@@ -159,18 +159,23 @@ int main() {
             if (e == EngineError::Ok) ++ok; else if (e == EngineError::InvalidState) ++rejected; else ++other;
             if (i % 50 == 26) g.transportStop();
         }
+        // Quiesce deterministically: stop the engine thread, drain every queued
+        // command on this thread (an earlier Start may still be queued), and only
+        // then send Stop — under load the 256-slot command queue can be full, and
+        // a push into a full queue is dropped (EngineError::QueueFull, by contract).
+        stopTicking.store(true, std::memory_order_release);
+        engine.join();
+        ticks(g, 1000);
         g.transportStop();
-        while (g.snapshot().playing) std::this_thread::yield();
+        ticks(g, 10);
         std::printf("  [concurrent] loads ok=%d rejected=%d ticks=%ld\n", ok, rejected, tickCalls.load());
         TEST("concurrent: every load returned Ok or InvalidState", other == 0 && ok + rejected == 400);
         TEST("concurrent: loads succeeded while stopped", ok > 0);
         TEST("concurrent: the engine thread kept ticking", tickCalls.load() > 0);
         // A final stopped load + Start plays that style's grid, cleanly.
+        TEST("concurrent: transport stopped after the drain", !g.snapshot().playing);
         TEST("concurrent: final stopped load Ok", g.loadStyle(cls) == EngineError::Ok);
-        g.transportStart();
-        while (!g.snapshot().playing) std::this_thread::yield();
-        stopTicking.store(true, std::memory_order_release);
-        engine.join();
+        g.transportStart(); ticks(g, 10);
         TEST("concurrent: lifecycle after swaps: playing CLASSIC_6_8 on 1920 / 5760",
              g.snapshot().playing && g.session().clock().ticksPerBar() == 5760);
         g.transportStop(); ticks(g, 10);

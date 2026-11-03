@@ -5,7 +5,7 @@
 ## ▶ macOS integration validation — 2026-11-03 (supersedes conflicting claims below)
 
 > Branch `integ/audit-merge-2026-11-03` = the 20 audit commits below + 5 follow-ups.
-> Environment: **macOS 27 arm64, Apple clang 17, CMake 4.3, Command Line Tools only (no
+> Environment: **macOS 27 arm64, Apple clang 21.0.0, CMake 4.4.4, Command Line Tools only (no
 > Xcode), no MIDI hardware.** `main@5e72ee6` is unchanged and is the baseline.
 
 **Corrections to the 2026-09-28 audit (it ran on Linux only):**
@@ -28,7 +28,7 @@
 
 | Configuration | Result |
 |---|---|
-| Release, Debug, `-DAIARR_LATENCY_TRACE=ON` | **98/98** each (95 C++ incl. 3 Apple-only + pure-C ABI + Python) |
+| Release, Debug, `-DAIARR_LATENCY_TRACE=ON` | **98/98** each (89 C++ incl. 3 Apple-only + 1 pure-C ABI consumer + 1 Python + 7 korg-validation) |
 | ASan+UBSan (`-fno-sanitize-recover=undefined`) | **98/98**, 0 sanitizer reports |
 | TSan | **98/98** ×3 full runs, 0 TSan warnings |
 | `-DBUILD_MACOS_APP=ON` (JUCE 8.0.4) | builds (only JUCE-internal + 2 deprecated-`Font` warnings); launches, alive 20 s, ~107 MB RSS, no crash report. **GUI not exercised.** |
@@ -38,6 +38,10 @@ corpus styles, 1920 PPQN, one 6/8): Intro A → Main A (auto) → Main A loops �
 Fill In BB → Main B → Break (Fill In BA) → Main B → Ending A → transport stops; every switch
 on a bar boundary; NoteOn == NoteOff and 0 outstanding notes at the end of every run.
 Playback tempo: imported from SMF Set Tempo and persisted in UASF v1.1 (Issue #2; corpus 100 / 90 / 105 / 76 BPM).
+
+**After this validation** the follow-ups are tracked as GitHub issues (#2 tempo, #3–#7, #10).
+Test counts grow with each fix (98 → 101 after #2, 102 after #3, 103 after #4/#5); the
+numbers above are this validation's, not the current main's.
 
 **Still not verified:** any MIDI hardware (CoreMIDI in/out exist in
 `src/engine/midi/coremidi_{in,out}.cpp`; there is no Pa5X-specific code), GUI interaction,
@@ -136,7 +140,7 @@ never pushed. **Ask the owner for it; do not assume it.**
 | Issue | Sev | Evidence | Impact | Proposed fix |
 |---|---|---|---|---|
 | GitHub Actions jobs never start | **Blocker (external)** | Runs 50–52+ on this branch: all jobs (including the unchanged macOS job) "failure" after 3–8 s, job logs HTTP 404. `main` last passed 2026-07-11 (run 49). | No CI signal; the macOS build is unverified | Owner: repo/account Settings → Actions (enabled? billing/spending limit/payment), then re-run the latest run |
-| macOS build of this branch unverified | P1 | No Mac here | Apple-side files touched: `clock.cpp`/`clock.h` (mach include moved out of the header), `coreaudio_driver.cpp` (explicit include), `coreaudio_clock.cpp`, `LiveHostDriver.h` (comment) | `bash scripts/run_tests.sh` on macOS (expect **96**: 93 + 3 Apple-only), then `-DBUILD_MACOS_APP=ON` |
+| ~~macOS build of this branch unverified~~ **Resolved 2026-11-03** (top section: 98/98 in every config on macOS, app builds and launches) | — | No Mac here (at the time) | Apple-side files touched: `clock.cpp`/`clock.h` (mach include moved out of the header), `coreaudio_driver.cpp` (explicit include), `coreaudio_clock.cpp`, `LiveHostDriver.h` (comment) | `bash scripts/run_tests.sh` on macOS (expect **96**: 93 + 3 Apple-only), then `-DBUILD_MACOS_APP=ON` |
 | Musical behaviour changed materially | P1 (validation) | sections loop/hand over; imports split, timed and metered correctly | Every earlier listening impression of imported styles is void | Re-run the Gate 3 hardware checklist (A.1, item 44) |
 | Spec vs implementation: PPQ | Decision | uasf-spec-v0.9 says "normalise to 480"; importer keeps the source 1920 and the validator now accepts ≤ 1920 | None at runtime | Owner: pick one and update the spec or the importer |
 | `Sff1Reader::parseSection` fabricates 12 empty tracks | P3 | stub `parseTrack` | Report noise (bounded by the chunk cap) | Remove the stub loop |
@@ -173,7 +177,7 @@ Apple-only tests not built on Linux: `test_coremidi_out`, `test_latency_stabilit
    jobs green. Then open a PR from this branch to `main`.
 
 **P1 — next milestone (Gate 3 hardware)**
-2. On a Mac: `bash scripts/run_tests.sh` (expect 96/96), then
+2. ~~On a Mac~~ — **done 2026-11-03** (see the top section; the count was 98, not 96): `bash scripts/run_tests.sh` (expect 96/96), then
    `cmake -B build -DBUILD_MACOS_APP=ON && cmake --build build --target aiarranger-macos`.
    Fix anything in the Apple-touching files listed in §5.
 3. Gate 3 hardware checklist with a real keyboard and module (A.1, 44 first).

@@ -136,12 +136,26 @@ static void probe(const char* needle, uint32_t expectedBpm) {
     TEST(tag + ": measured tick rate == PPQN x BPM / 60 (+/-0.1%)",
          std::llabs(measured - wantTps) * 1000 <= wantTps);
     TEST(tag + ": Intro A hands over to Main A", runUntil(inSection(mainA), 16));
-    // Stay in Main A for (bars + 2): it must loop, not fall silent or move on.
-    const long beforeLoop = notesOn();
-    for (int64_t i = 0; i < (m.bars + 2) * stepsPerBar; ++i) step();
-    TEST(tag + ": Main A loops (still Main A after its length + 2 bars)",
+    // Stay in Main A for two full passes + 1 bar: it must loop, not fall silent
+    // or move on — and the SECOND pass must sound like the first (Issue #6.7:
+    // a total-count check was already satisfied by the first pass alone).
+    const int64_t mainStart = trace.empty() ? 0 : trace.back().second * tpBar;   // Main A's bar line
+    const int64_t passLen = static_cast<int64_t>(m.bars) * tpBar;
+    for (int64_t i = 0; i < (2 * m.bars + 1) * stepsPerBar; ++i) step();
+    auto onsIn = [&](int64_t from, int64_t to) {
+        long n = 0;
+        for (const auto& e : out.sent)
+            if (e.type == uasf::MidiEventType::NoteOn && e.data2 > 0 &&
+                static_cast<int64_t>(e.tick) >= from && static_cast<int64_t>(e.tick) < to) ++n;
+        return n;
+    };
+    const long pass1 = onsIn(mainStart, mainStart + passLen);
+    const long pass2 = onsIn(mainStart + passLen, mainStart + 2 * passLen);
+    std::printf("  [loop] %s Main A pass1=%ld pass2=%ld NoteOns\n", needle, pass1, pass2);
+    TEST(tag + ": Main A loops (still Main A after two passes + 1 bar)",
          f.snapshot().section == mainA && f.snapshot().playing);
-    TEST(tag + ": Main A sounds while looping", notesOn() > beforeLoop);
+    TEST(tag + ": Main A's second pass sounds, like its first (same NoteOn count)",
+         pass1 > 0 && pass2 == pass1);
 
     f.setVariation(1);                                  // Variation B
     TEST(tag + ": Variation B -> Main B", runUntil(inSection(mainB), 4));

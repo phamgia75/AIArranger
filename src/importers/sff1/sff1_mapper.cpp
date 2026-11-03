@@ -8,6 +8,9 @@
 namespace ai_arranger::importers::sff1 {
 
 namespace {
+// UASF SectionHeader::bars is uint16.
+constexpr uint64_t kMaxSectionBars = 0xFFFF;
+
 // Exact Yamaha SFF section marker names. Anything else ("SFF1"/"SFF2" format
 // tags, "SInt" setup, unknown text) is not a playable section.
 bool markerSectionType(const std::string& m, uasf::SectionType& out) {
@@ -176,6 +179,16 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
                            parseResult.time_sig_den == 8 || parseResult.time_sig_den == 16)
                               ? parseResult.time_sig_den : 4;
 
+    // A grid whose bar rounds to 0 ticks (e.g. 1 PPQN in 1/16) cannot be played:
+    // the sequencer ignores a 0-tick bar, so the style would import "fine" and
+    // never sound. Reject it instead.
+    if (static_cast<uint64_t>(style.resolution) * 4 * tsNum / tsDen == 0) {
+        result.error = "Unplayable grid: " + std::to_string(style.resolution) + " PPQN in " +
+                       std::to_string(tsNum) + "/" + std::to_string(tsDen) +
+                       " gives a bar of 0 ticks";
+        return result;
+    }
+
     std::vector<const SffMidiEvent*> allEvents;
     for (const auto& sffSection : parseResult.sections)
         for (const auto& t : sffSection.tracks)
@@ -255,8 +268,13 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             section.resolution = style.resolution;
             section.beats_per_bar = tsNum;
             section.beat_note = tsDen;
-            section.bars = barTicks ? static_cast<uint32_t>(std::max<uint64_t>(
-                               1, (len + barTicks - 1) / barTicks)) : 1;
+            const uint64_t bars = std::max<uint64_t>(1, (len + barTicks - 1) / barTicks);
+            if (bars > kMaxSectionBars) {   // UASF stores bars as uint16
+                result.error = "Section '" + r.name + "' is " + std::to_string(bars) +
+                               " bars long (max " + std::to_string(kMaxSectionBars) + ")";
+                return result;
+            }
+            section.bars = static_cast<uint32_t>(bars);
             fillTracks(section, evs, secCfg.empty() ? nullptr : &secCfg);
             // A note whose NoteOff fell past this marker range (into the next
             // section) would never be closed by this section: end it here.
@@ -289,11 +307,17 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             for (const auto& t : section.tracks)
                 for (const auto& e : t.events) { anyEvent = true; if (e.tick > maxTick) maxTick = e.tick; }
             if (anyEvent && section.resolution > 0) {
-                // >= 1: a hostile 1-PPQN file in 1/16 has a 0-tick bar (div by zero).
+                // >= 1 keeps the division safe even for a section whose own
+                // resolution differs from the style's (checked above).
                 const uint64_t barTicks = std::max<uint64_t>(
                     1, static_cast<uint64_t>(section.resolution) * 4 * tsNum / tsDen);
                 const uint64_t bars = std::max<uint64_t>(1, (maxTick + barTicks - 1) / barTicks);
-                section.bars = static_cast<uint32_t>(std::min<uint64_t>(bars, 0xFFFF));
+                if (bars > kMaxSectionBars) {   // was clamped: a silently shortened section
+                    result.error = "Section is " + std::to_string(bars) + " bars long (max " +
+                                   std::to_string(kMaxSectionBars) + ")";
+                    return result;
+                }
+                section.bars = static_cast<uint32_t>(bars);
             }
 
             style.sections.push_back(std::move(section));

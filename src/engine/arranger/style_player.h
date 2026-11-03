@@ -13,7 +13,6 @@
 #include <functional>
 #include <cstdint>
 #include <atomic>
-#include <cstdint>
 
 namespace ai_arranger::arranger {
 

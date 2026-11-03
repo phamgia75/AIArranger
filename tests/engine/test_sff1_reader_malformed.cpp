@@ -11,7 +11,8 @@
 //     noexcept parseBuffer => std::terminate.
 //  3. A zero-size chunk called memcpy(nullptr, ..., 0) (UBSan: null argument).
 //  5. Division 1 + time signature 1/16 gave a 0-tick bar; the mapper's
-//     unmarked-section length divided by it (SIGFPE on import).
+//     unmarked-section length divided by it (SIGFPE on import). Now an import
+//     error (Issue #6.1).
 //
 // Run under -fsanitize=address,undefined in CI (portable-core-linux job).
 
@@ -134,10 +135,11 @@ int main() {
         const ParseResult r = reader.parseBuffer(buf, "zero_bar.sty");
         TEST("1 PPQN + 1/16 meter: reader accepts it", r.success);
         Sff1ToUasfMapper mapper;
-        const auto mr = mapper.map(r);                            // SIGFPE before the fix
-        bool bounded = mr.success;
-        for (const auto& sec : mr.style.sections) bounded = bounded && sec.bars >= 1;
-        TEST("1 PPQN + 1/16 meter: import does not crash; sections get >= 1 bar", bounded);
+        const auto mr = mapper.map(r);                            // SIGFPE before d85831e
+        // d85831e made this import "succeed" as a style that never sounds (the
+        // sequencer ignores a 0-tick bar); Issue #6.1 rejects it instead.
+        TEST("1 PPQN + 1/16 meter: import does not crash and is rejected (0-tick bar)",
+             !mr.success && mr.error.find("0 ticks") != std::string::npos);
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);
