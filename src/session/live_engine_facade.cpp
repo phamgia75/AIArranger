@@ -26,6 +26,7 @@ LiveEngineFacade::LiveEngineFacade(midi::IMidiInputSource* input,
     : input_(input), output_(output) {}
 
 void LiveEngineFacade::start() noexcept {
+    EngineGuard guard(engine_busy_);   // tick() skips its step meanwhile (#10)
     if (started_) return;
     session_.boot();
     // Engine scheduler output -> lock-free bridge (no Apple framework here).
@@ -43,10 +44,17 @@ void LiveEngineFacade::start() noexcept {
 }
 
 void LiveEngineFacade::stop() noexcept {
+    EngineGuard guard(engine_busy_);   // tick() skips its step meanwhile (#10)
     if (!started_) return;
     // Flush the input sink so no late callback races teardown.
     if (input_) input_->setSink(nullptr);
     session_.shutdown();   // stops playback + flushes all notes (no hanging notes)
+    // Commands and input queued for the session being stopped must not act on
+    // a later tick (a pending Start used to restart playback after stop()).
+    control::ControlEvent discard;
+    while (cmd_q_.try_pop(discard)) {}
+    while (input_q_.pop(discard)) {}
+    has_cmd_carry_ = has_input_carry_ = false;
     started_ = false;
     lifecycle_.apply(LifecycleEvent::Stop);    // Gate 4: track high-level state
     publishSnapshot();
@@ -74,14 +82,16 @@ EngineError LiveEngineFacade::loadStyle(const uasf::StyleDefinition& style) noex
         recordError(EngineError::InvalidState);
         return EngineError::InvalidState;
     }
-    while (engine_busy_.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
-    // Re-checked under the exclusion: a Start may have been applied meanwhile.
-    // The lifecycle tracker is updated here too: tick() publishes its state.
-    const bool loaded = session_.loadStyle(style);
-    if (loaded && lifecycle_.state() != LifecycleState::Running &&
-        lifecycle_.state() != LifecycleState::Suspended)
-        lifecycle_.apply(LifecycleEvent::LoadStyle);
-    engine_busy_.clear(std::memory_order_release);
+    bool loaded = false;
+    {
+        EngineGuard guard(engine_busy_);
+        // Re-checked under the exclusion: a Start may have been applied meanwhile.
+        // The lifecycle tracker is updated here too: tick() publishes its state.
+        loaded = session_.loadStyle(style);
+        if (loaded && lifecycle_.state() != LifecycleState::Running &&
+            lifecycle_.state() != LifecycleState::Suspended)
+            lifecycle_.apply(LifecycleEvent::LoadStyle);
+    }
     if (!loaded) {
         recordError(EngineError::InvalidState);
         return EngineError::InvalidState;

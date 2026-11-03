@@ -59,8 +59,7 @@ MIDI input: single read thread; engine control queue: the tick thread only).
 
 | API group | Thread that may call it | Mechanism |
 |-----------|------------------------|-----------|
-| `start` / `stop` (lifecycle) | **owner thread** only | direct; not re-entrant |
-| `loadStyle` (lifecycle) | **owner thread** only; safe while `tick()` runs on another thread | excluded from `tick()` by an atomic flag: `tick()` only try-acquires and skips its step during a load (never waits), `loadStyle` waits for an in-flight tick. Rejected while the transport plays (below) |
+| `start` / `stop` / `loadStyle` (lifecycle) | **owner thread** only (never from inside `tick()`); safe while `tick()` runs on another thread | excluded from `tick()` by an atomic flag: `tick()` only try-acquires and skips its step while a lifecycle call runs (never waits); the lifecycle call waits for an in-flight tick. `stop()` also discards commands/input still queued for the stopped session. `loadStyle` is rejected while the transport plays (below) |
 | Transport / section / tempo / variation / panic commands | **any thread, concurrently** | enqueued on a bounded lock-free **MPSC** ring (exactly `maxCommandQueue` = 256 slots), applied in `tick()` |
 | MIDI input events | the input source's **read thread** | routed lock-free onto a 2nd SPSC queue, drained in `tick()` |
 | `tick(numSamples)` | the **engine thread** (one, consistent) | advances clock/sequencer, pumps output, publishes snapshot |
