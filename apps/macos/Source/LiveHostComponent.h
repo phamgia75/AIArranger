@@ -11,6 +11,7 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "LiveHostDriver.h"
+#include "ui/tempo_control_model.h"
 
 namespace ai_arranger::app {
 
@@ -33,6 +34,7 @@ private:
                   sectionLabel_, tempoLabel_, statusLabel_;
     juce::ComboBox inputBox_, outputBox_;
     juce::Slider  tempoSlider_;
+    ui::TempoControlModel tempoModel_;   // slider <-> engine tempo (Issue #7)
 
     juce::TextButton refreshBtn_{"Refresh"}, loadBtn_{"Load Style..."},
                      startBtn_{"Start"}, stopBtn_{"Stop"}, syncBtn_{"Sync Start"},
