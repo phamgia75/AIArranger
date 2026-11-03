@@ -118,7 +118,9 @@ AiArrError aiarr_engine_panic(AiArrEngine* engine);
  *                          variation 0..3). Nothing changes.
  *   AIARR_ERR_NULL_ARGUMENT  NULL handle.
  * Acceptance is not the outcome: what the engine did with an accepted command
- * (e.g. Start with nothing to play) shows in the next snapshot. Before 1.0.2
+ * (e.g. Start with nothing to play) shows in the next snapshot, and
+ * aiarr_engine_stop() discards accepted commands not yet applied (a session
+ * boundary). Before 1.0.2
  * these returned AIARR_OK even when the command was dropped or ignored. */
 AiArrError aiarr_engine_transport_start(AiArrEngine* engine);
 AiArrError aiarr_engine_transport_stop(AiArrEngine* engine);
