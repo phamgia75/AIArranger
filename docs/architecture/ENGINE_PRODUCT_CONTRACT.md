@@ -149,7 +149,9 @@ facade is pure state tracking and changes **no** runtime behaviour.
 ### 4.2 `LiveEngineFacade` (`src/session/live_engine_facade.h`)
 
 Commands (any thread, lock-free): `transportStart/Stop`, `syncStart`, `intro`,
-`fill`, `breakSection`, `ending`, `panic`, `setVariation(0..3)`, `setTempo`.
+`fill`, `breakSection`, `ending`, `panic`, `setVariation(0..3)`, `setTempo(20..400)`.
+Each returns `bool`: accepted (queued) or not — a full command queue (also
+recorded as `QueueFull`) or an out-of-range argument (#18, contract 1.0.2).
 Devices: `selectMidiInput/Output`. Lifecycle (owner thread): `start`, `stop`,
 `loadStyle` (returns `EngineError`: `Ok`, or `InvalidState` while playing). Engine step: `tick(numSamples)`. Reads (any thread): `snapshot`,
 `capabilities`, `lifecycleState`, `lastError` / `clearError`, `contractVersion`.
@@ -173,6 +175,12 @@ the product host links. Rules:
   No callback retains C++ ownership.
 - `aiarr_engine_create/destroy` are the explicit ownership pair; `destroy(NULL)`
   and every NULL-handle call are safe and deterministic.
+- A command's result reports whether it was **accepted** (contract 1.0.2, #18):
+  `AIARR_OK` queued; `AIARR_ERR_QUEUE_FULL` dropped (queue full);
+  `AIARR_ERR_UNSUPPORTED` argument out of range (tempo 20..400, variation 0..3).
+  Signatures, enumerator values and struct layouts are unchanged; before 1.0.2
+  these calls returned `AIARR_OK` for a dropped or ignored command, contrary to
+  §6. What the engine then did with an accepted command shows in the snapshot.
 
 Exercised by `tests/bridge/test_bridge_roundtrip.cpp` (create → capabilities →
 lifecycle → transport → tick → snapshot → stop → destroy; null-handle safety;
@@ -187,8 +195,10 @@ map.
   silently swallowed; command-queue overflow surfaces as `QueueFull`, bad device
   index as `DeviceUnavailable`.
 - **Contract version:** `kEngineContractVersion = MAJOR<<16 | MINOR<<8 | PATCH`
-  (currently `1.0.1` — 1.0.1 made the implementation honour §2: MPSC
-  command queue + lossless drain; no API change). Also reachable pre-handle via `aiarr_contract_version()`
+  (currently `1.0.2` — 1.0.1 made the implementation honour §2: MPSC
+  command queue + lossless drain; 1.0.2 made command results honour this
+  section — a dropped or out-of-range command no longer returns success (#18);
+  no signature, enumerator or layout change). Also reachable pre-handle via `aiarr_contract_version()`
   so a host can gate on ABI compatibility before creating an engine.
 - **Backward-compatibility rules (additive-only):**
   - Existing `EngineError` / `LifecycleState` enumerators keep their integer

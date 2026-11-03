@@ -73,33 +73,28 @@ AiArrError aiarr_engine_stop(AiArrEngine* engine) {
 
 AiArrError aiarr_engine_panic(AiArrEngine* engine) {
     if (!engine) return AIARR_ERR_NULL_ARGUMENT;
-    engine->facade.panic();
-    return AIARR_OK;
+    return engine->facade.panic() ? AIARR_OK : AIARR_ERR_QUEUE_FULL;
 }
 
 AiArrError aiarr_engine_transport_start(AiArrEngine* engine) {
     if (!engine) return AIARR_ERR_NULL_ARGUMENT;
-    engine->facade.transportStart();
-    return AIARR_OK;
+    return engine->facade.transportStart() ? AIARR_OK : AIARR_ERR_QUEUE_FULL;
 }
 
 AiArrError aiarr_engine_transport_stop(AiArrEngine* engine) {
     if (!engine) return AIARR_ERR_NULL_ARGUMENT;
-    engine->facade.transportStop();
-    return AIARR_OK;
+    return engine->facade.transportStop() ? AIARR_OK : AIARR_ERR_QUEUE_FULL;
 }
 
 AiArrError aiarr_engine_set_tempo(AiArrEngine* engine, uint32_t bpm) {
     if (!engine) return AIARR_ERR_NULL_ARGUMENT;
-    engine->facade.setTempo(bpm);
-    return AIARR_OK;
+    return engine->facade.setTempo(bpm) ? AIARR_OK : AIARR_ERR_UNSUPPORTED;   // outside 20..400
 }
 
 AiArrError aiarr_engine_set_variation(AiArrEngine* engine, int32_t index) {
     if (!engine) return AIARR_ERR_NULL_ARGUMENT;
     if (index < 0 || index > 3) return AIARR_ERR_UNSUPPORTED;
-    engine->facade.setVariation(index);
-    return AIARR_OK;
+    return engine->facade.setVariation(index) ? AIARR_OK : AIARR_ERR_QUEUE_FULL;
 }
 
 AiArrError aiarr_engine_tick(AiArrEngine* engine, uint32_t numSamples) {

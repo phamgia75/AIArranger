@@ -82,11 +82,11 @@ void LiveEngineFacade::stop() noexcept {
     publishSnapshot();
 }
 
-void LiveEngineFacade::setVariation(int index) noexcept {
-    if (index < 0 || index > 3) return;
+bool LiveEngineFacade::setVariation(int index) noexcept {
+    if (index < 0 || index > 3) return false;
     const auto action = static_cast<control::ControlAction>(
         static_cast<int>(control::ControlAction::VariationA) + index);
-    push(action);
+    return push(action);
 }
 
 void LiveEngineFacade::tick(uint32_t numSamples) noexcept {

@@ -26,7 +26,7 @@ namespace ai_arranger::session {
 // silently); MINOR appends enumerators/fields with defaults; PATCH is docs/impl.
 inline constexpr uint32_t kEngineContractVersionMajor = 1;
 inline constexpr uint32_t kEngineContractVersionMinor = 0;
-inline constexpr uint32_t kEngineContractVersionPatch = 1;  // 1.0.1: MPSC command queue + lossless drain
+inline constexpr uint32_t kEngineContractVersionPatch = 2;  // 1.0.2: command results report acceptance (#18)
 inline constexpr uint32_t kEngineContractVersion =
     (kEngineContractVersionMajor << 16) |
     (kEngineContractVersionMinor << 8)  |

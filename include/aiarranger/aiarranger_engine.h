@@ -109,7 +109,17 @@ AiArrError aiarr_engine_stop(AiArrEngine* engine);
 /* Emergency all-notes-off (safe from any active state). */
 AiArrError aiarr_engine_panic(AiArrEngine* engine);
 
-/* Transport + parameter commands (enqueued lock-free, applied in tick()). */
+/* Transport + parameter commands (enqueued lock-free, applied in tick()).
+ * The result says whether the engine ACCEPTED the command (contract 1.0.2):
+ *   AIARR_OK               queued; it is applied on a following tick().
+ *   AIARR_ERR_QUEUE_FULL   dropped: the command queue (maxCommandQueue) is full
+ *                          because tick() has not drained it. Nothing changes.
+ *   AIARR_ERR_UNSUPPORTED  argument outside the engine range (tempo 20..400 BPM,
+ *                          variation 0..3). Nothing changes.
+ *   AIARR_ERR_NULL_ARGUMENT  NULL handle.
+ * Acceptance is not the outcome: what the engine did with an accepted command
+ * (e.g. Start with nothing to play) shows in the next snapshot. Before 1.0.2
+ * these returned AIARR_OK even when the command was dropped or ignored. */
 AiArrError aiarr_engine_transport_start(AiArrEngine* engine);
 AiArrError aiarr_engine_transport_stop(AiArrEngine* engine);
 AiArrError aiarr_engine_set_tempo(AiArrEngine* engine, uint32_t bpm);

@@ -11,6 +11,7 @@
 #include "engine/control/control_events.h"
 #include "engine/chord/chord_scan_mode.h"
 #include "engine/trace/mpsc_ring.h"
+#include "engine/uasf/types.h"
 #include "midi/midi_input_source.h"
 #include "midi/midi_output_provider.h"
 #include <atomic>
@@ -66,21 +67,28 @@ public:
     EngineError loadStyle(const uasf::StyleDefinition& style) noexcept;
 
     // ── Commands (any thread, concurrently; lock-free) ──────────────────
-    // Each enqueues onto the MPSC command queue drained in tick(). A dropped
-    // command (queue full) records EngineError::QueueFull, observable via
-    // lastError() — the enqueue itself stays fire-and-forget (unchanged behaviour).
-    void transportStart() noexcept { push(control::ControlAction::Start); }
-    void transportStop()  noexcept { push(control::ControlAction::Stop); }
+    // Each enqueues onto the MPSC command queue drained in tick() and returns
+    // whether it was accepted (queued). A dropped command (queue full) returns
+    // false and records EngineError::QueueFull (#18). Whether the engine can
+    // act on an accepted command (e.g. Start with no style) shows in snapshot().
+    bool transportStart() noexcept { return push(control::ControlAction::Start); }
+    bool transportStop()  noexcept { return push(control::ControlAction::Stop); }
     // Sync Start: arm the engine; the first detected chord fires playback.
-    void syncStart()      noexcept { push(control::ControlAction::SyncArm); }
-    void intro()          noexcept { push(control::ControlAction::Intro); }
-    void fill()           noexcept { push(control::ControlAction::Fill); }
-    void breakSection()   noexcept { push(control::ControlAction::Break); }
-    void ending()         noexcept { push(control::ControlAction::Ending); }
-    void panic()          noexcept { push(control::ControlAction::Panic); }
-    // variation 0..3 -> A..D; out-of-range ignored.
-    void setVariation(int index) noexcept;
-    void setTempo(uint32_t bpm) noexcept { pending_tempo_.store(bpm, std::memory_order_relaxed); }
+    bool syncStart()      noexcept { return push(control::ControlAction::SyncArm); }
+    bool intro()          noexcept { return push(control::ControlAction::Intro); }
+    bool fill()           noexcept { return push(control::ControlAction::Fill); }
+    bool breakSection()   noexcept { return push(control::ControlAction::Break); }
+    bool ending()         noexcept { return push(control::ControlAction::Ending); }
+    bool panic()          noexcept { return push(control::ControlAction::Panic); }
+    // variation 0..3 -> A..D; out-of-range ignored (returns false).
+    bool setVariation(int index) noexcept;
+    // Applied on the next tick (the latest value wins). Outside the engine
+    // range (uasf::kMinTempoBpm..kMaxTempoBpm) it is ignored and returns false.
+    bool setTempo(uint32_t bpm) noexcept {
+        if (bpm < uasf::kMinTempoBpm || bpm > uasf::kMaxTempoBpm) return false;
+        pending_tempo_.store(bpm, std::memory_order_relaxed);
+        return true;
+    }
 
     // Device selection (delegates to the injected source/provider). A failed
     // selection records EngineError::DeviceUnavailable; the bool return is
@@ -140,10 +148,11 @@ private:
     void tickLocked(uint32_t numSamples) noexcept;
     // fromTick: the realtime path never waits for a concurrent lifecycle publish.
     void publishSnapshot(bool fromTick = false) noexcept;
-    void push(control::ControlAction a, int32_t param = 0) noexcept {
+    bool push(control::ControlAction a, int32_t param = 0) noexcept {
         // timestamp = the session generation the command belongs to (see stop()).
-        if (!cmd_q_.try_push({a, param, session_gen_.load(std::memory_order_acquire)}))
-            recordError(EngineError::QueueFull);
+        if (cmd_q_.try_push({a, param, session_gen_.load(std::memory_order_acquire)})) return true;
+        recordError(EngineError::QueueFull);
+        return false;
     }
     // Hand queued events to the engine's control queue without dropping any.
     template <class PopFn>
