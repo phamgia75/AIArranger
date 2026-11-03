@@ -11,6 +11,7 @@
 #include "session/live_engine_facade.h"
 #include "engine/arranger/style_player.h"
 #include "../midi/fake_midi_output_provider.h"
+#include "../midi/fake_midi_input_source.h"
 #include <atomic>
 #include <cstdio>
 #include <map>
@@ -95,6 +96,65 @@ int main() {
         g.start(); g.transportStart();
         for (int i = 0; i < 10; ++i) g.tick(48);
         TEST("a new start() + transportStart() after that plays normally", g.snapshot().playing);
+        g.stop();
+    }
+
+    // Input is physical key state, not a command: a release queued when stop()
+    // runs must still reach the performer (Level 2 review of #10).
+    {
+        midi::FakeMidiInputSource in;
+        midi::FakeMidiOutputProvider o3; o3.setDevices({{0, "synth"}});
+        session::LiveEngineFacade g(&in, &o3);
+        g.selectMidiOutput(0);
+        g.loadStyle(arranger::buildDemoStyle());
+        g.start();
+        const uint8_t triadOn[]  = {0x90, 48, 100, 0x90, 52, 100, 0x90, 55, 100};
+        const uint8_t triadOff[] = {0x80, 48, 0, 0x80, 52, 0, 0x80, 55, 0};
+        in.inject(triadOn, sizeof(triadOn));
+        g.tick(48);
+        TEST("input: triad held before stop()", g.session().adapter().heldCount() == 3);
+        in.inject(triadOff, sizeof(triadOff));   // released, not yet ticked
+        g.stop();
+        g.start();
+        for (int i = 0; i < 5; ++i) g.tick(48);
+        TEST("input: releases queued at stop() still arrive (no stale held keys)",
+             g.session().adapter().heldCount() == 0);
+        g.stop();
+    }
+    // A tempo set before stop() and not yet applied must not override the tempo
+    // of a style selected afterwards.
+    {
+        midi::FakeMidiOutputProvider o4; o4.setDevices({{0, "synth"}});
+        session::LiveEngineFacade g(nullptr, &o4);
+        g.selectMidiOutput(0);
+        g.start();
+        g.setTempo(150);                    // pending until the next tick
+        g.stop();
+        auto st = arranger::buildDemoStyle(); st.tempo_bpm = 90;
+        g.loadStyle(st);
+        g.start(); g.transportStart();
+        for (int i = 0; i < 3; ++i) g.tick(48);
+        TEST("tempo pending at stop() is dropped: plays at the new style's 90",
+             g.snapshot().playing && g.snapshot().tempoBpm == 90);
+        g.stop();
+    }
+    // Sync Start armed before stop() must not fire on a chord after restart.
+    {
+        midi::FakeMidiInputSource in;
+        midi::FakeMidiOutputProvider o5; o5.setDevices({{0, "synth"}});
+        session::LiveEngineFacade g(&in, &o5);
+        g.selectMidiOutput(0);
+        g.loadStyle(arranger::buildDemoStyle());
+        g.start();
+        g.syncStart(); g.tick(48);
+        TEST("sync: armed before stop()", g.session().adapter().sync().isArmed());
+        g.stop();
+        TEST("sync: stop() disarms", !g.session().adapter().sync().isArmed());
+        g.start();
+        const uint8_t chord[] = {0x90, 48, 100, 0x90, 52, 100, 0x90, 55, 100};
+        in.inject(chord, sizeof(chord));
+        for (int i = 0; i < 5; ++i) g.tick(48);
+        TEST("sync: a chord after restart does not start the transport", !g.snapshot().playing);
         g.stop();
     }
 

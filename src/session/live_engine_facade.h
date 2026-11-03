@@ -141,7 +141,9 @@ private:
     // fromTick: the realtime path never waits for a concurrent lifecycle publish.
     void publishSnapshot(bool fromTick = false) noexcept;
     void push(control::ControlAction a, int32_t param = 0) noexcept {
-        if (!cmd_q_.try_push({a, param, 0})) recordError(EngineError::QueueFull);
+        // timestamp = the session generation the command belongs to (see stop()).
+        if (!cmd_q_.try_push({a, param, session_gen_.load(std::memory_order_acquire)}))
+            recordError(EngineError::QueueFull);
     }
     // Hand queued events to the engine's control queue without dropping any.
     template <class PopFn>
@@ -167,6 +169,7 @@ private:
     bool has_input_carry_{false};
 
     std::atomic<uint32_t>       pending_tempo_{0};
+    std::atomic<uint64_t>       session_gen_{0};   // bumped by stop(); stamps commands
     SeqlockSnapshot<EngineSnapshot> snapshot_;
     EngineLifecycle             lifecycle_{};                 // Gate 4 lifecycle tracker
     std::atomic<EngineError>    last_error_{EngineError::Ok}; // most recent deterministic error
