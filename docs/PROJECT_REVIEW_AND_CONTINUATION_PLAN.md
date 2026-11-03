@@ -37,7 +37,7 @@
 corpus styles, 1920 PPQN, one 6/8): Intro A → Main A (auto) → Main A loops → Variation B →
 Fill In BB → Main B → Break (Fill In BA) → Main B → Ending A → transport stops; every switch
 on a bar boundary; NoteOn == NoteOff and 0 outstanding notes at the end of every run.
-Playback tempo is still the default 120 BPM (SMF Set Tempo not imported; next task).
+Playback tempo: imported from SMF Set Tempo and persisted in UASF v1.1 (Issue #2; corpus 100 / 90 / 105 / 76 BPM).
 
 **Still not verified:** any MIDI hardware (CoreMIDI in/out exist in
 `src/engine/midi/coremidi_{in,out}.cpp`; there is no Pa5X-specific code), GUI interaction,

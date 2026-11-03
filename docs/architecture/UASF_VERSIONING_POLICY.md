@@ -34,6 +34,11 @@ UASF uses semantic versioning: `MAJOR.MINOR.PATCH`
 
 - **v0.1 (unofficial):** Gate 2 internal demo (no file format)
 - **v1.0:** Gate 3 binary format (first official)
+- **v1.1:** optional extension blocks after the last section, flagged by
+  `FileHeader.flags` bit 0; first block `TMPO` (style tempo, Issue #2). The
+  binary `version` field stays 1 (it carries the MAJOR version): v1.0 readers
+  ignore `flags` and trailing bytes, so they load v1.1 files at 120 BPM, and
+  v1.1 readers load every v1.0 file at 120 BPM. See UASF_FIELD_CONVENTIONS.md.
 
 ## Backward Compatibility Commitment
 
