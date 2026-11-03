@@ -26,6 +26,7 @@ LiveEngineFacade::LiveEngineFacade(midi::IMidiInputSource* input,
     : input_(input), output_(output) {}
 
 void LiveEngineFacade::start() noexcept {
+    EngineGuard guard(engine_busy_);   // tick() skips its step meanwhile (#10)
     if (started_) return;
     session_.boot();
     // Engine scheduler output -> lock-free bridge (no Apple framework here).
@@ -43,10 +44,31 @@ void LiveEngineFacade::start() noexcept {
 }
 
 void LiveEngineFacade::stop() noexcept {
+    EngineGuard guard(engine_busy_);   // tick() skips its step meanwhile (#10)
     if (!started_) return;
     // Flush the input sink so no late callback races teardown.
     if (input_) input_->setSink(nullptr);
+    // A real transport Stop through the performer first (FSM -> Idle, Sync Start
+    // disarmed), so no input after stop() can fire a stale arm.
+    session_.adapter().postEvent({control::ControlAction::Stop, 0, 0});
+    session_.tick();
     session_.shutdown();   // stops playback + flushes all notes (no hanging notes)
+    // Commands issued for this session must not act on a later one (a pending
+    // Start used to restart playback after stop()). Draining cmd_q_ is not
+    // enough: a completed push can sit behind another producer's unpublished
+    // slot. Every command carries the generation it was issued in; bumping it
+    // makes tick() drop older ones whenever they become visible.
+    session_gen_.fetch_add(1, std::memory_order_release);
+    has_cmd_carry_ = false;
+    pending_tempo_.store(0, std::memory_order_relaxed);
+    // Input is not observed while stopped (the sink is detached above), so a
+    // key released meanwhile would stay "held" after restart. Forget input
+    // state and what is still queued; restart begins with nothing held. Single
+    // consumer kept: tick() is excluded and the input producer is detached.
+    session_.adapter().resetInput();
+    control::ControlEvent dropped;
+    while (input_q_.pop(dropped)) {}
+    has_input_carry_ = false;
     started_ = false;
     lifecycle_.apply(LifecycleEvent::Stop);    // Gate 4: track high-level state
     publishSnapshot();
@@ -74,14 +96,16 @@ EngineError LiveEngineFacade::loadStyle(const uasf::StyleDefinition& style) noex
         recordError(EngineError::InvalidState);
         return EngineError::InvalidState;
     }
-    while (engine_busy_.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
-    // Re-checked under the exclusion: a Start may have been applied meanwhile.
-    // The lifecycle tracker is updated here too: tick() publishes its state.
-    const bool loaded = session_.loadStyle(style);
-    if (loaded && lifecycle_.state() != LifecycleState::Running &&
-        lifecycle_.state() != LifecycleState::Suspended)
-        lifecycle_.apply(LifecycleEvent::LoadStyle);
-    engine_busy_.clear(std::memory_order_release);
+    bool loaded = false;
+    {
+        EngineGuard guard(engine_busy_);
+        // Re-checked under the exclusion: a Start may have been applied meanwhile.
+        // The lifecycle tracker is updated here too: tick() publishes its state.
+        loaded = session_.loadStyle(style);
+        if (loaded && lifecycle_.state() != LifecycleState::Running &&
+            lifecycle_.state() != LifecycleState::Suspended)
+            lifecycle_.apply(LifecycleEvent::LoadStyle);
+    }
     if (!loaded) {
         recordError(EngineError::InvalidState);
         return EngineError::InvalidState;
@@ -98,7 +122,12 @@ void LiveEngineFacade::tickLocked(uint32_t numSamples) noexcept {
     // producer of the adapter's SPSC control queue, which is the same depth as
     // each facade queue: a burst on both in one tick cannot all fit, so the drain
     // applies back-pressure instead of discarding (a lost NoteOff = stuck note).
-    drainToAdapter([this](control::ControlEvent& e) noexcept { return cmd_q_.try_pop(e); },
+    drainToAdapter([this](control::ControlEvent& e) noexcept {
+                       const uint64_t gen = session_gen_.load(std::memory_order_acquire);
+                       while (cmd_q_.try_pop(e))
+                           if (e.timestamp == gen) return true;   // older session: dropped
+                       return false;
+                   },
                    cmd_carry_, has_cmd_carry_);
     drainToAdapter([this](control::ControlEvent& e) noexcept { return input_q_.pop(e); },
                    input_carry_, has_input_carry_);

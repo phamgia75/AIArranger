@@ -14,6 +14,7 @@
 #include "midi/midi_input_source.h"
 #include "midi/midi_output_provider.h"
 #include <atomic>
+#include <thread>
 #include <cstdint>
 
 // ── LiveEngineFacade — the single entry point the UI/bridge drives ───────────
@@ -46,6 +47,9 @@ public:
                      midi::IMidiOutputProvider* output) noexcept;
 
     // Boot the engine, attach the output route, and wire the input source's sink.
+    // Owner thread. Like loadStyle(), start()/stop() are safe while tick() runs
+    // on another thread (tick() skips its step meanwhile) and must not be called
+    // from inside tick() (#10).
     void start() noexcept;
     void stop() noexcept;
 
@@ -137,7 +141,9 @@ private:
     // fromTick: the realtime path never waits for a concurrent lifecycle publish.
     void publishSnapshot(bool fromTick = false) noexcept;
     void push(control::ControlAction a, int32_t param = 0) noexcept {
-        if (!cmd_q_.try_push({a, param, 0})) recordError(EngineError::QueueFull);
+        // timestamp = the session generation the command belongs to (see stop()).
+        if (!cmd_q_.try_push({a, param, session_gen_.load(std::memory_order_acquire)}))
+            recordError(EngineError::QueueFull);
     }
     // Hand queued events to the engine's control queue without dropping any.
     template <class PopFn>
@@ -163,13 +169,24 @@ private:
     bool has_input_carry_{false};
 
     std::atomic<uint32_t>       pending_tempo_{0};
+    std::atomic<uint64_t>       session_gen_{0};   // bumped by stop(); stamps commands
     SeqlockSnapshot<EngineSnapshot> snapshot_;
     EngineLifecycle             lifecycle_{};                 // Gate 4 lifecycle tracker
     std::atomic<EngineError>    last_error_{EngineError::Ok}; // most recent deterministic error
     bool started_{false};
-    // loadStyle() <-> tick() exclusion. tick() only try-acquires (never blocks,
-    // skips its step when taken); loadStyle() waits for an in-flight tick.
+    // Lifecycle (start/stop/loadStyle) <-> tick() exclusion. tick() only
+    // try-acquires (never blocks, skips its step when taken); the lifecycle
+    // calls wait for an in-flight tick (owner thread, not realtime).
     std::atomic_flag engine_busy_ = ATOMIC_FLAG_INIT;
+    struct EngineGuard {
+        std::atomic_flag& f;
+        explicit EngineGuard(std::atomic_flag& flag) noexcept : f(flag) {
+            while (f.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
+        }
+        ~EngineGuard() { f.clear(std::memory_order_release); }
+        EngineGuard(const EngineGuard&) = delete;
+        EngineGuard& operator=(const EngineGuard&) = delete;
+    };
 };
 
 } // namespace ai_arranger::session
