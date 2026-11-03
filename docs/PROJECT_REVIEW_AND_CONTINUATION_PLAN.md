@@ -2,6 +2,49 @@
 
 ---
 
+## ▶ macOS integration validation — 2026-11-03 (supersedes conflicting claims below)
+
+> Branch `integ/audit-merge-2026-11-03` = the 20 audit commits below + 5 follow-ups.
+> Environment: **macOS 27 arm64, Apple clang 17, CMake 4.3, Command Line Tools only (no
+> Xcode), no MIDI hardware.** `main@5e72ee6` is unchanged and is the baseline.
+
+**Corrections to the 2026-09-28 audit (it ran on Linux only):**
+- "93/93 ASan+UBSan" did not hold on macOS: 4 tests aborted with UBSan
+  `serializer.cpp:49: load of value 165 ... type 'bool'`. Root cause: the uasf model structs
+  had no member initializers, so `uasf::TrackDefinition track;` left
+  `articulation.recommended.*`, `has_keyswitch` etc. indeterminate; serialized
+  `playback_flags` depended on heap contents, and the committed corpus `.uasf` fixtures
+  carried `0x0F` on every track. Fixed in `318913b` (defaults at the type definitions, fixtures
+  regenerated: only the playback_flags bytes changed), test `test_uasf_deterministic_init`.
+- "1920-PPQN imports ran 4× too slow through the facade — fixed" held only for
+  start-then-load. `loadStyle()` before `start()` (the documented order) was undone by
+  `EngineSession::boot()` forcing 480 PPQN. Fixed in `de660a1`; `57d20d2` makes Start
+  re-adopt the loaded style's grid after a running style swap.
+- Hostile SMF (division 1, meter 1/16) divided by a zero-tick bar in the mapper: `d85831e`.
+- `test_latency_stability` had a test-harness data race (read the tap's vector while the
+  dispatch thread could still write it): `555ad3a`. Not a product race.
+
+**Build/test matrix (HEAD of the integration branch, macOS arm64):**
+
+| Configuration | Result |
+|---|---|
+| Release, Debug, `-DAIARR_LATENCY_TRACE=ON` | **98/98** each (95 C++ incl. 3 Apple-only + pure-C ABI + Python) |
+| ASan+UBSan (`-fno-sanitize-recover=undefined`) | **98/98**, 0 sanitizer reports |
+| TSan | **98/98** ×3 full runs, 0 TSan warnings |
+| `-DBUILD_MACOS_APP=ON` (JUCE 8.0.4) | builds (only JUCE-internal + 2 deprecated-`Font` warnings); launches, alive 20 s, ~107 MB RSS, no crash report. **GUI not exercised.** |
+
+**Real Genos playback through `LiveEngineFacade`** (`test_genos_facade_runtime`, all 4
+corpus styles, 1920 PPQN, one 6/8): Intro A → Main A (auto) → Main A loops → Variation B →
+Fill In BB → Main B → Break (Fill In BA) → Main B → Ending A → transport stops; every switch
+on a bar boundary; NoteOn == NoteOff and 0 outstanding notes at the end of every run.
+Playback tempo is still the default 120 BPM (SMF Set Tempo not imported; next task).
+
+**Still not verified:** any MIDI hardware (CoreMIDI in/out exist in
+`src/engine/midi/coremidi_{in,out}.cpp`; there is no Pa5X-specific code), GUI interaction,
+iOS/iPad (no target exists), GitHub Actions (0 runs recorded on `phamgia75/AIArranger`).
+
+---
+
 ## ▶ CURRENT STATUS — audit of 2026-09-28 (supersedes the status claims below)
 
 > Branch `claude/aiarranger-audit-handoff-fyv4vy` (19 commits on top of `main@5e72ee6`, the
