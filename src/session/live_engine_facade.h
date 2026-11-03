@@ -55,8 +55,10 @@ public:
     // records) EngineError::InvalidState and changes nothing — stop first
     // (Issue #4). Safe while tick() runs on another thread: the two exclude
     // each other, and tick() never waits — it skips its step while a load is
-    // in progress (Issue #5). The lifecycle tracker advances toward Ready when
-    // the engine is not running; a load while running does not move state.
+    // in progress (Issue #5). Never call it from inside tick() (e.g. from an
+    // output callback on the tick thread): it would wait for its own tick.
+    // The lifecycle tracker advances toward Ready when the engine is not
+    // running; a load while running does not move state.
     EngineError loadStyle(const uasf::StyleDefinition& style) noexcept;
 
     // ── Commands (any thread, concurrently; lock-free) ──────────────────
