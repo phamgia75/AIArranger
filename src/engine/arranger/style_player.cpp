@@ -1,6 +1,7 @@
 #include "engine/arranger/style_player.h"
 #include "engine/music/ntt.h"
 #include "engine/trace/latency_trace.h"
+#include "engine/uasf/note_closure.h"
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -16,6 +17,9 @@ StylePlayer::StylePlayer(realtime::RealtimeClock& clock,
 
 void StylePlayer::loadStyle(const uasf::StyleDefinition& style) noexcept {
     style_ = style;
+    // Close notes a section cannot close itself (NoteOff past its end), whatever
+    // produced the style: a looping Main would otherwise hold them forever.
+    for (auto& sec : style_.sections) uasf::closeOpenNotes(sec);
     style_loaded_ = true;
     sequencer_.setSections(style_.sections.data(), style_.sections.size());
     // Selecting a style (while stopped) adopts its tempo and resolution;

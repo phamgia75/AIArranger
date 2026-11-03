@@ -1,4 +1,5 @@
 #include "importers/sff1/sff1_mapper.h"
+#include "engine/uasf/note_closure.h"
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -257,6 +258,9 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             section.bars = barTicks ? static_cast<uint32_t>(std::max<uint64_t>(
                                1, (len + barTicks - 1) / barTicks)) : 1;
             fillTracks(section, evs, secCfg.empty() ? nullptr : &secCfg);
+            // A note whose NoteOff fell past this marker range (into the next
+            // section) would never be closed by this section: end it here.
+            for (auto& t : section.tracks) uasf::closeOpenNotes(t, len);
             style.sections.push_back(std::move(section));
         }
     } else {
