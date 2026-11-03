@@ -57,11 +57,18 @@ void LiveEngineFacade::stop() noexcept {
     // Start used to restart playback after stop()). Draining cmd_q_ is not
     // enough: a completed push can sit behind another producer's unpublished
     // slot. Every command carries the generation it was issued in; bumping it
-    // makes tick() drop older ones whenever they become visible. MIDI input is
-    // kept: it is physical key state (a queued release must still arrive).
+    // makes tick() drop older ones whenever they become visible.
     session_gen_.fetch_add(1, std::memory_order_release);
     has_cmd_carry_ = false;
     pending_tempo_.store(0, std::memory_order_relaxed);
+    // Input is not observed while stopped (the sink is detached above), so a
+    // key released meanwhile would stay "held" after restart. Forget input
+    // state and what is still queued; restart begins with nothing held. Single
+    // consumer kept: tick() is excluded and the input producer is detached.
+    session_.adapter().resetInput();
+    control::ControlEvent dropped;
+    while (input_q_.pop(dropped)) {}
+    has_input_carry_ = false;
     started_ = false;
     lifecycle_.apply(LifecycleEvent::Stop);    // Gate 4: track high-level state
     publishSnapshot();

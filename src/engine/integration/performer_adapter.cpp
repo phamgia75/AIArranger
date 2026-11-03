@@ -33,6 +33,14 @@ void PerformerAdapter::doPanic() noexcept {
     sm_.apply(performance::PerformerInput::Panic);
 }
 
+void PerformerAdapter::resetInput() noexcept {
+    held_count_ = 0;
+    sustain_ = false;
+    sustained_count_ = 0;
+    latch_pending_ = false;
+    last_chord_ = arranger::Chord{arranger::ChordType::NoChord, 0, 0, 0};
+}
+
 void PerformerAdapter::handleControl(const control::ControlEvent& ev) noexcept {
     switch (ev.action) {
         case ControlAction::SyncArm:

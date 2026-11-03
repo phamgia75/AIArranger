@@ -99,8 +99,9 @@ int main() {
         g.stop();
     }
 
-    // Input is physical key state, not a command: a release queued when stop()
-    // runs must still reach the performer (Level 2 review of #10).
+    // Physical input across stop()/start(): while stopped the engine cannot see
+    // the keyboard, so stop() forgets input state and restart begins with
+    // nothing held (Level 2 review of #10: no stale held keys either way).
     {
         midi::FakeMidiInputSource in;
         midi::FakeMidiOutputProvider o3; o3.setDevices({{0, "synth"}});
@@ -117,7 +118,33 @@ int main() {
         g.stop();
         g.start();
         for (int i = 0; i < 5; ++i) g.tick(48);
-        TEST("input: releases queued at stop() still arrive (no stale held keys)",
+        TEST("input: releases queued at stop() leave no stale held keys",
+             g.session().adapter().heldCount() == 0);
+        // Pressed before stop(), released WHILE stopped (sink detached).
+        const uint8_t one[] = {0x90, 50, 100};             // lower zone
+        in.inject(one, sizeof(one));
+        g.tick(48);
+        TEST("input: key held before stop()", g.session().adapter().heldCount() == 1);
+        g.stop();
+        const uint8_t release[] = {0x80, 50, 0};
+        in.inject(release, sizeof(release));   // nobody listening while stopped
+        g.start();
+        for (int i = 0; i < 5; ++i) g.tick(48);
+        TEST("input: key released while stopped is not held after restart",
+             g.session().adapter().heldCount() == 0);
+        // Sustain down before stop(), pedal + key released while stopped.
+        const uint8_t pedalKey[] = {0xB0, 64, 127, 0x90, 53, 100, 0x80, 53, 0};
+        in.inject(pedalKey, sizeof(pedalKey));
+        g.tick(48);
+        TEST("input: sustained key held before stop()", g.session().adapter().heldCount() == 1);
+        g.stop();
+        const uint8_t pedalUp[] = {0xB0, 64, 0};
+        in.inject(pedalUp, sizeof(pedalUp));
+        g.start();
+        const uint8_t tap[] = {0x90, 50, 100, 0x80, 50, 0};   // a fresh press + release
+        in.inject(tap, sizeof(tap));
+        for (int i = 0; i < 5; ++i) g.tick(48);
+        TEST("input: sustain released while stopped is not stuck after restart",
              g.session().adapter().heldCount() == 0);
         g.stop();
     }

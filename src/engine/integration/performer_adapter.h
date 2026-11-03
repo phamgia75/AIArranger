@@ -71,6 +71,11 @@ public:
     // ── Realtime tick: drain control events, drive the player ──────
     void tick() noexcept;
 
+    // Forget physical input state (held lower-zone keys, sustain, deferred
+    // releases, pending chord-release latch, last chord). For an engine stop:
+    // input is not observed while stopped, so restart must not trust it.
+    void resetInput() noexcept;
+
     // ── Observability (testing) ────────────────────────────────────
     performance::PerformerState state() const noexcept { return sm_.state(); }
     bool isPlaying() const noexcept { return player_.isPlaying(); }
