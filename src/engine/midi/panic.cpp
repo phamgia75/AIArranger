@@ -48,6 +48,27 @@ void PanicHandler::panic(MidiScheduler& scheduler, MidiEventCallback sendCallbac
     // Phase 1: Clear pending scheduler queue
     scheduler.clear();
 
+    // Phase 1b: an explicit NoteOff for every tracked note (Issue #14). Receivers
+    // that track notes by NoteOff only would otherwise keep them on; CC 120/123
+    // below still silence everything else.
+    for (uint8_t ch = 0; ch <= kMaxChannel; ++ch) {
+        uasf::MidiEvent off{};
+        off.type = uasf::MidiEventType::NoteOff;
+        off.channel = ch;
+        off.data2 = 0;
+        off.tick = 0;
+        const uint64_t words[2] = {channel_notes_low_[ch].load(std::memory_order_acquire),
+                                   channel_notes_high_[ch].load(std::memory_order_acquire)};
+        for (int w = 0; w < 2; ++w) {
+            uint64_t bits = words[w];
+            while (bits) {
+                off.data1 = static_cast<uint8_t>(w * 64 + __builtin_ctzll(bits));
+                bits &= bits - 1;
+                sendCallback(off);
+            }
+        }
+    }
+
     // Phase 2: Send AllSoundOff (CC 120) on all channels
     uasf::MidiEvent allSoundOff{};
     allSoundOff.type = uasf::MidiEventType::ControlChange;

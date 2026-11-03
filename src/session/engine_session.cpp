@@ -45,8 +45,11 @@ bool EngineSession::boot() noexcept {
 
 void EngineSession::shutdown() noexcept {
     if (!booted_) return;
-    player_.stop();    // flushes active notes (no hanging notes)
-    player_.panic();   // belt-and-suspenders: clear scheduler + all-notes-off
+    // Panic first: it clears the scheduler and then sends a NoteOff per active
+    // note + CC 120/123. In the old order stop() scheduled the NoteOffs and the
+    // panic's scheduler clear discarded them (Issue #14).
+    player_.panic();
+    player_.stop();    // nothing left sounding; stops the clock and sequencer
     clock_.stop();
     booted_ = false;
 }

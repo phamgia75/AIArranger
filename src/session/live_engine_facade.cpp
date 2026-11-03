@@ -48,11 +48,19 @@ void LiveEngineFacade::stop() noexcept {
     if (!started_) return;
     // Flush the input sink so no late callback races teardown.
     if (input_) input_->setSink(nullptr);
-    // A real transport Stop through the performer first (FSM -> Idle, Sync Start
-    // disarmed), so no input after stop() can fire a stale arm.
+    // Shut down first: its panic clears the scheduler, then queues a NoteOff for
+    // every note still tracked + CC 120/123 (#14). (A player stop() before it
+    // would clear the tracking and its NoteOffs would be discarded by the panic.)
+    session_.shutdown();
+    // Then a real transport Stop through the performer (FSM -> Idle, Sync Start
+    // disarmed), so no input after stop() can fire a stale arm. Nothing is left
+    // sounding for it to flush.
     session_.adapter().postEvent({control::ControlAction::Stop, 0, 0});
     session_.tick();
-    session_.shutdown();   // stops playback + flushes all notes (no hanging notes)
+    // Deliver the silence now rather than on a later tick (a host may stop
+    // ticking after stop()). The scheduler holds only the panic's events.
+    session_.scheduler().advanceTo(INT64_MAX);
+    if (output_) control::pumpEngineOutput(out_bridge_, *output_);
     // Commands issued for this session must not act on a later one (a pending
     // Start used to restart playback after stop()). Draining cmd_q_ is not
     // enough: a completed push can sit behind another producer's unpublished
