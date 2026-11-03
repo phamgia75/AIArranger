@@ -1,4 +1,5 @@
 #include "importers/sff1/sff1_report.h"
+#include <algorithm>
 #include <sstream>
 #include <iomanip>
 

@@ -7,10 +7,10 @@
 //
 // A trivially-copyable value the facade publishes each tick and the UI polls at
 // ~30-60 Hz. No pointers, no containers — safe to store in std::atomic and to
-// marshal across the Swift/C++ boundary as a plain struct. NOTE: at this size the
-// std::atomic<EngineSnapshot> is mutex-backed (is_lock_free() == false), so it
-// gives thread-safe snapshot publication, not a lock-free one — acceptable for the
-// MIDI-only reference host; do not describe it as lock-free.
+// marshal across the Swift/C++ boundary as a plain struct. It is too large for a
+// lock-free std::atomic (that would be mutex-backed), so the facade publishes it
+// through SeqlockSnapshot (session/seqlock_snapshot.h): lock-free for the tick
+// thread, consistent (never torn) for readers on any thread.
 
 namespace ai_arranger::session {
 

@@ -13,6 +13,14 @@ void SectionSequencer::queueSection(int index) noexcept {
     queued_section_.store(index, std::memory_order_release);
 }
 
+void SectionSequencer::commitSection(int index) noexcept {
+    if (!sections_ || index < 0 || index >= static_cast<int>(section_count_)) return;
+    const int pending = queued_section_.load(std::memory_order_acquire);
+    activateSection(index);
+    if (pending >= 0 && pending != index)
+        queued_section_.store(pending, std::memory_order_release);
+}
+
 void SectionSequencer::queueIntro() noexcept {
     // Find the first Intro section (symmetric with queueFill/queueEnding).
     for (size_t i = 0; i < section_count_; ++i) {
@@ -25,7 +33,23 @@ void SectionSequencer::queueIntro() noexcept {
 }
 
 void SectionSequencer::queueFill() noexcept {
-    // Find the first Fill section
+    // Fill for the Main that is playing (Main A -> Fill In AA, ... Main D ->
+    // Fill In DD, arranger-engine-spec §5.3); otherwise the first Fill.
+    const int cur = current_section_.load(std::memory_order_acquire);
+    if (sections_ && cur >= 0 && cur < static_cast<int>(section_count_)) {
+        const auto t = sections_[cur].type;
+        if (t >= uasf::SectionType::Main1 && t <= uasf::SectionType::Main4) {
+            const auto want = static_cast<uasf::SectionType>(
+                static_cast<int>(uasf::SectionType::Fill1) +
+                (static_cast<int>(t) - static_cast<int>(uasf::SectionType::Main1)));
+            for (size_t i = 0; i < section_count_; ++i) {
+                if (sections_[i].type == want) {
+                    queued_section_.store(static_cast<int>(i), std::memory_order_release);
+                    return;
+                }
+            }
+        }
+    }
     for (size_t i = 0; i < section_count_; ++i) {
         if (sections_ && sections_[i].type >= uasf::SectionType::Fill1 &&
             sections_[i].type <= uasf::SectionType::Fill4) {

@@ -11,7 +11,9 @@
 #include "engine/music/groove.h"
 #include <vector>
 #include <functional>
+#include <cstdint>
 #include <atomic>
+#include <cstdint>
 
 namespace ai_arranger::arranger {
 
@@ -97,6 +99,16 @@ private:
     // -1 means "nothing dispatched yet" so tick-0 events still fire.
     int64_t section_rel_cursor_{-1};
 
+    // Main section that Intro / Fill / Break hand back to when they end
+    // (the most recently played Main; -1 = first Main in the style).
+    int return_main_{-1};
+
+    // End-of-section handling (arranger-engine-spec §5). Returns false if the
+    // transport stopped (Ending finished).
+    bool handleSectionEnd(int64_t currentTick) noexcept;
+    int  defaultMainIndex() const noexcept;
+    void applyStyleGrid() noexcept;
+
     // Event callback for demo/debug
     PlaybackEventCallback event_cb_{nullptr};
 
@@ -108,9 +120,12 @@ private:
     std::atomic<uint8_t> swing_percent_{music::kStraightSwing};
 
     // Dispatch events from the current section that are <= currentTick
+    // Events at section-relative ticks >= noteOffOnlyFrom are dispatched only
+    // if they are note-offs (used to close a pass exactly at its end).
     void dispatchSectionEvents(const uasf::SectionDefinition& section,
                                int64_t currentTick,
-                               Chord chord) noexcept;
+                               Chord chord,
+                               int64_t noteOffOnlyFrom = INT64_MAX) noexcept;
 
     // Transpose a MIDI event based on chord
     uint8_t transposeNote(uint8_t note, Chord chord, uasf::TrackRole role) const noexcept;

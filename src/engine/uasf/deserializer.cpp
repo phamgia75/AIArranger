@@ -35,6 +35,14 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
         return result;
     }
 
+    // Structural limits (format.h). The serializer clamps to them, so a larger
+    // count means a corrupt or crafted file; rejecting it also bounds memory.
+    if (header.section_count > format::kMaxSections) {
+        result.error = "Too many sections: " + std::to_string(header.section_count) +
+                       " (max " + std::to_string(format::kMaxSections) + ")";
+        return result;
+    }
+
     auto& style = result.style;
     style.format_version = "1.0";
     style.tempo_bpm = 120;
@@ -58,6 +66,13 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
         section.beats_per_bar = sect_hdr.beats_per_bar;
         section.beat_note = sect_hdr.beat_note;
 
+        if (sect_hdr.track_count > format::kMaxTracksPerSection) {
+            result.error = "Too many tracks in section " + std::to_string(s) + ": " +
+                           std::to_string(sect_hdr.track_count) +
+                           " (max " + std::to_string(format::kMaxTracksPerSection) + ")";
+            return result;
+        }
+
         // Read tracks
         for (uint8_t t = 0; t < sect_hdr.track_count; ++t) {
             if (!ensure(sizeof(format::TrackHeader))) {
@@ -72,6 +87,16 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
             track.midi_channel = trk_hdr.midi_channel;
             track.role = static_cast<TrackRole>(trk_hdr.role);
             track.is_drum = trk_hdr.is_drum != 0;
+
+            if (trk_hdr.name_length > format::kMaxTrackNameLength) {
+                result.error = "Track name too long: " + std::to_string(trk_hdr.name_length);
+                return result;
+            }
+            if (trk_hdr.event_count > format::kMaxEvents) {
+                result.error = "Too many events in track: " + std::to_string(trk_hdr.event_count) +
+                               " (max " + std::to_string(format::kMaxEvents) + ")";
+                return result;
+            }
 
             // Track name
             if (trk_hdr.name_length > 0) {

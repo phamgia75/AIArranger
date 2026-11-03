@@ -1,29 +1,51 @@
 #include "performance/clock/coreaudio_clock.h"
+#if defined(__APPLE__)
 #include <mach/mach_time.h>
+#else
+#include <ctime>
+#endif
 
 namespace ai_arranger::performance {
 
 namespace {
-// Cached mach timebase (host ticks -> nanoseconds).
-mach_timebase_info_data_t& timebase() {
-    static mach_timebase_info_data_t tb = [] {
+struct HostTimebase { uint32_t numer; uint32_t denom; };
+
+// Cached host timebase (host ticks -> nanoseconds). Non-Apple hosts read
+// CLOCK_MONOTONIC in nanoseconds already, so the ratio is 1/1 there.
+const HostTimebase& timebase() {
+    static const HostTimebase tb = [] {
+#if defined(__APPLE__)
         mach_timebase_info_data_t t{};
         mach_timebase_info(&t);
-        if (t.denom == 0) { t.numer = 1; t.denom = 1; }
-        return t;
+        if (t.denom == 0) return HostTimebase{1, 1};
+        return HostTimebase{t.numer, t.denom};
+#else
+        return HostTimebase{1, 1};
+#endif
     }();
     return tb;
+}
+
+uint64_t hostNow() noexcept {
+#if defined(__APPLE__)
+    return mach_absolute_time();
+#else
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL +
+           static_cast<uint64_t>(ts.tv_nsec);
+#endif
 }
 } // namespace
 
 void CoreAudioClock::start() noexcept {
-    last_host_.store(mach_absolute_time(), std::memory_order_release);
+    last_host_.store(hostNow(), std::memory_order_release);
     running_.store(true, std::memory_order_release);
 }
 
 uint64_t CoreAudioClock::pollElapsedSamples() noexcept {
     if (!running_.load(std::memory_order_acquire)) return 0;
-    const uint64_t now = mach_absolute_time();
+    const uint64_t now = hostNow();
     const uint64_t prev = last_host_.exchange(now, std::memory_order_acq_rel);
     if (now <= prev) return 0;
     const auto& tb = timebase();

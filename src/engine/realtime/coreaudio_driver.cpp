@@ -1,5 +1,6 @@
 #include "engine/realtime/coreaudio_driver.h"
 #include <cstdio>
+#include <mach/mach_time.h>
 
 namespace ai_arranger::realtime {
 

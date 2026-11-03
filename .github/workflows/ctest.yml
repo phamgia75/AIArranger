@@ -2,13 +2,14 @@ name: CTest
 
 on:
   push:
-    branches: [main]
+    # claude/** : agent work branches are validated on macOS before any PR exists.
+    branches: [main, 'claude/**']
   pull_request:
     branches: [main]
 
 jobs:
   build-and-test:
-    # macOS only: the engine links CoreMIDI / CoreAudio / AudioUnit.
+    # macOS: the full suite, including the CoreMIDI / CoreAudio platform layer.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,3 +18,39 @@ jobs:
       # local runs (cmake configure + build -j + ctest --output-on-failure).
       - name: Build + CTest (scripts/run_tests.sh)
         run: bash scripts/run_tests.sh
+
+  portable-core-linux:
+    # Machine-checks the Gate 4 claim that the portable core (engine, facade,
+    # C ABI bridge, importer, validation harness) builds and passes with no Apple
+    # SDK, and runs it under sanitizers — the lock-free queues and cross-thread
+    # facade are only race-checked here.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            flags: ""
+          - name: asan-ubsan
+            flags: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+          - name: tsan
+            flags: "-fsanitize=thread -fno-omit-frame-pointer"
+    name: portable-core-linux (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      # TSan's shadow mapping breaks with the runner kernel's 32-bit mmap ASLR
+      # entropy ("unexpected memory mapping"); 28 bits is the documented fix.
+      - name: Reduce mmap ASLR entropy for TSan
+        if: matrix.name == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+          -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+      - name: Build
+        run: cmake --build build
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure

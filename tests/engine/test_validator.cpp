@@ -45,6 +45,14 @@ int main() {
     auto r4 = validator.validate(badRes);
     TEST("Zero resolution — invalid", !r4.valid);
 
+    // ── Real Genos resolution (1920) is valid; above it is not ─────
+    {
+        auto genos = style; genos.resolution = 1920;
+        TEST("1920 PPQN (Genos source resolution) — valid", validator.validate(genos).valid);
+        auto tooHigh = style; tooHigh.resolution = 1921;
+        TEST("1921 PPQN — invalid", !validator.validate(tooHigh).valid);
+    }
+
     // ── Empty sections ─────────────────────────────────────────────
     auto emptyStyle = style;
     emptyStyle.sections.clear();

@@ -1,6 +1,8 @@
 #include "session/session_persistence.h"
 
 #include <fstream>
+#include <limits>
+#include <type_traits>
 #include <sstream>
 #include <string>
 
@@ -79,19 +81,35 @@ std::string SessionPersistence::serialize(const PerformerSession& s) {
 
 bool SessionPersistence::deserialize(const std::string& j, PerformerSession& out) {
     PerformerSession s;
-    long v = 0;
-    if (!readInt(j, "version", v)) return false; s.version = (uint16_t)v;
+    // Read an integer field and store it only if it fits the destination type;
+    // an out-of-range value (e.g. tempo_bpm 4294967416) must be rejected, not
+    // wrapped into a valid-looking one before isValid() sees it.
+    auto field = [&j](const char* key, auto& dst) {
+        long v = 0;
+        if (!readInt(j, key, v)) return false;
+        using T = std::remove_reference_t<decltype(dst)>;
+        if constexpr (std::is_same_v<T, bool>) {
+            dst = (v != 0);
+        } else {
+            if (v < static_cast<long>(std::numeric_limits<T>::min()) ||
+                static_cast<unsigned long>(v) > std::numeric_limits<T>::max())
+                return false;
+            dst = static_cast<T>(v);
+        }
+        return true;
+    };
+    if (!field("version", s.version)) return false;
     readStr(j, "style_name", s.style_name);   // optional
-    if (!readInt(j, "variation", v)) return false; s.variation = (uint8_t)v;
-    if (!readInt(j, "tempo_bpm", v)) return false; s.tempo_bpm = (uint32_t)v;
-    if (!readInt(j, "split_point", v)) return false; s.split_point = (uint8_t)v;
-    if (!readInt(j, "manual_bass", v)) return false; s.manual_bass = (v != 0);
-    if (!readInt(j, "sync_armed", v)) return false; s.sync_armed = (v != 0);
-    if (!readInt(j, "chord_scan_mode", v)) return false; s.chord_scan_mode = (uint8_t)v;
-    if (!readInt(j, "groove_profile", v)) return false; s.groove_profile = (uint8_t)v;
+    if (!field("variation", s.variation)) return false;
+    if (!field("tempo_bpm", s.tempo_bpm)) return false;
+    if (!field("split_point", s.split_point)) return false;
+    if (!field("manual_bass", s.manual_bass)) return false;
+    if (!field("sync_armed", s.sync_armed)) return false;
+    if (!field("chord_scan_mode", s.chord_scan_mode)) return false;
+    if (!field("groove_profile", s.groove_profile)) return false;
     readStr(j, "midi_output_name", s.midi_output_name); // optional
-    if (!readInt(j, "ui_layout", v)) return false; s.ui_layout = (uint8_t)v;
-    if (!readInt(j, "theme", v)) return false; s.theme = (uint8_t)v;
+    if (!field("ui_layout", s.ui_layout)) return false;
+    if (!field("theme", s.theme)) return false;
 
     if (!isValid(s)) return false;
     out = s;

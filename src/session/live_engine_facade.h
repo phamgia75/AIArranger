@@ -3,12 +3,14 @@
 
 #include "session/engine_session.h"
 #include "session/engine_snapshot.h"
+#include "session/seqlock_snapshot.h"
 #include "session/engine_contract.h"
 #include "session/engine_lifecycle.h"
 #include "control/ui_event_queue.h"
 #include "control/midi_output_bridge.h"
 #include "engine/control/control_events.h"
 #include "engine/chord/chord_scan_mode.h"
+#include "engine/trace/mpsc_ring.h"
 #include "midi/midi_input_source.h"
 #include "midi/midi_output_provider.h"
 #include <atomic>
@@ -23,13 +25,16 @@
 // directly.
 //
 // Threading (matches the macOS EngineDriver, generalised + testable):
-//   - Commands (transport/tempo/variation/panic/select) may be called from any
-//     thread — each enqueues onto a lock-free SPSC queue (UI thread = producer).
-//   - The MIDI input source's read thread routes messages onto a SECOND SPSC
-//     queue (input thread = producer). Both are drained inside tick() so the
+//   - Commands (transport/tempo/variation/panic) may be called from any thread,
+//     concurrently — each enqueues onto a bounded lock-free MPSC queue.
+//   - The MIDI input source's read thread routes messages onto a SPSC queue
+//     (input thread = the one producer). Both are drained inside tick() so the
 //     engine's own SPSC control queue keeps a single producer (this tick thread).
+//     The drain is lossless: an event the engine queue cannot take this tick is
+//     held back and delivered first on the next tick (never silently dropped).
 //   - tick() runs on the engine thread; it advances the clock/sequencer, pumps
-//     output, and republishes the atomic snapshot the UI polls.
+//     output, and republishes the snapshot the UI polls. Publication is a
+//     lock-free seqlock (never a mutex), so tick() may run on an audio thread.
 
 namespace ai_arranger::session {
 
@@ -55,8 +60,8 @@ public:
             lifecycle_.apply(LifecycleEvent::LoadStyle);
     }
 
-    // ── Commands (any thread, lock-free) ──────────────────────────────
-    // Each enqueues onto the SPSC command queue drained in tick(). A dropped
+    // ── Commands (any thread, concurrently; lock-free) ──────────────────
+    // Each enqueues onto the MPSC command queue drained in tick(). A dropped
     // command (queue full) records EngineError::QueueFull, observable via
     // lastError() — the enqueue itself stays fire-and-forget (unchanged behaviour).
     void transportStart() noexcept { push(control::ControlAction::Start); }
@@ -97,7 +102,7 @@ public:
     void tick(uint32_t numSamples) noexcept;
 
     // ── UI read ───────────────────────────────────────────────────────
-    EngineSnapshot snapshot() const noexcept { return snapshot_.load(std::memory_order_acquire); }
+    EngineSnapshot snapshot() const noexcept { return snapshot_.load(); }
 
     EngineSession& session() noexcept { return session_; }
 
@@ -127,10 +132,14 @@ public:
     static constexpr uint32_t contractVersion() noexcept { return kEngineContractVersion; }
 
 private:
-    void publishSnapshot() noexcept;
+    // fromTick: the realtime path never waits for a concurrent lifecycle publish.
+    void publishSnapshot(bool fromTick = false) noexcept;
     void push(control::ControlAction a, int32_t param = 0) noexcept {
-        if (!cmd_q_.push({a, param, 0})) recordError(EngineError::QueueFull);
+        if (!cmd_q_.try_push({a, param, 0})) recordError(EngineError::QueueFull);
     }
+    // Hand queued events to the engine's control queue without dropping any.
+    template <class PopFn>
+    void drainToAdapter(PopFn&& pop, control::ControlEvent& carry, bool& hasCarry) noexcept;
     void recordError(EngineError e) noexcept {
         last_error_.store(e, std::memory_order_relaxed);
     }
@@ -140,11 +149,19 @@ private:
     midi::IMidiOutputProvider*  output_;
     control::MidiOutputBridge   out_bridge_;
 
-    control::UiEventQueue<control::ControlEvent, 256> cmd_q_;    // UI thread -> tick
+    // Any command thread(s) -> tick. Holds exactly EngineCapabilities::maxCommandQueue.
+    trace::MpscRing<control::ControlEvent, 256>       cmd_q_;
     control::UiEventQueue<control::ControlEvent, 256> input_q_;  // MIDI-in thread -> tick
 
+    // Tick-thread only: the one event per queue the engine could not accept on
+    // the previous tick, delivered first on the next (keeps FIFO order).
+    control::ControlEvent cmd_carry_{};
+    control::ControlEvent input_carry_{};
+    bool has_cmd_carry_{false};
+    bool has_input_carry_{false};
+
     std::atomic<uint32_t>       pending_tempo_{0};
-    std::atomic<EngineSnapshot> snapshot_{};
+    SeqlockSnapshot<EngineSnapshot> snapshot_;
     EngineLifecycle             lifecycle_{};                 // Gate 4 lifecycle tracker
     std::atomic<EngineError>    last_error_{EngineError::Ok}; // most recent deterministic error
     bool started_{false};

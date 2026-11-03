@@ -110,8 +110,12 @@ int main() {
     auto dr = de.deserialize(sr.data);
     TEST("Deserializer succeeds", dr.success);
 
+    // The import is split into its marker sections (Intro A, Main A-D, fills,
+    // break, ending), and sections now loop / hand over at their length. Play
+    // every section exactly once for its own length and sum the dispatches —
+    // the same "whole style once" coverage the single-section import had.
     int dispatched = 0;
-    {
+    for (size_t si = 0; si < dr.style.sections.size(); ++si) {
         realtime::RealtimeClock clk;
         midi::MidiScheduler sch;
         midi::PanicHandler pn;
@@ -120,23 +124,21 @@ int main() {
             if (e.type == uasf::MidiEventType::NoteOn ||
                 e.type == uasf::MidiEventType::NoteOff) dispatched++;
         });
-        uint64_t maxTick = 0;
-        for (const auto& sec : dr.style.sections)
-            for (const auto& t : sec.tracks)
-                for (const auto& e : t.events) if (e.tick > maxTick) maxTick = e.tick;
-
         pl.loadStyle(dr.style);
         clk.setSampleRate(48000);
         clk.setTempo(dr.style.tempo_bpm ? dr.style.tempo_bpm : 120);
         clk.setResolution(dr.style.resolution ? dr.style.resolution : 480);
-        pl.start(0);
+        pl.start(static_cast<int>(si));
         clk.start();
-        const int64_t target = static_cast<int64_t>(maxTick) + 8192;
-        for (int i = 0; i < 2000000 && clk.getPosition() < target; ++i) {
-            clk.advance(2048);
+        const int64_t target =
+            static_cast<int64_t>(dr.style.sections[si].bars) * clk.ticksPerBar() - 1;
+        for (int i = 0; i < 2000000 && clk.isRunning() && clk.getPosition() < target; ++i) {
+            clk.advance(256);
             pl.tick();
             sch.advanceTo(clk.getPosition());
         }
+        pl.stop();
+        sch.advanceTo(INT64_MAX);
     }
     // Strict improvement over the PR #7 single-track baseline of 3384.
     TEST("Dispatched note events recover above PR #7 baseline (3384)",

@@ -54,22 +54,31 @@ Named platform seams the core depends on only through interfaces:
 ## 2. Thread-ownership model
 
 The engine is **not** globally synchronised. Ownership is explicit; follow it and
-the lock-free SPSC queues keep single-producer discipline.
+the lock-free queues keep their producer discipline (commands: multi-producer;
+MIDI input: single read thread; engine control queue: the tick thread only).
 
 | API group | Thread that may call it | Mechanism |
 |-----------|------------------------|-----------|
 | `start` / `stop` / `loadStyle` (lifecycle) | **owner thread** only | direct; not re-entrant |
-| Transport / section / tempo / variation / panic commands | **any thread** | enqueued lock-free (SPSC), applied in `tick()` |
+| Transport / section / tempo / variation / panic commands | **any thread, concurrently** | enqueued on a bounded lock-free **MPSC** ring (exactly `maxCommandQueue` = 256 slots), applied in `tick()` |
 | MIDI input events | the input source's **read thread** | routed lock-free onto a 2nd SPSC queue, drained in `tick()` |
 | `tick(numSamples)` | the **engine thread** (one, consistent) | advances clock/sequencer, pumps output, publishes snapshot |
-| `snapshot()` / `capabilities()` / `lastError()` | **any thread** | atomic read (snapshot is published each tick) |
+| `snapshot()` / `capabilities()` / `lastError()` | **any thread** | snapshot: lock-free seqlock read, never torn (published each tick; the tick side never takes a lock, so `tick()` may run on an audio thread) |
 
 `lifecycleState()` reads the owner-thread tracker; for cross-thread polling read
 `snapshot().lifecycleState`, which is published atomically inside `tick()`,
 `start()`, and `stop()`.
 
-Dropped commands (SPSC queue full) are not silently lost: they set
-`EngineError::QueueFull`, observable via `lastError()`.
+Dropped commands (command queue full) are not silently lost: they set
+`EngineError::QueueFull`, observable via `lastError()`. The same applies to MIDI
+input events when the input queue overflows on the read thread.
+
+The `tick()` hand-off from the facade queues into the engine's own control queue
+is **lossless**: when a burst of commands + MIDI input exceeds what the engine
+queue can take in one tick, the remainder stays queued (FIFO order kept) and is
+delivered on the next tick(s) — it is never discarded (a discarded NoteOff would
+leave a stuck held note). Pinned by `tests/session/test_facade_queue_integrity.cpp`
+(capacity, 4-thread producer race, stuck-note reproducer; run under TSan in CI).
 
 ---
 
@@ -170,7 +179,8 @@ map.
   silently swallowed; command-queue overflow surfaces as `QueueFull`, bad device
   index as `DeviceUnavailable`.
 - **Contract version:** `kEngineContractVersion = MAJOR<<16 | MINOR<<8 | PATCH`
-  (currently `1.0.0`). Also reachable pre-handle via `aiarr_contract_version()`
+  (currently `1.0.1` — 1.0.1 made the implementation honour §2: MPSC
+  command queue + lossless drain; no API change). Also reachable pre-handle via `aiarr_contract_version()`
   so a host can gate on ABI compatibility before creating an engine.
 - **Backward-compatibility rules (additive-only):**
   - Existing `EngineError` / `LifecycleState` enumerators keep their integer

@@ -1,3 +1,6 @@
+> **Current status lives in `docs/PROJECT_REVIEW_AND_CONTINUATION_PLAN.md` (top section,
+> audit of 2026-09-28).** This file's Gate 7 header is historical.
+
 # H A N D O F F   P A C K A G E
 ## AI Arranger / Style Maker — Gate 7 (CASM Semantic Analysis)
 ## Transfer to: Agent [TBD by PTH]

@@ -33,6 +33,12 @@ public:
     // ── Control (non-realtime) ────────────────────────────────────
     void setSections(const uasf::SectionDefinition* sections, size_t count) noexcept;
     void queueSection(int index) noexcept;  // Queue switch at next bar
+    // Switch now (engine thread) — used when the current section reaches its end
+    // (Intro/Fill/Break -> Main). A different user-queued switch stays pending.
+    void commitSection(int index) noexcept;
+    // Tick of the bar boundary at which the last switch was committed by
+    // advance() — the musical origin of the section that just started.
+    int64_t lastBarStart() const noexcept { return last_bar_start_.load(std::memory_order_acquire); }
     void queueIntro() noexcept;
     void queueFill() noexcept;
     void queueBreak() noexcept;

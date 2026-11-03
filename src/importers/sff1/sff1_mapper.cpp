@@ -6,6 +6,25 @@
 
 namespace ai_arranger::importers::sff1 {
 
+namespace {
+// Exact Yamaha SFF section marker names. Anything else ("SFF1"/"SFF2" format
+// tags, "SInt" setup, unknown text) is not a playable section.
+bool markerSectionType(const std::string& m, uasf::SectionType& out) {
+    using T = uasf::SectionType;
+    static const struct { const char* name; T type; } kMap[] = {
+        {"Intro A", T::Intro1}, {"Intro B", T::Intro2}, {"Intro C", T::Intro3},
+        {"Main A", T::Main1}, {"Main B", T::Main2}, {"Main C", T::Main3}, {"Main D", T::Main4},
+        {"Fill In AA", T::Fill1}, {"Fill In BB", T::Fill2},
+        {"Fill In CC", T::Fill3}, {"Fill In DD", T::Fill4},
+        {"Fill In BA", T::Break},
+        {"Ending A", T::Ending1}, {"Ending B", T::Ending2}, {"Ending C", T::Ending3},
+    };
+    for (const auto& e : kMap)
+        if (m == e.name) { out = e.type; return true; }
+    return false;
+}
+} // namespace
+
 SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
     SffToUasfResult result;
     result.success = false;
@@ -62,72 +81,200 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
     // emitted once per channel, not once per section.
     std::set<uint8_t> fallbackWarned;
 
-    for (const auto& sffSection : parseResult.sections) {
-        uasf::SectionDefinition section;
-        section.type = mapSectionType(sffSection.type);
-        section.name = sffSection.name;
-        section.bars = sffSection.bars;
-        section.resolution = sffSection.resolution;
-        section.beats_per_bar = 4;
-        section.beat_note = 4;
+    // One UASF track per MIDI channel; role/NTR/NTT from the CASM config for
+    // that channel (section-specific `cfgs` first, then the style-wide map).
+    auto makeTrack = [&](uint8_t ch, const std::map<uint8_t, const CasmTrackConfig*>* cfgs) {
+        uasf::TrackDefinition track;
+        track.midi_channel = ch;
+        track.articulation.profile = uasf::ArticulationProfile::Generic;
+        track.articulation.fidelity = uasf::FidelityRequirement::High;
 
-        // Bucket events by MIDI channel, building one UASF track per channel.
-        std::map<uint8_t, uasf::TrackDefinition> byChannel;
-        for (const auto& sffTrack : sffSection.tracks) {
-            for (const auto& sffEv : sffTrack.events) {
-                const uint8_t ch = sffEv.status & 0x0F;
-                auto it = byChannel.find(ch);
-                if (it == byChannel.end()) {
-                    uasf::TrackDefinition track;
-                    track.midi_channel = ch;
-                    track.articulation.profile = uasf::ArticulationProfile::Generic;
-                    track.articulation.fidelity = uasf::FidelityRequirement::High;
-
-                    auto cit = chanConfig.find(ch);
-                    if (cit != chanConfig.end()) {
-                        const CasmTrackConfig& cfg = *cit->second;
-                        track.name = cfg.name;
-                        track.role = mapCasmTrackRole(cfg);
-                        track.articulation.ntr = cfg.ntr;
-                        track.articulation.ntt = cfg.ntt;
-                    } else {
-                        // No CASM metadata for this channel: fall back to the
-                        // GM drum convention, else treat as a melodic phrase.
-                        track.name = "Channel " + std::to_string(static_cast<int>(ch));
-                        track.role = (ch == 9) ? uasf::TrackRole::Drum
-                                               : uasf::TrackRole::Phrase1;
-                        if (fallbackWarned.insert(ch).second) {
-                            result.warnings.push_back(
-                                "Channel " + std::to_string(static_cast<int>(ch)) +
-                                " has events but no CASM metadata — using " +
-                                (ch == 9 ? "drum" : "melodic") + " fallback role");
-                        }
-                    }
-                    track.is_drum = (track.role == uasf::TrackRole::Drum ||
-                                     track.role == uasf::TrackRole::Percussion);
-                    if (track.role == uasf::TrackRole::Bass ||
-                        track.role == uasf::TrackRole::Percussion) {
-                        track.articulation.fidelity =
-                            uasf::FidelityRequirement::Medium;
-                    }
-                    it = byChannel.emplace(ch, std::move(track)).first;
-                }
-                it->second.events.push_back(mapMidiEvent(sffEv));
+        const CasmTrackConfig* cfg = nullptr;
+        if (cfgs) { auto it = cfgs->find(ch); if (it != cfgs->end()) cfg = it->second; }
+        if (!cfg) { auto it = chanConfig.find(ch); if (it != chanConfig.end()) cfg = it->second; }
+        if (cfg) {
+            track.name = cfg->name;
+            track.role = mapCasmTrackRole(*cfg);
+            track.articulation.ntr = cfg->ntr;
+            track.articulation.ntt = cfg->ntt;
+        } else {
+            // No CASM metadata for this channel: fall back to the
+            // GM drum convention, else treat as a melodic phrase.
+            track.name = "Channel " + std::to_string(static_cast<int>(ch));
+            track.role = (ch == 9) ? uasf::TrackRole::Drum
+                                   : uasf::TrackRole::Phrase1;
+            if (fallbackWarned.insert(ch).second) {
+                result.warnings.push_back(
+                    "Channel " + std::to_string(static_cast<int>(ch)) +
+                    " has events but no CASM metadata — using " +
+                    (ch == 9 ? "drum" : "melodic") + " fallback role");
             }
         }
-
-        // std::map iterates in ascending channel order → deterministic output.
-        for (auto& [ch, track] : byChannel) {
-            section.tracks.push_back(std::move(track));
+        track.is_drum = (track.role == uasf::TrackRole::Drum ||
+                         track.role == uasf::TrackRole::Percussion);
+        if (track.role == uasf::TrackRole::Bass ||
+            track.role == uasf::TrackRole::Percussion) {
+            track.articulation.fidelity = uasf::FidelityRequirement::Medium;
         }
+        return track;
+    };
 
-        style.sections.push_back(std::move(section));
+    // Bucket (event, section-relative tick) pairs into per-channel tracks, in
+    // ascending channel order (std::map) for deterministic output.
+    auto fillTracks = [&](uasf::SectionDefinition& section,
+                          const std::vector<std::pair<const SffMidiEvent*, uint64_t>>& evs,
+                          const std::map<uint8_t, const CasmTrackConfig*>* cfgs) {
+        std::map<uint8_t, uasf::TrackDefinition> byChannel;
+        for (const auto& [sffEv, rel] : evs) {
+            const uint8_t ch = sffEv->status & 0x0F;
+            auto it = byChannel.find(ch);
+            if (it == byChannel.end()) it = byChannel.emplace(ch, makeTrack(ch, cfgs)).first;
+            uasf::MidiEvent ev = mapMidiEvent(*sffEv);
+            ev.tick = rel;
+            it->second.events.push_back(ev);
+        }
+        for (auto& [ch, track] : byChannel) section.tracks.push_back(std::move(track));
+    };
+
+    // ── Marker-based section split (Yamaha SMF: "SInt", "Intro A", "Main A",
+    // "Fill In AA", "Fill In BA" = Break, "Ending A", ...) ──────────────────
+    // Each recognised marker opens a section that runs to the next later
+    // marker (or End of Track). Ticks become section-relative; a NoteOff
+    // exactly on the end tick closes the section (dispatched at its end). The
+    // SInt block's setup messages (program/bank/CC, not notes) are placed at
+    // tick 0 of every Intro, so a Start re-initialises the parts. Styles with
+    // no recognised markers keep the single-section import below.
+    // Meter from the SMF time signature (FF 58); 4/4 if absent or unusable.
+    const uint8_t tsNum = parseResult.time_sig_num ? parseResult.time_sig_num : 4;
+    const uint8_t tsDen = (parseResult.time_sig_den == 2 || parseResult.time_sig_den == 4 ||
+                           parseResult.time_sig_den == 8 || parseResult.time_sig_den == 16)
+                              ? parseResult.time_sig_den : 4;
+
+    std::vector<const SffMidiEvent*> allEvents;
+    for (const auto& sffSection : parseResult.sections)
+        for (const auto& t : sffSection.tracks)
+            for (const auto& e : t.events) allEvents.push_back(&e);
+
+    struct Range { uasf::SectionType type; std::string name; uint32_t start; uint32_t end; };
+    std::vector<Range> ranges;
+    uint32_t sintStart = 0, sintEnd = 0;
+    bool haveSInt = false;
+    uint32_t lastTick = parseResult.end_of_track_tick;
+    for (const auto* e : allEvents) lastTick = std::max(lastTick, e->tick);
+    const auto& marks = parseResult.markers;
+    for (size_t i = 0; i < marks.size(); ++i) {
+        uint32_t end = lastTick;
+        for (size_t j = i + 1; j < marks.size(); ++j)
+            if (marks[j].tick > marks[i].tick) { end = marks[j].tick; break; }
+        if (marks[i].name == "SInt") {
+            haveSInt = true; sintStart = marks[i].tick; sintEnd = end;
+            continue;
+        }
+        uasf::SectionType type;
+        if (!markerSectionType(marks[i].name, type)) continue;
+        if (end <= marks[i].tick) continue;          // empty range
+        bool dup = false;
+        for (const auto& r : ranges) if (r.type == type) dup = true;
+        if (dup) {
+            result.warnings.push_back("Duplicate section marker '" + marks[i].name + "' ignored");
+            continue;
+        }
+        ranges.push_back({type, marks[i].name, marks[i].tick, end});
+    }
+
+    if (!ranges.empty()) {
+        // Canonical order (enum order): Intros, Mains, Fills, Endings, Break —
+        // so section 0 is Intro A when present (Start plays section 0).
+        std::stable_sort(ranges.begin(), ranges.end(),
+                         [](const Range& a, const Range& b) { return a.type < b.type; });
+        const bool anyIntro = std::any_of(ranges.begin(), ranges.end(), [](const Range& r) {
+            return r.type >= uasf::SectionType::Intro1 && r.type <= uasf::SectionType::Intro3;
+        });
+        const uint64_t barTicks = static_cast<uint64_t>(style.resolution) * 4 * tsNum / tsDen;
+
+        for (size_t ri = 0; ri < ranges.size(); ++ri) {
+            const Range& r = ranges[ri];
+            const uint32_t len = r.end - r.start;
+            std::vector<std::pair<const SffMidiEvent*, uint64_t>> evs;
+
+            const bool isIntro = r.type >= uasf::SectionType::Intro1 &&
+                                 r.type <= uasf::SectionType::Intro3;
+            if (haveSInt && (isIntro || (!anyIntro && ri == 0))) {
+                for (const auto* e : allEvents) {
+                    if (e->tick < sintStart || e->tick >= sintEnd) continue;
+                    const uint8_t hi = e->status & 0xF0;
+                    if (hi == 0x80 || hi == 0x90 || hi == 0xA0) continue;   // not notes
+                    evs.emplace_back(e, 0);
+                }
+            }
+            for (const auto* e : allEvents) {
+                const uint8_t hi = e->status & 0xF0;
+                const bool isOff = hi == 0x80 || (hi == 0x90 && e->data2 == 0);
+                if ((e->tick >= r.start && e->tick < r.end) || (isOff && e->tick == r.end))
+                    evs.emplace_back(e, e->tick - r.start);
+            }
+
+            // Section-specific CASM configs (same name as the marker).
+            std::map<uint8_t, const CasmTrackConfig*> secCfg;
+            for (const auto& cs : parseResult.casm_sections) {
+                if (cs.name != r.name) continue;
+                for (const auto& t : cs.tracks)
+                    if (t.source_channel <= 15) secCfg.emplace(t.source_channel, &t);
+                break;
+            }
+
+            uasf::SectionDefinition section;
+            section.type = r.type;
+            section.name = r.name;
+            section.resolution = style.resolution;
+            section.beats_per_bar = tsNum;
+            section.beat_note = tsDen;
+            section.bars = barTicks ? static_cast<uint32_t>(std::max<uint64_t>(
+                               1, (len + barTicks - 1) / barTicks)) : 1;
+            fillTracks(section, evs, secCfg.empty() ? nullptr : &secCfg);
+            style.sections.push_back(std::move(section));
+        }
+    } else {
+        for (const auto& sffSection : parseResult.sections) {
+            uasf::SectionDefinition section;
+            section.type = mapSectionType(sffSection.type);
+            section.name = sffSection.name;
+            section.bars = sffSection.bars;
+            section.resolution = sffSection.resolution;
+            section.beats_per_bar = tsNum;
+            section.beat_note = tsDen;
+
+            std::vector<std::pair<const SffMidiEvent*, uint64_t>> evs;
+            for (const auto& sffTrack : sffSection.tracks)
+                for (const auto& sffEv : sffTrack.events) evs.emplace_back(&sffEv, sffEv.tick);
+            fillTracks(section, evs, nullptr);
+
+            // Section length from its content. The reader only knows a placeholder
+            // (4 bars); the engine loops / hands over at bars x bar length, so
+            // a placeholder would loop just the first 4 bars of a 24+ bar SMF.
+            // Round up to whole bars of the style meter (the sequencer grid); a final
+            // NoteOff exactly on a bar line ends that bar (it is dispatched at the
+            // section end), so it does not add an extra bar.
+            uint64_t maxTick = 0;
+            bool anyEvent = false;
+            for (const auto& t : section.tracks)
+                for (const auto& e : t.events) { anyEvent = true; if (e.tick > maxTick) maxTick = e.tick; }
+            if (anyEvent && section.resolution > 0) {
+                // >= 1: a hostile 1-PPQN file in 1/16 has a 0-tick bar (div by zero).
+                const uint64_t barTicks = std::max<uint64_t>(
+                    1, static_cast<uint64_t>(section.resolution) * 4 * tsNum / tsDen);
+                const uint64_t bars = std::max<uint64_t>(1, (maxTick + barTicks - 1) / barTicks);
+                section.bars = static_cast<uint32_t>(std::min<uint64_t>(bars, 0xFFFF));
+            }
+
+            style.sections.push_back(std::move(section));
+        }
     }
 
     // ── CASM-derived section structure (Task D) ────────────────────────
     // Build UASF sections from the CASM Sdec/Ctb2 data: real section names,
-    // per-track roles and channels. Events are NOT attached here — they
-    // remain in the single SMF MTrk (per-section event splitting is Gate 8+).
+    // per-track roles and channels (metadata only — the playable, event-bearing
+    // sections are built above from the SMF markers).
     for (const auto& cs : parseResult.casm_sections) {
         uasf::SectionDefinition sec;
         sec.type = mapCasmSectionType(cs.name);
@@ -147,14 +294,11 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             track.articulation.profile = uasf::ArticulationProfile::Generic;
             track.articulation.fidelity = uasf::FidelityRequirement::High;
 
-            // Pass NTR/NTT from CASM config to UASF articulation
-            for (const auto& cfg : parseResult.casm_configs) {
-                if (track.name.find(cfg.name) != std::string::npos) {
-                    track.articulation.ntr = cfg.ntr;
-                    track.articulation.ntt = cfg.ntt;
-                    break;
-                }
-            }
+            // NTR/NTT come from this section's own Ctb2 entry: the same track
+            // name can carry a different rule in another section (C_WHISPER's
+            // Strings), so never look it up by name across the whole file.
+            track.articulation.ntr = t.ntr;
+            track.articulation.ntt = t.ntt;
 
             sec.tracks.push_back(std::move(track));
         }
@@ -265,6 +409,7 @@ uasf::SectionType Sff1ToUasfMapper::mapCasmSectionType(const std::string& name) 
         return uasf::SectionType::Ending1;
     }
     if (has("break")) return uasf::SectionType::Break;
+    if (has("fill in ba")) return uasf::SectionType::Break;   // Yamaha's Break
     if (has("fill")) {
         // "Fill In AA/BB/CC/DD" map to the matching main variant.
         if (has("bb")) return uasf::SectionType::Fill2;

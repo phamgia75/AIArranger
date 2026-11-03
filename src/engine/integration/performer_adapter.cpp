@@ -128,6 +128,20 @@ void PerformerAdapter::tick() noexcept {
     var_.onBarBoundary();
 
     player_.tick();
+
+    // The transport can stop by itself (an Ending that played out). Mirror the
+    // Stop command's FSM inputs so the performer state does not stay Playing
+    // while nothing plays. Armed (sync-start waiting) is not playing yet: untouched.
+    if (!player_.isPlaying()) {
+        const auto st = sm_.state();
+        if (st == performance::PerformerState::Playing ||
+            st == performance::PerformerState::PendingTransition) {
+            sync_.requestStop();
+            sm_.apply(performance::PerformerInput::Stop);
+            sync_.notifyStopped();
+            sm_.apply(performance::PerformerInput::Stopped);
+        }
+    }
 }
 
 void PerformerAdapter::noteOn(uint8_t note) noexcept {

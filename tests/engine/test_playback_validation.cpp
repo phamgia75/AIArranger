@@ -109,7 +109,8 @@ struct PlaybackHarness {
     // flushing the scheduler each block, recording section transitions.
     void runTo(int64_t untilTick) {
         const int64_t barSize = clock.ticksPerBar();
-        while (clock.getPosition() < untilTick) {
+        // Stop early if the transport stopped itself (an Ending that played out).
+        while (clock.isRunning() && clock.getPosition() < untilTick) {
             clock.advance(kBlock);
             player.tick();
             scheduler.advanceTo(clock.getPosition());

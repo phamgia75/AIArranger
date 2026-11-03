@@ -26,7 +26,7 @@ namespace ai_arranger::session {
 // silently); MINOR appends enumerators/fields with defaults; PATCH is docs/impl.
 inline constexpr uint32_t kEngineContractVersionMajor = 1;
 inline constexpr uint32_t kEngineContractVersionMinor = 0;
-inline constexpr uint32_t kEngineContractVersionPatch = 0;
+inline constexpr uint32_t kEngineContractVersionPatch = 1;  // 1.0.1: MPSC command queue + lossless drain
 inline constexpr uint32_t kEngineContractVersion =
     (kEngineContractVersionMajor << 16) |
     (kEngineContractVersionMinor << 8)  |
@@ -45,7 +45,7 @@ enum class EngineError : int32_t {
     AlreadyStarted,       // start requested while already running
     NotStarted,           // an operation required a running engine
     DeviceUnavailable,    // requested MIDI in/out device index is not present
-    QueueFull,            // a command was dropped: the SPSC command queue was full
+    QueueFull,            // a command/input event was dropped: its queue was full
     Unsupported,          // operation not supported in this build/configuration
 };
 
@@ -78,7 +78,7 @@ struct EngineCapabilities {
     bool     hasSections    = true;   // intro/main/fill/break/ending transitions
     bool     hasSuspendResume = true; // lifecycle suspend/resume is modelled
     bool     latencyTrace   = false;  // AIARR_LATENCY_TRACE compiled in
-    uint32_t maxCommandQueue = 256;   // command SPSC queue depth
+    uint32_t maxCommandQueue = 256;   // command (MPSC) queue depth, exact
 };
 
 } // namespace ai_arranger::session

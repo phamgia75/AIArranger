@@ -3,7 +3,6 @@
 
 #include <cstdint>
 #include <atomic>
-#include <mach/mach_time.h>
 
 namespace ai_arranger::realtime {
 

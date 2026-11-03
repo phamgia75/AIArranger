@@ -130,6 +130,12 @@ struct SffSection {
     std::vector<SffTrack> tracks;
 };
 
+// ── SMF marker (FF 06) — Yamaha section boundaries ("SInt", "Main A", ...) ──
+struct SmfMarker {
+    uint32_t    tick;
+    std::string name;
+};
+
 // ── SFF1 Chunk ────────────────────────────────────────────────────
 struct SffChunk {
     std::string chunk_id;     // 4-char ID
@@ -153,6 +159,12 @@ struct ParseResult {
     std::vector<CasmTrackConfig> casm_configs;
     std::vector<std::string> sections_parsed;
     std::vector<CasmSection> casm_sections;
+    // SMF meta data from the MTrk (section splitting): markers in file order,
+    // the first time signature (FF 58), and the End-of-Track tick (0 = none).
+    std::vector<SmfMarker> markers;
+    uint8_t  time_sig_num = 4;
+    uint8_t  time_sig_den = 4;
+    uint32_t end_of_track_tick = 0;
 };
 
 // ── Supported Chunk IDs ───────────────────────────────────────────

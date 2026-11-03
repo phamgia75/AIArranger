@@ -1,5 +1,202 @@
 # AI Arranger — Project Review & Continuation Plan
 
+---
+
+## ▶ macOS integration validation — 2026-11-03 (supersedes conflicting claims below)
+
+> Branch `integ/audit-merge-2026-11-03` = the 20 audit commits below + 5 follow-ups.
+> Environment: **macOS 27 arm64, Apple clang 17, CMake 4.3, Command Line Tools only (no
+> Xcode), no MIDI hardware.** `main@5e72ee6` is unchanged and is the baseline.
+
+**Corrections to the 2026-09-28 audit (it ran on Linux only):**
+- "93/93 ASan+UBSan" did not hold on macOS: 4 tests aborted with UBSan
+  `serializer.cpp:49: load of value 165 ... type 'bool'`. Root cause: the uasf model structs
+  had no member initializers, so `uasf::TrackDefinition track;` left
+  `articulation.recommended.*`, `has_keyswitch` etc. indeterminate; serialized
+  `playback_flags` depended on heap contents, and the committed corpus `.uasf` fixtures
+  carried `0x0F` on every track. Fixed in `318913b` (defaults at the type definitions, fixtures
+  regenerated: only the playback_flags bytes changed), test `test_uasf_deterministic_init`.
+- "1920-PPQN imports ran 4× too slow through the facade — fixed" held only for
+  start-then-load. `loadStyle()` before `start()` (the documented order) was undone by
+  `EngineSession::boot()` forcing 480 PPQN. Fixed in `de660a1`; `57d20d2` makes Start
+  re-adopt the loaded style's grid after a running style swap.
+- Hostile SMF (division 1, meter 1/16) divided by a zero-tick bar in the mapper: `d85831e`.
+- `test_latency_stability` had a test-harness data race (read the tap's vector while the
+  dispatch thread could still write it): `555ad3a`. Not a product race.
+
+**Build/test matrix (HEAD of the integration branch, macOS arm64):**
+
+| Configuration | Result |
+|---|---|
+| Release, Debug, `-DAIARR_LATENCY_TRACE=ON` | **98/98** each (95 C++ incl. 3 Apple-only + pure-C ABI + Python) |
+| ASan+UBSan (`-fno-sanitize-recover=undefined`) | **98/98**, 0 sanitizer reports |
+| TSan | **98/98** ×3 full runs, 0 TSan warnings |
+| `-DBUILD_MACOS_APP=ON` (JUCE 8.0.4) | builds (only JUCE-internal + 2 deprecated-`Font` warnings); launches, alive 20 s, ~107 MB RSS, no crash report. **GUI not exercised.** |
+
+**Real Genos playback through `LiveEngineFacade`** (`test_genos_facade_runtime`, all 4
+corpus styles, 1920 PPQN, one 6/8): Intro A → Main A (auto) → Main A loops → Variation B →
+Fill In BB → Main B → Break (Fill In BA) → Main B → Ending A → transport stops; every switch
+on a bar boundary; NoteOn == NoteOff and 0 outstanding notes at the end of every run.
+Playback tempo is still the default 120 BPM (SMF Set Tempo not imported; next task).
+
+**Still not verified:** any MIDI hardware (CoreMIDI in/out exist in
+`src/engine/midi/coremidi_{in,out}.cpp`; there is no Pa5X-specific code), GUI interaction,
+iOS/iPad (no target exists), GitHub Actions (0 runs recorded on `phamgia75/AIArranger`).
+
+---
+
+## ▶ CURRENT STATUS — audit of 2026-09-28 (supersedes the status claims below)
+
+> Branch `claude/aiarranger-audit-handoff-fyv4vy` (19 commits on top of `main@5e72ee6`, the
+> Gate 4 merge, PR #32). Method: fresh clone, git history and branches, full doc read, clean
+> builds, full CTest in 4 configurations, sanitizers (never used on this repo before), a
+> parser mini-fuzz, an independent SMF reference decoder, and per-bar output measurement through
+> `LiveEngineFacade`. Environment: **Linux x86_64, GCC 13 / Clang 18, no macOS, no Xcode,
+> no MIDI hardware**. The sections after this one (dated 2026-07-11) are the historical baseline.
+
+### 1. Executive status
+
+The repo is a **C++20 engine-first arranger**: a vendor-agnostic realtime core, a Yamaha SFF1
+importer, a UASF format, a headless app shell, a JUCE macOS reference host, and a frozen Gate 4
+engine/product contract with a C ABI. There is **still no iPad/iOS app and no Xcode project**
+(Gate 5 has not started), and **nothing has been validated on hardware** (`hardware_validated:false`).
+
+This audit found that the "play a Yamaha style live" path was broken in several places that the
+existing tests did not cover. **All of them are now fixed, each with a reproducer test:**
+- imported styles were time-stretched about 15× (SysEx decode);
+- a style played its Intro and then **fell silent**, because no section ever looped or handed over (spec §5 was never implemented);
+- an imported `.sty` was a single section, so Intro, Variation, Fill, Break and Ending were unaddressable;
+- 1920-PPQN imports ran 4× too slow through the facade;
+- Variation A–D pointed at raw section indexes (A reached the Intro, D the Ending);
+- 6/8 styles ran on a 4/4 grid;
+- the Gate 4 "commands from any thread" was a data race, and queue overflow dropped NoteOffs (stuck chord);
+- plus UASF, importer and session hardening.
+
+**GitHub Actions is currently not running any job** (see §5), so CI status for this branch is
+**unverified**, and macOS was not built this session.
+
+**Prompt items that do not exist in this repository** (not on any branch; only strategy docs
+mention the PA5X): the Audio Intelligence / MIR pipeline (MP3/WAV → analysis → Performance Model →
+Style), the `.air` format, beat/tempo detection, Fill1 generation from audio, `aiarr_engine_load_style`,
+CMake install/export, a shared library with symbol visibility, a Pa5X USB-MIDI path, and any
+iPad/iOS/Xcode target. If that work exists, it is in another repository or on a machine that was
+never pushed. **Ask the owner for it; do not assume it.**
+
+### 2. Verified completed (repo + test evidence, this session)
+
+| Subsystem | Evidence | Validation |
+|---|---|---|
+| Portable core builds off-Apple | `5f1ce4f` | Linux GCC 13: configure + build, 0 errors |
+| Full hardware-independent suite | 93 CTest entries (91 C++ + 1 Python + 1 pure-C) | **93/93** in release, ASan+UBSan, TSan and trace-ON |
+| Live style playback per spec §5 (Intro→Main, Main loop, Fill/Break return, Ending stop) | `99e6a05`, `test_section_lifecycle` (29 checks, including through the facade) | pass; loop repeat is exact; notes balanced |
+| SFF1 import: timing, sections, meter, CASM roles | `0a65b27`, `f58b3ac`, `0997a87`, `a6e6955`; `test_sff1_smf_decode` (identical to an independent decoder on 4 Genos styles), `test_time_signature`, `test_sff1_mapper_casm_ntr` | pass |
+| SFF1 hostile input | `ae9af06`, `test_sff1_reader_malformed` + mini-fuzz | no sanitizer finding |
+| UASF read/write/validate + golden gate | `3c12f80`, `5f2e8b9`, `f94839c`; `test_uasf_*` | pass; golden files are now actually tested (ADR-015) |
+| Gate 4 contract: lifecycle, facade, C ABI | existing tests + `test_bridge_c_consumer` (strict C11), `test_facade_queue_integrity`, `test_snapshot_seqlock` | pass; TSan clean with 0 warnings |
+| Variation A–D → Main A–D; Fill of the playing Main | `f58b3ac` | tested via the facade on the demo style and POP_ACOUSTIC_2 |
+| Tempo ownership (Start keeps the performer's tempo) | `fd18ad4`, `test_style_player_tempo` | pass |
+| Session JSON range safety | `bbfdcba` | pass |
+
+### 3. Fixed this session (one commit per bug, each with a test that failed first)
+
+| Sev | Bug | Commit |
+|---|---|---|
+| **P0** | No section lifecycle: after Start the demo style played its 4-bar intro, then silence forever (facade-measured). Main never looped, Fill/Intro never returned, Ending never stopped. Sections were also anchored one engine tick late. | `99e6a05` |
+| **P0** | SMF decode: SysEx payload read as delta-times (styles about 15× too long); EoT and truncated messages emitted as events | `0a65b27` |
+| **P0** | Imported `.sty` = one section, so Intro/Main A–D/Fill/Break/Ending were unaddressable. Variation A–D mapped to indexes 0–3 (A = Intro). | `f58b3ac` (+ `7e5a04c`) |
+| **P0** | Clock stayed at 480 PPQN for 1920-PPQN imports (4× slow via the facade) | `99e6a05` |
+| **P0** | Facade SPSC command queue under "any thread" contract → data race; tick drain dropped overflow (stuck chord) | `af540ac` |
+| **P0** | Hardware-checklist `.uasf` fixtures stale (res 7, 1 track, stretched) | `e68b9e4`, regenerated again with sections/meter |
+| **P1** | 6/8 styles on a 4/4 grid (`ticksPerBar` ignored `beat_note`) | `0997a87` |
+| **P1** | UASF serializer: unsorted tracks lost timing after save/load (demo drums went silent); the event cap corrupted following tracks | `5f2e8b9` |
+| **P1** | SFF1 hostile input: CSEG recursion stack overflow, 219× memory amplification leading to terminate, `memcpy(nullptr)` | `ae9af06` |
+| **P1** | Start reset tempo to the style tempo | `fd18ad4` |
+| **P1** | Mutex-backed snapshot publish on the tick path (the contract allows an audio-thread tick) | `618a0a6` |
+| **P1** | Mapper gave CASM tracks another section's NTR/NTT (C_WHISPER: 6/62) | `a6e6955` |
+| **P1** | Validator rejected every real Genos import (res ≤ 960); golden files were never tested | `f94839c` |
+| **P2** | UASF deserializer ignored `kMax*` limits | `3c12f80` |
+| **P2** | Session JSON wrapped out-of-range numbers into valid ones | `bbfdcba` |
+| **P2** | Performer FSM stayed Playing after an Ending stopped the transport | `48c4d8b` |
+| infra | Linux CI job (release/ASan+UBSan/TSan), CI on `claude/**`, pure-C ABI test, Python test in CTest | `5f1ce4f`, `be456b3` |
+
+### 4. In progress (code exists, not "done")
+
+- **macOS JUCE reference host** (`apps/macos`): builds only with `-DBUILD_MACOS_APP=ON` on a Mac.
+  **Not built this session**, and not built by CI.
+- **C ABI bridge**: a skeleton only. There is no style loading, MIDI binding, input injection or
+  suspend/resume through the ABI (deferred to Gate 5 by the contract §7 *and* by the owner's
+  2026-07-11 direction: no bridge/Swift work until Gate 3 passes on hardware).
+- **SFF2**: detection only. The corpus is 4 styles; no compatibility percentage is proven.
+- **Imported styles**: the Intro/Ending **B/C variants** are imported when the file marks them; one
+  corpus file (C_WHISPER) has about 9 unmarked bars after "Fill In BA" that end up in the Break.
+  Auto-fill on variation change (spec §5.3 `autoFill`) is not implemented.
+
+### 5. Known issues
+
+| Issue | Sev | Evidence | Impact | Proposed fix |
+|---|---|---|---|---|
+| GitHub Actions jobs never start | **Blocker (external)** | Runs 50–52+ on this branch: all jobs (including the unchanged macOS job) "failure" after 3–8 s, job logs HTTP 404. `main` last passed 2026-07-11 (run 49). | No CI signal; the macOS build is unverified | Owner: repo/account Settings → Actions (enabled? billing/spending limit/payment), then re-run the latest run |
+| macOS build of this branch unverified | P1 | No Mac here | Apple-side files touched: `clock.cpp`/`clock.h` (mach include moved out of the header), `coreaudio_driver.cpp` (explicit include), `coreaudio_clock.cpp`, `LiveHostDriver.h` (comment) | `bash scripts/run_tests.sh` on macOS (expect **96**: 93 + 3 Apple-only), then `-DBUILD_MACOS_APP=ON` |
+| Musical behaviour changed materially | P1 (validation) | sections loop/hand over; imports split, timed and metered correctly | Every earlier listening impression of imported styles is void | Re-run the Gate 3 hardware checklist (A.1, item 44) |
+| Spec vs implementation: PPQ | Decision | uasf-spec-v0.9 says "normalise to 480"; importer keeps the source 1920 and the validator now accepts ≤ 1920 | None at runtime | Owner: pick one and update the spec or the importer |
+| `Sff1Reader::parseSection` fabricates 12 empty tracks | P3 | stub `parseTrack` | Report noise (bounded by the chunk cap) | Remove the stub loop |
+| Duplicate clock/groove subsystems; JUCE `EngineDriver` still on a 1 ms timer | P3 | historical §H | Drift | Deliberate consolidation gate |
+
+### 6. Pending validation (cannot be done here)
+
+- **Gate 3 hardware checklist** (`docs/gate-plans/GATE3_HARDWARE_VALIDATION_CHECKLIST.md`), on real
+  keyboard + module. Start with A.1 (load a `.sty`, Start) and item 44 (Intro, Variation A–D, Fill,
+  Break, Ending): all of these behave differently, and now correctly per spec, after this session.
+- Gate 9/10B Korg checklists: use the regenerated `.uasf` files (sectioned, 1920 PPQN).
+- iPad device testing: blocked, since no iOS target exists.
+- SFF1/SFF2 at-scale compatibility: needs a larger, legally-owned corpus.
+
+### 7. Build/test matrix (this session, Linux x86_64)
+
+| Command | Result |
+|---|---|
+| `cmake -S . -B b -G Ninja && cmake --build b && ctest --test-dir b` (GCC 13) | **93/93 pass** |
+| same with `-DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=undefined"` | **93/93 pass** |
+| same with `-fsanitize=thread` | **93/93 pass**, 0 TSan reports, 0 `-Wtsan` warnings |
+| same with `-DAIARR_LATENCY_TRACE=ON` | **93/93 pass** |
+| `test_snapshot_seqlock` ×60 ASan + ×60 release + ×10 TSan | 0 failures |
+| mini-fuzz (SFF1 corpus seeds, UASF, MIDI-in, session JSON) | no sanitizer finding after the fixes |
+| macOS `scripts/run_tests.sh`, `-DBUILD_MACOS_APP=ON`, iOS/Xcode | **NOT RUN** (no macOS; no Xcode project exists; CI not starting) |
+
+Apple-only tests not built on Linux: `test_coremidi_out`, `test_latency_stability`,
+`test_midi_output_provider` (plus the `korg-playback` tool).
+
+### 8. Recommended next work
+
+**P0 — blockers**
+1. *(Owner)* Restore GitHub Actions (§5), re-run the latest run on this branch, and require all 4
+   jobs green. Then open a PR from this branch to `main`.
+
+**P1 — next milestone (Gate 3 hardware)**
+2. On a Mac: `bash scripts/run_tests.sh` (expect 96/96), then
+   `cmake -B build -DBUILD_MACOS_APP=ON && cmake --build build --target aiarranger-macos`.
+   Fix anything in the Apple-touching files listed in §5.
+3. Gate 3 hardware checklist with a real keyboard and module (A.1, 44 first).
+4. Auto-fill on variation change (spec §5.3): when enabled, Main X→Y inserts the Fill of X, then
+   commits Y. The hooks are `SectionSequencer::queueFill` (now picks the playing Main's fill) and
+   `StylePlayer::handleSectionEnd` (fill → return target). Add the target to the fill return, test
+   headless.
+5. Gate 5 ABI surface, only once the owner lifts the Gate 3 hold: `aiarr_engine_load_style_uasf`,
+   `aiarr_engine_post_midi`, a Swift module map. Test from `test_bridge_c_consumer.c`.
+
+**P2 — hardening**
+6. Time-boxed parser fuzzing in CI (a corpus-mutation test).
+7. Decide the PPQ spec question (§5) and align the spec, importer and validator.
+
+**P3 — cleanup / future**
+8. Consolidate the duplicate clock/groove trees; move `EngineDriver` to `CoreAudioClock`.
+9. Remove the `parseSection` stub; move the Apple adapters to `src/platform/apple/`.
+
+---
+
+## (Historical) Review of 2026-07-11
+
+
 > Author: audit session (autonomous). Date: **2026-07-11**.
 > Method: full documentation read + source architecture map + fresh build/test
 > run + BRD↔implementation traceability. Every claim below is backed by concrete

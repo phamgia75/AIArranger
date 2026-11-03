@@ -15,10 +15,8 @@
 //     thread-safe atomic snapshot().
 //   - The CoreMIDI read thread routes messages onto the facade's input queue.
 //
-// No malloc / ObjC in the timer callback or the CoreMIDI read callback. The tick's
-// snapshot publish uses std::atomic<EngineSnapshot>, which is mutex-backed for this
-// size (not lock-free) — a brief bounded lock, fine on this MIDI-only 1 ms timer
-// (not the audio render thread).
+// No malloc / lock / ObjC in the timer callback or the CoreMIDI read callback. The
+// tick's snapshot publish is a lock-free seqlock (session/seqlock_snapshot.h).
 
 #include <juce_core/juce_core.h>
 #include "session/live_engine_facade.h"

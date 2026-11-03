@@ -4,6 +4,7 @@
 #include "engine/uasf/types.h"
 #include <cstdint>
 #include <array>
+#include <atomic>
 
 namespace ai_arranger::arranger {
 

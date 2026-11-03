@@ -62,9 +62,24 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
                 writeBytes(track.name.data(), trk_hdr.name_length);
             }
 
-            // Events (delta-encoded)
+            // Events (delta-encoded). tick_delta is UNSIGNED, so events must be
+            // written in non-decreasing tick order: a track stored out of time
+            // order (e.g. the demo drums, grouped per instrument) would otherwise
+            // underflow and be clamped, shifting every later event by ~2^32
+            // ticks on load. Stable sort keeps same-tick order (NoteOff before a
+            // retriggered NoteOn). Exactly event_count events are written — the
+            // header count is capped at kMaxEvents, and writing more would
+            // desynchronise the rest of the file.
+            std::vector<const MidiEvent*> ordered;
+            ordered.reserve(trk_hdr.event_count);
+            for (uint32_t i = 0; i < trk_hdr.event_count; ++i)
+                ordered.push_back(&track.events[i]);
+            std::stable_sort(ordered.begin(), ordered.end(),
+                             [](const MidiEvent* x, const MidiEvent* y) { return x->tick < y->tick; });
+
             uint64_t last_tick = global_tick_offset;
-            for (const auto& event : track.events) {
+            for (const MidiEvent* evp : ordered) {
+                const MidiEvent& event = *evp;
                 format::MidiEventSerialized ev;
                 ev.tick_delta = deltaEncode(event.tick, last_tick);
                 ev.type_channel = (static_cast<uint8_t>(event.type) & 0xF0) | (event.channel & 0x0F);

@@ -17,8 +17,13 @@ ValidationResult UasfValidator::validate(const StyleDefinition& style) noexcept 
     if (style.tempo_bpm > 300) {
         addIssue(ValidationIssue::WARNING, "Tempo > 300 BPM may cause playback issues");
     }
-    if (style.resolution == 0 || style.resolution > 960) {
-        addIssue(ValidationIssue::ERROR, "Resolution must be 1-960 ticks/quarter");
+    // Upper bound = the highest real source PPQN the importer preserves (Yamaha
+    // Genos/PSR styles are 1920). It was 960, which rejected every real Genos
+    // import. NOTE: uasf-spec-v0.9 §"ppq" still says "normalise to 480"; the
+    // implementation keeps source resolution — open decision, see
+    // docs/PROJECT_REVIEW_AND_CONTINUATION_PLAN.md.
+    if (style.resolution == 0 || style.resolution > 1920) {
+        addIssue(ValidationIssue::ERROR, "Resolution must be 1-1920 ticks/quarter");
     }
     if (style.sections.empty()) {
         addIssue(ValidationIssue::ERROR, "Style must have at least one section");

@@ -75,24 +75,29 @@ enum class ArticulationProfile : uint8_t {
     Custom,
 };
 
+// Model types hold std::string/std::vector, so `T x;` is default-initialization:
+// every scalar member needs an initializer or it is indeterminate (the serializer
+// used to read garbage bools here). Defaults equal value-initialization (zero /
+// false / first enumerator) and are pinned by test_uasf_deterministic_init.
+
 struct PlaybackRecommendation {
-    bool external_yamaha;
-    bool external_midi;
-    bool premium_library;
-    bool user_soundfont;
-    bool degradation_allowed;   // GM fallback only with warning
+    bool external_yamaha = false;
+    bool external_midi = false;
+    bool premium_library = false;
+    bool user_soundfont = false;
+    bool degradation_allowed = false;   // GM fallback only with warning
 };
 
 struct ArticulationMetadata {
-    ArticulationProfile profile;
-    FidelityRequirement fidelity;
+    ArticulationProfile profile = ArticulationProfile::Generic;
+    FidelityRequirement fidelity = FidelityRequirement::Low;
     PlaybackRecommendation recommended;
-    uint8_t ntr;                 // Note Transposition Rule (0=Root,1=Fifth,2=Chord,3=Bass,6=Fixed)
-    uint8_t ntt;                 // Note Transposition Table (from CASM)
+    uint8_t ntr = 0;             // Note Transposition Rule (0=Root,1=Fifth,2=Chord,3=Bass,6=Fixed)
+    uint8_t ntt = 0;             // Note Transposition Table (from CASM)
     std::string vendor;
     std::string vendor_articulation;
-    bool has_keyswitch;
-    uint8_t keyswitch_note;
+    bool has_keyswitch = false;
+    uint8_t keyswitch_note = 0;
     std::vector<uint8_t> velocity_map;
 };
 
@@ -100,9 +105,9 @@ struct ArticulationMetadata {
 
 struct TrackDefinition {
     std::string name;
-    uint8_t midi_channel;
-    TrackRole role;
-    bool is_drum;
+    uint8_t midi_channel = 0;
+    TrackRole role = TrackRole::Accompaniment;
+    bool is_drum = false;
     ArticulationMetadata articulation;
     std::vector<MidiEvent> events;
 };
@@ -110,12 +115,12 @@ struct TrackDefinition {
 // ── Section Definition ───────────────────────────────────────────────
 
 struct SectionDefinition {
-    SectionType type;
+    SectionType type = SectionType::Intro1;
     std::string name;
-    uint32_t bars;
-    uint32_t resolution;      // ticks per quarter note
-    uint32_t beats_per_bar;
-    uint32_t beat_note;       // denominator (4 = quarter note)
+    uint32_t bars = 0;            // 0 = unset (validator error)
+    uint32_t resolution = 0;      // ticks per quarter note; 0 = unset
+    uint32_t beats_per_bar = 0;
+    uint32_t beat_note = 0;       // denominator (4 = quarter note)
     std::vector<TrackDefinition> tracks;
 };
 
@@ -124,11 +129,11 @@ struct SectionDefinition {
 struct StyleDefinition {
     std::string name;
     std::string format_version;
-    uint32_t tempo_bpm;
-    uint32_t resolution;       // ticks per quarter note (default 480)
+    uint32_t tempo_bpm = 0;        // 0 = unset
+    uint32_t resolution = 0;       // ticks per quarter note; 0 = unset (players fall back to 480)
     std::vector<SectionDefinition> sections;
-    int32_t ottava_bass;       // transpose bass tracks
-    int32_t ottava_chord;      // transpose chord tracks
+    int32_t ottava_bass = 0;       // transpose bass tracks
+    int32_t ottava_chord = 0;      // transpose chord tracks
 };
 
 } // namespace ai_arranger::uasf
