@@ -10,10 +10,13 @@
 //     with 12 fabricated tracks each (+2.2 GB RSS, 219x) — bad_alloc inside the
 //     noexcept parseBuffer => std::terminate.
 //  3. A zero-size chunk called memcpy(nullptr, ..., 0) (UBSan: null argument).
+//  5. Division 1 + time signature 1/16 gave a 0-tick bar; the mapper's
+//     unmarked-section length divided by it (SIGFPE on import).
 //
 // Run under -fsanitize=address,undefined in CI (portable-core-linux job).
 
 #include "importers/sff1/sff1_reader.h"
+#include "importers/sff1/sff1_mapper.h"
 #include <cstdio>
 #include <cstdint>
 #include <string>
@@ -113,6 +116,28 @@ int main() {
         const ParseResult r = reader.parseBuffer(buf, "junk_tail.sty");
         TEST("junk after valid chunk: valid chunk kept, parse succeeds",
              r.success && r.total_chunks == 1);
+    }
+
+    // ── 5. A meter/resolution whose bar is < 1 tick must not divide by zero ─
+    {
+        std::vector<uint8_t> buf;
+        putId(buf, "MThd"); putBE32(buf, 6);
+        const uint8_t hdr[] = {0, 0, 0, 1, 0x00, 0x01};          // division = 1 PPQN
+        buf.insert(buf.end(), hdr, hdr + sizeof(hdr));
+        const uint8_t trk[] = {
+            0x00, 0xFF, 0x58, 0x04, 0x01, 0x04, 0x18, 0x08,       // time signature 1/16
+            0x00, 0x90, 60, 100,                                  // NoteOn
+            0x05, 0x80, 60, 0,                                    // NoteOff
+            0x00, 0xFF, 0x2F, 0x00};                              // End of Track
+        putId(buf, "MTrk"); putBE32(buf, sizeof(trk));
+        buf.insert(buf.end(), trk, trk + sizeof(trk));
+        const ParseResult r = reader.parseBuffer(buf, "zero_bar.sty");
+        TEST("1 PPQN + 1/16 meter: reader accepts it", r.success);
+        Sff1ToUasfMapper mapper;
+        const auto mr = mapper.map(r);                            // SIGFPE before the fix
+        bool bounded = mr.success;
+        for (const auto& sec : mr.style.sections) bounded = bounded && sec.bars >= 1;
+        TEST("1 PPQN + 1/16 meter: import does not crash; sections get >= 1 bar", bounded);
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

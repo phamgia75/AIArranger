@@ -260,8 +260,9 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             for (const auto& t : section.tracks)
                 for (const auto& e : t.events) { anyEvent = true; if (e.tick > maxTick) maxTick = e.tick; }
             if (anyEvent && section.resolution > 0) {
-                const uint64_t barTicks =
-                    static_cast<uint64_t>(section.resolution) * 4 * tsNum / tsDen;
+                // >= 1: a hostile 1-PPQN file in 1/16 has a 0-tick bar (div by zero).
+                const uint64_t barTicks = std::max<uint64_t>(
+                    1, static_cast<uint64_t>(section.resolution) * 4 * tsNum / tsDen);
                 const uint64_t bars = std::max<uint64_t>(1, (maxTick + barTicks - 1) / barTicks);
                 section.bars = static_cast<uint32_t>(std::min<uint64_t>(bars, 0xFFFF));
             }
