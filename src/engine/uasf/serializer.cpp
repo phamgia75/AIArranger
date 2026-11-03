@@ -16,6 +16,15 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
                                std::to_string(kMinTempoBpm) + "-" + std::to_string(kMaxTempoBpm) + ")"};
     }
 
+    // SectionHeader stores bars and resolution as uint16: refuse rather than
+    // truncate (a truncated length plays a different, shorter section).
+    for (size_t i = 0; i < style.sections.size() && i < format::kMaxSections; ++i) {
+        const auto& sec = style.sections[i];
+        if (sec.bars > 0xFFFF || sec.resolution > 0xFFFF) {
+            return {false, {}, "Section " + std::to_string(i) + ": bars/resolution exceed 65535"};
+        }
+    }
+
     // ── File header ────────────────────────────────────────────────
     format::FileHeader header;
     header.magic = format::kMagic;

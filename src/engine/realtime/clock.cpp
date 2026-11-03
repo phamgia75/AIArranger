@@ -141,8 +141,9 @@ int32_t RealtimeClock::getCurrentBeatFromTick(int64_t tick) const noexcept {
 }
 
 bool RealtimeClock::isFirstBeatOfBar() const noexcept {
-    int64_t pos = getPosition();
-    return (pos % ticksPerBar()) < ticksPerBeat();
+    const int64_t tpb = ticksPerBar();
+    if (tpb <= 0) return false;   // 0-tick bar (e.g. 1 PPQN in 1/16): no bar grid
+    return (getPosition() % tpb) < ticksPerBeat();
 }
 
 int64_t RealtimeClock::getNextBarTick() const noexcept {

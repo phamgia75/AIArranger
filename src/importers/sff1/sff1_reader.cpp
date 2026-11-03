@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <new>
+#include <cstdint>
 
 namespace ai_arranger::importers::sff1 {
 
@@ -121,6 +122,11 @@ ParseResult Sff1Reader::parseBufferImpl(const std::vector<uint8_t>& buffer,
     result_.total_chunks = result_.chunks.size();
     result_.success = result_.total_chunks > 0;
 
+    // Markers are collected MTrk by MTrk, each with its own tick base of 0; the
+    // mapper's section ranges need them in time order (file order on ties).
+    std::stable_sort(result_.markers.begin(), result_.markers.end(),
+                     [](const SmfMarker& a, const SmfMarker& b) { return a.tick < b.tick; });
+
     if (!result_.success) {
         result_.error = "No recognizable SFF1 structure found";
     }
@@ -228,7 +234,7 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
     const uint8_t* d = data + offset;
     const size_t remaining = size - offset;
     uint8_t  running_status = 0;
-    uint32_t absolute_tick = 0;
+    uint64_t absolute_tick = 0;   // wider than SmfMarker/SffMidiEvent ticks: checked below
     size_t   pos = 0;
     bool     have_time_sig = false;
 
@@ -254,6 +260,10 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
         uint32_t delta = 0;
         if (!readVlq(delta)) break;
         absolute_tick += delta;
+        if (absolute_tick > UINT32_MAX) {   // ticks are stored as uint32: never wrap
+            result_.warnings.push_back("MTrk too long (tick exceeds 2^32-1); rest of the track ignored");
+            break;
+        }
         if (pos >= remaining) break;
 
         uint8_t status = d[pos];
@@ -272,7 +282,7 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
             if (!readVlq(len)) break;
             running_status = 0;
             if (metaType == 0x2F) {                    // End of Track
-                result_.end_of_track_tick = absolute_tick;
+                result_.end_of_track_tick = static_cast<uint32_t>(absolute_tick);
                 break;
             }
             if (len > remaining - pos) break;          // truncated meta
@@ -281,7 +291,7 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
                 result_.markers.size() < kMaxTopLevelChunks) {
                 std::string name(reinterpret_cast<const char*>(d + pos), len);
                 while (!name.empty() && static_cast<uint8_t>(name.back()) <= 32) name.pop_back();
-                result_.markers.push_back({absolute_tick, std::move(name)});
+                result_.markers.push_back({static_cast<uint32_t>(absolute_tick), std::move(name)});
             } else if (metaType == 0x58 && len >= 2 && !have_time_sig) {
                 result_.time_sig_num = d[pos];
                 result_.time_sig_den = (d[pos + 1] < 8) ? static_cast<uint8_t>(1u << d[pos + 1]) : 4;
@@ -294,7 +304,7 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
                     result_.warnings.push_back("Malformed Set Tempo at tick " +
                                                std::to_string(absolute_tick) + " ignored");
                 } else if (result_.tempos.size() < kMaxTopLevelChunks) {
-                    result_.tempos.push_back({absolute_tick, mpqn});
+                    result_.tempos.push_back({static_cast<uint32_t>(absolute_tick), mpqn});
                 }
             }
             pos += len;
@@ -316,7 +326,7 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
         if (need > remaining - pos) break;             // truncated channel message
 
         SffMidiEvent ev;
-        ev.tick   = absolute_tick;
+        ev.tick   = static_cast<uint32_t>(absolute_tick);
         ev.status = status;
         ev.data1  = d[pos];
         ev.data2  = (need == 2) ? d[pos + 1] : 0;

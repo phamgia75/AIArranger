@@ -46,6 +46,13 @@ ValidationResult UasfValidator::validate(const StyleDefinition& style) noexcept 
         if (section.beats_per_bar == 0) {
             addIssue(ValidationIssue::ERROR, "Beats per bar = 0", loc);
         }
+        if (section.beat_note == 0) {
+            addIssue(ValidationIssue::ERROR, "Beat note = 0", loc);
+        } else if (static_cast<uint64_t>(section.resolution) * 4 * section.beats_per_bar /
+                       section.beat_note == 0) {
+            // The sequencer cannot advance on a 0-tick bar: the section never plays.
+            addIssue(ValidationIssue::ERROR, "Bar length is 0 ticks (resolution x meter)", loc);
+        }
 
         if (section.tracks.empty()) {
             addIssue(ValidationIssue::WARNING, "Section has no tracks", loc);
