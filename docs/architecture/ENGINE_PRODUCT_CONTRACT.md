@@ -141,7 +141,10 @@ facade is pure state tracking and changes **no** runtime behaviour.
   Unsupported`. `toString()` for logs.
 - `EngineCapabilities` (POD): contract version + `hasMidiInput/Output`,
   `hasChordDetect`, `hasSections`, `hasSuspendResume`, `latencyTrace`,
-  `maxCommandQueue`.
+  `maxCommandQueue`. A flag means the host can **use** the capability now.
+  `hasSuspendResume` is `false` until suspend/resume entry points exist (the
+  state machine models them; binding is Gate 5, §7). It was `true` before
+  contract 1.0.3, which advertised calls that do not exist (#19).
 - `LifecycleState` / `LifecycleEvent` (`uint8_t`) — §3.
 - `EngineSnapshot` (`src/session/engine_snapshot.h`, POD) — UI poll value; gained
   one additive field `lifecycleState` in Gate 4.
@@ -197,10 +200,11 @@ map.
   silently swallowed; command-queue overflow surfaces as `QueueFull`, bad device
   index as `DeviceUnavailable`.
 - **Contract version:** `kEngineContractVersion = MAJOR<<16 | MINOR<<8 | PATCH`
-  (currently `1.0.2` — 1.0.1 made the implementation honour §2: MPSC
+  (currently `1.0.3` — 1.0.1 made the implementation honour §2: MPSC
   command queue + lossless drain; 1.0.2 made command results honour this
   section — a dropped or out-of-range command no longer returns success (#18);
-  no signature, enumerator or layout change). Also reachable pre-handle via `aiarr_contract_version()`
+  1.0.3 made `hasSuspendResume` report only a callable API (#19); no
+  signature, enumerator or layout change). Also reachable pre-handle via `aiarr_contract_version()`
   so a host can gate on ABI compatibility before creating an engine.
 - **Backward-compatibility rules (additive-only):**
   - Existing `EngineError` / `LifecycleState` enumerators keep their integer

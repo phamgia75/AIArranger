@@ -35,8 +35,11 @@ int main() {
         const auto caps = fac.capabilities();
         TEST("caps: has MIDI input",  caps.hasMidiInput);
         TEST("caps: has MIDI output", caps.hasMidiOutput);
-        TEST("caps: chord detect + sections + suspend/resume advertised",
-             caps.hasChordDetect && caps.hasSections && caps.hasSuspendResume);
+        TEST("caps: chord detect + sections advertised",
+             caps.hasChordDetect && caps.hasSections);
+        // A capability is what a host can call. Suspend/resume is modelled in
+        // the lifecycle state machine but has no facade or C entry point (#19).
+        TEST("caps: suspend/resume NOT advertised (no callable API)", !caps.hasSuspendResume);
         TEST("caps: contract version matches header",
              caps.contractVersion == session::kEngineContractVersion);
         TEST("contractVersion() constant matches header",
