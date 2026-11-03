@@ -29,13 +29,15 @@ bool EngineSession::boot() noexcept {
     if (booted_) return true;  // idempotent
 
     clock_.setSampleRate(48000);
-    clock_.setResolution(480);
-    clock_.setTempo(120);
-    clock_.reset();
-
     if (!style_loaded_) {
+        clock_.setResolution(480);
+        clock_.setTempo(120);
         loadStyle(arranger::buildDemoStyle());
     }
+    // A style loaded before boot already set the clock's tempo/PPQN/meter
+    // (StylePlayer::loadStyle). Overwriting them here ran a 1920-PPQN Genos
+    // style on a 480-PPQN clock (4x slow) whenever loadStyle() preceded start().
+    clock_.reset();
     booted_ = true;
     return true;
 }
