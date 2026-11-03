@@ -1,6 +1,7 @@
 #include "engine/uasf/serializer.h"
 #include <cstring>
 #include <algorithm>
+#include <string>
 
 namespace ai_arranger::uasf {
 
@@ -8,11 +9,18 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
     buffer_.clear();
     buffer_.reserve(65536); // Pre-allocate
 
+    // A tempo the reader would reject must not be written (0 = no tempo stored).
+    if (style.tempo_bpm != 0 &&
+        (style.tempo_bpm < kMinTempoBpm || style.tempo_bpm > kMaxTempoBpm)) {
+        return {false, {}, "Tempo " + std::to_string(style.tempo_bpm) + " BPM out of range (" +
+                               std::to_string(kMinTempoBpm) + "-" + std::to_string(kMaxTempoBpm) + ")"};
+    }
+
     // ── File header ────────────────────────────────────────────────
     format::FileHeader header;
     header.magic = format::kMagic;
     header.version = format::kVersion;
-    header.flags = 0;
+    header.flags = style.tempo_bpm != 0 ? format::kFlagExtensions : 0;
     header.section_count = static_cast<uint32_t>(std::min(style.sections.size(),
                                                          size_t(format::kMaxSections)));
 
@@ -21,7 +29,10 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
     // ── Sections ───────────────────────────────────────────────────
     uint64_t global_tick_offset = 0;
 
-    for (const auto& section : style.sections) {
+    // Write exactly the counted sections/tracks: anything past the header count
+    // would desynchronise the reader (and land where it expects extensions).
+    for (uint32_t si = 0; si < header.section_count; ++si) {
+        const auto& section = style.sections[si];
         // Section header
         format::SectionHeader sect_hdr;
         sect_hdr.type = static_cast<uint8_t>(section.type);
@@ -36,7 +47,8 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
         writeBytes(&sect_hdr, sizeof(sect_hdr));
 
         // Tracks
-        for (const auto& track : section.tracks) {
+        for (uint32_t ti = 0; ti < sect_hdr.track_count; ++ti) {
+            const auto& track = section.tracks[ti];
             format::TrackHeader trk_hdr;
             trk_hdr.name_length = static_cast<uint8_t>(std::min(track.name.size(),
                                                                 size_t(format::kMaxTrackNameLength)));
@@ -89,6 +101,13 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
                 writeBytes(&ev, sizeof(ev));
             }
         }
+    }
+
+    // ── Extension blocks (v1.1) ────────────────────────────────────
+    if (header.flags & format::kFlagExtensions) {
+        writeU32(format::kExtTempo);
+        writeU32(4);
+        writeU32(style.tempo_bpm);
     }
 
     return {true, std::move(buffer_), ""};

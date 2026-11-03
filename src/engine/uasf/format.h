@@ -61,7 +61,23 @@ struct MidiEventSerialized {
     uint8_t  data2;
     uint8_t  padding;
 };
+// ── Extension blocks (v1.1, optional) ──────────────────────────────
+// When FileHeader.flags has kFlagExtensions, tagged blocks follow the last
+// section until end of file: ExtensionHeader + `length` payload bytes. Readers
+// skip unknown tags by length. `version` stays 1: v1.0 readers ignore `flags`
+// and trailing bytes, so they still load these files (at their defaults), and
+// files without the flag (every file written before v1.1) are unchanged.
+
+struct ExtensionHeader {
+    uint32_t tag;             // four ASCII bytes, little-endian
+    uint32_t length;          // payload bytes that follow
+};
 #pragma pack(pop)
+
+constexpr uint32_t kFlagExtensions = 1u << 0;
+// 'TMPO': style tempo, payload = uint32 whole BPM in [kMinTempoBpm, kMaxTempoBpm]
+// (types.h). Absent = no stored tempo (the reader uses 120 BPM, as v1.0 did).
+constexpr uint32_t kExtTempo = 0x4F504D54;
 
 // ── Validation constants ───────────────────────────────────────────
 
