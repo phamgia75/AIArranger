@@ -59,7 +59,8 @@ MIDI input: single read thread; engine control queue: the tick thread only).
 
 | API group | Thread that may call it | Mechanism |
 |-----------|------------------------|-----------|
-| `start` / `stop` / `loadStyle` (lifecycle) | **owner thread** only | direct; not re-entrant |
+| `start` / `stop` (lifecycle) | **owner thread** only | direct; not re-entrant |
+| `loadStyle` (lifecycle) | **owner thread** only; safe while `tick()` runs on another thread | excluded from `tick()` by an atomic flag: `tick()` only try-acquires and skips its step during a load (never waits), `loadStyle` waits for an in-flight tick. Rejected while the transport plays (below) |
 | Transport / section / tempo / variation / panic commands | **any thread, concurrently** | enqueued on a bounded lock-free **MPSC** ring (exactly `maxCommandQueue` = 256 slots), applied in `tick()` |
 | MIDI input events | the input source's **read thread** | routed lock-free onto a 2nd SPSC queue, drained in `tick()` |
 | `tick(numSamples)` | the **engine thread** (one, consistent) | advances clock/sequencer, pumps output, publishes snapshot |
@@ -117,7 +118,15 @@ classifying `EngineError` (`NotStarted`, `AlreadyStarted`, `InvalidState`).
 
 **Facade binding (Gate 4):** the `LiveEngineFacade` drives this tracker from its
 existing methods — `start()→Start`, `stop()→Stop`, `loadStyle()→LoadStyle` (when
-not running). `Suspend`/`Resume` are **defined and tested in the state machine**;
+not running).
+
+**`loadStyle` and the transport (Issue #4):** with the transport stopped,
+`loadStyle` replaces the style and adopts its tempo, PPQN and meter at once
+(also while the engine is `Running`, e.g. the macOS host's stop-then-reload).
+While the transport **plays** it is rejected: it returns and records
+`EngineError::InvalidState` and changes nothing (style, grid, tempo) — a swap
+used to keep the old grid until the next Start, running the new style's events
+on the wrong PPQN/meter. Stop first, load, Start. `Suspend`/`Resume` are **defined and tested in the state machine**;
 their facade/runtime binding is deferred to Gate 5 (see §7) because it would touch
 device retention semantics best proven on hardware. The bookkeeping added to the
 facade is pure state tracking and changes **no** runtime behaviour.
@@ -143,7 +152,7 @@ facade is pure state tracking and changes **no** runtime behaviour.
 Commands (any thread, lock-free): `transportStart/Stop`, `syncStart`, `intro`,
 `fill`, `breakSection`, `ending`, `panic`, `setVariation(0..3)`, `setTempo`.
 Devices: `selectMidiInput/Output`. Lifecycle (owner thread): `start`, `stop`,
-`loadStyle`. Engine step: `tick(numSamples)`. Reads (any thread): `snapshot`,
+`loadStyle` (returns `EngineError`: `Ok`, or `InvalidState` while playing). Engine step: `tick(numSamples)`. Reads (any thread): `snapshot`,
 `capabilities`, `lifecycleState`, `lastError` / `clearError`, `contractVersion`.
 
 **Gate 4 additions are additive** — no existing signature changed, no runtime

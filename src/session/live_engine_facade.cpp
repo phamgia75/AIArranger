@@ -1,4 +1,5 @@
 #include "session/live_engine_facade.h"
+#include <thread>
 
 #include "control/engine_midi_route.h"   // attachEngineOutput / pumpEngineOutput
 #include "midi/midi_input_router.h"      // routeMidiInput
@@ -59,6 +60,36 @@ void LiveEngineFacade::setVariation(int index) noexcept {
 }
 
 void LiveEngineFacade::tick(uint32_t numSamples) noexcept {
+    // A style load in progress owns the engine: skip this step rather than
+    // wait (tick() may run on an audio thread). Loads only happen with the
+    // transport stopped, so a skipped step loses no playback time.
+    if (engine_busy_.test_and_set(std::memory_order_acquire)) return;
+    tickLocked(numSamples);
+    engine_busy_.clear(std::memory_order_release);
+}
+
+EngineError LiveEngineFacade::loadStyle(const uasf::StyleDefinition& style) noexcept {
+    // Fast reject without touching the tick (no skipped step while playing).
+    if (session_.player().isPlaying()) {
+        recordError(EngineError::InvalidState);
+        return EngineError::InvalidState;
+    }
+    while (engine_busy_.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
+    // Re-checked under the exclusion: a Start may have been applied meanwhile.
+    // The lifecycle tracker is updated here too: tick() publishes its state.
+    const bool loaded = session_.loadStyle(style);
+    if (loaded && lifecycle_.state() != LifecycleState::Running &&
+        lifecycle_.state() != LifecycleState::Suspended)
+        lifecycle_.apply(LifecycleEvent::LoadStyle);
+    engine_busy_.clear(std::memory_order_release);
+    if (!loaded) {
+        recordError(EngineError::InvalidState);
+        return EngineError::InvalidState;
+    }
+    return EngineError::Ok;
+}
+
+void LiveEngineFacade::tickLocked(uint32_t numSamples) noexcept {
     // Apply a pending tempo change (UI thread set it atomically).
     if (uint32_t bpm = pending_tempo_.exchange(0, std::memory_order_relaxed))
         session_.clock().setTempo(bpm);

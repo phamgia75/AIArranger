@@ -15,23 +15,23 @@ StylePlayer::StylePlayer(realtime::RealtimeClock& clock,
     , scheduler_(scheduler)
     , panic_handler_(panic) {}
 
-void StylePlayer::loadStyle(const uasf::StyleDefinition& style) noexcept {
+bool StylePlayer::loadStyle(const uasf::StyleDefinition& style) noexcept {
+    // A swap while playing used to keep the old PPQN/meter until the next Start,
+    // so the new style's events ran on the wrong grid (Issue #4). Stop first.
+    if (clock_.isRunning()) return false;
     style_ = style;
     // Close notes a section cannot close itself (NoteOff past its end), whatever
     // produced the style: a looping Main would otherwise hold them forever.
     for (auto& sec : style_.sections) uasf::closeOpenNotes(sec);
     style_loaded_ = true;
     sequencer_.setSections(style_.sections.data(), style_.sections.size());
-    // Selecting a style (while stopped) adopts its tempo and resolution;
-    // start() then keeps whatever tempo the performer has set since. A style
-    // swap while playing keeps the running tempo/resolution (no audible jump,
-    // no position discontinuity mid-song). Without the resolution, a 1920-PPQN
+    // Selecting a style adopts its tempo and grid; start() then keeps whatever
+    // tempo the performer has set since. Without the resolution, a 1920-PPQN
     // Genos import ran on the engine's default 480-PPQN clock (4x too slow).
-    if (!clock_.isRunning()) {
-        if (style_.tempo_bpm > 0)  clock_.setTempo(style_.tempo_bpm);
-        applyStyleGrid();
-    }
+    if (style_.tempo_bpm > 0) clock_.setTempo(style_.tempo_bpm);
+    applyStyleGrid();
     return_main_ = -1;
+    return true;
 }
 
 // The clock's PPQN and bar grid must match the loaded style's event ticks.

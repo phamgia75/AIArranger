@@ -4,8 +4,8 @@ namespace ai_arranger::session {
 
 EngineSession::EngineSession() noexcept = default;
 
-void EngineSession::loadStyle(const uasf::StyleDefinition& style) noexcept {
-    player_.loadStyle(style);
+bool EngineSession::loadStyle(const uasf::StyleDefinition& style) noexcept {
+    if (!player_.loadStyle(style)) return false;
     style_loaded_ = true;
 
     // Variation A-D -> the style's Main A-D sections (by type, not by index:
@@ -23,6 +23,7 @@ void EngineSession::loadStyle(const uasf::StyleDefinition& style) noexcept {
     for (int k = 0; k < 4; ++k)
         if (mains[k] < 0) mains[k] = (firstMain >= 0) ? firstMain : k;
     adapter_.setVariationSections(mains[0], mains[1], mains[2], mains[3]);
+    return true;
 }
 
 bool EngineSession::boot() noexcept {

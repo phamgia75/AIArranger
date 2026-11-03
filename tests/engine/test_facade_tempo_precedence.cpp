@@ -7,7 +7,7 @@
 //      is selected is kept by Start; Start never re-applies the style tempo.
 //   3. Stop / Start keeps the current tempo (no drift, no reset).
 //   4. Selecting another style while stopped adopts the new style's tempo;
-//      selecting one while playing keeps the running tempo.
+//      selecting one while playing is rejected (Issue #4) and changes nothing.
 
 #include "session/live_engine_facade.h"
 #include "engine/arranger/style_player.h"
@@ -56,10 +56,10 @@ int main() {
         f.transportStart(); f.tick(48);
         TEST("Stop/Start after a performer change keeps 110", f.snapshot().tempoBpm == 110);
 
-        // Case 4a: another style while playing keeps the running tempo.
-        f.loadStyle(styleAt(76));
+        // Case 4a: a load while playing is rejected (Issue #4); tempo unchanged.
+        TEST("load while playing rejected", f.loadStyle(styleAt(76)) == session::EngineError::InvalidState);
         f.tick(48);
-        TEST("style swap while playing keeps the running 110", f.snapshot().tempoBpm == 110);
+        TEST("rejected load keeps the running 110", f.snapshot().tempoBpm == 110);
 
         // Case 4b: another style while stopped adopts its tempo.
         f.transportStop(); f.tick(48);

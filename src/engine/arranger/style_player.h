@@ -42,7 +42,10 @@ public:
                 midi::PanicHandler& panic);
 
     // ── Style loading (non-realtime) ───────────────────────────────
-    void loadStyle(const uasf::StyleDefinition& style) noexcept;
+    // Only while the transport is stopped: returns false and changes nothing
+    // (style, grid, tempo) while playing — the running events, section
+    // indexes and bar grid all belong to the playing style (Issue #4).
+    bool loadStyle(const uasf::StyleDefinition& style) noexcept;
     void clearStyle() noexcept;
 
     // ── Control ────────────────────────────────────────────────────

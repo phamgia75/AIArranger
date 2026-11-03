@@ -213,12 +213,17 @@ int main() {
         f.start();
         f.transportStart();
         for (int i = 0; i < 4000; ++i) f.tick(48);
-        f.loadStyle(arranger::buildDemoStyle());         // 480 PPQN, 4/4, while running
+        // A load while playing is rejected (Issue #4): the 6/8 grid stays.
+        TEST("load while playing rejected, CLASSIC_6_8 grid kept",
+             f.loadStyle(arranger::buildDemoStyle()) == session::EngineError::InvalidState &&
+             f.session().clock().ticksPerBar() == 5760);
         f.transportStop();
         for (int i = 0; i < 10; ++i) f.tick(48);
+        TEST("load after Stop accepted",
+             f.loadStyle(arranger::buildDemoStyle()) == session::EngineError::Ok);
         f.transportStart();
         for (int i = 0; i < 10; ++i) f.tick(48);
-        TEST("restart after a running style swap adopts the new PPQN + meter",
+        TEST("restart after Stop + load plays the new PPQN + meter",
              f.snapshot().playing && f.session().clock().ticksPerBeat() == 480 &&
              f.session().clock().ticksPerBar() == 1920);
         f.stop();
