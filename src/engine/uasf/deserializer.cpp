@@ -45,7 +45,7 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
 
     auto& style = result.style;
     style.format_version = "1.0";
-    style.tempo_bpm = 120;
+    style.tempo_bpm = kDefaultTempoBpm;   // unless a tempo block says otherwise
     style.resolution = 480;
 
     // Read sections
@@ -142,6 +142,42 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
         }
 
         style.sections.push_back(std::move(section));
+    }
+
+    // ── Extension blocks (v1.1): only when flagged; v1.0 files never set the
+    // flag, and trailing bytes without it are ignored as before. ─────────────
+    if (header.flags & format::kFlagExtensions) {
+        bool haveTempo = false;
+        while (pos_ < size_) {
+            if (!ensure(sizeof(format::ExtensionHeader))) {
+                result.error = "Truncated extension header";
+                return result;
+            }
+            format::ExtensionHeader ext;
+            readBytes(&ext, sizeof(ext));
+            if (ext.length > size_ - pos_) {
+                result.error = "Truncated extension block";
+                return result;
+            }
+            if (ext.tag != format::kExtTempo) {   // unknown: keep verbatim for the writer
+                const uint8_t* blk = data_ + pos_ - sizeof(ext);
+                style.unknown_extensions.insert(style.unknown_extensions.end(), blk,
+                                                blk + sizeof(ext) + ext.length);
+                pos_ += ext.length;
+                continue;
+            }
+            if (haveTempo || ext.length != 4) {
+                result.error = haveTempo ? "Duplicate tempo block" : "Malformed tempo block";
+                return result;
+            }
+            const uint32_t bpm = readU32();
+            if (bpm < kMinTempoBpm || bpm > kMaxTempoBpm) {
+                result.error = "Tempo out of range: " + std::to_string(bpm);
+                return result;
+            }
+            style.tempo_bpm = bpm;
+            haveTempo = true;
+        }
     }
 
     // The file header carries no style-level resolution, so recover it from

@@ -126,6 +126,11 @@ struct SectionDefinition {
 
 // ── Style Definition ─────────────────────────────────────────────────
 
+// Accepted style tempo (whole BPM), the same range the session layer persists.
+inline constexpr uint32_t kMinTempoBpm = 20;
+inline constexpr uint32_t kMaxTempoBpm = 400;
+inline constexpr uint32_t kDefaultTempoBpm = 120;   // a style with no tempo
+
 struct StyleDefinition {
     std::string name;
     std::string format_version;
@@ -134,6 +139,10 @@ struct StyleDefinition {
     std::vector<SectionDefinition> sections;
     int32_t ottava_bass = 0;       // transpose bass tracks
     int32_t ottava_chord = 0;      // transpose chord tracks
+    // UASF v1.1 extension blocks this reader does not understand, kept verbatim
+    // (header + payload, file order) so a read/write round trip preserves them
+    // (UASF_VERSIONING_POLICY: unknown fields MUST be preserved).
+    std::vector<uint8_t> unknown_extensions;
 };
 
 } // namespace ai_arranger::uasf

@@ -38,7 +38,32 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
     auto& style = result.style;
     style.name = "Imported from " + parseResult.file_path;
     style.format_version = "1.0";
-    style.tempo_bpm = 120;
+
+    // Style tempo = the earliest Set Tempo by absolute tick (file order breaks
+    // ties: min_element keeps the first). Whole BPM, rounded to nearest:
+    // Yamaha writes 105 BPM as 571429 us/q (104.9999), so truncation is wrong.
+    // No tempo map: later changes are reported and ignored.
+    style.tempo_bpm = uasf::kDefaultTempoBpm;
+    if (!parseResult.tempos.empty()) {
+        const auto first = std::min_element(
+            parseResult.tempos.begin(), parseResult.tempos.end(),
+            [](const SmfTempo& a, const SmfTempo& b) { return a.tick < b.tick; });
+        const uint64_t bpm = (60'000'000ull + first->mpqn / 2) / first->mpqn;
+        if (bpm >= uasf::kMinTempoBpm && bpm <= uasf::kMaxTempoBpm) {
+            style.tempo_bpm = static_cast<uint32_t>(bpm);
+        } else {
+            result.warnings.push_back("Set Tempo " + std::to_string(first->mpqn) +
+                                      " us/quarter (" + std::to_string(bpm) +
+                                      " BPM) out of range; using 120 BPM");
+        }
+        for (const auto& t : parseResult.tempos) {
+            if (t.mpqn != first->mpqn) {
+                result.warnings.push_back("Later tempo changes ignored (no tempo map); "
+                                          "style tempo is the initial tempo");
+                break;
+            }
+        }
+    }
 
     // Resolution (PPQN) must match the source so the playback clock plays the
     // event ticks at the correct tempo. The MThd-derived section carries the

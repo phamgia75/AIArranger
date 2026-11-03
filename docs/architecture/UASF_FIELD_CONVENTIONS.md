@@ -53,3 +53,27 @@
 | type_channel | uint8 | ✅ v1.0 |
 | data1 | uint8 | ✅ v1.0 |
 | data2 | uint8 | ✅ v1.0 |
+
+## v1.1 Extension Blocks (optional)
+
+`FileHeader.flags` bit 0 (`kFlagExtensions`) means tagged blocks follow the last
+section, until end of file. `version` stays **1**, so v1.0 readers (which ignore
+`flags` and trailing bytes) still load v1.1 files at their defaults.
+
+| Field | Type | Since |
+|-------|------|-------|
+| tag | uint32 (4 ASCII bytes, LE) | v1.1 |
+| length | uint32 (payload bytes) | v1.1 |
+| payload | `length` bytes | v1.1 |
+
+Readers keep unknown blocks verbatim (`StyleDefinition::unknown_extensions`) and
+writers re-emit them after `TMPO`, so a read/write round trip preserves them;
+a truncated block is an error.
+
+| Tag | Payload | Meaning |
+|-----|---------|---------|
+| `TMPO` | uint32 `tempo_bpm`, 20..400 | Style tempo (whole BPM). Absent → 120 BPM, the v1.0 default. At most one. |
+
+Writers emit `TMPO` only for a set tempo (`tempo_bpm != 0`); a style without a
+tempo (and no preserved blocks) is written with `flags = 0` and no trailer,
+byte-identical to v1.0.

@@ -136,6 +136,12 @@ struct SmfMarker {
     std::string name;
 };
 
+// ── SMF Set Tempo (FF 51 03 tt tt tt) — raw microseconds per quarter note ──
+struct SmfTempo {
+    uint32_t tick;   // absolute tick within its MTrk
+    uint32_t mpqn;   // microseconds per quarter note (1..0xFFFFFF)
+};
+
 // ── SFF1 Chunk ────────────────────────────────────────────────────
 struct SffChunk {
     std::string chunk_id;     // 4-char ID
@@ -162,6 +168,9 @@ struct ParseResult {
     // SMF meta data from the MTrk (section splitting): markers in file order,
     // the first time signature (FF 58), and the End-of-Track tick (0 = none).
     std::vector<SmfMarker> markers;
+    // Every well-formed Set Tempo, in file order (MTrk by MTrk); the mapper
+    // picks the earliest by tick. Raw MPQN: no rounding at the reader layer.
+    std::vector<SmfTempo> tempos;
     uint8_t  time_sig_num = 4;
     uint8_t  time_sig_den = 4;
     uint32_t end_of_track_tick = 0;

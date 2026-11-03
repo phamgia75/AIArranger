@@ -286,6 +286,16 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
                 result_.time_sig_num = d[pos];
                 result_.time_sig_den = (d[pos + 1] < 8) ? static_cast<uint8_t>(1u << d[pos + 1]) : 4;
                 have_time_sig = true;
+            } else if (metaType == 0x51) {             // Set Tempo: 3-byte MPQN
+                const uint32_t mpqn = (len == 3) ? (uint32_t(d[pos]) << 16) |
+                                                   (uint32_t(d[pos + 1]) << 8) | d[pos + 2]
+                                                 : 0;
+                if (mpqn == 0) {
+                    result_.warnings.push_back("Malformed Set Tempo at tick " +
+                                               std::to_string(absolute_tick) + " ignored");
+                } else if (result_.tempos.size() < kMaxTopLevelChunks) {
+                    result_.tempos.push_back({absolute_tick, mpqn});
+                }
             }
             pos += len;
             continue;

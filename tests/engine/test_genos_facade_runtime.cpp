@@ -10,8 +10,10 @@
 // NoteOn/NoteOff are balanced per (channel, note) at the end (no stuck notes).
 // Prints a measurement line per style for the validation report.
 //
-// Tempo is NOT checked: SMF Set Tempo is not imported yet (known P1; playback
-// runs at the default 120 BPM).
+// Tempo (Issue #2): the imported tempo must equal the file's Set Tempo (expected
+// values decoded independently from the corpus), the clock must run at it, and
+// the measured tick rate over 1 s of audio must be PPQN x BPM / 60 (a quarter is
+// the SMF tempo unit for every meter, so 6/8 uses the same formula).
 
 #include "session/live_engine_facade.h"
 #include "importers/sff1/sff1_reader.h"
@@ -19,6 +21,7 @@
 #include "engine/arranger/style_player.h"
 #include "../midi/fake_midi_output_provider.h"
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -49,7 +52,7 @@ static std::string findCorpusSty(const std::string& needle) {
     return {};
 }
 
-static void probe(const char* needle) {
+static void probe(const char* needle, uint32_t expectedBpm) {
     const std::string tag = needle;
     const std::string sty = findCorpusSty(needle);
     TEST(tag + ": corpus .sty present", !sty.empty());
@@ -76,6 +79,8 @@ static void probe(const char* needle) {
          introA >= 0 && mainA >= 0 && mainB >= 0 && fillBB >= 0 && endA >= 0);
     if (introA < 0 || mainA < 0 || mainB < 0 || fillBB < 0 || endA < 0) return;
 
+    TEST(tag + ": imported tempo " + std::to_string(expectedBpm) + " BPM",
+         mr.style.tempo_bpm == expectedBpm);
     const auto& m = secs[mainA];
     const int64_t tpBar = static_cast<int64_t>(m.resolution) * m.beats_per_bar * 4 / m.beat_note;
 
@@ -96,13 +101,16 @@ static void probe(const char* needle) {
             last = s.section;
             const int64_t pos = s.positionTicks;
             trace.emplace_back(last, tpBar ? pos / tpBar : -1);
-            // 48 samples @48 kHz, 120 BPM, <=1920 PPQN = <4 ticks per step.
+            // 48 samples @48 kHz, <=1920 PPQN, <=120 BPM here = <4 ticks per step.
             if (tpBar && pos % tpBar > 8 && trace.size() > 1) offGrid = true;
         }
     };
+    // Steps (48 samples @ 48 kHz) per bar at the clock's tempo: a bar is
+    // tpBar / (res x bpm / 60) seconds = tpBar x 60 x 1000 / (res x bpm) steps.
+    const int64_t stepsPerBar =
+        tpBar * 60 * 1000 / (static_cast<int64_t>(m.resolution) * f.session().clock().getTempo()) + 1;
     auto runUntil = [&](const std::function<bool()>& pred, int maxBars) {
-        // a 4/4 bar at 120 BPM / 48 kHz is 2000 steps; allow generous headroom
-        for (int i = 0; i < maxBars * 2000 && !pred(); ++i) step();
+        for (int64_t i = 0; i < maxBars * stepsPerBar && !pred(); ++i) step();
         return pred();
     };
     auto inSection = [&](int idx) { return [&, idx] { return f.snapshot().section == idx; }; };
@@ -116,10 +124,21 @@ static void probe(const char* needle) {
          f.session().clock().ticksPerBar() == tpBar);
     step();                                             // commands apply inside tick()
     TEST(tag + ": starts in Intro A", f.snapshot().section == introA && f.snapshot().playing);
+    TEST(tag + ": clock runs at the style tempo", f.session().clock().getTempo() == expectedBpm &&
+                                                  f.snapshot().tempoBpm == expectedBpm);
+    // Measured progression: 1000 steps x 48 samples = 1 s at 48 kHz.
+    const int64_t p0 = f.session().clock().getPosition();
+    for (int i = 0; i < 1000; ++i) step();
+    const int64_t measured = f.session().clock().getPosition() - p0;
+    const int64_t wantTps = static_cast<int64_t>(m.resolution) * expectedBpm / 60;
+    std::printf("  [tempo] %s expected=%lld ticks/s measured=%lld\n", needle,
+                static_cast<long long>(wantTps), static_cast<long long>(measured));
+    TEST(tag + ": measured tick rate == PPQN x BPM / 60 (+/-0.1%)",
+         std::llabs(measured - wantTps) * 1000 <= wantTps);
     TEST(tag + ": Intro A hands over to Main A", runUntil(inSection(mainA), 16));
     // Stay in Main A for (bars + 2): it must loop, not fall silent or move on.
     const long beforeLoop = notesOn();
-    for (uint32_t i = 0; i < (m.bars + 2) * 2000u; ++i) step();
+    for (int64_t i = 0; i < (m.bars + 2) * stepsPerBar; ++i) step();
     TEST(tag + ": Main A loops (still Main A after its length + 2 bars)",
          f.snapshot().section == mainA && f.snapshot().playing);
     TEST(tag + ": Main A sounds while looping", notesOn() > beforeLoop);
@@ -146,6 +165,7 @@ static void probe(const char* needle) {
          runUntil([&] { return !f.snapshot().playing; }, 32));
     for (int i = 0; i < 4000; ++i) f.tick(48);          // drain anything scheduled
     TEST(tag + ": every section switch on a bar boundary", !offGrid);
+    TEST(tag + ": tempo unchanged through the whole run", f.session().clock().getTempo() == expectedBpm);
 
     std::map<int, long> open;                            // (ch<<8|note) -> outstanding
     long on = 0, off = 0;
@@ -174,7 +194,11 @@ static void probe(const char* needle) {
 
 int main() {
     std::printf("Test: real Genos styles through LiveEngineFacade\n");
-    for (const char* n : {"POP_ACOUSTIC_2", "CLASSIC_6_8", "BALLAD_FOLK", "C_WHISPER"}) probe(n);
+    // Expected BPM from each file's FF 51 (600000 / 666667 / 571429 / 789473 us/q).
+    probe("POP_ACOUSTIC_2", 100);
+    probe("CLASSIC_6_8", 90);
+    probe("BALLAD_FOLK", 105);
+    probe("C_WHISPER", 76);
 
     // A style swapped in while playing keeps the running grid (no mid-song
     // jump), but the next Start must adopt the new style's PPQN + meter.

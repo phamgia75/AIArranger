@@ -126,6 +126,14 @@ static std::vector<uint16_t> playbackFlags(const std::vector<uint8_t>& b) {
             flags.push_back(th.playback_flags);
         }
     }
+    // v1.1: flagged extension blocks (e.g. the style tempo) follow the sections.
+    if (fh.flags & format::kFlagExtensions) {
+        while (o + sizeof(format::ExtensionHeader) <= b.size()) {
+            format::ExtensionHeader eh;
+            std::memcpy(&eh, b.data() + o, sizeof(eh));
+            o += sizeof(eh) + eh.length;
+        }
+    }
     return o == b.size() ? flags : std::vector<uint16_t>{};
 }
 

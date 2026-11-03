@@ -197,8 +197,11 @@ int main() {
         f.loadStyle(mr.style);
         f.start();
         f.transportStart();
-        // 120 BPM, 48 kHz: one 4/4 bar = 96000 samples = 2000 ticks of 48.
-        auto bars = [&](int n) { for (int i = 0; i < n * 2000; ++i) f.tick(48); };
+        // The style's own tempo (POP_ACOUSTIC_2: 100 BPM), 48 kHz, 4/4: one bar =
+        // 4 quarters x 60/bpm s x 48000 = 240000/bpm ticks of 48 samples.
+        const int stepsPerBar = static_cast<int>(240000 / f.session().clock().getTempo());
+        TEST("import: facade runs at the imported tempo (100 BPM)", f.session().clock().getTempo() == 100);
+        auto bars = [&](int n) { for (int i = 0; i < n * stepsPerBar; ++i) f.tick(48); };
         auto notes = [&] {
             int n = 0;
             for (const auto& e : out.sent) if (e.type == uasf::MidiEventType::NoteOn && e.data2 > 0) ++n;
