@@ -112,6 +112,9 @@ AiArrError aiarr_engine_panic(AiArrEngine* engine);
 /* Transport + parameter commands (enqueued lock-free, applied in tick()).
  * The result says whether the engine ACCEPTED the command (contract 1.0.2):
  *   AIARR_OK               queued; it is applied on a following tick().
+ *                          Tempo is not queued: it holds one pending value and
+ *                          the latest accepted one before a tick() wins (an
+ *                          earlier one may never apply; tempo never QUEUE_FULL).
  *   AIARR_ERR_QUEUE_FULL   dropped: the command queue (maxCommandQueue) is full
  *                          because tick() has not drained it. Nothing changes.
  *   AIARR_ERR_UNSUPPORTED  argument outside the engine range (tempo 20..400 BPM,

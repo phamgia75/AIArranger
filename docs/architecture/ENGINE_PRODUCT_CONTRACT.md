@@ -178,6 +178,8 @@ the product host links. Rules:
 - A command's result reports whether it was **accepted** (contract 1.0.2, #18):
   `AIARR_OK` queued; `AIARR_ERR_QUEUE_FULL` dropped (queue full);
   `AIARR_ERR_UNSUPPORTED` argument out of range (tempo 20..400, variation 0..3).
+  Tempo is a single pending value, not a queue: the latest accepted tempo
+  before a tick wins.
   Signatures, enumerator values and struct layouts are unchanged; before 1.0.2
   these calls returned `AIARR_OK` for a dropped or ignored command, contrary to
   §6. What the engine then did with an accepted command shows in the snapshot.
