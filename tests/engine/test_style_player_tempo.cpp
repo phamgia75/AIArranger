@@ -5,7 +5,7 @@
 // style's 120 BPM (visible through the C ABI: aiarr_engine_set_tempo then
 // aiarr_engine_transport_start -> snapshot.tempoBpm == 120). Arranger semantics:
 // selecting a style (while stopped) adopts its tempo; Start/Stop keep whatever
-// tempo is current; swapping style while playing keeps the running tempo.
+// tempo is current. Loading a style while playing is rejected (Issue #4).
 
 #include "engine/arranger/style_player.h"
 #include "engine/realtime/clock.h"
@@ -45,8 +45,8 @@ int main() {
 
     auto fast = buildDemoStyle();
     fast.tempo_bpm = 140;
-    player.loadStyle(fast);              // style swap while playing
-    TEST("style swap while playing keeps the running tempo (104)", clock.getTempo() == 104);
+    TEST("load while playing is rejected (Issue #4)", !player.loadStyle(fast));
+    TEST("rejected load keeps the running tempo (104)", clock.getTempo() == 104);
 
     player.stop();
     player.loadStyle(fast);              // re-select while stopped

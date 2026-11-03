@@ -34,7 +34,8 @@ public:
 
     bool isBooted() const noexcept { return booted_; }
 
-    void loadStyle(const uasf::StyleDefinition& style) noexcept;
+    // False (nothing changed) while the transport is playing; see StylePlayer.
+    bool loadStyle(const uasf::StyleDefinition& style) noexcept;
 
     // Drive one engine step (drains control events, advances the player).
     void tick() noexcept { adapter_.tick(); }

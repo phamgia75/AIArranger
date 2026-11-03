@@ -49,16 +49,15 @@ public:
     void start() noexcept;
     void stop() noexcept;
 
-    // Load a normalized style. Call before start() (boot keeps a pre-loaded
-    // style); calling while stopped re-arms the sequencer with a new style. The
-    // lifecycle tracker advances toward Ready when not running; a load while
-    // running is a pass-through (behaviour unchanged) and does not move state.
-    void loadStyle(const uasf::StyleDefinition& style) noexcept {
-        session_.loadStyle(style);
-        if (lifecycle_.state() != LifecycleState::Running &&
-            lifecycle_.state() != LifecycleState::Suspended)
-            lifecycle_.apply(LifecycleEvent::LoadStyle);
-    }
+    // Load a normalized style (owner thread). Before start() boot keeps it;
+    // with the transport stopped it replaces the style and adopts its tempo,
+    // PPQN and meter. While the transport PLAYS it is rejected: returns (and
+    // records) EngineError::InvalidState and changes nothing — stop first
+    // (Issue #4). Safe while tick() runs on another thread: the two exclude
+    // each other, and tick() never waits — it skips its step while a load is
+    // in progress (Issue #5). The lifecycle tracker advances toward Ready when
+    // the engine is not running; a load while running does not move state.
+    EngineError loadStyle(const uasf::StyleDefinition& style) noexcept;
 
     // ── Commands (any thread, concurrently; lock-free) ──────────────────
     // Each enqueues onto the MPSC command queue drained in tick(). A dropped
@@ -132,6 +131,7 @@ public:
     static constexpr uint32_t contractVersion() noexcept { return kEngineContractVersion; }
 
 private:
+    void tickLocked(uint32_t numSamples) noexcept;
     // fromTick: the realtime path never waits for a concurrent lifecycle publish.
     void publishSnapshot(bool fromTick = false) noexcept;
     void push(control::ControlAction a, int32_t param = 0) noexcept {
@@ -165,6 +165,9 @@ private:
     EngineLifecycle             lifecycle_{};                 // Gate 4 lifecycle tracker
     std::atomic<EngineError>    last_error_{EngineError::Ok}; // most recent deterministic error
     bool started_{false};
+    // loadStyle() <-> tick() exclusion. tick() only try-acquires (never blocks,
+    // skips its step when taken); loadStyle() waits for an in-flight tick.
+    std::atomic_flag engine_busy_ = ATOMIC_FLAG_INIT;
 };
 
 } // namespace ai_arranger::session
