@@ -16,6 +16,7 @@
 #include "session/live_engine_facade.h"
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
+#include "engine/arranger/style_player.h"
 #include "../midi/fake_midi_output_provider.h"
 #include <cstdio>
 #include <filesystem>
@@ -174,6 +175,30 @@ static void probe(const char* needle) {
 int main() {
     std::printf("Test: real Genos styles through LiveEngineFacade\n");
     for (const char* n : {"POP_ACOUSTIC_2", "CLASSIC_6_8", "BALLAD_FOLK", "C_WHISPER"}) probe(n);
+
+    // A style swapped in while playing keeps the running grid (no mid-song
+    // jump), but the next Start must adopt the new style's PPQN + meter.
+    {
+        importers::sff1::Sff1Reader reader;
+        importers::sff1::Sff1ToUasfMapper mapper;
+        const auto mr = mapper.map(reader.parseFile(findCorpusSty("CLASSIC_6_8")));
+        midi::FakeMidiOutputProvider out; out.setDevices({{0, "synth"}});
+        session::LiveEngineFacade f(nullptr, &out);
+        f.selectMidiOutput(0);
+        f.loadStyle(mr.style);                           // 1920 PPQN, 6/8
+        f.start();
+        f.transportStart();
+        for (int i = 0; i < 4000; ++i) f.tick(48);
+        f.loadStyle(arranger::buildDemoStyle());         // 480 PPQN, 4/4, while running
+        f.transportStop();
+        for (int i = 0; i < 10; ++i) f.tick(48);
+        f.transportStart();
+        for (int i = 0; i < 10; ++i) f.tick(48);
+        TEST("restart after a running style swap adopts the new PPQN + meter",
+             f.snapshot().playing && f.session().clock().ticksPerBeat() == 480 &&
+             f.session().clock().ticksPerBar() == 1920);
+        f.stop();
+    }
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }

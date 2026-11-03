@@ -107,6 +107,7 @@ private:
     // transport stopped (Ending finished).
     bool handleSectionEnd(int64_t currentTick) noexcept;
     int  defaultMainIndex() const noexcept;
+    void applyStyleGrid() noexcept;
 
     // Event callback for demo/debug
     PlaybackEventCallback event_cb_{nullptr};

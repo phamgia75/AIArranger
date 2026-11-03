@@ -25,14 +25,19 @@ void StylePlayer::loadStyle(const uasf::StyleDefinition& style) noexcept {
     // Genos import ran on the engine's default 480-PPQN clock (4x too slow).
     if (!clock_.isRunning()) {
         if (style_.tempo_bpm > 0)  clock_.setTempo(style_.tempo_bpm);
-        if (style_.resolution > 0) clock_.setResolution(style_.resolution);
-        // Bar grid from the style's meter (first section; styles are one meter).
-        if (!style_.sections.empty() && style_.sections[0].beats_per_bar > 0 &&
-            style_.sections[0].beat_note > 0)
-            clock_.setTimeSignature(style_.sections[0].beats_per_bar,
-                                    style_.sections[0].beat_note);
+        applyStyleGrid();
     }
     return_main_ = -1;
+}
+
+// The clock's PPQN and bar grid must match the loaded style's event ticks.
+void StylePlayer::applyStyleGrid() noexcept {
+    if (style_.resolution > 0) clock_.setResolution(style_.resolution);
+    // Bar grid from the style's meter (first section; styles are one meter).
+    if (!style_.sections.empty() && style_.sections[0].beats_per_bar > 0 &&
+        style_.sections[0].beat_note > 0)
+        clock_.setTimeSignature(style_.sections[0].beats_per_bar,
+                                style_.sections[0].beat_note);
 }
 
 void StylePlayer::clearStyle() noexcept {
@@ -48,6 +53,10 @@ bool StylePlayer::start(int introSectionIndex) noexcept {
         introSectionIndex = 0;
     }
 
+    // A style swapped in while playing kept the old grid (no mid-song jump);
+    // a (re)start is the first safe point to adopt its own. Tempo is not
+    // touched: Start keeps the performer's tempo.
+    if (!clock_.isRunning()) applyStyleGrid();
     clock_.reset();
     clock_.start();
 
