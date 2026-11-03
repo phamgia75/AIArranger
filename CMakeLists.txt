@@ -204,6 +204,15 @@ target_compile_options(test_bridge_c_consumer PRIVATE
 target_link_libraries(test_bridge_c_consumer arranger-bridge arranger-engine Threads::Threads)
 add_test(NAME test_bridge_c_consumer COMMAND test_bridge_c_consumer)
 
+# The Apple-only tests talk to the system CoreMIDI server. Under a full
+# parallel ctest run, client creation occasionally fails (MIDIClientCreate
+# OSStatus -304) and keeps failing in that process for over a second, while the
+# same tests pass every time run alone (Issue #21: 30/30 and 50/50 serial).
+# Run them serially so they never compete with the rest of the suite.
+if(APPLE)
+    set_tests_properties(${APPLE_ONLY_TESTS} PROPERTIES RUN_SERIAL TRUE)
+endif()
+
 # ── Gate 3 latency report tool (Python, stdlib only) ──────────────────
 # Synthetic-data unit test for tools/latency_report; registered so CTest/CI run
 # it alongside the C++ suites instead of it being a manual-only check.
