@@ -71,13 +71,15 @@ LiveHostComponent::LiveHostComponent() {
         driver_.switchOutput(id == 1 ? -1 : id - 2);
     };
 
-    tempoSlider_.setRange(40.0, 300.0, 1.0);
-    tempoSlider_.setValue(120.0, juce::dontSendNotification);
+    // Engine range (20..400). The timer keeps the slider on the engine's tempo
+    // (style load, Stop/Start) without notifying; only a user change is sent.
+    tempoSlider_.setRange(ui::TempoControlModel::kMin, ui::TempoControlModel::kMax, 1.0);
+    tempoModel_.setTempoSink([this](uint32_t bpm) { driver_.facade().setTempo(bpm); });
+    if (tempoModel_.syncFromEngine(driver_.facade().snapshot().tempoBpm))
+        tempoSlider_.setValue(tempoModel_.displayed(), juce::dontSendNotification);
     tempoSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
     tempoSlider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 22);
-    tempoSlider_.onValueChange = [this] {
-        driver_.facade().setTempo(static_cast<uint32_t>(tempoSlider_.getValue()));
-    };
+    tempoSlider_.onValueChange = [this] { tempoModel_.userSet(tempoSlider_.getValue()); };
     addAndMakeVisible(tempoSlider_);
 
     // Transport + section controls: each posts a lock-free facade command.
@@ -169,6 +171,8 @@ void LiveHostComponent::timerCallback() {
                           (s.playing ? "  (playing)" : "  (stopped)"),
                           juce::dontSendNotification);
     tempoLabel_.setText("Tempo " + juce::String(s.tempoBpm), juce::dontSendNotification);
+    if (tempoModel_.syncFromEngine(s.tempoBpm))
+        tempoSlider_.setValue(tempoModel_.displayed(), juce::dontSendNotification);
 
     // Connection / error status. Transport must NOT stop on device loss; we only
     // surface the state (DOCTRINE 06).
