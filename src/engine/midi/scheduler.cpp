@@ -23,15 +23,15 @@ void MidiScheduler::scheduleEvents(const uasf::MidiEvent* events, size_t count) 
 void MidiScheduler::advanceTo(int64_t currentTick) noexcept {
     if (!callback_) return;
 
+    // Visit exactly the events queued on entry: dispatch every due one, re-queue
+    // future ones in their original order. Stopping at the first future event
+    // (as before) left every due event behind it waiting for a later block —
+    // with swing, off-beats are scheduled ahead, so grooves ran up to ~17 ms
+    // late (Issue #16). Allocation-free; same thread as scheduleEvent().
     uasf::MidiEvent event;
-    while (queue_.pop(event)) {
-        if (event.tick <= currentTick) {
-            callback_(event);
-        } else {
-            // Event is in the future — push it back (rare, only on tick mismatch)
-            queue_.push(event);
-            break;
-        }
+    for (size_t n = queue_.size(); n > 0 && queue_.pop(event); --n) {
+        if (static_cast<int64_t>(event.tick) <= currentTick) callback_(event);
+        else queue_.push(event);
     }
     last_dispatched_tick_.store(currentTick, std::memory_order_release);
 }
