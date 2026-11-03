@@ -96,13 +96,16 @@ static void probe(const char* needle) {
             last = s.section;
             const int64_t pos = s.positionTicks;
             trace.emplace_back(last, tpBar ? pos / tpBar : -1);
-            // 48 samples @48 kHz, 120 BPM, <=1920 PPQN = <4 ticks per step.
+            // 48 samples @48 kHz, <=1920 PPQN, <=120 BPM here = <4 ticks per step.
             if (tpBar && pos % tpBar > 8 && trace.size() > 1) offGrid = true;
         }
     };
+    // Steps (48 samples @ 48 kHz) per bar at the clock's tempo: a bar is
+    // tpBar / (res x bpm / 60) seconds = tpBar x 60 x 1000 / (res x bpm) steps.
+    const int64_t stepsPerBar =
+        tpBar * 60 * 1000 / (static_cast<int64_t>(m.resolution) * f.session().clock().getTempo()) + 1;
     auto runUntil = [&](const std::function<bool()>& pred, int maxBars) {
-        // a 4/4 bar at 120 BPM / 48 kHz is 2000 steps; allow generous headroom
-        for (int i = 0; i < maxBars * 2000 && !pred(); ++i) step();
+        for (int64_t i = 0; i < maxBars * stepsPerBar && !pred(); ++i) step();
         return pred();
     };
     auto inSection = [&](int idx) { return [&, idx] { return f.snapshot().section == idx; }; };
@@ -119,7 +122,7 @@ static void probe(const char* needle) {
     TEST(tag + ": Intro A hands over to Main A", runUntil(inSection(mainA), 16));
     // Stay in Main A for (bars + 2): it must loop, not fall silent or move on.
     const long beforeLoop = notesOn();
-    for (uint32_t i = 0; i < (m.bars + 2) * 2000u; ++i) step();
+    for (int64_t i = 0; i < (m.bars + 2) * stepsPerBar; ++i) step();
     TEST(tag + ": Main A loops (still Main A after its length + 2 bars)",
          f.snapshot().section == mainA && f.snapshot().playing);
     TEST(tag + ": Main A sounds while looping", notesOn() > beforeLoop);

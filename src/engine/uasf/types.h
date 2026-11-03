@@ -126,6 +126,11 @@ struct SectionDefinition {
 
 // ── Style Definition ─────────────────────────────────────────────────
 
+// Accepted style tempo (whole BPM), the same range the session layer persists.
+inline constexpr uint32_t kMinTempoBpm = 20;
+inline constexpr uint32_t kMaxTempoBpm = 400;
+inline constexpr uint32_t kDefaultTempoBpm = 120;   // a style with no tempo
+
 struct StyleDefinition {
     std::string name;
     std::string format_version;
