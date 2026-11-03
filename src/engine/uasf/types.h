@@ -139,6 +139,10 @@ struct StyleDefinition {
     std::vector<SectionDefinition> sections;
     int32_t ottava_bass = 0;       // transpose bass tracks
     int32_t ottava_chord = 0;      // transpose chord tracks
+    // UASF v1.1 extension blocks this reader does not understand, kept verbatim
+    // (header + payload, file order) so a read/write round trip preserves them
+    // (UASF_VERSIONING_POLICY: unknown fields MUST be preserved).
+    std::vector<uint8_t> unknown_extensions;
 };
 
 } // namespace ai_arranger::uasf

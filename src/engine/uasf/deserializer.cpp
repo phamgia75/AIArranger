@@ -159,7 +159,10 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                 result.error = "Truncated extension block";
                 return result;
             }
-            if (ext.tag != format::kExtTempo) {   // unknown: skip (forward compatible)
+            if (ext.tag != format::kExtTempo) {   // unknown: keep verbatim for the writer
+                const uint8_t* blk = data_ + pos_ - sizeof(ext);
+                style.unknown_extensions.insert(style.unknown_extensions.end(), blk,
+                                                blk + sizeof(ext) + ext.length);
                 pos_ += ext.length;
                 continue;
             }

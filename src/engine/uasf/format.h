@@ -64,7 +64,8 @@ struct MidiEventSerialized {
 // ── Extension blocks (v1.1, optional) ──────────────────────────────
 // When FileHeader.flags has kFlagExtensions, tagged blocks follow the last
 // section until end of file: ExtensionHeader + `length` payload bytes. Readers
-// skip unknown tags by length. `version` stays 1: v1.0 readers ignore `flags`
+// keep unknown tags verbatim (StyleDefinition::unknown_extensions); writers
+// re-emit them. `version` stays 1: v1.0 readers ignore `flags`
 // and trailing bytes, so they still load these files (at their defaults), and
 // files without the flag (every file written before v1.1) are unchanged.
 

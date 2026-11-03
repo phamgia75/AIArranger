@@ -66,11 +66,14 @@ section, until end of file. `version` stays **1**, so v1.0 readers (which ignore
 | length | uint32 (payload bytes) | v1.1 |
 | payload | `length` bytes | v1.1 |
 
-Readers skip unknown tags by `length`; a truncated block is an error.
+Readers keep unknown blocks verbatim (`StyleDefinition::unknown_extensions`) and
+writers re-emit them after `TMPO`, so a read/write round trip preserves them;
+a truncated block is an error.
 
 | Tag | Payload | Meaning |
 |-----|---------|---------|
 | `TMPO` | uint32 `tempo_bpm`, 20..400 | Style tempo (whole BPM). Absent → 120 BPM, the v1.0 default. At most one. |
 
 Writers emit `TMPO` only for a set tempo (`tempo_bpm != 0`); a style without a
-tempo is written with `flags = 0` and no trailer, byte-identical to v1.0.
+tempo (and no preserved blocks) is written with `flags = 0` and no trailer,
+byte-identical to v1.0.

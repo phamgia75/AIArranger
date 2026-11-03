@@ -20,7 +20,8 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
     format::FileHeader header;
     header.magic = format::kMagic;
     header.version = format::kVersion;
-    header.flags = style.tempo_bpm != 0 ? format::kFlagExtensions : 0;
+    header.flags = (style.tempo_bpm != 0 || !style.unknown_extensions.empty())
+                       ? format::kFlagExtensions : 0;
     header.section_count = static_cast<uint32_t>(std::min(style.sections.size(),
                                                          size_t(format::kMaxSections)));
 
@@ -104,11 +105,14 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
     }
 
     // ── Extension blocks (v1.1) ────────────────────────────────────
-    if (header.flags & format::kFlagExtensions) {
+    if (style.tempo_bpm != 0) {
         writeU32(format::kExtTempo);
         writeU32(4);
         writeU32(style.tempo_bpm);
     }
+    // Blocks a reader kept but did not understand, re-emitted verbatim.
+    if (!style.unknown_extensions.empty())
+        writeBytes(style.unknown_extensions.data(), style.unknown_extensions.size());
 
     return {true, std::move(buffer_), ""};
 }

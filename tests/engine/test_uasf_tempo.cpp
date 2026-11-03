@@ -121,6 +121,27 @@ int main() {
         TEST("unknown block skipped, following TMPO read (76)", f.success && f.style.tempo_bpm == 76);
         Bytes overlong; putU32(overlong, 0x5A5A5A5A); putU32(overlong, 1000);   // no payload
         TEST("unknown block longer than the file rejected", !des(withTrailer(overlong)).success);
+
+        // UASF_VERSIONING_POLICY (MINOR): unknown fields MUST be preserved — the
+        // writer re-emits unknown blocks verbatim, in order, after TMPO.
+        const Bytes unk1 = block(0x5A5A5A5A, {1, 2, 3});
+        const Bytes unk2 = block(0x31545845, {});              // 'EXT1', empty payload
+        Bytes in = unk1; in.insert(in.end(), tmpo.begin(), tmpo.end());
+        in.insert(in.end(), unk2.begin(), unk2.end());
+        const auto u = des(withTrailer(in));
+        Bytes want = tmpo; want.insert(want.end(), unk1.begin(), unk1.end());
+        want.insert(want.end(), unk2.begin(), unk2.end());
+        const Bytes out = u.success ? ser(u.style) : Bytes{};
+        TEST("unknown blocks survive a read/write round trip byte-for-byte",
+             out.size() >= want.size() && Bytes(out.end() - want.size(), out.end()) == want);
+        // No tempo, only unknown blocks: still flagged and preserved.
+        const auto v = des(withTrailer(unk1));
+        const Bytes outNoTempo = v.success ? ser(v.style) : Bytes{};
+        TEST("unknown block without a tempo: flag kept, block preserved, still 120 BPM",
+             v.success && v.style.tempo_bpm == kDefaultTempoBpm && outNoTempo.size() > 12 &&
+             u32At(outNoTempo, 8) == format::kFlagExtensions &&
+             Bytes(outNoTempo.end() - unk1.size(), outNoTempo.end()) == unk1 &&
+             des(outNoTempo).success);
     }
     {   // 8. writer refuses a tempo the reader would reject
         UasfSerializer w;
