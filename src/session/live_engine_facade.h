@@ -90,6 +90,12 @@ public:
         return true;
     }
 
+    // Auto-fill on variation change (arranger-engine-spec §5.3). A setting,
+    // not a queued command: any thread, takes effect at once, kept across
+    // stop()/start(). Off by default.
+    void setAutoFill(bool on) noexcept { session_.player().setAutoFill(on); }
+    bool autoFill() const noexcept { return session_.player().autoFill(); }
+
     // Device selection (delegates to the injected source/provider). A failed
     // selection records EngineError::DeviceUnavailable; the bool return is
     // unchanged.

@@ -45,6 +45,7 @@ public:
     midi::MidiScheduler&            scheduler() noexcept { return scheduler_; }
     midi::PanicHandler&             panic() noexcept { return panic_; }
     arranger::StylePlayer&          player() noexcept { return player_; }
+    const arranger::StylePlayer&    player() const noexcept { return player_; }
     integration::PerformerAdapter&  adapter() noexcept { return adapter_; }
 
 private:

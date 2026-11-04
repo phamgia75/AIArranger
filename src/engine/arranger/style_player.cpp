@@ -72,6 +72,7 @@ bool StylePlayer::start(int introSectionIndex) noexcept {
     section_origin_tick_ = 0;
     section_rel_cursor_ = -1;
     return_main_ = -1;
+    landing_main_ = -1;
 
     // Queue intro section
     sequencer_.queueSection(introSectionIndex);
@@ -88,6 +89,7 @@ void StylePlayer::stop() noexcept {
     });
     clock_.stop();
     sequencer_.panic();
+    landing_main_ = -1;
     if (event_cb_) event_cb_("STOP");
 }
 
@@ -97,6 +99,7 @@ void StylePlayer::panic() noexcept {
         scheduler_.scheduleEvent(ev);
     });
     sequencer_.panic();
+    landing_main_ = -1;
     clock_.stop();
     AIARR_TRACE_COUNT_PANIC();
     AIARR_TRACE_LIFECYCLE(::ai_arranger::trace::LifecycleTag::kPanic);
@@ -124,6 +127,29 @@ void StylePlayer::ending() noexcept {
 }
 
 void StylePlayer::switchSection(int index) noexcept {
+    const int n = static_cast<int>(style_.sections.size());
+    const int cur = sequencer_.getCurrentSectionIndex();
+    auto isType = [&](int i, uasf::SectionType lo, uasf::SectionType hi) {
+        return i >= 0 && i < n && style_.sections[i].type >= lo && style_.sections[i].type <= hi;
+    };
+    using T = uasf::SectionType;
+    if (auto_fill_.load(std::memory_order_relaxed) && clock_.isRunning() &&
+        index != cur && isType(index, T::Main1, T::Main4)) {
+        bool hasFill = false;
+        for (int i = 0; i < n && !hasFill; ++i) hasFill = isType(i, T::Fill1, T::Fill4);
+        if (isType(cur, T::Main1, T::Main4) && hasFill) {
+            landing_main_ = index;
+            sequencer_.queueFill();          // fill of the playing Main (§5.3)
+            if (event_cb_) event_cb_("AUTO_FILL_QUEUED");
+            return;
+        }
+        if (isType(cur, T::Intro1, T::Intro3) || isType(cur, T::Fill1, T::Fill4) ||
+            isType(cur, T::Break, T::Break)) {
+            landing_main_ = index;           // the running section lands there
+            return;
+        }
+    }
+    landing_main_ = -1;
     sequencer_.queueSection(index);
     if (event_cb_) {
         char buf[64];
@@ -238,7 +264,8 @@ bool StylePlayer::handleSectionEnd(int64_t currentTick) noexcept {
         (type >= uasf::SectionType::Fill1  && type <= uasf::SectionType::Fill4)  ||
         type == uasf::SectionType::Break;
     if (handsBack) {
-        const int main = defaultMainIndex();
+        const int main = landing_main_ >= 0 ? landing_main_ : defaultMainIndex();
+        landing_main_ = -1;
         if (main >= 0) next = main;
     }
 
