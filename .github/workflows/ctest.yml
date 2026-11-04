@@ -11,9 +11,10 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref supersedes a running check.
+# A newer push to a PR supersedes its running check. Pushes to main get a
+# unique group (run_id) so every merged commit keeps its full validation.
 concurrency:
-  group: ctest-${{ github.ref }}
+  group: ctest-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
