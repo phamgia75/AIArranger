@@ -11,4 +11,4 @@ BUILD="$ROOT/build"
 
 cmake -S "$ROOT" -B "$BUILD" >/dev/null
 cmake --build "$BUILD" -j4
-ctest --test-dir "$BUILD" --output-on-failure
+ctest --test-dir "$BUILD" --output-on-failure --timeout 300

@@ -7,10 +7,21 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only token: the jobs only build and test.
+permissions:
+  contents: read
+
+# A newer push to a PR supersedes its running check. Pushes to main get a
+# unique group (run_id) so every merged commit keeps its full validation.
+concurrency:
+  group: ctest-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     # macOS: the full suite, including the CoreMIDI / CoreAudio platform layer.
     runs-on: macos-latest
+    timeout-minutes: 30   # a hung test must not burn the 6 h default
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +36,7 @@ jobs:
     # SDK, and runs it under sanitizers — the lock-free queues and cross-thread
     # facade are only race-checked here.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -49,8 +61,9 @@ jobs:
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+          -DCMAKE_C_FLAGS="${{ matrix.flags }}"
           -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
       - name: Build
         run: cmake --build build
       - name: CTest
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --timeout 300
