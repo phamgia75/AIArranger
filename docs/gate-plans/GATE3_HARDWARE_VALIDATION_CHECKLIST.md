@@ -78,10 +78,32 @@ A single stuck note, crash, deadlock, dropped callback, or audible timing drift 
     - Do: play continuously (or loop an automated chord/section pattern) for 30–60 minutes into the module.
     - Pass: **no stuck notes, no crash, no deadlock, no dropped callbacks, no audible timing drift**; NoteOn/NoteOff stay balanced start to finish; rx/tx counters advance monotonically without stalling.
 
+## D. Behaviour added after the Gate 3 hardening (2026-11)
+Proven headless only (tests named in brackets); each needs one pass on real gear.
+
+16. **Imported style tempo** [`test_genos_facade_runtime`, #2].
+    - Do: load each Genos corpus style (POP_ACOUSTIC_2 100, CLASSIC_6_8 90 in 6/8, BALLAD_FOLK 105, C_WHISPER 76); Start without touching the slider.
+    - Pass: plays at the listed BPM (tap along or time 8 bars in the MIDI monitor); 6/8 feels in 6; the slider shows the style tempo.
+17. **Stop / Panic silence every note** [`test_stop_noteoffs`, #14].
+    - Do: hold a sustained chord on a pad patch, press Stop; repeat with PANIC; repeat by closing the window.
+    - Pass: the MIDI monitor shows a NoteOff for every sounding note before CC120/123; nothing keeps ringing.
+18. **Swing timing** [`test_scheduler_timing`, #16].
+    - Do: play a swung style at 120 BPM and record output timestamps for 8 bars.
+    - Pass: off-beats land within ~2 ms of their grid position; no event is late by a scheduling period.
+19. **Auto-fill** [`test_auto_fill`].
+    - Do: tick Auto Fill; on Main A press B; on Main C press D; press a variation during a Fill and during the Intro; untick and press B.
+    - Pass: A->B plays Fill AA then Main B, C->D plays Fill CC then Main D, each on a bar line; a press during a Fill/Intro lands there without another fill or a cut; unticked = plain switch.
+20. **MIDI init failure is visible** [`test_coremidi_reinit`, #23].
+    - Do: `sudo killall -9 MIDIServer` (or keep the CPU saturated) and launch the app.
+    - Pass: if CoreMIDI refuses the client, the status line says "MIDI ... unavailable" in red (not "none"); Refresh re-attempts; after a restart MIDI works. Record whether Refresh alone recovered.
+21. **Arranger keyboard as the host's keyboard + module (e.g. Korg Pa5X).** No Pa5X-specific code exists; this checks the generic CoreMIDI path only.
+    - Do: connect by USB; record the source/destination endpoint names the app lists; select them; run items 1, 2, 5, 10, 11, 17.
+    - Pass: the endpoints appear and are selectable by name; the keyboard drives chords; the module/keyboard voices play; disconnect/reconnect as in 10–11. Record the exact endpoint names and the keyboard's local-control/MIDI settings used.
+
 ---
 
 ## Sign-off
-- [ ] All A/B/C items PASS on real hardware, build SHA recorded.
+- [ ] All A/B/C/D items PASS on real hardware, build SHA recorded.
 - [ ] No stuck note / crash / deadlock / callback loss / timing drift observed.
 - [ ] Only then: flip `hardware_validated:true` and mark the Mac reference host live-safe.
 
