@@ -35,6 +35,7 @@ int main(void) {
     CHECK("capabilities OK", aiarr_engine_capabilities(e, &caps) == AIARR_OK);
     CHECK("capabilities carry the contract version",
           caps.contractVersion == aiarr_contract_version());
+    CHECK("no suspend/resume entry point -> hasSuspendResume == 0", caps.hasSuspendResume == 0);
     CHECK("start OK", aiarr_engine_start(e) == AIARR_OK);
     CHECK("lifecycle Running", aiarr_engine_lifecycle_state(e) == AIARR_LIFECYCLE_RUNNING);
     CHECK("tempo OK", aiarr_engine_set_tempo(e, 100u) == AIARR_OK);

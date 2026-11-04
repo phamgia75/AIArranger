@@ -88,7 +88,7 @@ typedef struct AiArrCapabilities {
     int32_t  hasMidiOutput;
     int32_t  hasChordDetect;
     int32_t  hasSections;
-    int32_t  hasSuspendResume;
+    int32_t  hasSuspendResume;  /* 1 only when suspend/resume entry points exist (0 today) */
     int32_t  latencyTrace;
     uint32_t maxCommandQueue;
 } AiArrCapabilities;

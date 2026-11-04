@@ -26,7 +26,7 @@ namespace ai_arranger::session {
 // silently); MINOR appends enumerators/fields with defaults; PATCH is docs/impl.
 inline constexpr uint32_t kEngineContractVersionMajor = 1;
 inline constexpr uint32_t kEngineContractVersionMinor = 0;
-inline constexpr uint32_t kEngineContractVersionPatch = 2;  // 1.0.2: command results report acceptance (#18)
+inline constexpr uint32_t kEngineContractVersionPatch = 3;  // 1.0.3: hasSuspendResume reports a callable API (#19)
 inline constexpr uint32_t kEngineContractVersion =
     (kEngineContractVersionMajor << 16) |
     (kEngineContractVersionMinor << 8)  |
@@ -76,7 +76,9 @@ struct EngineCapabilities {
     bool     hasMidiOutput  = false;  // a MIDI output provider is wired
     bool     hasChordDetect = true;   // fingered/one-finger chord scan available
     bool     hasSections    = true;   // intro/main/fill/break/ending transitions
-    bool     hasSuspendResume = true; // lifecycle suspend/resume is modelled
+    // Callable suspend()/resume(). False: the lifecycle state machine models
+    // them, but no facade or C entry point exists until Gate 5 binds it (#19).
+    bool     hasSuspendResume = false;
     bool     latencyTrace   = false;  // AIARR_LATENCY_TRACE compiled in
     uint32_t maxCommandQueue = 256;   // command (MPSC) queue depth, exact
 };
