@@ -92,7 +92,7 @@ endif()
 
 # Tests that exercise the Apple platform layer directly (CoreMidiOut /
 # CoreMidiOutputProvider / mach host time). Built and run on Apple only.
-set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider)
+set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit)
 
 # ── Importer library (vendor SFF1/SFF2 isolation) ─────────────────────
 file(GLOB_RECURSE IMPORTER_SFF1_SRC
