@@ -41,6 +41,7 @@ private:
                      introBtn_{"Intro"}, varA_{"A"}, varB_{"B"}, varC_{"C"},
                      varD_{"D"}, fillBtn_{"Fill"}, breakBtn_{"Break"},
                      endingBtn_{"Ending"}, panicBtn_{"PANIC"};
+    juce::ToggleButton autoFillBtn_{"Auto Fill"};   // spec §5.3
 
     std::unique_ptr<juce::FileChooser> chooser_;
 

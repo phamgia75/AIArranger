@@ -95,6 +95,9 @@ LiveHostComponent::LiveHostComponent() {
     breakBtn_.onClick  = [this] { driver_.facade().breakSection(); };
     endingBtn_.onClick = [this] { driver_.facade().ending(); };
     panicBtn_.onClick  = [this] { driver_.facade().panic(); };
+    autoFillBtn_.setToggleState(driver_.facade().autoFill(), juce::dontSendNotification);
+    autoFillBtn_.onClick = [this] { driver_.facade().setAutoFill(autoFillBtn_.getToggleState()); };
+    addAndMakeVisible(autoFillBtn_);
     refreshBtn_.onClick = [this] { driver_.retryMidi(); refreshDevices(); };   // #23
     loadBtn_.onClick    = [this] { loadStyleDialog(); };
 
@@ -256,6 +259,8 @@ void LiveHostComponent::resized() {
     breakBtn_.setBounds(sectionRow.removeFromLeft(64));
     sectionRow.removeFromLeft(6);
     endingBtn_.setBounds(sectionRow.removeFromLeft(72));
+    sectionRow.removeFromLeft(10);
+    autoFillBtn_.setBounds(sectionRow.removeFromLeft(100));
     area.removeFromTop(10);
 
     auto bottom = area.removeFromTop(34);

@@ -55,7 +55,15 @@ public:
     void fill() noexcept;
     void breakSection() noexcept;
     void ending() noexcept;
+    // Variation change (Main X -> Main Y), bar-quantized. With auto-fill on
+    // (arranger-engine-spec §5.3): from a playing Main X it plays X's Fill (or
+    // the nearest fill) and lands on Y; while an Intro / Fill / Break plays it
+    // changes where that section lands instead of cutting it. Otherwise (auto-
+    // fill off, same Main, no fill in the style, Ending) a plain switch.
     void switchSection(int index) noexcept;
+    // Auto-fill setting: any thread (atomic), kept across Stop/Start.
+    void setAutoFill(bool on) noexcept { auto_fill_.store(on, std::memory_order_relaxed); }
+    bool autoFill() const noexcept { return auto_fill_.load(std::memory_order_relaxed); }
 
     // ── Chord ──────────────────────────────────────────────────────
     void setChord(Chord chord) noexcept;
@@ -104,6 +112,10 @@ private:
     // Main section that Intro / Fill / Break hand back to when they end
     // (the most recently played Main; -1 = first Main in the style).
     int return_main_{-1};
+    // Main a running Intro / Fill / Break lands on instead (auto-fill target);
+    // -1 = return_main_. Engine thread; cleared on landing and on start/stop.
+    int landing_main_{-1};
+    std::atomic<bool> auto_fill_{false};
 
     // End-of-section handling (arranger-engine-spec §5). Returns false if the
     // transport stopped (Ending finished).

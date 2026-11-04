@@ -155,6 +155,10 @@ Commands (any thread, lock-free): `transportStart/Stop`, `syncStart`, `intro`,
 `fill`, `breakSection`, `ending`, `panic`, `setVariation(0..3)`, `setTempo(20..400)`.
 Each returns `bool`: accepted (queued) or not — a full command queue (also
 recorded as `QueueFull`) or an out-of-range argument (#18, contract 1.0.2).
+Setting (any thread, atomic, kept across stop/start): `setAutoFill(bool)` /
+`autoFill()` — arranger-engine-spec §5.3. With it on, a variation change from
+a playing Main X plays X's fill (or the nearest one) and lands on the new Main;
+pressed during an Intro / Fill / Break it changes where that section lands.
 Devices: `selectMidiInput/Output`. Lifecycle (owner thread): `start`, `stop`,
 `loadStyle` (returns `EngineError`: `Ok`, or `InvalidState` while playing). Engine step: `tick(numSamples)`. Reads (any thread): `snapshot`,
 `capabilities`, `lifecycleState`, `lastError` / `clearError`, `contractVersion`.

@@ -133,7 +133,9 @@ never pushed. **Ask the owner for it; do not assume it.**
 - **SFF2**: detection only. The corpus is 4 styles; no compatibility percentage is proven.
 - **Imported styles**: the Intro/Ending **B/C variants** are imported when the file marks them; one
   corpus file (C_WHISPER) has about 9 unmarked bars after "Fill In BA" that end up in the Break.
-  Auto-fill on variation change (spec §5.3 `autoFill`) is not implemented.
+  Auto-fill on variation change (spec §5.3 `autoFill`) is implemented in the engine, facade and
+  macOS host (not in the C ABI: no bridge work before Gate 3). Fills stay bar-quantized; the
+  spec's "start on the beat when the fill is longer than the rest of the bar" is not done.
 
 ### 5. Known issues
 
@@ -181,7 +183,7 @@ Apple-only tests not built on Linux: `test_coremidi_out`, `test_latency_stabilit
    `cmake -B build -DBUILD_MACOS_APP=ON && cmake --build build --target aiarranger-macos`.
    Fix anything in the Apple-touching files listed in §5.
 3. Gate 3 hardware checklist with a real keyboard and module (A.1, 44 first).
-4. Auto-fill on variation change (spec §5.3): when enabled, Main X→Y inserts the Fill of X, then
+4. ~~Auto-fill~~ — **done 2026-11-04** (`tests/engine/test_auto_fill.cpp`). Auto-fill on variation change (spec §5.3): when enabled, Main X→Y inserts the Fill of X, then
    commits Y. The hooks are `SectionSequencer::queueFill` (now picks the playing Main's fill) and
    `StylePlayer::handleSectionEnd` (fill → return target). Add the target to the fill return, test
    headless.
