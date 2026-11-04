@@ -211,6 +211,9 @@ add_test(NAME test_bridge_c_consumer COMMAND test_bridge_c_consumer)
 # Run them serially so they never compete with the rest of the suite.
 if(APPLE)
     set_tests_properties(${APPLE_ONLY_TESTS} PROPERTIES RUN_SERIAL TRUE)
+    # Re-init test: exit 77 = first CoreMIDI client creation failed (environment,
+    # #21) -> reported as Skipped; first init itself is covered by the other tests.
+    set_tests_properties(test_coremidi_reinit PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # ── Gate 3 latency report tool (Python, stdlib only) ──────────────────
