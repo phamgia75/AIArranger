@@ -95,7 +95,7 @@ LiveHostComponent::LiveHostComponent() {
     breakBtn_.onClick  = [this] { driver_.facade().breakSection(); };
     endingBtn_.onClick = [this] { driver_.facade().ending(); };
     panicBtn_.onClick  = [this] { driver_.facade().panic(); };
-    refreshBtn_.onClick = [this] { refreshDevices(); };
+    refreshBtn_.onClick = [this] { driver_.retryMidi(); refreshDevices(); };   // #23
     loadBtn_.onClick    = [this] { loadStyleDialog(); };
 
     panicBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
@@ -176,15 +176,25 @@ void LiveHostComponent::timerCallback() {
 
     // Connection / error status. Transport must NOT stop on device loss; we only
     // surface the state (DOCTRINE 06).
-    juce::String status;
-    status << "In: "  << (s.midiInLive  ? "connected" : "none")
-           << "   Out: " << (s.midiOutLive ? "connected" : "none")
-           << "   rx: " << juce::String(s.receivedMessages)
-           << "   tx: " << juce::String(s.dispatchedNotes);
-    statusLabel_.setText(status, juce::dontSendNotification);
-    statusLabel_.setColour(juce::Label::textColourId,
-                           s.midiOutLive ? juce::Colours::lightgreen
-                                         : juce::Colours::orange);
+    // A failed CoreMIDI init is not "no device": say so, and how to recover (#23).
+    if (!driver_.midiReady()) {
+        juce::String which = !driver_.midiInReady() && !driver_.midiOutReady() ? "in+out"
+                           : !driver_.midiInReady() ? "in" : "out";
+        statusLabel_.setText("MIDI " + which + " unavailable: CoreMIDI init failed. "
+                             "Press Refresh to retry; if it persists, restart the app.",
+                             juce::dontSendNotification);
+        statusLabel_.setColour(juce::Label::textColourId, juce::Colours::red);
+    } else {
+        juce::String status;
+        status << "In: "  << (s.midiInLive  ? "connected" : "none")
+               << "   Out: " << (s.midiOutLive ? "connected" : "none")
+               << "   rx: " << juce::String(s.receivedMessages)
+               << "   tx: " << juce::String(s.dispatchedNotes);
+        statusLabel_.setText(status, juce::dontSendNotification);
+        statusLabel_.setColour(juce::Label::textColourId,
+                               s.midiOutLive ? juce::Colours::lightgreen
+                                             : juce::Colours::orange);
+    }
 
     startBtn_.setColour(juce::TextButton::buttonColourId,
                         s.playing ? juce::Colours::darkgreen

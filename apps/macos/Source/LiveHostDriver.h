@@ -33,8 +33,7 @@ public:
 
     void start() {
         if (running_) return;
-        midi_in_.initialize("AI Arranger");
-        midi_out_.initialize("AI Arranger");
+        initMidi();                              // a failure is surfaced, not fatal (#23)
         facade_.setChordScanMode(&detector_);   // fingered chord detection by default
         facade_.start();                         // boots engine + wires input sink
         startTimer(1);                           // ~1 ms engine tick (MIDI only, no DSP)
@@ -105,6 +104,23 @@ public:
         // transport left stopped; tick restarts via guard.
     }
 
+    // Re-attempt a failed CoreMIDI init (#23) — manual (Refresh), never a loop.
+    // Each side's initialize() is a no-op once it has succeeded. The tick thread
+    // is quiesced while the output starts its dispatch thread under the engine.
+    // Returns midiReady(). In #21's measurements a process whose client creation
+    // failed did not recover in-process, so the UI also says to restart.
+    bool retryMidi() {
+        if (midiReady()) return true;
+        if (!running_) { initMidi(); return midiReady(); }
+        stopTimer();
+        struct TickGuard { LiveHostDriver* d; ~TickGuard() { d->restartTick(); } } guard{this};
+        initMidi();
+        return midiReady();
+    }
+    bool midiInReady()  const noexcept { return midi_in_ok_; }
+    bool midiOutReady() const noexcept { return midi_out_ok_; }
+    bool midiReady()    const noexcept { return midi_in_ok_ && midi_out_ok_; }
+
     // ── Accessors for the UI ──────────────────────────────────────────
     // Commands are posted lock-free; the snapshot is read through the facade as a
     // thread-safe atomic; enumeration is read straight off the platform adapters.
@@ -116,6 +132,11 @@ public:
 private:
     void hiResTimerCallback() override { facade_.tick(48 /* ~1 ms @ 48 kHz */); }
 
+    void initMidi() {
+        midi_in_ok_  = midi_in_.initialize("AI Arranger");
+        midi_out_ok_ = midi_out_.initialize("AI Arranger");
+    }
+
     // Restart the engine tick (member access to the protected base method, so the
     // RAII TickGuard in reloadStyle() can re-arm it on any exit path).
     void restartTick() noexcept { startTimer(1); }
@@ -126,6 +147,8 @@ private:
     chord::FingeredDetector      detector_;
     session::LiveEngineFacade    facade_;
     bool                         running_{false};
+    bool                         midi_in_ok_{false};    // message thread only
+    bool                         midi_out_ok_{false};
 };
 
 } // namespace ai_arranger::app
