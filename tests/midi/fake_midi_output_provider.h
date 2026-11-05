@@ -34,6 +34,11 @@ struct FakeMidiOutputProvider : IMidiOutputProvider {
         if (index < 0 || index >= (int)devices.size()) return false;
         selected_ = index; live_ = true; drop_all_ = false; return true;
     }
+    bool selectByUid(int64_t uid) override {
+        for (int i = 0; uid != 0 && i < (int)devices.size(); ++i)
+            if (devices[i].uid == uid) return select(i);
+        return false;
+    }
     int  selected() const override { return selected_; }
     bool hasLiveDestination() const override { return live_; }
     bool send(const uasf::MidiEvent& ev) override {

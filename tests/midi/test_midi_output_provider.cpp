@@ -4,6 +4,7 @@
 #include "midi/coremidi/coremidi_output_provider.h"
 #include "engine/uasf/types.h"
 #include <cstdio>
+#include <cstdlib>
 
 using namespace ai_arranger;
 using namespace ai_arranger::midi;
@@ -19,6 +20,7 @@ static uasf::MidiEvent noteOn(uint8_t n) {
 }
 
 int main() {
+    setenv("AIARR_MIDI_HW_TX", "0", 1);   // never drive real hardware, even outside CTest
     std::printf("Test: Gate 14C Task A — MIDI output provider\n");
 
     // ── Fake provider behaviour (the CI workhorse) ──

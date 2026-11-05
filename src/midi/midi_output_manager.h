@@ -8,7 +8,8 @@
 
 // ── MIDI output manager + state machine (Gate 14C Task B) ────────────
 //
-// Enumerates output destinations, selects one (remembered by name for hot-plug),
+// Enumerates output destinations, selects one (remembered by device identity
+// for hot-plug when the provider reports one, else by name),
 // and tracks a connection state machine:
 //   NoDevice → Selected → Connected → Disconnected → (Reconnecting) → Connected
 // Provider-abstracted → CI-testable with a synthetic provider. No arranger logic.
@@ -47,6 +48,7 @@ private:
     IMidiOutputProvider&           provider_;
     std::vector<MidiOutDeviceInfo>  devices_;
     std::string                     selected_name_;   // "" = none
+    int64_t                         selected_uid_ = 0; // identity when the provider has one
     int                             selected_index_ = -1;
     OutputState                     state_ = OutputState::NoDevice;
     std::function<void()>           on_changed_;

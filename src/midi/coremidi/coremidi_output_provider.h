@@ -4,6 +4,8 @@
 #include "midi/midi_output_provider.h"
 #include "engine/midi/coremidi_out.h"
 
+#include <cstdint>
+
 // CoreMIDI-backed provider (Gate 14C). Thin wrapper over the Gate 9 CoreMidiOut
 // — no behaviour change to that class; this only adapts it to the
 // IMidiOutputProvider interface. Real-device output; headless-safe (no-op with
@@ -21,10 +23,13 @@ public:
     std::vector<MidiOutDeviceInfo> enumerate() override {
         std::vector<MidiOutDeviceInfo> v;
         for (const auto& d : out_.enumerateDestinations())
-            v.push_back({d.index, d.name});
+            v.push_back({d.index, d.name, d.uid});
         return v;
     }
     bool select(int index) override { return out_.selectDestination(index); }
+    bool selectByUid(int64_t uid) override {
+        return uid >= INT32_MIN && uid <= INT32_MAX && out_.selectDestinationByUid(static_cast<int32_t>(uid));
+    }
     int  selected() const override { return out_.selectedDestination(); }
     bool hasLiveDestination() const override { return out_.hasLiveDestination(); }
     bool send(const uasf::MidiEvent& ev) override { return out_.send(ev); }

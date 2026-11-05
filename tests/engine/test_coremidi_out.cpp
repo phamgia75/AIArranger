@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 using namespace ai_arranger::midi;
@@ -22,6 +23,7 @@ static MidiEvent ev(MidiEventType t, uint8_t ch, uint8_t d1, uint8_t d2) {
 }
 
 int main() {
+    setenv("AIARR_MIDI_HW_TX", "0", 1);   // never drive real hardware, even outside CTest
     std::printf("Test: CoreMidiOut\n");
 
     // ── Pure conversion (no hardware) ────────────────────────────────
@@ -67,7 +69,7 @@ int main() {
     }
     // Wait for the dispatch thread to drain (generous budget for a cold-start
     // CoreMIDI client + thread spin-up, so the test is not timing-flaky).
-    for (int i = 0; i < 1000 && out.dispatchedCount() < (uint64_t)kSendCount; ++i) {
+    for (int i = 0; i < 1000 && out.droppedCount() < (uint64_t)kSendCount; ++i) {   // dropped is counted last
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     TEST("All sent events dispatched", out.dispatchedCount() >= (uint64_t)kSendCount);

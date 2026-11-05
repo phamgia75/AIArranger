@@ -25,3 +25,9 @@ foreach(test_file ${KORG_VALIDATION_TEST_SRC})
         KORG_REPO_DIR="${CMAKE_SOURCE_DIR}")
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+# Proves the top-level hardware-transmission guard (AIARR_MIDI_HW_TX=0) reaches
+# tests registered in a subdirectory.
+if(UNIX)
+    add_test(NAME test_midi_hw_guard_env COMMAND /bin/sh -c [=[test "$AIARR_MIDI_HW_TX" = 0]=])
+endif()

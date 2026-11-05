@@ -2,6 +2,8 @@
 #include "engine/trace/latency_trace.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 // MIDIPacketList / MIDIPacketListAdd are deprecated in favour of the newer
@@ -40,9 +42,18 @@ size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept {
 
 namespace {
 
-std::mutex& nameMutex() {
+// Serialises selection changes (control thread) against hot-plug re-resolution
+// (dispatch thread), so a deselect can never be undone by an in-flight resolve.
+// Neither thread is the audio thread.
+std::mutex& selectionMutex() {
     static std::mutex m;
     return m;
+}
+
+int32_t endpointUniqueId(MIDIEndpointRef ep) {
+    SInt32 uid = 0;
+    if (ep == 0 || MIDIObjectGetIntegerProperty(ep, kMIDIPropertyUniqueID, &uid) != noErr) return 0;
+    return uid;
 }
 
 std::string endpointDisplayName(MIDIEndpointRef ep) {
@@ -68,6 +79,10 @@ CoreMidiOut::~CoreMidiOut() {
 bool CoreMidiOut::initialize(const char* clientName) noexcept {
     if (initialized_.load(std::memory_order_acquire)) return true;
 
+    // Hardware-transmission guard, read once here (never on the realtime path).
+    const char* tx = std::getenv("AIARR_MIDI_HW_TX");
+    hw_tx_allowed_ = !(tx && std::strcmp(tx, "0") == 0);
+
     CFStringRef cfClient = CFStringCreateWithCString(
         kCFAllocatorDefault, clientName ? clientName : "AI Arranger", kCFStringEncodingUTF8);
     OSStatus st = MIDIClientCreate(cfClient, &CoreMidiOut::notifyProc, this, &client_);
@@ -86,10 +101,8 @@ bool CoreMidiOut::initialize(const char* clientName) noexcept {
         return false;
     }
 
-    // Auto-select the first destination if one exists (headless CI → none).
-    if (destinationCount() > 0) {
-        selectDestination(0);
-    }
+    // Fail-closed: no destination is selected here, even if devices exist. The
+    // caller must pick one explicitly (selectDestination) before anything is sent.
 
     running_.store(true, std::memory_order_release);
     dispatch_thread_ = std::thread([this]{ dispatchLoop(); });
@@ -103,11 +116,20 @@ void CoreMidiOut::shutdown() noexcept {
         return;
     }
     running_.store(false, std::memory_order_release);
-    if (dispatch_thread_.joinable()) dispatch_thread_.join();
+    if (dispatch_thread_.joinable()) dispatch_thread_.join();   // drains the queue
+
+    // Deterministic cleanup: silence the explicitly selected device after the
+    // final drain, so a Note On without its Note Off never keeps sounding.
+    sendAllSoundOff(endpoint_.load(std::memory_order_acquire));
 
     if (out_port_) { MIDIPortDispose(out_port_); out_port_ = 0; }
     if (client_)   { MIDIClientDispose(client_);  client_ = 0; }
     endpoint_.store(0, std::memory_order_release);
+    // Forget the selection: a later initialize() must start with no destination,
+    // not let the hot-plug probe silently reconnect the old device.
+    std::lock_guard<std::mutex> lk(selectionMutex());
+    selected_index_.store(-1, std::memory_order_release);
+    selected_uid_.store(0, std::memory_order_release);
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -127,7 +149,7 @@ std::vector<MidiDestinationInfo> CoreMidiOut::enumerateDestinations() const noex
     out.reserve(n);
     for (ItemCount i = 0; i < n; ++i) {
         MIDIEndpointRef ep = MIDIGetDestination(i);
-        out.push_back({static_cast<int>(i), endpointDisplayName(ep)});
+        out.push_back({static_cast<int>(i), endpointDisplayName(ep), endpointUniqueId(ep)});
     }
     return out;
 }
@@ -138,12 +160,10 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
     // sent to the newly selected device. Validate first so a failed switch leaves
     // both the old device and the current selection untouched.
     if (index < 0) {
+        std::lock_guard<std::mutex> lk(selectionMutex());
         MIDIEndpointRef old = endpoint_.exchange(0, std::memory_order_acq_rel);
         if (old != 0) sendAllSoundOff(old);
-        {
-            std::lock_guard<std::mutex> lk(nameMutex());
-            selected_name_.clear();
-        }
+        selected_uid_.store(0, std::memory_order_release);
         selected_index_.store(-1, std::memory_order_release);
         return true;
     }
@@ -155,13 +175,41 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
     // rather than repointing to endpoint 0 (which would silence the old device and
     // leave a half-switched state with selected_index_ set but no live endpoint).
     if (ep == 0) return false;
-    std::string name = endpointDisplayName(ep);
+    return selectEndpoint(ep, index);
+}
+
+bool CoreMidiOut::selectDestinationByName(const std::string& name) noexcept {
+    // One pass over the live list; the endpoint that matched is the one selected
+    // (no re-query by index), so a hot-plug between lookup and selection cannot
+    // redirect output to a different device.
+    MIDIEndpointRef match = 0;
+    int matchIndex = -1, matches = 0;
+    const ItemCount n = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < n; ++i) {
+        MIDIEndpointRef ep = MIDIGetDestination(i);
+        if (ep != 0 && endpointDisplayName(ep) == name) { match = ep; matchIndex = static_cast<int>(i); ++matches; }
+    }
+    if (name.empty() || matches != 1) return false;   // missing or ambiguous: select nothing
+    return selectEndpoint(match, matchIndex);
+}
+
+bool CoreMidiOut::selectDestinationByUid(int32_t uid) noexcept {
+    if (uid == 0) return false;
+    const ItemCount n = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < n; ++i) {
+        MIDIEndpointRef ep = MIDIGetDestination(i);
+        if (endpointUniqueId(ep) == uid) return selectEndpoint(ep, static_cast<int>(i));
+    }
+    return false;
+}
+
+bool CoreMidiOut::selectEndpoint(MIDIEndpointRef ep, int index) noexcept {
+    const int32_t uid = endpointUniqueId(ep);
+    if (uid == 0) return false;   // cannot be re-identified on hot-plug: refuse (fail closed)
+    std::lock_guard<std::mutex> lk(selectionMutex());
     MIDIEndpointRef old = endpoint_.load(std::memory_order_acquire);
     if (old != 0 && old != ep) sendAllSoundOff(old);
-    {
-        std::lock_guard<std::mutex> lk(nameMutex());
-        selected_name_ = name;
-    }
+    selected_uid_.store(uid, std::memory_order_release);
     selected_index_.store(index, std::memory_order_release);
     endpoint_.store(ep, std::memory_order_release);
     // Non-RT context: record the active output endpoint id (0 = none). +1 so a
@@ -172,6 +220,10 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
 
 void CoreMidiOut::sendAllSoundOff(MIDIEndpointRef ep) noexcept {
     if (ep == 0 || out_port_ == 0) return;
+    if (!hw_tx_allowed_) {   // guard: cleanup never reaches an unauthorized endpoint
+        blocked_count_.fetch_add(32, std::memory_order_relaxed);
+        return;
+    }
     for (uint8_t ch = 0; ch < 16; ++ch) {
         const uint8_t ctrls[2] = {123 /*All Notes Off*/, 120 /*All Sound Off*/};
         for (uint8_t cc : ctrls) {
@@ -217,26 +269,24 @@ uint64_t CoreMidiOut::sentCount() const noexcept { return sent_count_.load(std::
 uint64_t CoreMidiOut::dispatchedCount() const noexcept { return dispatched_count_.load(std::memory_order_acquire); }
 uint64_t CoreMidiOut::droppedCount() const noexcept { return dropped_count_.load(std::memory_order_acquire); }
 uint64_t CoreMidiOut::reconnectCount() const noexcept { return reconnect_count_.load(std::memory_order_acquire); }
+uint64_t CoreMidiOut::blockedCount() const noexcept { return blocked_count_.load(std::memory_order_acquire); }
 
 // ── Hotplug re-resolution (dispatch / control thread) ────────────────
 
-void CoreMidiOut::resolveEndpointByName() noexcept {
-    int idx = selected_index_.load(std::memory_order_acquire);
-    if (idx < 0) {
+void CoreMidiOut::resolveSelectedEndpoint() noexcept {
+    // Re-resolve by unique ID only: the exact device that was selected, or none.
+    std::lock_guard<std::mutex> lk(selectionMutex());
+    const int32_t want = selected_uid_.load(std::memory_order_acquire);
+    if (selected_index_.load(std::memory_order_acquire) < 0 || want == 0) {
         endpoint_.store(0, std::memory_order_release);
         return;
-    }
-    std::string want;
-    {
-        std::lock_guard<std::mutex> lk(nameMutex());
-        want = selected_name_;
     }
 
     MIDIEndpointRef found = 0;
     ItemCount n = MIDIGetNumberOfDestinations();
     for (ItemCount i = 0; i < n; ++i) {
         MIDIEndpointRef ep = MIDIGetDestination(i);
-        if (!want.empty() && endpointDisplayName(ep) == want) {
+        if (endpointUniqueId(ep) == want) {
             found = ep;
             selected_index_.store(static_cast<int>(i), std::memory_order_release);
             break;
@@ -278,7 +328,7 @@ void CoreMidiOut::dispatchLoop() noexcept {
             endpoint_.load(std::memory_order_acquire) == 0) {
             if (++idleTicks >= kProbeEvery) { wantResolve = true; idleTicks = 0; }
         }
-        if (wantResolve) resolveEndpointByName();
+        if (wantResolve) resolveSelectedEndpoint();
 
         uasf::MidiEvent ev;
         bool any = false;
@@ -299,6 +349,11 @@ void CoreMidiOut::dispatchOne(const uasf::MidiEvent& ev) noexcept {
 
     if (dispatch_tap_) dispatch_tap_(ev);
 
+    // Hold the selection lock from reading the endpoint until MIDISend returns:
+    // a deselect/switch (which silences the old device under the same lock) is
+    // then strictly before or after this send, so an in-flight Note On can
+    // never reach the old device after its cleanup. Dispatch thread, not RT.
+    std::lock_guard<std::mutex> lk(selectionMutex());
     MIDIEndpointRef ep = endpoint_.load(std::memory_order_acquire);
     if (ep == 0) {
         // Graceful no-op: nowhere to send (headless / disconnected).
@@ -309,6 +364,11 @@ void CoreMidiOut::dispatchOne(const uasf::MidiEvent& ev) noexcept {
     uint8_t bytes[3];
     size_t nbytes = midiEventToBytes(ev, bytes);
     if (nbytes == 0) return;
+
+    if (!hw_tx_allowed_) {   // guard at the MIDISend boundary
+        blocked_count_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
     uint8_t listBuf[256];
     MIDIPacketList* pktList = reinterpret_cast<MIDIPacketList*>(listBuf);
