@@ -121,9 +121,14 @@ uint8_t transpose(uint8_t note, Chord target,
     }
 
     // ── NTR root handling ────────────────────────────────────────────
-    const int rootDelta = (ntr == NtrRule::RootFixed)
-        ? 0
-        : (static_cast<int>(target.root) - static_cast<int>(srcRootMidi));
+    // Only the root's pitch class transposes (up 0..11 from the source root): the
+    // detectors report the lowest played note, so F2 and F4 are the same chord
+    // and must not move the pattern by octaves.
+    int rootDelta = 0;
+    if (ntr != NtrRule::RootFixed) {
+        rootDelta = (static_cast<int>(target.root) - static_cast<int>(srcRootMidi)) % 12;
+        if (rootDelta < 0) rootDelta += 12;
+    }
 
     int result = static_cast<int>(note) + rootDelta + (dstRel - rel);
 

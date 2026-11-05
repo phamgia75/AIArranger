@@ -29,6 +29,7 @@
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/style_player.h"
 #include "engine/arranger/chord_input.h"
+#include <algorithm>
 #include "engine/realtime/clock.h"
 #include "engine/midi/scheduler.h"
 #include "engine/midi/panic.h"
@@ -81,6 +82,7 @@ struct Captured {
     std::set<int> harmonicChannels;     // note-event channels that are NOT drums
     uint64_t noteStreamHash = 1469598103934665603ull;  // FNV-1a over every note
     uint64_t harmonicHash   = 1469598103934665603ull;  // FNV-1a over pitched notes
+    int bassMin = 128, bassMax = -1;    // note-on range on Bass-role channels
 };
 
 static void fnvMix(uint64_t& h, uint64_t v) {
@@ -113,6 +115,10 @@ static std::set<int> drumChannels(const uasf::StyleDefinition& s) {
 static Captured playAndCapture(const uasf::StyleDefinition& style,
                                const arranger::Chord& chord) {
     const std::set<int> drums = drumChannels(style);
+    std::set<int> bass;
+    for (const auto& sec : style.sections)
+        for (const auto& t : sec.tracks)
+            if (t.role == uasf::TrackRole::Bass) bass.insert(t.midi_channel);
     Captured cap;
 
     realtime::RealtimeClock clk;
@@ -135,6 +141,10 @@ static Captured playAndCapture(const uasf::StyleDefinition& style,
                                     (isOn ? 1u : 0u);
             fnvMix(cap.noteStreamHash, packed);
             if (!isDrum) fnvMix(cap.harmonicHash, packed);
+            if (isOn && bass.count(e.channel)) {
+                cap.bassMin = std::min<int>(cap.bassMin, e.data1);
+                cap.bassMax = std::max<int>(cap.bassMax, e.data1);
+            }
             if (isOn)  { ++cap.noteOn;  ++cap.balance; }
             else       { ++cap.noteOff; --cap.balance; }
         } else if (e.type == uasf::MidiEventType::ControlChange) {
@@ -233,6 +243,19 @@ static void runFixture(const std::string& label, const std::string& needle) {
     TEST((label + ": chord change keeps notes balanced (no stuck notes)").c_str(),
          g.balance == 0 && g.noteOn == g.noteOff);
 
+    // ── The chord's octave never moves the pattern (Pa5X 2026-11-05) ──
+    // A left-hand F2 and an F4 are the same chord: identical output, and the bass
+    // stays in its recorded register instead of dropping ~1.5 octaves.
+    const Captured f2 = playAndCapture(mr.style, {arranger::ChordType::Major, 41, 0, 0});
+    const Captured f4 = playAndCapture(mr.style, {arranger::ChordType::Major, 65, 0, 0});
+    TEST((label + ": F2 and F4 chords give an identical note stream").c_str(),
+         f2.noteStreamHash == f4.noteStreamHash && f2.noteOn == f4.noteOn);
+    if (c.bassMax >= 0)
+        TEST((label + ": bass over F2 stays within C-chord bass range +0..11").c_str(),
+             f2.bassMin >= c.bassMin - 2 && f2.bassMax <= c.bassMax + 11);
+
+    std::printf("  [bass range] C:%d..%d F2:%d..%d F4:%d..%d\n", c.bassMin, c.bassMax,
+                f2.bassMin, f2.bassMax, f4.bassMin, f4.bassMax);
     std::printf("  [counts] events=%u res=%u notes=%ld | onC=%ld ccC=%ld othC=%ld ch=%zu harmCh=%zu\n",
                 pr.parsed_events, readerRes, noteEvents,
                 c.noteOn, c.cc, c.other, c.channels.size(), c.harmonicChannels.size());

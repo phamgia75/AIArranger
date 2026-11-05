@@ -83,6 +83,53 @@ int main() {
     TEST("High note stays in MIDI range", hi <= 127);
     TEST("Low note stays in MIDI range", lo <= 127); // uint8_t, just guard the fold
 
+    // ── The chord root's octave never transposes the pattern (Pa5X 2026-11-05) ──
+    // Detectors report the lowest played MIDI note as the root, so a left-hand F2
+    // (41) and an F4 (65) are the same chord. Before the fix F2 shifted the whole
+    // pattern down 19 semitones (bass C2 -> F0).
+    TEST_EQ("Bass C2 over F2 chord -> F2 (41), same as over F4",
+            transpose(bassRoot, maj(41), NtrRule::RootTransposition, NttMode::Bass), 41);
+    TEST_EQ("Chord E4 over F2 chord -> A4 (69), same as over F4",
+            transpose(64, maj(41), NtrRule::RootTransposition, NttMode::Chord),
+            transpose(64, maj(65), NtrRule::RootTransposition, NttMode::Chord));
+    {
+        const ChordType types[] = {ChordType::Major, ChordType::Minor, ChordType::Dom7,
+                                   ChordType::Min7, ChordType::Maj7, ChordType::Dim, ChordType::Dim7};
+        const NttMode modes[] = {NttMode::Bass, NttMode::Chord, NttMode::Melody, NttMode::Guitar,
+                                 NttMode::Bypass, NttMode::NaturalMinor, NttMode::Dorian};
+        const NtrRule rules[] = {NtrRule::RootTransposition, NtrRule::RootFixed, NtrRule::Guitar, NtrRule::Bypass};
+        bool octaveFree = true, inRange = true, rootFixedStill = true;
+        for (int pc = 0; pc < 12; ++pc)
+            for (ChordType t : types)
+                for (NttMode m : modes)
+                    for (NtrRule r : rules)
+                        for (int note = 0; note < 128; ++note) {
+                            const Chord ref{t, static_cast<uint8_t>(60 + pc), 0, 0};
+                            const uint8_t want = transpose(static_cast<uint8_t>(note), ref, r, m);
+                            if (want > 127) inRange = false;
+                            for (int root = pc; root < 128; root += 12) {
+                                const Chord c{t, static_cast<uint8_t>(root), 0, 0};
+                                const uint8_t got = transpose(static_cast<uint8_t>(note), c, r, m);
+                                if (got != want) octaveFree = false;
+                                if (got > 127) inRange = false;
+                            }
+                            // RootFixed: never moves more than the NTT remap (< 1 octave).
+                            if (r == NtrRule::RootFixed && (want > note + 11 || want + 11 < note)) rootFixedStill = false;
+                        }
+        TEST("all 12 roots x 7 chord types x NTT modes x NTR rules: root octave 0..10 gives identical output",
+             octaveFree);
+        TEST("every output is a valid MIDI note (0..127)", inRange);
+        TEST("RootFixed never shifts by the root", rootFixedStill);
+
+        // Root transposition goes up 0..11 semitones from the C reference (existing
+        // contract), regardless of the octave the chord is played in.
+        bool upward = true;
+        for (int root = 0; root < 128; ++root)
+            if (transpose(bassRoot, maj(static_cast<uint8_t>(root)), NtrRule::RootTransposition, NttMode::Bass)
+                != bassRoot + root % 12) upward = false;
+        TEST("bass C2 over any major root (any octave) -> C2 + pitch class", upward);
+    }
+
     // ── Role -> default rule pairs ──
     NtrRule ntr; NttMode ntt;
     defaultRuleForRole(uasf::TrackRole::Bass, ntr, ntt);

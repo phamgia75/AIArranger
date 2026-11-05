@@ -29,7 +29,7 @@ using arranger::ChordType;
 
 // Note Transposition Rule — how the root is handled (UASF-neutral).
 enum class NtrRule : uint8_t {
-    RootTransposition = 0,  // shift by (targetRoot - sourceRoot); keep contour
+    RootTransposition = 0,  // shift up by the root pitch-class interval (0..11); keep contour
     RootFixed         = 1,  // no root shift; only the NTT remap applies
     Guitar            = 2,  // SFF2; v1 falls back to RootTransposition
     Fifth             = 3,  // root+5th rule; v1 falls back to RootTransposition
