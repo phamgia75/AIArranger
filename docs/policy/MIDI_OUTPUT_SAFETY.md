@@ -25,7 +25,7 @@ No SysEx, Bank Select or Program Change was sent, so no instrument setting was c
 - `CoreMidiOut::shutdown()` kept the remembered selection. After a re-`initialize()`, the hot-plug probe silently reconnected the old device by name.
 - Hot-plug re-resolution matched by display name. A different device with the same name could take over the output.
 
-`MidiOutputManager`, `LiveEngineFacade::selectMidiOutput` and the C ABI already worked on explicit selection. They are unchanged. The C ABI only reports `hasMidiOutput`, which means "a provider is wired".
+`LiveEngineFacade::selectMidiOutput` and the C ABI already worked on explicit selection, and are unchanged. `MidiOutputManager` already selected explicitly, but re-resolved by name. It now uses the device identity (see below). The C ABI only reports `hasMidiOutput`, which means "a provider is wired".
 
 ## Policy
 
