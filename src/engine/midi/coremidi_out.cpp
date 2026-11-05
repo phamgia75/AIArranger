@@ -170,7 +170,25 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
     // rather than repointing to endpoint 0 (which would silence the old device and
     // leave a half-switched state with selected_index_ set but no live endpoint).
     if (ep == 0) return false;
-    std::string name = endpointDisplayName(ep);
+    return selectEndpoint(ep, index, endpointDisplayName(ep));
+}
+
+bool CoreMidiOut::selectDestinationByName(const std::string& name) noexcept {
+    // One pass over the live list; the endpoint that matched is the one selected
+    // (no re-query by index), so a hot-plug between lookup and selection cannot
+    // redirect output to a different device.
+    MIDIEndpointRef match = 0;
+    int matchIndex = -1, matches = 0;
+    const ItemCount n = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < n; ++i) {
+        MIDIEndpointRef ep = MIDIGetDestination(i);
+        if (ep != 0 && endpointDisplayName(ep) == name) { match = ep; matchIndex = static_cast<int>(i); ++matches; }
+    }
+    if (name.empty() || matches != 1) return false;   // missing or ambiguous: select nothing
+    return selectEndpoint(match, matchIndex, name);
+}
+
+bool CoreMidiOut::selectEndpoint(MIDIEndpointRef ep, int index, const std::string& name) noexcept {
     MIDIEndpointRef old = endpoint_.load(std::memory_order_acquire);
     if (old != 0 && old != ep) sendAllSoundOff(old);
     {

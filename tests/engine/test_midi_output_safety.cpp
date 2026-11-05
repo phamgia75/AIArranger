@@ -119,6 +119,29 @@ int main() {
         TEST("guard blocks events at the MIDISend boundary", out.sentCount() == 0 && out.blockedCount() == 2);
         out.selectDestination(-1);   // would send CC123/CC120 x16 to the old endpoint
         TEST("guard blocks deselect cleanup", out.blockedCount() == 2 + 32);
+
+        // Selection by exact name: unique -> that endpoint; missing or ambiguous ->
+        // controlled failure, selection unchanged (never a fallback device).
+        const std::string dupName = "AIARR SAFETY DUP " + std::to_string(getpid());
+        CFStringRef dupCf = CFStringCreateWithCString(nullptr, dupName.c_str(), kCFStringEncodingUTF8);
+        Sink dup;
+        MIDIEndpointRef dupA = 0, dupB = 0;
+        MIDIDestinationCreate(client, dupCf, readProc, &dup, &dupA);
+        MIDIDestinationCreate(client, dupCf, readProc, &dup, &dupB);
+        CFRelease(dupCf);
+        indexOf(dupA); indexOf(dupB);
+        TEST("by name: missing name rejected, nothing selected",
+             !out.selectDestinationByName("AIARR NO SUCH DEVICE") && out.selectedDestination() == -1);
+        TEST("by name: ambiguous name rejected, nothing selected",
+             !out.selectDestinationByName(dupName) && out.selectedDestination() == -1);
+        TEST("by name: unique name selects that endpoint",
+             out.selectDestinationByName(uniq) && out.hasLiveDestination() &&
+             MIDIGetDestination(out.selectedDestination()) == sinkEp);
+        TEST("by name: failed lookup keeps the current selection",
+             !out.selectDestinationByName(dupName) && MIDIGetDestination(out.selectedDestination()) == sinkEp);
+        out.selectDestination(-1);
+        if (dupA) MIDIEndpointDispose(dupA);
+        if (dupB) MIDIEndpointDispose(dupB);
         out.shutdown();
         settle();
         TEST("selected sink received nothing while guarded", sink.count() == 0);

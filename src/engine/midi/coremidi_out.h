@@ -81,6 +81,10 @@ public:
     // Select destination by index; -1 selects "none". Remembers the name
     // for hotplug re-resolution. Returns false if index out of range.
     bool selectDestination(int index) noexcept;
+    // Select the one destination whose display name is exactly `name`. Fails
+    // (selection unchanged) if none or more than one matches. Race-free against
+    // hot-plug: the endpoint that matched is the one selected.
+    bool selectDestinationByName(const std::string& name) noexcept;
     [[nodiscard]] int  selectedDestination() const noexcept;
     [[nodiscard]] bool hasLiveDestination() const noexcept;
 
@@ -108,6 +112,7 @@ public:
     [[nodiscard]] bool hardwareTransmitAllowed() const noexcept { return hw_tx_allowed_; }
 
 private:
+    bool selectEndpoint(MIDIEndpointRef ep, int index, const std::string& name) noexcept;
     void dispatchLoop() noexcept;          // consumer thread body
     void dispatchOne(const uasf::MidiEvent& ev) noexcept; // send one event now
     // Directly send All-Notes-Off (CC123) + All-Sound-Off (CC120) on every channel

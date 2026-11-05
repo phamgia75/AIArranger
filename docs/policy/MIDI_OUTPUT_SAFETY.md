@@ -42,7 +42,9 @@ No SysEx, Bank Select or Program Change was sent, so no instrument setting was c
    - Input is routed only to chord detection and transport control (`routeMidiInput`). No input message is forwarded to an output.
    - `test_midi_input_no_thru` locks this in. On the Pa5X the keyboard and the sound engine are the same device, so an echo would double notes and could loop.
 6. **Tools select explicitly.**
-   - `korg-playback` takes `--dest "NAME"`, which must match exactly one destination, or interactive `[` / `]`.
+   - `korg-playback` takes `--dest "NAME"` or interactive `[` / `]`.
+   - `--dest` goes through `CoreMidiOut::selectDestinationByName()`. The name must match exactly one live destination, and the endpoint that matched is the one selected, in a single pass. A hot-plug between the lookup and the selection cannot redirect output to another device.
+   - A missing or ambiguous name fails and selects nothing.
    - With neither, it plays silently.
 
 ## Regression coverage
@@ -72,6 +74,7 @@ To check that the test catches the bug, the auto-select was put back temporarily
   - Production code transmits to an explicitly selected destination unless `AIARR_MIDI_HW_TX=0`.
   - Every CoreMIDI test also sets `AIARR_MIDI_HW_TX=0` itself at the top of `main`, so a binary run directly, outside CTest, is guarded too.
   - A new CoreMIDI test that forgets this line is covered only under CTest.
+- **App UI pickers still select by index.** The JUCE output menus and `MidiOutputManager` pick a destination by its index in a list enumerated a moment earlier. A device plugged or unplugged in between could shift the index. Every such pick is still an explicit user action, but moving these pickers to name or identity selection is a follow-up.
 - **Hot-plug re-resolution is by display name.** Two destinations with the same name resolve to the first one. Unique-ID resolution is a follow-up.
 - **Not yet proven on the device.** Passing unit tests do not prove hardware safety. The fix still needs one CoreMIDI test run on the Mac mini with the Pa5X attached and a MIDI monitor watching, to show that nothing reaches `Pa5X SOUND`.
 - **The `hieucat75/AIArranger` fork has the same auto-select** (`feat/gate3-5-live-arranger-loop`, which includes `tools/pa5x_live_cli.cpp`). This fix lands in `phamgia75/AIArranger` only.

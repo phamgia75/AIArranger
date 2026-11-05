@@ -166,15 +166,14 @@ int main(int argc, char** argv) {
     std::printf("\nMIDI destinations (%zu):\n", dests.size());
     for (auto& d : dests) std::printf("  [%d] %s\n", d.index, d.name.c_str());
     if (destName) {
-        int match = -1, matches = 0;
-        for (auto& d : dests) if (d.name == destName) { match = d.index; ++matches; }
-        if (matches != 1) {   // controlled error: never fall back to another device
-            std::fprintf(stderr, "--dest \"%s\" matches %d destinations (need exactly 1)\n", destName, matches);
+        // Controlled error, never a fallback: the name must match exactly one live
+        // destination, and that exact endpoint is selected (hot-plug safe).
+        if (!out.selectDestinationByName(destName)) {
+            std::fprintf(stderr, "--dest \"%s\": no unique destination with that exact name\n", destName);
             out.shutdown();
             return 2;
         }
-        out.selectDestination(match);
-        std::printf("Selected: [%d] %s\n", match, destName);
+        std::printf("Selected: %s\n", destName);
     } else {
         std::printf("No destination selected: playback is silent until you pick one with [ / ].\n");
     }
