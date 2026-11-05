@@ -149,7 +149,7 @@ std::vector<MidiDestinationInfo> CoreMidiOut::enumerateDestinations() const noex
     out.reserve(n);
     for (ItemCount i = 0; i < n; ++i) {
         MIDIEndpointRef ep = MIDIGetDestination(i);
-        out.push_back({static_cast<int>(i), endpointDisplayName(ep)});
+        out.push_back({static_cast<int>(i), endpointDisplayName(ep), endpointUniqueId(ep)});
     }
     return out;
 }
@@ -339,6 +339,11 @@ void CoreMidiOut::dispatchOne(const uasf::MidiEvent& ev) noexcept {
 
     if (dispatch_tap_) dispatch_tap_(ev);
 
+    // Hold the selection lock from reading the endpoint until MIDISend returns:
+    // a deselect/switch (which silences the old device under the same lock) is
+    // then strictly before or after this send, so an in-flight Note On can
+    // never reach the old device after its cleanup. Dispatch thread, not RT.
+    std::lock_guard<std::mutex> lk(selectionMutex());
     MIDIEndpointRef ep = endpoint_.load(std::memory_order_acquire);
     if (ep == 0) {
         // Graceful no-op: nowhere to send (headless / disconnected).

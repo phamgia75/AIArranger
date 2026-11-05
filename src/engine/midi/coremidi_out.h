@@ -56,6 +56,7 @@ size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept;
 struct MidiDestinationInfo {
     int         index;   // index into the CoreMIDI destination list
     std::string name;    // display name (endpoint or its device)
+    int32_t     uid = 0; // CoreMIDI unique ID (0 = unknown)
 };
 
 class CoreMidiOut {

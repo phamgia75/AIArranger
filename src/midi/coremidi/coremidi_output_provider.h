@@ -21,7 +21,7 @@ public:
     std::vector<MidiOutDeviceInfo> enumerate() override {
         std::vector<MidiOutDeviceInfo> v;
         for (const auto& d : out_.enumerateDestinations())
-            v.push_back({d.index, d.name});
+            v.push_back({d.index, d.name, d.uid});
         return v;
     }
     bool select(int index) override { return out_.selectDestination(index); }

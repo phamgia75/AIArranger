@@ -34,7 +34,10 @@ No SysEx, Bank Select or Program Change was sent, so no instrument setting was c
 3. **Hardware-transmission guard at the `MIDISend` boundary.**
    - `initialize()` reads the `AIARR_MIDI_HW_TX` environment variable. If it is `0`, every `MIDISend` is blocked: events in `dispatchOne()` and cleanup CCs in `sendAllSoundOff()`. Blocked messages are counted in `blockedCount()`.
    - Any other value, or no value, allows transmission, but only to a destination that was selected explicitly.
-   - CTest sets `AIARR_MIDI_HW_TX=0` on **every** registered test, in the top-level directory and in `tools/korg_validation`. Tests added later get it too, because the block runs over the directory's `TESTS` property rather than over a list of names.
+   - CTest sets the guard for the whole ctest process. CMake adds a `TEST_INCLUDE_FILES` script (`set(ENV{AIARR_MIDI_HW_TX} 0)`) to the root directory and, recursively, to every subdirectory. So every test inherits it: in any directory, added later, or run with ctest from a subdirectory's build tree.
+   - `test_midi_hw_guard_env`, registered in `tools/korg_validation`, fails if the variable does not reach a subdirectory test. It caught the subdirectory case during development.
+   - Each CoreMIDI test also calls `setenv("AIARR_MIDI_HW_TX", "0")` itself, so a direct binary run is guarded.
+   - `dispatchOne()` holds the selection lock from reading the endpoint until `MIDISend` returns. A switch or deselect, which silences the old device under the same lock, therefore happens strictly before or after any send. An in-flight Note On cannot reach the old device after its cleanup.
 4. **Deterministic cleanup when authorized.**
    - Deselecting or switching sends CC123 and CC120 on all 16 channels to the old device. This was already the behaviour.
    - `shutdown()` now sends the same after the final queue drain.
@@ -75,7 +78,8 @@ To check that the test catches the bug, the auto-select was put back temporarily
   - Production code transmits to an explicitly selected destination unless `AIARR_MIDI_HW_TX=0`.
   - Every CoreMIDI test also sets `AIARR_MIDI_HW_TX=0` itself at the top of `main`, so a binary run directly, outside CTest, is guarded too.
   - A new CoreMIDI test that forgets this line is covered only under CTest.
-- **App UI pickers still select by index.** The JUCE output menus and `MidiOutputManager` pick a destination by its index in a list enumerated a moment earlier. A device plugged or unplugged in between could shift the index. Every such pick is still an explicit user action, but moving these pickers to name or identity selection is a follow-up.
+- **`MidiOutputManager` re-resolves by identity.** It remembers the device's unique ID, carried in `MidiOutDeviceInfo::uid`, and on refresh or hot-plug never adopts a different device that shares the name. Covered by `test_midi_output_manager_identity`. Providers without identity, such as the test fakes, keep the by-name behaviour.
+- **App UI pickers still select by index.** The JUCE output menus and `MidiOutputManager::selectDevice()` pick a destination by its index in a list enumerated a moment earlier. A device plugged or unplugged in between could shift the index. Every such pick is still an explicit user action, but moving these pickers to name or identity selection is a follow-up.
 - **Hot-plug re-resolution (fixed).**
   - The selection is remembered by CoreMIDI **unique ID**, not by name or index.
   - A device with the same name can never be adopted. `test_midi_output_safety` has a "hot-plug" case that failed on the name-based code and passes now.

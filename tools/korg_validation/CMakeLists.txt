@@ -26,9 +26,8 @@ foreach(test_file ${KORG_VALIDATION_TEST_SRC})
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
-# Hardware-transmission guard (see the top-level CMakeLists): no test here may
-# drive a real MIDI device.
-get_property(_kv_tests DIRECTORY PROPERTY TESTS)
-if(_kv_tests)
-    set_property(TEST ${_kv_tests} APPEND PROPERTY ENVIRONMENT "AIARR_MIDI_HW_TX=0")
+# Proves the top-level hardware-transmission guard (AIARR_MIDI_HW_TX=0) reaches
+# tests registered in a subdirectory.
+if(UNIX)
+    add_test(NAME test_midi_hw_guard_env COMMAND /bin/sh -c [=[test "$AIARR_MIDI_HW_TX" = 0]=])
 endif()

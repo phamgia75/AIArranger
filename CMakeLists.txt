@@ -282,11 +282,19 @@ endif()
 # ── Hardware-transmission guard for every registered test ─────────────
 # Software tests must never drive a real MIDI device (a regression run once sent
 # notes to an attached Korg Pa5X). CoreMidiOut blocks every MIDISend when
-# AIARR_MIDI_HW_TX=0, so this holds for every test here and in subdirectories,
-# including ones added later. Intentional hardware tests run outside CTest.
-# (set_property(TEST) only reaches this directory's tests; tools/korg_validation
-# applies the same block to its own.)
-get_property(_tests DIRECTORY PROPERTY TESTS)
-if(_tests)
-    set_property(TEST ${_tests} APPEND PROPERTY ENVIRONMENT "AIARR_MIDI_HW_TX=0")
-endif()
+# AIARR_MIDI_HW_TX=0. Each CTestTestfile includes this script, which sets the
+# variable in the ctest process itself, so every test in every directory —
+# including subdirectories and tests added later — inherits it. Verified by
+# test_midi_hw_guard_env (tools/korg_validation). Intentional hardware tests run
+# outside CTest.
+# Applied to this directory and, recursively, to every subdirectory, so running
+# ctest from a subdirectory's build tree is guarded too.
+file(WRITE ${CMAKE_BINARY_DIR}/aiarr_midi_hw_guard.cmake "set(ENV{AIARR_MIDI_HW_TX} 0)\n")
+function(aiarr_guard_midi_tests dir)
+    set_property(DIRECTORY ${dir} APPEND PROPERTY TEST_INCLUDE_FILES ${CMAKE_BINARY_DIR}/aiarr_midi_hw_guard.cmake)
+    get_property(subdirs DIRECTORY ${dir} PROPERTY SUBDIRECTORIES)
+    foreach(sub ${subdirs})
+        aiarr_guard_midi_tests(${sub})
+    endforeach()
+endfunction()
+aiarr_guard_midi_tests(${CMAKE_CURRENT_SOURCE_DIR})

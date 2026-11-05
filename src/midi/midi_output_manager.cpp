@@ -23,9 +23,14 @@ void MidiOutputManager::resolve() {
         return;
     }
 
+    // Re-resolve the remembered device by identity when known: a different device
+    // that merely shares the name is never adopted (hardware safety).
     int idx = -1;
-    for (int i = 0; i < (int)devices_.size(); ++i)
-        if (devices_[i].name == selected_name_) { idx = i; break; }
+    for (int i = 0; i < (int)devices_.size(); ++i) {
+        const bool same = selected_uid_ != 0 ? devices_[i].uid == selected_uid_
+                                             : devices_[i].name == selected_name_;
+        if (same) { idx = i; break; }
+    }
 
     if (idx < 0) {
         // Remembered device is gone — stay "armed" by name, report disconnected.
@@ -58,6 +63,7 @@ void MidiOutputManager::notifyHotPlug() {
 bool MidiOutputManager::selectDevice(int index) {
     if (index == -1) {
         selected_name_.clear();
+        selected_uid_ = 0;
         provider_.select(-1);
         selected_index_ = -1;
         state_ = OutputState::NoDevice;
@@ -67,6 +73,7 @@ bool MidiOutputManager::selectDevice(int index) {
     if (index < 0 || index >= (int)devices_.size()) return false;
 
     selected_name_ = devices_[index].name;
+    selected_uid_  = devices_[index].uid;
     provider_.select(index);
     selected_index_ = index;
     state_ = provider_.hasLiveDestination() ? OutputState::Connected

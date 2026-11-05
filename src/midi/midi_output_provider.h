@@ -18,6 +18,7 @@ namespace ai_arranger::midi {
 struct MidiOutDeviceInfo {
     int         index = -1;
     std::string name;
+    int64_t     uid = 0;   // stable device identity (CoreMIDI unique ID); 0 = provider has none
 };
 
 class IMidiOutputProvider {
