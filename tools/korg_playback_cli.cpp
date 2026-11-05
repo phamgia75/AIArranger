@@ -247,8 +247,12 @@ int main(int argc, char** argv) {
                     int sel = out.selectedDestination();
                     if (sel < 0) sel = (c == ']') ? 0 : n - 1;   // first explicit pick
                     else sel = (c == ']') ? (sel + 1) % n : (sel - 1 + n) % n;
-                    out.selectDestination(sel);
-                    std::printf("[dest] -> [%d] %s\n", sel, ds[sel].name.c_str());
+                    // Select the device shown in this list by identity, not by an
+                    // index a hot-plug may have shifted since enumeration.
+                    if (out.selectDestinationByUid(ds[sel].uid))
+                        std::printf("[dest] -> %s\n", ds[sel].name.c_str());
+                    else
+                        std::printf("[dest] %s is gone; nothing selected\n", ds[sel].name.c_str());
                 }
                 break;
             }

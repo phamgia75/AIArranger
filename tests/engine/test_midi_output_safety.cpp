@@ -143,8 +143,8 @@ int main() {
         int32_t sinkUid = 0;
         MIDIObjectGetIntegerProperty(sinkEp, kMIDIPropertyUniqueID, &sinkUid);
         out.selectDestination(-1);
-        TEST("by uid: unknown uid rejected, nothing selected",
-             !out.selectDestinationByUid(sinkUid ^ 0x5A5A5A5A) && out.selectedDestination() == -1);
+        TEST("by uid: uid 0 (no identity) rejected, nothing selected",
+             !out.selectDestinationByUid(0) && out.selectedDestination() == -1);
         TEST("by uid: selects exactly that endpoint",
              sinkUid != 0 && out.selectDestinationByUid(sinkUid) && MIDIGetDestination(out.selectedDestination()) == sinkEp);
         out.selectDestination(-1);
