@@ -23,6 +23,7 @@ No SysEx, Bank Select or Program Change was sent, so no instrument setting was c
 - `apps/macos/Source/LiveHostDriver.h`: the live host played to whichever device was first, before the user picked one.
 - `CoreMidiOut::shutdown()` did not silence the device, so a Note On without its Note Off kept sounding after the process exited.
 - `CoreMidiOut::shutdown()` kept the remembered selection. After a re-`initialize()`, the hot-plug probe silently reconnected the old device by name.
+- Hot-plug re-resolution matched by display name. A different device with the same name could take over the output.
 
 `MidiOutputManager`, `LiveEngineFacade::selectMidiOutput` and the C ABI already worked on explicit selection. They are unchanged. The C ABI only reports `hasMidiOutput`, which means "a provider is wired".
 
@@ -75,7 +76,11 @@ To check that the test catches the bug, the auto-select was put back temporarily
   - Every CoreMIDI test also sets `AIARR_MIDI_HW_TX=0` itself at the top of `main`, so a binary run directly, outside CTest, is guarded too.
   - A new CoreMIDI test that forgets this line is covered only under CTest.
 - **App UI pickers still select by index.** The JUCE output menus and `MidiOutputManager` pick a destination by its index in a list enumerated a moment earlier. A device plugged or unplugged in between could shift the index. Every such pick is still an explicit user action, but moving these pickers to name or identity selection is a follow-up.
-- **Hot-plug re-resolution is by display name.** Two destinations with the same name resolve to the first one. Unique-ID resolution is a follow-up.
+- **Hot-plug re-resolution (fixed).**
+  - The selection is remembered by CoreMIDI **unique ID**, not by name or index.
+  - A device with the same name can never be adopted. `test_midi_output_safety` has a "hot-plug" case that failed on the name-based code and passes now.
+  - Selecting an endpoint without a unique ID is refused.
+  - Resolution and selection are serialised by a mutex, so an in-flight resolve cannot undo a deselect.
 - **Not yet proven on the device.** Passing unit tests do not prove hardware safety. The fix still needs one CoreMIDI test run on the Mac mini with the Pa5X attached and a MIDI monitor watching, to show that nothing reaches `Pa5X SOUND`.
 - **The `hieucat75/AIArranger` fork has the same auto-select** (`feat/gate3-5-live-arranger-loop`, which includes `tools/pa5x_live_cli.cpp`). This fix lands in `phamgia75/AIArranger` only.
 

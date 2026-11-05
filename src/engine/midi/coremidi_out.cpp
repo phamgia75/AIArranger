@@ -42,9 +42,18 @@ size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept {
 
 namespace {
 
-std::mutex& nameMutex() {
+// Serialises selection changes (control thread) against hot-plug re-resolution
+// (dispatch thread), so a deselect can never be undone by an in-flight resolve.
+// Neither thread is the audio thread.
+std::mutex& selectionMutex() {
     static std::mutex m;
     return m;
+}
+
+int32_t endpointUniqueId(MIDIEndpointRef ep) {
+    SInt32 uid = 0;
+    if (ep == 0 || MIDIObjectGetIntegerProperty(ep, kMIDIPropertyUniqueID, &uid) != noErr) return 0;
+    return uid;
 }
 
 std::string endpointDisplayName(MIDIEndpointRef ep) {
@@ -117,12 +126,10 @@ void CoreMidiOut::shutdown() noexcept {
     if (client_)   { MIDIClientDispose(client_);  client_ = 0; }
     endpoint_.store(0, std::memory_order_release);
     // Forget the selection: a later initialize() must start with no destination,
-    // not let the hot-plug probe silently reconnect the old device by name.
+    // not let the hot-plug probe silently reconnect the old device.
+    std::lock_guard<std::mutex> lk(selectionMutex());
     selected_index_.store(-1, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> lk(nameMutex());
-        selected_name_.clear();
-    }
+    selected_uid_.store(0, std::memory_order_release);
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -153,12 +160,10 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
     // sent to the newly selected device. Validate first so a failed switch leaves
     // both the old device and the current selection untouched.
     if (index < 0) {
+        std::lock_guard<std::mutex> lk(selectionMutex());
         MIDIEndpointRef old = endpoint_.exchange(0, std::memory_order_acq_rel);
         if (old != 0) sendAllSoundOff(old);
-        {
-            std::lock_guard<std::mutex> lk(nameMutex());
-            selected_name_.clear();
-        }
+        selected_uid_.store(0, std::memory_order_release);
         selected_index_.store(-1, std::memory_order_release);
         return true;
     }
@@ -170,7 +175,7 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
     // rather than repointing to endpoint 0 (which would silence the old device and
     // leave a half-switched state with selected_index_ set but no live endpoint).
     if (ep == 0) return false;
-    return selectEndpoint(ep, index, endpointDisplayName(ep));
+    return selectEndpoint(ep, index);
 }
 
 bool CoreMidiOut::selectDestinationByName(const std::string& name) noexcept {
@@ -185,16 +190,16 @@ bool CoreMidiOut::selectDestinationByName(const std::string& name) noexcept {
         if (ep != 0 && endpointDisplayName(ep) == name) { match = ep; matchIndex = static_cast<int>(i); ++matches; }
     }
     if (name.empty() || matches != 1) return false;   // missing or ambiguous: select nothing
-    return selectEndpoint(match, matchIndex, name);
+    return selectEndpoint(match, matchIndex);
 }
 
-bool CoreMidiOut::selectEndpoint(MIDIEndpointRef ep, int index, const std::string& name) noexcept {
+bool CoreMidiOut::selectEndpoint(MIDIEndpointRef ep, int index) noexcept {
+    const int32_t uid = endpointUniqueId(ep);
+    if (uid == 0) return false;   // cannot be re-identified on hot-plug: refuse (fail closed)
+    std::lock_guard<std::mutex> lk(selectionMutex());
     MIDIEndpointRef old = endpoint_.load(std::memory_order_acquire);
     if (old != 0 && old != ep) sendAllSoundOff(old);
-    {
-        std::lock_guard<std::mutex> lk(nameMutex());
-        selected_name_ = name;
-    }
+    selected_uid_.store(uid, std::memory_order_release);
     selected_index_.store(index, std::memory_order_release);
     endpoint_.store(ep, std::memory_order_release);
     // Non-RT context: record the active output endpoint id (0 = none). +1 so a
@@ -258,23 +263,20 @@ uint64_t CoreMidiOut::blockedCount() const noexcept { return blocked_count_.load
 
 // ── Hotplug re-resolution (dispatch / control thread) ────────────────
 
-void CoreMidiOut::resolveEndpointByName() noexcept {
-    int idx = selected_index_.load(std::memory_order_acquire);
-    if (idx < 0) {
+void CoreMidiOut::resolveSelectedEndpoint() noexcept {
+    // Re-resolve by unique ID only: the exact device that was selected, or none.
+    std::lock_guard<std::mutex> lk(selectionMutex());
+    const int32_t want = selected_uid_.load(std::memory_order_acquire);
+    if (selected_index_.load(std::memory_order_acquire) < 0 || want == 0) {
         endpoint_.store(0, std::memory_order_release);
         return;
-    }
-    std::string want;
-    {
-        std::lock_guard<std::mutex> lk(nameMutex());
-        want = selected_name_;
     }
 
     MIDIEndpointRef found = 0;
     ItemCount n = MIDIGetNumberOfDestinations();
     for (ItemCount i = 0; i < n; ++i) {
         MIDIEndpointRef ep = MIDIGetDestination(i);
-        if (!want.empty() && endpointDisplayName(ep) == want) {
+        if (endpointUniqueId(ep) == want) {
             found = ep;
             selected_index_.store(static_cast<int>(i), std::memory_order_release);
             break;
@@ -316,7 +318,7 @@ void CoreMidiOut::dispatchLoop() noexcept {
             endpoint_.load(std::memory_order_acquire) == 0) {
             if (++idleTicks >= kProbeEvery) { wantResolve = true; idleTicks = 0; }
         }
-        if (wantResolve) resolveEndpointByName();
+        if (wantResolve) resolveSelectedEndpoint();
 
         uasf::MidiEvent ev;
         bool any = false;

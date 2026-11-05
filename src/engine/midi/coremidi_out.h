@@ -24,9 +24,10 @@ namespace ai_arranger::midi {
  *     pops events, builds a MIDIPacketList, and calls MIDISend.
  *
  * Hotplug:
- *   - The selected destination is remembered by NAME. A MIDINotifyProc marks
+ *   - The selected destination is remembered by its CoreMIDI unique ID (stable
+ *     across unplug/replug), never by name or index. A MIDINotifyProc marks
  *     the setup dirty (when a CoreMIDI run loop is present), and the dispatch
- *     thread also re-resolves the endpoint by name periodically, so a device
+ *     thread also re-resolves the endpoint by unique ID periodically, so a device
  *     that disappears and reappears reconnects without caller intervention.
  *
  * Fail-closed output policy (hardware safety):
@@ -112,14 +113,14 @@ public:
     [[nodiscard]] bool hardwareTransmitAllowed() const noexcept { return hw_tx_allowed_; }
 
 private:
-    bool selectEndpoint(MIDIEndpointRef ep, int index, const std::string& name) noexcept;
+    bool selectEndpoint(MIDIEndpointRef ep, int index) noexcept;
     void dispatchLoop() noexcept;          // consumer thread body
     void dispatchOne(const uasf::MidiEvent& ev) noexcept; // send one event now
     // Directly send All-Notes-Off (CC123) + All-Sound-Off (CC120) on every channel
     // to `ep` (non-realtime, calling thread). Used to silence the outgoing device
     // before a destination switch/disconnect.
     void sendAllSoundOff(MIDIEndpointRef ep) noexcept;
-    void resolveEndpointByName() noexcept; // hotplug re-resolution
+    void resolveSelectedEndpoint() noexcept; // hotplug re-resolution (by unique ID)
     static void notifyProc(const MIDINotification* msg, void* refCon);
 
     LockFreeQueue<uasf::MidiEvent, kQueueSize> queue_;
@@ -128,7 +129,10 @@ private:
     MIDIPortRef      out_port_{0};
     std::atomic<MIDIEndpointRef> endpoint_{0}; // 0 = none/disconnected
 
-    std::string      selected_name_;          // remembered for hotplug
+    // Unique ID of the explicitly selected endpoint (0 = none): hot-plug re-
+    // resolution reconnects only this exact device, never another one that
+    // happens to share its name.
+    std::atomic<int32_t> selected_uid_{0};
     std::atomic<int> selected_index_{-1};
     std::atomic<bool> needs_reresolve_{false};
 

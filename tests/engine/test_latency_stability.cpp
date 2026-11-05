@@ -118,7 +118,7 @@ int main() {
         constexpr int PAIRS = 200;
         for (int i = 0; i < PAIRS; ++i) {
             if (i == 50) out.selectDestination(-1);                 // "unplug"
-            if (i == 120) out.selectDestination(sinkIdx);              // "replug" (own sink or none)
+            if (i == 120) out.selectDestinationByName(sinkName);      // "replug" (own unique sink or none)
             uint8_t note = 36 + (i % 24);
             out.send(mk(MidiEventType::NoteOn,  0, note, 100));
             out.send(mk(MidiEventType::NoteOff, 0, note, 0));

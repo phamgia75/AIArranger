@@ -112,7 +112,7 @@ int main() {
         TEST("guard active (AIARR_MIDI_HW_TX=0)", !out.hardwareTransmitAllowed());
         TEST("out-of-range select rejected, selection unchanged",
              !out.selectDestination(9999) && out.selectedDestination() == -1);
-        TEST("explicit select", out.selectDestination(sinkIdx) && out.hasLiveDestination());
+        TEST("explicit select", out.selectDestinationByName(uniq) && out.hasLiveDestination());
         out.send(ev(MidiEventType::NoteOn, 60, 100));
         out.send(ev(MidiEventType::NoteOff, 60, 0));
         waitFor([&] { return out.blockedCount() >= 2; });   // counted after dispatch
@@ -142,6 +142,29 @@ int main() {
         out.selectDestination(-1);
         if (dupA) MIDIEndpointDispose(dupA);
         if (dupB) MIDIEndpointDispose(dupB);
+
+        // Hot-plug cannot hand the output to a different device with the same
+        // name: select A, a same-named B appears, A disappears -> no destination.
+        const std::string hopName = "AIARR SAFETY HOP " + std::to_string(getpid());
+        CFStringRef hopCf = CFStringCreateWithCString(nullptr, hopName.c_str(), kCFStringEncodingUTF8);
+        Sink hop;
+        MIDIEndpointRef hopA = 0, hopB = 0;
+        MIDIDestinationCreate(client, hopCf, readProc, &hop, &hopA);
+        indexOf(hopA);
+        TEST("hot-plug: select A by name", out.selectDestinationByName(hopName) && out.hasLiveDestination());
+        MIDIDestinationCreate(client, hopCf, readProc, &hop, &hopB);
+        CFRelease(hopCf);
+        indexOf(hopB);
+        MIDIEndpointDispose(hopA);
+        // CoreMIDI delivers setup notifications on the run loop of the thread that
+        // created the client (this one): pump it, as the app's event loop would,
+        // so the output re-resolves after A disappears.
+        for (int w = 0; w < 10; ++w) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));   // > 2 probe periods
+        for (int w = 0; w < 4; ++w) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+        TEST("hot-plug: A gone -> disconnected, same-named B never adopted", !out.hasLiveDestination());
+        out.selectDestination(-1);
+        if (hopB) MIDIEndpointDispose(hopB);
         out.shutdown();
         settle();
         TEST("selected sink received nothing while guarded", sink.count() == 0);
@@ -155,7 +178,7 @@ int main() {
     {
         CoreMidiOut out;
         out.initialize("AIARR safety 3");
-        out.selectDestination(sinkIdx);
+        out.selectDestinationByName(uniq);
         out.send(ev(MidiEventType::NoteOn, 60, 100));   // deliberately no Note Off
         waitFor([&] { return out.blockedCount() >= 1; });
         out.shutdown();
