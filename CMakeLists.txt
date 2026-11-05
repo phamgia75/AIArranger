@@ -107,7 +107,8 @@ target_link_libraries(importer-sff1 arranger-engine)
 # Depends on the portable core only; the SFF1 routing helper is header-only.
 add_library(exporter-korg STATIC
     src/exporters/korg/korg_style_smf.cpp
-    src/exporters/korg/genos_to_korg.cpp)
+    src/exporters/korg/genos_to_korg.cpp
+    src/exporters/korg/sound_map.cpp)
 target_include_directories(exporter-korg PUBLIC src)
 target_link_libraries(exporter-korg PUBLIC arranger-engine)
 
@@ -165,7 +166,9 @@ foreach(test_file ${EXPORTER_TEST_SRC})
     add_executable(${test_name} ${test_file})
     target_link_libraries(${test_name} exporter-korg importer-sff1 arranger-engine Threads::Threads)
     target_compile_definitions(${test_name} PRIVATE
-        CORPUS_DIR="${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1")
+        CORPUS_DIR="${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1"
+        CONVERT_BIN="$<TARGET_FILE:aiarranger-convert>")
+    add_dependencies(${test_name} aiarranger-convert)   # the CLI exit-code test runs it
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 

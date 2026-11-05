@@ -1,0 +1,30 @@
+# Pa5X sound map for BALLAD_FOLK_SC_GENOS_.S718---4c7ad352-3441-418f-9ad6-41fd41c38619.sty
+# Replace 'unresolved' with '<msb> <lsb> <pc>' read from the Pa5X Sound
+# Select window (or its MIDI implementation chart). Leave 'unresolved'
+# until the number is verified on the instrument. Never copy the Yamaha
+# numbers below: they select different sounds on Pa5X.
+
+# Genos ch 11 'Bass'  family: Bass  Yamaha MSB/LSB/PC 63/60/23  MEGAVOICE CANDIDATE: 1 notes at C7 or above (Bass part); velocities span 3 MegaVoice zones
+bass unresolved
+
+# Genos ch 10 'Rhythm2'  family: Drum Kit  Yamaha MSB/LSB/PC 127/0/87
+drum unresolved
+
+# Genos ch 9 'Rhythm1'  family: Percussion  Yamaha MSB/LSB/PC 127/0/87
+perc unresolved
+
+# Genos ch 12 'Chord1'  family: Unidentified  Yamaha MSB/LSB/PC 8/41/20
+acc1 unresolved
+
+# Genos ch 13 'Chord2'  family: Unidentified  Yamaha MSB/LSB/PC 8/50/1
+acc2 unresolved
+
+# Genos ch 14 'Pad'  family: Pad  Yamaha MSB/LSB/PC 104/11/89
+acc3 unresolved
+
+# Genos ch 15 'Chord1'  family: Unidentified  Yamaha MSB/LSB/PC 63/120/4  MEGAVOICE CANDIDATE: 108 notes at C7 or above (Unidentified part); velocities span 4 MegaVoice zones
+acc4 unresolved
+
+# Genos ch 7 'Tbn Bs'  family: Brass  Yamaha MSB/LSB/PC 0/117/57
+# Genos ch 16 'Tbn'  family: Brass  Yamaha MSB/LSB/PC 0/117/57
+acc5 unresolved

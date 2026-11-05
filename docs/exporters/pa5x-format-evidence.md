@@ -41,7 +41,7 @@ Genos .sty --Sff1Reader--> ParseResult --Sff1ToUasfMapper--> UASF StyleDefinitio
    --write (korg_style_smf)--> SMF bytes --parse (independent reader)--> validate --> file
 ```
 
-CLI: `aiarranger-convert --input X.sty --target pa5x --output X.mid [--ppqn N] [--sound-map FILE] [--report FILE]`.
+CLI: `aiarranger-convert --input X.sty --target pa5x --output X.mid [--ppqn N] [--sound-map FILE] [--sound-template FILE] [--report FILE]`, and `aiarranger-convert --compare X.mid --with X_pa5x.mid` to check a Pa5X re-export. Sound maps: `pa5x-sound-mapping.md`.
 Exit codes: 0 means written and validated. 1 means a usage or input error. 2 means conversion or validation failed, and no file is written.
 
 ## 3. Mapping tables
@@ -97,6 +97,8 @@ Most dropped events belong to the unexported sections (Fill CC/DD, Break) plus t
 Generated `.mid` files are **not committed**: they derive from the Yamaha corpus, which is under legal review in issue #27.
 
 ## 5. Pa5X hardware acceptance checklist
+
+The fill-in result form, with the round-trip compare step, is `pa5x-hardware-validation.md`. The short version:
 
 1. Copy `X.mid` to a USB stick (or the Pa5X internal drive over USB).
 2. On Pa5X, choose any User style and open Style Edit > Menu > Import/Export > Import SMF. Select the file, check **Initialize**, then press **SHIFT + Execute**. Record the exact message if it fails.

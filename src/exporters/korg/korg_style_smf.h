@@ -71,6 +71,19 @@ struct ParseResult {
 // Independent reader (does not share code with write) used to verify output.
 ParseResult parse(const std::vector<uint8_t>& bytes);
 
+// Round-trip check: our export `a` against a Pa5X re-export `b` (Style Edit >
+// Export SMF). Compares elements by marker: length, meter, and notes (channel,
+// pitch, velocity, on/off). PPQN may differ, so ticks are compared at the
+// coarser resolution with a 1-tick tolerance. Bank/PC/CC/SysEx are ignored
+// (Pa5X writes its own header data), and so are notes C-1..B-1 on chord-driven
+// tracks (Pa5X exports Chord events that way). Elements only in `b` are listed in
+// `info`, not as differences: they reveal Pa5X marker codes.
+struct CompareResult {
+    std::vector<std::string> differences;
+    std::vector<std::string> info;
+};
+CompareResult compareStyles(const Style& a, const Style& b);
+
 } // namespace ai_arranger::exporters::korg
 
 #endif // AI_ARRANGER_EXPORTERS_KORG_STYLE_SMF_H

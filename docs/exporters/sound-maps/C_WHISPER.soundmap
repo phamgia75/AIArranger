@@ -1,0 +1,29 @@
+# Pa5X sound map for C_WHISPER_SC_GENOS.S718---da1df5af-1207-4d84-bf3d-99b5d051b92b.sty
+# Replace 'unresolved' with '<msb> <lsb> <pc>' read from the Pa5X Sound
+# Select window (or its MIDI implementation chart). Leave 'unresolved'
+# until the number is verified on the instrument. Never copy the Yamaha
+# numbers below: they select different sounds on Pa5X.
+
+# Genos ch 11 'Bass'  family: Bass  Yamaha MSB/LSB/PC 8/0/17  MEGAVOICE CANDIDATE: 1 notes at C7 or above (Bass part); velocities span 3 MegaVoice zones
+bass unresolved
+
+# Genos ch 10 'Rhythm2'  family: Drum Kit  Yamaha MSB/LSB/PC 127/0/0
+drum unresolved
+
+# Genos ch 9 'Rhythm1'  family: Percussion  Yamaha MSB/LSB/PC 62/100/0
+perc unresolved
+
+# Genos ch 12 'Chord1'  family: Unidentified  Yamaha MSB/LSB/PC 63/120/21  MEGAVOICE CANDIDATE: 31 notes at C7 or above (Unidentified part); velocities span 4 MegaVoice zones
+acc1 unresolved
+
+# Genos ch 13 'E Piano'  family: Piano/EP  Yamaha MSB/LSB/PC 0/117/4
+acc2 unresolved
+
+# Genos ch 14 'Str'  family: Strings  Yamaha MSB/LSB/PC 0/112/50
+acc3 unresolved
+
+# Genos ch 15 'Chord1'  family: Unidentified  Yamaha MSB/LSB/PC 63/120/10
+acc4 unresolved
+
+# Genos ch 16 'Phrase2'  family: Unidentified  Yamaha MSB/LSB/PC 104/9/81
+acc5 unresolved
