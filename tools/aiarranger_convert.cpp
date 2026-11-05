@@ -1,21 +1,27 @@
 // aiarranger-convert: Yamaha Genos .sty -> Korg Pa5X Style SMF (separated by markers).
 //
 //   aiarranger-convert --input Style.sty --target pa5x --output Style.mid
-//                      [--ppqn N] [--sound-map FILE] [--report FILE]
+//                      [--ppqn N] [--sound-map FILE] [--sound-template FILE] [--report FILE]
+//   aiarranger-convert --compare Style.mid --with Pa5X_Export.mid
 //
 // Load the output on Pa5X in Style Edit > Menu > Import/Export > Import SMF
 // (Initialize checked, SHIFT + Execute imports every marker in one pass).
-// Exit: 0 = written and validated, 1 = usage/input error, 2 = conversion or
-// validation failed (no file written).
+// --sound-template writes a fill-in sound map for this style (all unresolved).
+// --compare checks a Pa5X re-export (Export SMF) against our file.
+// Exit: 0 = written and validated / round trip equal, 1 = usage or input
+// error, 2 = conversion or validation failed (no file written) / round trip
+// differs.
 
 #include "exporters/korg/genos_to_korg.h"
 #include "exporters/korg/sff1_route.h"
+#include "exporters/korg/sound_map.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "importers/sff1/sff1_reader.h"
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <sstream>
+#include <iterator>
 
 using namespace ai_arranger;
 using namespace ai_arranger::exporters::korg;
@@ -23,39 +29,45 @@ using namespace ai_arranger::exporters::korg;
 namespace {
 int usage() {
     std::cerr << "usage: aiarranger-convert --input <file.sty> --target pa5x --output <file.mid>\n"
-                 "                          [--ppqn N] [--sound-map FILE] [--report FILE]\n"
-                 "sound-map lines: <bass|drum|perc|acc1..acc5> <msb> <lsb> <pc>   (# comments)\n";
+                 "                          [--ppqn N] [--sound-map FILE] [--sound-template FILE] [--report FILE]\n"
+                 "       aiarranger-convert --compare <ours.mid> --with <pa5x_export.mid>\n"
+                 "sound-map lines: <bass|drum|perc|acc1..acc5> <msb> <lsb> <pc> | <track> unresolved   (# comments)\n";
     return 1;
 }
 
-bool parseSoundMap(const std::string& path, std::map<uint8_t, SoundRef>& out, std::string& err) {
-    std::ifstream in(path);
-    if (!in) { err = "cannot open sound map " + path; return false; }
-    static const std::map<std::string, uint8_t> kTracks = {
-        {"bass", kBassCh}, {"drum", kDrumCh}, {"perc", kPercCh},
-        {"acc1", 11}, {"acc2", 12}, {"acc3", 13}, {"acc4", 14}, {"acc5", 15}};
-    std::string line;
-    for (int n = 1; std::getline(in, line); ++n) {
-        if (auto h = line.find('#'); h != std::string::npos) line.resize(h);
-        std::istringstream ss(line);
-        std::string track;
-        int msb, lsb, pc;
-        if (!(ss >> track)) continue;
-        std::string extra;
-        auto it = kTracks.find(track);
-        if (it == kTracks.end() || !(ss >> msb >> lsb >> pc) || (ss >> extra) ||
-            msb < 0 || msb > 127 || lsb < 0 || lsb > 127 || pc < 0 || pc > 127) {
-            err = path + ":" + std::to_string(n) + ": expected '<track> <msb 0-127> <lsb 0-127> <pc 0-127>'";
-            return false;
-        }
-        out[it->second] = {static_cast<uint8_t>(msb), static_cast<uint8_t>(lsb), static_cast<uint8_t>(pc)};
-    }
+bool writeText(const std::string& path, const std::string& text) {
+    std::ofstream f(path);
+    f << text;
+    f.close();
+    if (!f) std::cerr << "cannot write " << path << "\n";
+    return static_cast<bool>(f);
+}
+
+bool readStyle(const std::string& path, Style& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) { std::cerr << "cannot open " << path << "\n"; return false; }
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto p = parse(bytes);
+    if (!p.ok) { std::cerr << path << ": " << p.error << "\n"; return false; }
+    for (const auto& n : p.notes) std::cout << path << ": " << n << "\n";
+    out = p.style;
     return true;
+}
+
+int compareMode(const std::string& ours, const std::string& theirs) {
+    Style a, b;
+    if (!readStyle(ours, a) || !readStyle(theirs, b)) return 1;
+    const auto c = compareStyles(a, b);
+    for (const auto& i : c.info) std::cout << "info: " << i << "\n";
+    for (const auto& d : c.differences) std::cout << "DIFF: " << d << "\n";
+    std::cout << "Round trip: " << (c.differences.empty() ? "EQUAL" : "DIFFERS") << " (" << a.elements.size()
+              << " elements checked)\n";
+    return c.differences.empty() ? 0 : 2;
 }
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string input, output, target, soundMap, reportPath;
+    std::string input, output, target, soundMap, reportPath, templatePath, compareA, compareB;
     MapOptions opt;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -66,6 +78,9 @@ int main(int argc, char** argv) {
         else if (a == "--target") target = v;
         else if (a == "--sound-map") soundMap = v;
         else if (a == "--report") reportPath = v;
+        else if (a == "--sound-template") templatePath = v;
+        else if (a == "--compare") compareA = v;
+        else if (a == "--with") compareB = v;
         else if (a == "--ppqn") {
             try {
                 size_t used = 0;
@@ -76,11 +91,20 @@ int main(int argc, char** argv) {
             catch (...) { return usage(); }
         } else return usage();
     }
+    if (!compareA.empty() || !compareB.empty()) {
+        if (compareA.empty() || compareB.empty() || !input.empty()) return usage();
+        return compareMode(compareA, compareB);
+    }
     if (input.empty() || output.empty() || target.empty()) return usage();
     if (target != "pa5x") { std::cerr << "unsupported target '" << target << "' (supported: pa5x)\n"; return 1; }
 
-    std::string err;
-    if (!soundMap.empty() && !parseSoundMap(soundMap, opt.sounds, err)) { std::cerr << err << "\n"; return 1; }
+    if (!soundMap.empty()) {
+        std::ifstream in(soundMap);
+        if (!in) { std::cerr << "cannot open sound map " << soundMap << "\n"; return 1; }
+        auto sm = parseSoundMap(in, soundMap);
+        if (!sm.ok) { std::cerr << sm.error << "\n"; return 1; }
+        opt.sounds = std::move(sm.sounds);
+    }
 
     importers::sff1::Sff1Reader reader;
     const auto parsed = reader.parseFile(input);
@@ -92,6 +116,7 @@ int main(int argc, char** argv) {
     opt.route = routeFromCasm(parsed);
     const auto mapped = mapToKorg(canon.style, opt);
     if (!mapped.ok) { std::cerr << "conversion failed: " << mapped.error << "\n"; return 2; }
+    if (!templatePath.empty() && !writeText(templatePath, soundMapTemplate(mapped.report, std::filesystem::path(input).filename().string()))) return 1;
 
     // Write -> re-parse with the independent reader -> validate what was written.
     const auto written = write(mapped.style);
@@ -104,12 +129,7 @@ int main(int argc, char** argv) {
                          (errs.empty() ? "PASS (" + std::to_string(back.style.elements.size()) + " elements)" : "FAIL") + "\n";
     for (const auto& e : errs) report += "  " + e + "\n";
     std::cout << report;
-    if (!reportPath.empty()) {
-        std::ofstream rf(reportPath);
-        rf << report;
-        rf.close();
-        if (!rf) { std::cerr << "cannot write report " << reportPath << "\n"; return 1; }
-    }
+    if (!reportPath.empty() && !writeText(reportPath, report)) return 1;
     if (!errs.empty()) return 2;
 
     std::ofstream out(output, std::ios::binary);

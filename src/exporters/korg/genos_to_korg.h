@@ -38,6 +38,13 @@ struct TrackRow {
     int msb = -1, lsb = -1, pc = -1;   // first Yamaha voice select seen
     std::string family;                // instrument family hint
     std::string target;                // Pa5X sound, or UNRESOLVED
+    // MegaVoice heuristic (Yamaha velocity/key-switched articulations, which a
+    // Pa5X sound does not reproduce). A candidate needs confirmation by ear.
+    uint32_t chord_range_dropped = 0;  // notes 0..11 removed from this part
+    uint32_t high_notes = 0;           // notes >= 96 (C7) on a non-drum part
+    uint8_t velocity_zones = 0;        // bitmask of Mega zones 1-64/65-90/91-100/101-127
+    bool megavoice = false;
+    std::string megavoice_why;
 };
 
 struct Report {

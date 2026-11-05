@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <tuple>
 
 namespace ai_arranger::exporters::korg {
 
@@ -268,6 +269,83 @@ ParseResult parse(const std::vector<uint8_t>& b) {
     stray += events.size() - ei;
     if (stray) r.notes.push_back(std::to_string(stray) + " channel event(s) outside any marker ignored");
     r.ok = true;
+    return r;
+}
+
+namespace {
+struct CmpNote { uint8_t ch, pitch, vel; uint64_t on, off; };
+
+// Notes of one element at resolution q: FIFO pairing per (channel, pitch);
+// a note still sounding at the end is closed there, a stray NoteOff ignored.
+std::vector<CmpNote> notesAt(const Element& e, uint16_t from, uint16_t q) {
+    auto sc = [&](uint64_t t) { return (t * q + from / 2) / from; };
+    std::vector<CmpNote> out;
+    std::map<uint16_t, std::vector<size_t>> open;
+    for (const auto& ev : e.events) {
+        const uint8_t hi = ev.status & 0xF0, ch = ev.status & 0x0F;
+        const uint16_t k = static_cast<uint16_t>(ch << 8 | ev.d1);
+        // Pa5X exports Chord events as notes C-1..B-1 on chord-driven tracks
+        // (New Features p.46): they are chords, not style notes.
+        if (isChordDriven(ch) && ev.d1 <= kChordEventNoteMax) continue;
+        if (hi == 0x90 && ev.d2) {
+            open[k].push_back(out.size());
+            out.push_back({ch, ev.d1, ev.d2, sc(ev.tick), UINT64_MAX});
+        } else if ((hi == 0x80 || hi == 0x90) && !open[k].empty()) {
+            out[open[k].front()].off = sc(ev.tick);
+            open[k].erase(open[k].begin());
+        }
+    }
+    for (auto& n : out) if (n.off == UINT64_MAX) n.off = sc(e.length);
+    std::stable_sort(out.begin(), out.end(), [](const CmpNote& x, const CmpNote& y) {
+        return std::tie(x.ch, x.pitch, x.on) < std::tie(y.ch, y.pitch, y.on);
+    });
+    return out;
+}
+
+bool near1(uint64_t x, uint64_t y) { return x > y ? x - y <= 1 : y - x <= 1; }
+} // namespace
+
+CompareResult compareStyles(const Style& a, const Style& b) {
+    CompareResult r;
+    if (!a.ppqn || !b.ppqn) { r.differences.push_back("PPQN 0"); return r; }
+    const uint16_t q = std::min(a.ppqn, b.ppqn);
+    if (a.ppqn != b.ppqn)
+        r.info.push_back("PPQN differs (" + std::to_string(a.ppqn) + " vs " + std::to_string(b.ppqn) +
+                         "); compared at " + std::to_string(q) + " with 1-tick tolerance");
+    if (a.mpqn != b.mpqn)
+        r.info.push_back("tempo event differs (" + std::to_string(a.mpqn) + " vs " + std::to_string(b.mpqn) + " us/q)");
+
+    for (const auto& ea : a.elements) {
+        const Element* eb = nullptr;
+        for (const auto& x : b.elements) if (x.marker == ea.marker) { eb = &x; break; }
+        const std::string at = ea.marker + ": ";
+        if (!eb) { r.differences.push_back(at + "missing from the Pa5X export"); continue; }
+        if (ea.num != eb->num || ea.den != eb->den)
+            r.differences.push_back(at + "meter " + std::to_string(ea.num) + "/" + std::to_string(ea.den) + " vs " +
+                                    std::to_string(eb->num) + "/" + std::to_string(eb->den));
+        const uint64_t la = (uint64_t{ea.length} * q + a.ppqn / 2) / a.ppqn;
+        const uint64_t lb = (uint64_t{eb->length} * q + b.ppqn / 2) / b.ppqn;
+        if (la != lb) r.differences.push_back(at + "length " + std::to_string(la) + " vs " + std::to_string(lb) + " ticks");
+        const auto na = notesAt(ea, a.ppqn, q), nb = notesAt(*eb, b.ppqn, q);
+        if (na.size() != nb.size()) {
+            r.differences.push_back(at + std::to_string(na.size()) + " notes vs " + std::to_string(nb.size()));
+            continue;
+        }
+        size_t bad = 0;
+        std::string first;
+        for (size_t i = 0; i < na.size(); ++i) {
+            const auto &x = na[i], &y = nb[i];
+            if (x.ch == y.ch && x.pitch == y.pitch && x.vel == y.vel && near1(x.on, y.on) && near1(x.off, y.off)) continue;
+            if (!bad++)
+                first = "ch " + std::to_string(x.ch + 1) + " note " + std::to_string(x.pitch) + " @" +
+                        std::to_string(x.on) + " v" + std::to_string(x.vel) + " vs ch " + std::to_string(y.ch + 1) +
+                        " note " + std::to_string(y.pitch) + " @" + std::to_string(y.on) + " v" + std::to_string(y.vel);
+        }
+        if (bad) r.differences.push_back(at + std::to_string(bad) + " notes differ (first: " + first + ")");
+    }
+    for (const auto& eb : b.elements)
+        if (std::none_of(a.elements.begin(), a.elements.end(), [&](const Element& x) { return x.marker == eb.marker; }))
+            r.info.push_back("element only in the Pa5X export: '" + eb.marker + "' (" + std::to_string(eb.events.size()) + " events)");
     return r;
 }
 

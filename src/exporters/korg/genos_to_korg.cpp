@@ -63,19 +63,27 @@ std::string lower(std::string s) {
     return s;
 }
 
-// Instrument family for the sound report (priority order of the milestone).
-std::string familyOf(const std::string& name, uasf::TrackRole role) {
-    using R = uasf::TrackRole;
+// Instrument family for the sound report. Drum tracks by Korg target; other
+// parts by an instrument keyword in the Genos part name, then by role. Part
+// names like "Chord1" carry no instrument: those stay "Unidentified" (the
+// Yamaha voice number is not a family source; its banks are not GM).
+std::string familyOf(const std::string& name, uasf::TrackRole role, uint8_t korgCh) {
     const std::string n = lower(name);
-    auto has = [&](const char* k) { return n.find(k) != std::string::npos; };
-    if (role == R::Drum || role == R::Percussion) return "Drum Kit";
-    if (role == R::Bass || has("bass")) return "Bass";
-    if (has("piano") || has("e.p") || has("pno")) return "Piano/EP";
-    if (has("gt") || has("guit")) return "Guitar";
-    if (has("str")) return "Strings";
-    if (has("brass") || has("tp") || has("tb") || has("trump") || has("horn")) return "Brass";
-    if (role == R::Pad || has("pad")) return "Pad";
-    return "Generic";
+    auto has = [&](std::initializer_list<const char*> ks) {
+        for (const char* k : ks) if (n.find(k) != std::string::npos) return true;
+        return false;
+    };
+    if (korgCh == kDrumCh) return "Drum Kit";
+    if (korgCh == kPercCh) return "Percussion";
+    if (has({"piano", "pno", "e.p", "ep "})) return "Piano/EP";
+    if (has({"organ", "org"})) return "Organ";
+    if (has({"guitar", "gtr", "gt.", "gt "})) return "Guitar";
+    if (has({"str"})) return "Strings";
+    if (has({"brass", "tbn", "trb", "tp", "trp", "trumpet", "trombone", "horn", "sax"})) return "Brass";
+    if (has({"synth", "syn", "lead"})) return "Synth";
+    if (has({"pad"}) || role == uasf::TrackRole::Pad) return "Pad";
+    if (has({"bass"}) || role == uasf::TrackRole::Bass) return "Bass";
+    return "Unidentified";
 }
 
 struct Note { uint32_t on, off; uint8_t pitch, vel; };
@@ -166,7 +174,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 tr_row.role = tr.role;
                 tr_row.ntr = tr.articulation.ntr;
                 tr_row.ntt = tr.articulation.ntt;
-                tr_row.family = familyOf(tr.name, tr.role);
+                tr_row.family = familyOf(tr.name, tr.role, kch);
             }
 
             if (kch == 0xFF) { rep.dropped[kDropChannel] += static_cast<uint32_t>(tr.events.size()); continue; }
@@ -213,7 +221,15 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             }
             const bool drum = kch == kDrumCh || kch == kPercCh;
             for (auto n : notes) {
-                if (!drum && n.pitch <= kChordEventNoteMax) { ++rep.dropped[kDropChordRange]; continue; }
+                if (!drum) {
+                    tr_row.velocity_zones |= n.vel <= 64 ? 1 : n.vel <= 90 ? 2 : n.vel <= 100 ? 4 : 8;
+                    if (n.pitch >= 96) ++tr_row.high_notes;
+                }
+                if (!drum && n.pitch <= kChordEventNoteMax) {
+                    ++rep.dropped[kDropChordRange];
+                    ++tr_row.chord_range_dropped;
+                    continue;
+                }
                 if (len < 2 || n.on >= len - 1) { ++rep.dropped[kDropLastTick]; continue; }
                 // A note past the last tick makes Pa append a measure: end it inside.
                 n.off = std::max(std::min(n.off, len - 1), n.on + 1);
@@ -247,8 +263,29 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             row.target = "MSB " + std::to_string(s->second.msb) + " LSB " + std::to_string(s->second.lsb) +
                          " PC " + std::to_string(s->second.pc) + " (user map)";
         else row.target = "UNRESOLVED";
+
+        const bool drumTrack = row.korg_ch == kDrumCh || row.korg_ch == kPercCh;
+        // Keys at C7+ are MegaVoice noise/FX keys on plucked parts; a part with
+        // no instrument name is checked too. Velocity zones alone are ordinary
+        // dynamics, so they only support a flag, never raise one.
+        const bool plucked = row.family == "Guitar" || row.family == "Bass" || row.family == "Unidentified";
+        int zones = 0;
+        for (uint8_t z = row.velocity_zones; z; z &= z - 1) ++zones;
+        std::string why;
+        auto add = [&](const std::string& x) { why += (why.empty() ? "" : "; ") + x; };
+        if (!drumTrack && row.chord_range_dropped)
+            add(std::to_string(row.chord_range_dropped) + " notes in C-1..B-1 (dropped)");
+        if (!drumTrack && plucked && row.high_notes)
+            add(std::to_string(row.high_notes) + " notes at C7 or above (" + row.family + " part)");
+        row.megavoice = !why.empty();
+        if (row.megavoice && zones >= 3) add("velocities span " + std::to_string(zones) + " MegaVoice zones");
+        row.megavoice_why = why;
         rep.tracks.push_back(row);
     }
+    for (const auto& [kch, s] : opt.sounds)
+        if (std::none_of(rep.tracks.begin(), rep.tracks.end(), [&](const TrackRow& t) { return t.korg_ch == kch; }))
+            rep.warnings.push_back(std::string("sound map sets Korg ") + korgTrackName(kch) +
+                                   " but no Genos part plays it (bank/PC still written)");
     if (r.style.elements.empty()) { r.error = "no section maps to a Korg style element"; return r; }
     r.ok = true;
     return r;
@@ -271,6 +308,18 @@ std::string formatReport(const Report& r, const Style& s) {
         line("  " + std::to_string(t.src_ch + 1) + " | " + t.name + " | " + std::to_string(t.ntr) + "/" +
              std::to_string(t.ntt) + " | " + std::to_string(t.msb) + "/" + std::to_string(t.lsb) + "/" +
              std::to_string(t.pc) + " | " + t.family + " -> " + korgTrackName(t.korg_ch) + " | " + t.target);
+    line("");
+    line("MegaVoice / articulation candidates (Yamaha articulations do not carry over; confirm by ear):");
+    bool anyMega = false;
+    for (const auto& t : r.tracks)
+        if (t.megavoice) { anyMega = true; line("  Genos ch " + std::to_string(t.src_ch + 1) + " '" + t.name + "': " + t.megavoice_why); }
+    if (!anyMega) line("  none");
+    line("");
+    line("Confirm on Pa5X (sound choice by ear; unresolved = no sound assigned):");
+    for (const auto& t : r.tracks)
+        if (t.korg_ch != 0xFF)
+            line("  " + std::string(korgTrackName(t.korg_ch)) + " <- Genos ch " + std::to_string(t.src_ch + 1) + " '" +
+                 t.name + "' (" + t.family + "): " + t.target);
     line("");
     line("Dropped events:");
     if (r.dropped.empty()) line("  none");
