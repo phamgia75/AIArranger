@@ -25,3 +25,10 @@ foreach(test_file ${KORG_VALIDATION_TEST_SRC})
         KORG_REPO_DIR="${CMAKE_SOURCE_DIR}")
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+# Hardware-transmission guard (see the top-level CMakeLists): no test here may
+# drive a real MIDI device.
+get_property(_kv_tests DIRECTORY PROPERTY TESTS)
+if(_kv_tests)
+    set_property(TEST ${_kv_tests} APPEND PROPERTY ENVIRONMENT "AIARR_MIDI_HW_TX=0")
+endif()

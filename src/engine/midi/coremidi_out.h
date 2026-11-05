@@ -29,9 +29,19 @@ namespace ai_arranger::midi {
  *     thread also re-resolves the endpoint by name periodically, so a device
  *     that disappears and reappears reconnects without caller intervention.
  *
- * CI safety:
- *   - With zero destinations (headless CI), initialize() still succeeds and
- *     send()/dispatch become a graceful no-op (events counted as dropped).
+ * Fail-closed output policy (hardware safety):
+ *   - initialize() NEVER selects a destination. Nothing reaches any device until
+ *     the caller selects one explicitly with selectDestination(); a connected
+ *     device is never used as a default or fallback.
+ *   - With no destination selected, send()/dispatch are a graceful no-op (events
+ *     counted as dropped) — on CI and on a machine with a keyboard attached alike.
+ *   - Hardware-transmission guard at the MIDISend boundary: if the environment
+ *     variable AIARR_MIDI_HW_TX is "0" when initialize() runs, every MIDISend
+ *     (events AND cleanup CCs) is blocked and counted in blockedCount(). CTest sets
+ *     it for every registered test, so a software test cannot drive hardware
+ *     even if it selects a real destination.
+ *   - shutdown() silences the selected destination (CC123 + CC120, 16 channels)
+ *     after draining the queue, so a stray Note On never outlives the process.
  *   - midiEventToBytes() is a pure function, fully testable without hardware.
  */
 
@@ -58,8 +68,8 @@ public:
 
     // ── Lifecycle (non-realtime) ─────────────────────────────────────
     // Creates the CoreMIDI client + output port and starts the dispatch
-    // thread. Returns false only on a hard CoreMIDI failure (not on
-    // "zero destinations", which is a valid headless state).
+    // thread. Selects NO destination (fail-closed). Returns false only on a hard
+    // CoreMIDI failure (not on "zero destinations", a valid headless state).
     bool initialize(const char* clientName = "AI Arranger") noexcept;
     void shutdown() noexcept;
     [[nodiscard]] bool isInitialized() const noexcept;
@@ -90,6 +100,11 @@ public:
     [[nodiscard]] uint64_t dispatchedCount() const noexcept; // events popped
     [[nodiscard]] uint64_t droppedCount() const noexcept;  // dropped (queue full)
     [[nodiscard]] uint64_t reconnectCount() const noexcept;
+    // Messages a selected destination did NOT receive because the hardware-
+    // transmission guard (AIARR_MIDI_HW_TX=0) is active.
+    [[nodiscard]] uint64_t blockedCount() const noexcept;
+    // False when the guard read at initialize() blocks all transmission.
+    [[nodiscard]] bool hardwareTransmitAllowed() const noexcept { return hw_tx_allowed_; }
 
 private:
     void dispatchLoop() noexcept;          // consumer thread body
@@ -121,6 +136,9 @@ private:
     std::atomic<uint64_t> dispatched_count_{0};
     std::atomic<uint64_t> dropped_count_{0};
     std::atomic<uint64_t> reconnect_count_{0};
+    std::atomic<uint64_t> blocked_count_{0};
+    // Written only in initialize() before the dispatch thread starts.
+    bool hw_tx_allowed_{false};
 };
 
 } // namespace ai_arranger::midi

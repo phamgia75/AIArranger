@@ -1,0 +1,77 @@
+# MIDI output safety: fail-closed policy
+
+## Incident (2026-11-05)
+
+On the Mac mini with a Korg Pa5X attached over USB, a software-only `ctest` run sent MIDI to the instrument. It was not asked to.
+
+The cause was `CoreMidiOut::initialize()`, which auto-selected destination 0 whenever one existed, and destination 0 was `Pa5X SOUND`. The following tests then drove the instrument:
+
+| Test | What reached `Pa5X SOUND` |
+|---|---|
+| `test_midi_output_provider` | 1 Note On (ch 1, note 60, vel 100), **no Note Off**; nothing silenced it at shutdown |
+| `test_latency_stability` | ~130 balanced Note On/Off pairs (ch 1, notes 36-59), plus CC123/CC120 × 16 channels on "unplug" |
+| `test_coremidi_out` | CC123/CC120 × 16 channels from `selectDestination(-1)` |
+| `test_coremidi_reinit` | nothing sent, but 25 init cycles each selected the device |
+
+No SysEx, Bank Select or Program Change was sent, so no instrument setting was changed.
+
+## Affected call paths (before the fix)
+
+- `CoreMidiOut::initialize()` auto-selected the first destination.
+  - Every user of the class inherited this: `CoreMidiOutputProvider`, `tools/korg_playback_cli.cpp`, and both app drivers.
+- `apps/macos/Source/EngineDriver.h`: `initialize()` followed by `MidiOutputManager::refresh()`. With no name stored, `refresh()` calls `select(-1)`, which sent 32 CCs to the auto-selected device at every app start.
+- `apps/macos/Source/LiveHostDriver.h`: the live host played to whichever device was first, before the user picked one.
+- `CoreMidiOut::shutdown()` did not silence the device, so a Note On without its Note Off kept sounding after the process exited.
+
+`MidiOutputManager`, `LiveEngineFacade::selectMidiOutput` and the C ABI already worked on explicit selection. They are unchanged. The C ABI only reports `hasMidiOutput`, which means "a provider is wired".
+
+## Policy
+
+1. **`initialize()` never selects a destination.** Nothing is sent until the caller calls `selectDestination(index)`. A connected device is never used as a default or as a fallback.
+2. **No destination means a controlled no-op.** Events are counted in `droppedCount()` and none are sent. Selecting an out-of-range index fails and leaves the current selection unchanged.
+3. **Hardware-transmission guard at the `MIDISend` boundary.**
+   - `initialize()` reads the `AIARR_MIDI_HW_TX` environment variable. If it is `0`, every `MIDISend` is blocked: events in `dispatchOne()` and cleanup CCs in `sendAllSoundOff()`. Blocked messages are counted in `blockedCount()`.
+   - Any other value, or no value, allows transmission, but only to a destination that was selected explicitly.
+   - CTest sets `AIARR_MIDI_HW_TX=0` on **every** registered test, in the top-level directory and in `tools/korg_validation`. Tests added later get it too, because the block runs over the directory's `TESTS` property rather than over a list of names.
+4. **Deterministic cleanup when authorized.**
+   - Deselecting or switching sends CC123 and CC120 on all 16 channels to the old device. This was already the behaviour.
+   - `shutdown()` now sends the same after the final queue drain.
+   - Both go through the guard.
+5. **No MIDI thru.**
+   - Input is routed only to chord detection and transport control (`routeMidiInput`). No input message is forwarded to an output.
+   - `test_midi_input_no_thru` locks this in. On the Pa5X the keyboard and the sound engine are the same device, so an echo would double notes and could loop.
+6. **Tools select explicitly.**
+   - `korg-playback` takes `--dest "NAME"`, which must match exactly one destination, or interactive `[` / `]`.
+   - With neither, it plays silently.
+
+## Regression coverage
+
+`tests/engine/test_midi_output_safety.cpp` uses only virtual CoreMIDI destinations that the test creates itself:
+
+- a decoy named exactly `Pa5X SOUND`
+- a uniquely named sink
+
+It selects endpoints by `MIDIEndpointRef` identity, never by name, so a real device with the same name is never touched. It proves the following:
+
+- Initialization with a "Pa5X SOUND" present selects nothing.
+- With no destination, nothing is sent and the decoy receives nothing, including from shutdown cleanup.
+- Selection must be explicit, and an out-of-range select changes nothing.
+- The guard blocks events and the deselect cleanup at the send boundary, and the selected sink receives nothing.
+- When authorized (`AIARR_MIDI_HW_TX=1`, own sink only), Note On is followed by Note Off in order, and shutdown cleanup arrives as 32 CCs.
+
+To check that the test catches the bug, the auto-select was put back temporarily. Seven checks failed.
+
+`test_latency_stability` now "replugs" to a virtual sink it owns instead of real destination 0.
+
+## Remaining risks
+
+- **The guard is opt-out, not opt-in.**
+  - A test binary run directly, outside CTest, transmits if it selects a real device.
+  - After this fix no test selects any endpoint it did not create, so a direct run has nothing to transmit to.
+- **Hot-plug re-resolution is by display name.** Two destinations with the same name resolve to the first one. Unique-ID resolution is a follow-up.
+- **Not yet proven on the device.** Passing unit tests do not prove hardware safety. The fix still needs one CoreMIDI test run on the Mac mini with the Pa5X attached and a MIDI monitor watching, to show that nothing reaches `Pa5X SOUND`.
+- **The `hieucat75/AIArranger` fork has the same auto-select** (`feat/gate3-5-live-arranger-loop`, which includes `tools/pa5x_live_cli.cpp`). This fix lands in `phamgia75/AIArranger` only.
+
+## Intentional hardware tests
+
+Run them outside CTest and select the destination by exact name: for example `korg-playback --dest "Pa5X SOUND"`. Keep a log, and silence with Panic, or with CC123/CC120 on exit.

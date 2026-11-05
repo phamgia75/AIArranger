@@ -15,9 +15,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <vector>
 #include <mach/mach_time.h>
+#include <unistd.h>
 
 using namespace ai_arranger::midi;
 using namespace ai_arranger::uasf;
@@ -91,7 +93,22 @@ int main() {
         out.setDispatchTap([&](const MidiEvent& e) { balance.observe(e); });
 
         TEST("CoreMidiOut init for stability run", out.initialize("AIA Stability"));
-        int destCount = out.destinationCount();
+        // "Replug" target = a virtual destination this test owns, found by
+        // endpoint identity: a real attached device is never selected (#safety).
+        MIDIClientRef sinkClient = 0;
+        MIDIEndpointRef sinkEp = 0;
+        int sinkIdx = -1;
+        const std::string sinkName = "AIA STABILITY SINK " + std::to_string(getpid());
+        CFStringRef cf = CFStringCreateWithCString(nullptr, sinkName.c_str(), kCFStringEncodingUTF8);
+        if (MIDIClientCreate(CFSTR("AIA Stability sink"), nullptr, nullptr, &sinkClient) == noErr &&
+            MIDIDestinationCreate(sinkClient, cf, [](const MIDIPacketList*, void*, void*) {}, nullptr, &sinkEp) == noErr) {
+            for (int w = 0; w < 200 && sinkIdx < 0; ++w) {
+                for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); ++i)
+                    if (MIDIGetDestination(i) == sinkEp) sinkIdx = static_cast<int>(i);
+                if (sinkIdx < 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        CFRelease(cf);
 
         // Stream balanced NoteOn/NoteOff pairs while toggling the destination
         // (simulating a device dropping out and coming back). The dispatch path
@@ -99,7 +116,7 @@ int main() {
         constexpr int PAIRS = 200;
         for (int i = 0; i < PAIRS; ++i) {
             if (i == 50) out.selectDestination(-1);                 // "unplug"
-            if (i == 120) out.selectDestination(destCount > 0 ? 0 : -1); // "replug"
+            if (i == 120) out.selectDestination(sinkIdx);              // "replug" (own sink or none)
             uint8_t note = 36 + (i % 24);
             out.send(mk(MidiEventType::NoteOn,  0, note, 100));
             out.send(mk(MidiEventType::NoteOff, 0, note, 0));
@@ -110,6 +127,8 @@ int main() {
 
         TEST("Every event dispatched across reconnect", out.dispatchedCount() >= expected);
         out.shutdown();   // join the dispatch thread before reading the tap's NoteBalance
+        if (sinkEp) MIDIEndpointDispose(sinkEp);
+        if (sinkClient) MIDIClientDispose(sinkClient);
         TEST("Balanced on/off totals across reconnect",
              balance.totalNoteOn() == PAIRS && balance.totalNoteOff() == PAIRS);
         TEST("No stuck notes after disconnect/reconnect", balance.stuckNoteCount() == 0);

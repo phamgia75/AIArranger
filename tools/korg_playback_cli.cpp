@@ -7,8 +7,12 @@
 // This is a hands-on tool, not an automated test — run it on a machine with a
 // real MIDI destination connected.
 //
-//   korg-playback              # built-in demo style, auto-select destination
-//   korg-playback style.uasf   # load a UASF style file
+//   korg-playback                            # built-in demo style, NO destination
+//   korg-playback [style.uasf] --dest "NAME"  # select the destination named exactly NAME
+//
+// Fail-closed: nothing is sent until a destination is chosen, either with --dest
+// (exact name) or interactively with [ / ]. A connected device is never picked
+// on its own.
 //
 // Live keys (single keypress, no Enter):
 //   space   start / stop          1..6  switch to section index (0-based +1)
@@ -93,12 +97,19 @@ constexpr int kChordCount = sizeof(kChordCycle) / sizeof(kChordCycle[0]);
 
 int main(int argc, char** argv) {
     // ── Load a style ─────────────────────────────────────────────────
+    const char* stylePath = nullptr;
+    const char* destName = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--dest" && i + 1 < argc) destName = argv[++i];
+        else if (!stylePath) stylePath = argv[i];
+        else { std::fprintf(stderr, "usage: korg-playback [style.uasf] [--dest NAME]\n"); return 1; }
+    }
     StyleDefinition style;
-    if (argc >= 2) {
+    if (stylePath) {
         UasfDeserializer de;
-        auto res = de.deserializeFromFile(argv[1]);
+        auto res = de.deserializeFromFile(stylePath);
         if (!res.success) {
-            std::fprintf(stderr, "Failed to load '%s': %s\n", argv[1], res.error.c_str());
+            std::fprintf(stderr, "Failed to load '%s': %s\n", stylePath, res.error.c_str());
             return 1;
         }
         style = res.style;
@@ -153,11 +164,18 @@ int main(int argc, char** argv) {
     auto dests = out.enumerateDestinations();
     std::printf("\nMIDI destinations (%zu):\n", dests.size());
     for (auto& d : dests) std::printf("  [%d] %s\n", d.index, d.name.c_str());
-    if (dests.empty()) {
-        std::printf("  (none connected — playback will be a no-op until a device appears)\n");
+    if (destName) {
+        int match = -1, matches = 0;
+        for (auto& d : dests) if (d.name == destName) { match = d.index; ++matches; }
+        if (matches != 1) {   // controlled error: never fall back to another device
+            std::fprintf(stderr, "--dest \"%s\" matches %d destinations (need exactly 1)\n", destName, matches);
+            out.shutdown();
+            return 2;
+        }
+        out.selectDestination(match);
+        std::printf("Selected: [%d] %s\n", match, destName);
     } else {
-        std::printf("Selected: [%d] %s\n", out.selectedDestination(),
-                    dests[out.selectedDestination() >= 0 ? out.selectedDestination() : 0].name.c_str());
+        std::printf("No destination selected: playback is silent until you pick one with [ / ].\n");
     }
 
     player.loadStyle(style);
@@ -225,10 +243,10 @@ int main(int argc, char** argv) {
             case '[': case ']': {
                 auto ds = out.enumerateDestinations();
                 if (!ds.empty()) {
+                    const int n = (int)ds.size();
                     int sel = out.selectedDestination();
-                    if (sel < 0) sel = 0;
-                    sel = (c == ']') ? (sel + 1) % (int)ds.size()
-                                     : (sel - 1 + (int)ds.size()) % (int)ds.size();
+                    if (sel < 0) sel = (c == ']') ? 0 : n - 1;   // first explicit pick
+                    else sel = (c == ']') ? (sel + 1) % n : (sel - 1 + n) % n;
                     out.selectDestination(sel);
                     std::printf("[dest] -> [%d] %s\n", sel, ds[sel].name.c_str());
                 }

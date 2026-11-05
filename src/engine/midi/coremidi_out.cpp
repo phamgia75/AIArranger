@@ -2,6 +2,8 @@
 #include "engine/trace/latency_trace.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 // MIDIPacketList / MIDIPacketListAdd are deprecated in favour of the newer
@@ -68,6 +70,10 @@ CoreMidiOut::~CoreMidiOut() {
 bool CoreMidiOut::initialize(const char* clientName) noexcept {
     if (initialized_.load(std::memory_order_acquire)) return true;
 
+    // Hardware-transmission guard, read once here (never on the realtime path).
+    const char* tx = std::getenv("AIARR_MIDI_HW_TX");
+    hw_tx_allowed_ = !(tx && std::strcmp(tx, "0") == 0);
+
     CFStringRef cfClient = CFStringCreateWithCString(
         kCFAllocatorDefault, clientName ? clientName : "AI Arranger", kCFStringEncodingUTF8);
     OSStatus st = MIDIClientCreate(cfClient, &CoreMidiOut::notifyProc, this, &client_);
@@ -86,10 +92,8 @@ bool CoreMidiOut::initialize(const char* clientName) noexcept {
         return false;
     }
 
-    // Auto-select the first destination if one exists (headless CI → none).
-    if (destinationCount() > 0) {
-        selectDestination(0);
-    }
+    // Fail-closed: no destination is selected here, even if devices exist. The
+    // caller must pick one explicitly (selectDestination) before anything is sent.
 
     running_.store(true, std::memory_order_release);
     dispatch_thread_ = std::thread([this]{ dispatchLoop(); });
@@ -103,7 +107,11 @@ void CoreMidiOut::shutdown() noexcept {
         return;
     }
     running_.store(false, std::memory_order_release);
-    if (dispatch_thread_.joinable()) dispatch_thread_.join();
+    if (dispatch_thread_.joinable()) dispatch_thread_.join();   // drains the queue
+
+    // Deterministic cleanup: silence the explicitly selected device after the
+    // final drain, so a Note On without its Note Off never keeps sounding.
+    sendAllSoundOff(endpoint_.load(std::memory_order_acquire));
 
     if (out_port_) { MIDIPortDispose(out_port_); out_port_ = 0; }
     if (client_)   { MIDIClientDispose(client_);  client_ = 0; }
@@ -172,6 +180,10 @@ bool CoreMidiOut::selectDestination(int index) noexcept {
 
 void CoreMidiOut::sendAllSoundOff(MIDIEndpointRef ep) noexcept {
     if (ep == 0 || out_port_ == 0) return;
+    if (!hw_tx_allowed_) {   // guard: cleanup never reaches an unauthorized endpoint
+        blocked_count_.fetch_add(32, std::memory_order_relaxed);
+        return;
+    }
     for (uint8_t ch = 0; ch < 16; ++ch) {
         const uint8_t ctrls[2] = {123 /*All Notes Off*/, 120 /*All Sound Off*/};
         for (uint8_t cc : ctrls) {
@@ -217,6 +229,7 @@ uint64_t CoreMidiOut::sentCount() const noexcept { return sent_count_.load(std::
 uint64_t CoreMidiOut::dispatchedCount() const noexcept { return dispatched_count_.load(std::memory_order_acquire); }
 uint64_t CoreMidiOut::droppedCount() const noexcept { return dropped_count_.load(std::memory_order_acquire); }
 uint64_t CoreMidiOut::reconnectCount() const noexcept { return reconnect_count_.load(std::memory_order_acquire); }
+uint64_t CoreMidiOut::blockedCount() const noexcept { return blocked_count_.load(std::memory_order_acquire); }
 
 // ── Hotplug re-resolution (dispatch / control thread) ────────────────
 
@@ -309,6 +322,11 @@ void CoreMidiOut::dispatchOne(const uasf::MidiEvent& ev) noexcept {
     uint8_t bytes[3];
     size_t nbytes = midiEventToBytes(ev, bytes);
     if (nbytes == 0) return;
+
+    if (!hw_tx_allowed_) {   // guard at the MIDISend boundary
+        blocked_count_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
     uint8_t listBuf[256];
     MIDIPacketList* pktList = reinterpret_cast<MIDIPacketList*>(listBuf);

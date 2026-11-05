@@ -92,7 +92,7 @@ endif()
 
 # Tests that exercise the Apple platform layer directly (CoreMidiOut /
 # CoreMidiOutputProvider / mach host time). Built and run on Apple only.
-set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit)
+set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety)
 
 # ── Importer library (vendor SFF1/SFF2 isolation) ─────────────────────
 file(GLOB_RECURSE IMPORTER_SFF1_SRC
@@ -277,4 +277,16 @@ if(BUILD_MACOS_APP AND NOT APPLE)
 endif()
 if(BUILD_MACOS_APP)
     add_subdirectory(apps/macos)
+endif()
+
+# ── Hardware-transmission guard for every registered test ─────────────
+# Software tests must never drive a real MIDI device (a regression run once sent
+# notes to an attached Korg Pa5X). CoreMidiOut blocks every MIDISend when
+# AIARR_MIDI_HW_TX=0, so this holds for every test here and in subdirectories,
+# including ones added later. Intentional hardware tests run outside CTest.
+# (set_property(TEST) only reaches this directory's tests; tools/korg_validation
+# applies the same block to its own.)
+get_property(_tests DIRECTORY PROPERTY TESTS)
+if(_tests)
+    set_property(TEST ${_tests} APPEND PROPERTY ENVIRONMENT "AIARR_MIDI_HW_TX=0")
 endif()
