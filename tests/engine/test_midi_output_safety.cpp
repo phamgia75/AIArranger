@@ -96,7 +96,7 @@ int main() {
         TEST("initialize selects no destination", out.selectedDestination() == -1);
         TEST("no live destination after initialize", !out.hasLiveDestination());
         for (int i = 0; i < 8; ++i) out.send(ev(MidiEventType::NoteOn, 60, 100));
-        waitFor([&] { return out.dispatchedCount() >= 8; });
+        waitFor([&] { return out.droppedCount() >= 8; });   // counted after dispatch
         TEST("no destination: every event dropped, none sent",
              out.droppedCount() >= 8 && out.sentCount() == 0);
         out.shutdown();
@@ -115,7 +115,7 @@ int main() {
         TEST("explicit select", out.selectDestination(sinkIdx) && out.hasLiveDestination());
         out.send(ev(MidiEventType::NoteOn, 60, 100));
         out.send(ev(MidiEventType::NoteOff, 60, 0));
-        waitFor([&] { return out.dispatchedCount() >= 2; });
+        waitFor([&] { return out.blockedCount() >= 2; });   // counted after dispatch
         TEST("guard blocks events at the MIDISend boundary", out.sentCount() == 0 && out.blockedCount() == 2);
         out.selectDestination(-1);   // would send CC123/CC120 x16 to the old endpoint
         TEST("guard blocks deselect cleanup", out.blockedCount() == 2 + 32);
@@ -124,39 +124,28 @@ int main() {
         TEST("selected sink received nothing while guarded", sink.count() == 0);
     }
 
-    // 3. Authorized transmission (own isolated endpoint only): Note Off and
-    //    shutdown cleanup are delivered in order. Selection is by index, so if any
-    //    destination this test did not create exists (a real device that could
-    //    shift indices mid-test), the authorized leg is skipped: it must never be
-    //    able to reach hardware.
-    bool onlyOwn = true;
-    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); ++i)
-        if (MIDIGetDestination(i) != decoyEp && MIDIGetDestination(i) != sinkEp) onlyOwn = false;
-    if (!onlyOwn) {
-        std::printf("  SKIP: authorized leg (other MIDI destinations present)\n");
-    } else {
-        setenv("AIARR_MIDI_HW_TX", "1", 1);
+    // 3. Shutdown cleanup is deterministic (attempted for the selected device,
+    //    blocked here by the guard), and shutdown forgets the selection: a re-
+    //    initialized object has no destination and the hot-plug probe (~100 ms)
+    //    does not reconnect the old one. No automated test ever transmits: a
+    //    by-index selection can race with a device being plugged in.
+    {
         CoreMidiOut out;
         out.initialize("AIARR safety 3");
-        setenv("AIARR_MIDI_HW_TX", "0", 1);
-        TEST("authorized when AIARR_MIDI_HW_TX=1", out.hardwareTransmitAllowed());
         out.selectDestination(sinkIdx);
-        out.send(ev(MidiEventType::NoteOn, 60, 100));
-        out.send(ev(MidiEventType::NoteOff, 60, 0));
-        waitFor([&] { return sink.count() >= 2; });
+        out.send(ev(MidiEventType::NoteOn, 60, 100));   // deliberately no Note Off
+        waitFor([&] { return out.blockedCount() >= 1; });
         out.shutdown();
-        waitFor([&] { return sink.count() >= 34; });
-        bool ordered = false, cleanup = false;
-        {
-            std::lock_guard<std::mutex> l(sink.m);
-            const auto& s = sink.status;
-            ordered = s.size() >= 2 && s[0] == 0x90 && s[1] == 0x80;
-            cleanup = s.size() == 34;
-            for (size_t i = 2; cleanup && i < s.size(); ++i) cleanup = s[i] == (0xB0 | ((i - 2) / 2));
-        }
-        TEST("authorized: Note On then explicit Note Off delivered", ordered);
-        TEST("shutdown cleanup: CC123+CC120 on all 16 channels", cleanup);
-        TEST("decoy still received nothing", decoy.count() == 0);
+        TEST("shutdown cleanup attempted for the selected device (32 CCs, guarded)",
+             out.blockedCount() == 1 + 32);
+        TEST("re-initialize succeeds", out.initialize("AIARR safety 3b"));
+        TEST("re-initialized: no destination selected", out.selectedDestination() == -1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));   // > 2 probe periods
+        TEST("re-initialized: old destination not reconnected by the probe",
+             !out.hasLiveDestination() && out.selectedDestination() == -1);
+        out.shutdown();
+        settle();
+        TEST("sink and decoy received nothing", sink.count() == 0 && decoy.count() == 0);
     }
 
     MIDIEndpointDispose(decoyEp);

@@ -22,6 +22,7 @@ No SysEx, Bank Select or Program Change was sent, so no instrument setting was c
 - `apps/macos/Source/EngineDriver.h`: `initialize()` followed by `MidiOutputManager::refresh()`. With no name stored, `refresh()` calls `select(-1)`, which sent 32 CCs to the auto-selected device at every app start.
 - `apps/macos/Source/LiveHostDriver.h`: the live host played to whichever device was first, before the user picked one.
 - `CoreMidiOut::shutdown()` did not silence the device, so a Note On without its Note Off kept sounding after the process exited.
+- `CoreMidiOut::shutdown()` kept the remembered selection. After a re-`initialize()`, the hot-plug probe silently reconnected the old device by name.
 
 `MidiOutputManager`, `LiveEngineFacade::selectMidiOutput` and the C ABI already worked on explicit selection. They are unchanged. The C ABI only reports `hasMidiOutput`, which means "a provider is wired".
 
@@ -57,7 +58,9 @@ It selects endpoints by `MIDIEndpointRef` identity, never by name, so a real dev
 - With no destination, nothing is sent and the decoy receives nothing, including from shutdown cleanup.
 - Selection must be explicit, and an out-of-range select changes nothing.
 - The guard blocks events and the deselect cleanup at the send boundary, and the selected sink receives nothing.
-- When authorized (`AIARR_MIDI_HW_TX=1`, own sink only), Note On is followed by Note Off in order, and shutdown cleanup arrives as 32 CCs. This leg selects by index, so it is **skipped** whenever any destination the test did not create exists. A real device plugged in mid-test could shift the indices, and the authorized leg must never be able to reach it.
+- `shutdown()` attempts the cleanup for the selected device: 32 CCs, blocked here by the guard.
+- `shutdown()` forgets the selection. A re-initialized object has no destination, and the hot-plug probe does not reconnect the old one.
+- No automated test transmits, even to its own virtual sink. Selection is by index, and a device plugged in mid-test could shift the indices. Delivery of Note Off and cleanup to a real device is verified only in a manual hardware run.
 
 To check that the test catches the bug, the auto-select was put back temporarily. Seven checks failed.
 

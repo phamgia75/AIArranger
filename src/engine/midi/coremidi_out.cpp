@@ -116,6 +116,13 @@ void CoreMidiOut::shutdown() noexcept {
     if (out_port_) { MIDIPortDispose(out_port_); out_port_ = 0; }
     if (client_)   { MIDIClientDispose(client_);  client_ = 0; }
     endpoint_.store(0, std::memory_order_release);
+    // Forget the selection: a later initialize() must start with no destination,
+    // not let the hot-plug probe silently reconnect the old device by name.
+    selected_index_.store(-1, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(nameMutex());
+        selected_name_.clear();
+    }
     initialized_.store(false, std::memory_order_release);
 }
 

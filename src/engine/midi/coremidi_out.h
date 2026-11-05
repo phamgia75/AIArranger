@@ -41,7 +41,8 @@ namespace ai_arranger::midi {
  *     it for every registered test, so a software test cannot drive hardware
  *     even if it selects a real destination.
  *   - shutdown() silences the selected destination (CC123 + CC120, 16 channels)
- *     after draining the queue, so a stray Note On never outlives the process.
+ *     after draining the queue, so a stray Note On never outlives the process,
+ *     then forgets the selection: a re-initialize() starts with no destination.
  *   - midiEventToBytes() is a pure function, fully testable without hardware.
  */
 

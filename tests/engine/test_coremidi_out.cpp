@@ -69,7 +69,7 @@ int main() {
     }
     // Wait for the dispatch thread to drain (generous budget for a cold-start
     // CoreMIDI client + thread spin-up, so the test is not timing-flaky).
-    for (int i = 0; i < 1000 && out.dispatchedCount() < (uint64_t)kSendCount; ++i) {
+    for (int i = 0; i < 1000 && out.droppedCount() < (uint64_t)kSendCount; ++i) {   // dropped is counted last
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     TEST("All sent events dispatched", out.dispatchedCount() >= (uint64_t)kSendCount);
