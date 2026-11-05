@@ -11,6 +11,7 @@
 #include "engine/midi/coremidi_in.h"
 #include "midi/coremidi/coremidi_output_provider.h"
 #include <cstdio>
+#include <cstdlib>
 
 using namespace ai_arranger;
 
@@ -21,6 +22,7 @@ static int failures = 0, passes = 0;
 } while(0)
 
 int main() {
+    setenv("AIARR_MIDI_HW_TX", "0", 1);   // never drive real hardware, even outside CTest
     std::printf("Test: CoreMIDI adapters re-initialise cleanly\n");
     midi::CoreMidiIn in;
     midi::CoreMidiOutputProvider out;

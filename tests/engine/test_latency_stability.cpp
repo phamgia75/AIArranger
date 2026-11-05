@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -42,6 +43,7 @@ static uint64_t nowNs() {
 }
 
 int main() {
+    setenv("AIARR_MIDI_HW_TX", "0", 1);   // never drive real hardware, even outside CTest
     std::printf("Test: Latency + MIDI Stability\n");
 
     // ── 1. schedule -> dispatch latency (p50 / p99) ──────────────────

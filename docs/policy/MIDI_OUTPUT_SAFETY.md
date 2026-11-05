@@ -57,7 +57,7 @@ It selects endpoints by `MIDIEndpointRef` identity, never by name, so a real dev
 - With no destination, nothing is sent and the decoy receives nothing, including from shutdown cleanup.
 - Selection must be explicit, and an out-of-range select changes nothing.
 - The guard blocks events and the deselect cleanup at the send boundary, and the selected sink receives nothing.
-- When authorized (`AIARR_MIDI_HW_TX=1`, own sink only), Note On is followed by Note Off in order, and shutdown cleanup arrives as 32 CCs.
+- When authorized (`AIARR_MIDI_HW_TX=1`, own sink only), Note On is followed by Note Off in order, and shutdown cleanup arrives as 32 CCs. This leg selects by index, so it is **skipped** whenever any destination the test did not create exists. A real device plugged in mid-test could shift the indices, and the authorized leg must never be able to reach it.
 
 To check that the test catches the bug, the auto-select was put back temporarily. Seven checks failed.
 
@@ -66,8 +66,9 @@ To check that the test catches the bug, the auto-select was put back temporarily
 ## Remaining risks
 
 - **The guard is opt-out, not opt-in.**
-  - A test binary run directly, outside CTest, transmits if it selects a real device.
-  - After this fix no test selects any endpoint it did not create, so a direct run has nothing to transmit to.
+  - Production code transmits to an explicitly selected destination unless `AIARR_MIDI_HW_TX=0`.
+  - Every CoreMIDI test also sets `AIARR_MIDI_HW_TX=0` itself at the top of `main`, so a binary run directly, outside CTest, is guarded too.
+  - A new CoreMIDI test that forgets this line is covered only under CTest.
 - **Hot-plug re-resolution is by display name.** Two destinations with the same name resolve to the first one. Unique-ID resolution is a follow-up.
 - **Not yet proven on the device.** Passing unit tests do not prove hardware safety. The fix still needs one CoreMIDI test run on the Mac mini with the Pa5X attached and a MIDI monitor watching, to show that nothing reaches `Pa5X SOUND`.
 - **The `hieucat75/AIArranger` fork has the same auto-select** (`feat/gate3-5-live-arranger-loop`, which includes `tools/pa5x_live_cli.cpp`). This fix lands in `phamgia75/AIArranger` only.

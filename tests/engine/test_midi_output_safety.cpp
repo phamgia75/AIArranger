@@ -125,8 +125,16 @@ int main() {
     }
 
     // 3. Authorized transmission (own isolated endpoint only): Note Off and
-    //    shutdown cleanup are delivered in order.
-    {
+    //    shutdown cleanup are delivered in order. Selection is by index, so if any
+    //    destination this test did not create exists (a real device that could
+    //    shift indices mid-test), the authorized leg is skipped: it must never be
+    //    able to reach hardware.
+    bool onlyOwn = true;
+    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); ++i)
+        if (MIDIGetDestination(i) != decoyEp && MIDIGetDestination(i) != sinkEp) onlyOwn = false;
+    if (!onlyOwn) {
+        std::printf("  SKIP: authorized leg (other MIDI destinations present)\n");
+    } else {
         setenv("AIARR_MIDI_HW_TX", "1", 1);
         CoreMidiOut out;
         out.initialize("AIARR safety 3");

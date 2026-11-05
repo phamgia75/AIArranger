@@ -100,8 +100,9 @@ int main(int argc, char** argv) {
     const char* stylePath = nullptr;
     const char* destName = nullptr;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--dest" && i + 1 < argc) destName = argv[++i];
-        else if (!stylePath) stylePath = argv[i];
+        const bool isDest = std::string(argv[i]) == "--dest";
+        if (isDest && i + 1 < argc) destName = argv[++i];
+        else if (!isDest && !stylePath) stylePath = argv[i];
         else { std::fprintf(stderr, "usage: korg-playback [style.uasf] [--dest NAME]\n"); return 1; }
     }
     StyleDefinition style;

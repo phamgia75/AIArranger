@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 using namespace ai_arranger::midi;
@@ -22,6 +23,7 @@ static MidiEvent ev(MidiEventType t, uint8_t ch, uint8_t d1, uint8_t d2) {
 }
 
 int main() {
+    setenv("AIARR_MIDI_HW_TX", "0", 1);   // never drive real hardware, even outside CTest
     std::printf("Test: CoreMidiOut\n");
 
     // ── Pure conversion (no hardware) ────────────────────────────────
