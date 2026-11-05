@@ -103,6 +103,14 @@ add_library(importer-sff1 STATIC ${IMPORTER_SFF1_SRC})
 target_include_directories(importer-sff1 PUBLIC src)
 target_link_libraries(importer-sff1 arranger-engine)
 
+# ── Korg Pa5X style exporter (UASF -> Korg Style SMF separated by markers) ──
+# Depends on the portable core only; the SFF1 routing helper is header-only.
+add_library(exporter-korg STATIC
+    src/exporters/korg/korg_style_smf.cpp
+    src/exporters/korg/genos_to_korg.cpp)
+target_include_directories(exporter-korg PUBLIC src)
+target_link_libraries(exporter-korg PUBLIC arranger-engine)
+
 # ── Tests ─────────────────────────────────────────────────────────────
 # Each test file is a standalone program with its own main(). We build
 # one executable per file and register it with CTest, rather than linking
@@ -147,6 +155,17 @@ foreach(test_file ${SHELL_TEST_SRC})
     endif()
     add_executable(${test_name} ${test_file})
     target_link_libraries(${test_name} ${PLATFORM_LIBS} arranger-engine Threads::Threads)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+# ── Korg exporter tests (format, mapper, Genos corpus conversion) ─────
+file(GLOB EXPORTER_TEST_SRC tests/exporters/*.cpp)
+foreach(test_file ${EXPORTER_TEST_SRC})
+    get_filename_component(test_name ${test_file} NAME_WE)
+    add_executable(${test_name} ${test_file})
+    target_link_libraries(${test_name} exporter-korg importer-sff1 arranger-engine Threads::Threads)
+    target_compile_definitions(${test_name} PRIVATE
+        CORPUS_DIR="${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1")
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
@@ -229,6 +248,10 @@ endif()
 # ── SFF1 parser CLI tool ──────────────────────────────────────────────
 add_executable(sff1-parser tools/sff1_parser_cli.cpp)
 target_link_libraries(sff1-parser importer-sff1 arranger-engine)
+
+# ── Genos -> Pa5X converter CLI ───────────────────────────────────────
+add_executable(aiarranger-convert tools/aiarranger_convert.cpp)
+target_link_libraries(aiarranger-convert exporter-korg importer-sff1 arranger-engine)
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────
 if(APPLE)
