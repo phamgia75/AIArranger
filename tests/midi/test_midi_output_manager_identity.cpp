@@ -38,6 +38,22 @@ int main() {
     TEST("original uid back: CONNECTED at its new index",
          mgr.state() == OutputState::Connected && mgr.selectedIndex() == 0 && p.selected() == 0);
 
+    // Snapshot race: the UI shows the list, then a hot-plug shifts it before the
+    // pick. Picking index 1 ("Pa5X SOUND" uid 111 when shown) must select uid 111
+    // or nothing — never the device that now sits at index 1.
+    {
+        FakeMidiOutputProvider r;
+        MidiOutputManager m(r);
+        r.setDevices({{0, "IAC Bus 1", 7}, {1, "Pa5X SOUND", 111}});
+        m.refresh();                                            // list shown to the user
+        r.devices = {{0, "IAC Bus 1", 7}, {1, "Other Synth", 333}};   // shifted underneath
+        TEST("stale pick of a vanished device: rejected, nothing selected",
+             !m.selectDevice(1) && r.selected() == -1 && !r.hasLiveDestination());
+        r.devices = {{0, "Pa5X SOUND", 111}, {1, "IAC Bus 1", 7}};
+        TEST("stale index, device moved: the device the user saw is selected",
+             m.selectDevice(1) && r.selected() == 0 && r.devices[r.selected()].uid == 111);
+    }
+
     // Providers without identity (uid 0) keep the by-name behaviour.
     FakeMidiOutputProvider q;
     MidiOutputManager m2(q);

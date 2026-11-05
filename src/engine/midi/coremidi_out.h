@@ -87,6 +87,9 @@ public:
     // (selection unchanged) if none or more than one matches. Race-free against
     // hot-plug: the endpoint that matched is the one selected.
     bool selectDestinationByName(const std::string& name) noexcept;
+    // Select the destination with this CoreMIDI unique ID (same one-pass, hot-
+    // plug-safe guarantee). Fails, selection unchanged, if it is not present.
+    bool selectDestinationByUid(int32_t uid) noexcept;
     [[nodiscard]] int  selectedDestination() const noexcept;
     [[nodiscard]] bool hasLiveDestination() const noexcept;
 

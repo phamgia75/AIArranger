@@ -193,6 +193,16 @@ bool CoreMidiOut::selectDestinationByName(const std::string& name) noexcept {
     return selectEndpoint(match, matchIndex);
 }
 
+bool CoreMidiOut::selectDestinationByUid(int32_t uid) noexcept {
+    if (uid == 0) return false;
+    const ItemCount n = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < n; ++i) {
+        MIDIEndpointRef ep = MIDIGetDestination(i);
+        if (endpointUniqueId(ep) == uid) return selectEndpoint(ep, static_cast<int>(i));
+    }
+    return false;
+}
+
 bool CoreMidiOut::selectEndpoint(MIDIEndpointRef ep, int index) noexcept {
     const int32_t uid = endpointUniqueId(ep);
     if (uid == 0) return false;   // cannot be re-identified on hot-plug: refuse (fail closed)

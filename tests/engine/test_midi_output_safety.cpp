@@ -139,6 +139,14 @@ int main() {
              MIDIGetDestination(out.selectedDestination()) == sinkEp);
         TEST("by name: failed lookup keeps the current selection",
              !out.selectDestinationByName(dupName) && MIDIGetDestination(out.selectedDestination()) == sinkEp);
+        // Selection by unique ID: the exact endpoint, or nothing.
+        int32_t sinkUid = 0;
+        MIDIObjectGetIntegerProperty(sinkEp, kMIDIPropertyUniqueID, &sinkUid);
+        out.selectDestination(-1);
+        TEST("by uid: unknown uid rejected, nothing selected",
+             !out.selectDestinationByUid(sinkUid ^ 0x5A5A5A5A) && out.selectedDestination() == -1);
+        TEST("by uid: selects exactly that endpoint",
+             sinkUid != 0 && out.selectDestinationByUid(sinkUid) && MIDIGetDestination(out.selectedDestination()) == sinkEp);
         out.selectDestination(-1);
         if (dupA) MIDIEndpointDispose(dupA);
         if (dupB) MIDIEndpointDispose(dupB);

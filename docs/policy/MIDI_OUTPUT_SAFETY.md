@@ -79,7 +79,11 @@ To check that the test catches the bug, the auto-select was put back temporarily
   - Every CoreMIDI test also sets `AIARR_MIDI_HW_TX=0` itself at the top of `main`, so a binary run directly, outside CTest, is guarded too.
   - A new CoreMIDI test that forgets this line is covered only under CTest.
 - **`MidiOutputManager` re-resolves by identity.** It remembers the device's unique ID, carried in `MidiOutDeviceInfo::uid`, and on refresh or hot-plug never adopts a different device that shares the name. Covered by `test_midi_output_manager_identity`. Providers without identity, such as the test fakes, keep the by-name behaviour.
-- **App UI pickers still select by index.** The JUCE output menus and `MidiOutputManager::selectDevice()` pick a destination by its index in a list enumerated a moment earlier. A device plugged or unplugged in between could shift the index. Every such pick is still an explicit user action, but moving these pickers to name or identity selection is a follow-up.
+- **Selection carries identity end to end.**
+  - `MidiOutputManager::selectDevice()` and its refresh/hot-plug re-resolution select through `IMidiOutputProvider::selectByUid()`, which maps to `CoreMidiOut::selectDestinationByUid()`.
+  - The device the user saw is selected even if the list shifted after enumeration, or nothing is selected. A stale index cannot redirect output.
+  - `selectByUid()` defaults to failing (fail closed) for providers without identity.
+- **One picker still selects by index.** The live host (`LiveHostComponent` → `LiveEngineFacade::selectMidiOutput(index)`) passes a list index straight to the provider. A hot-plug between showing the list and the pick could shift it. The pick is still an explicit user action. Moving it to `selectByUid` is a follow-up.
 - **Hot-plug re-resolution (fixed).**
   - The selection is remembered by CoreMIDI **unique ID**, not by name or index.
   - A device with the same name can never be adopted. `test_midi_output_safety` has a "hot-plug" case that failed on the name-based code and passes now.

@@ -29,6 +29,10 @@ public:
 
     // Select by index (-1 = none). Returns false if out of range.
     virtual bool select(int index) = 0;
+    // Select the device with this identity (MidiOutDeviceInfo::uid) without going
+    // through a list index that a hot-plug could shift. Returns false, selection
+    // unchanged, if absent or if the provider has no identities (fail closed).
+    virtual bool selectByUid(int64_t /*uid*/) { return false; }
     virtual int  selected() const = 0;
 
     // True when a real, connected destination is currently resolved.
