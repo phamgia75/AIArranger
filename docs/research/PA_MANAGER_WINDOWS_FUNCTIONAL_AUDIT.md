@@ -127,7 +127,24 @@ Differences recorded without explanation:
 - PAD and CHORDSEQUENCE have bank folders but no files.
 - A **PCM** folder is present: per manual p.736, loading this whole KST deletes the User Samples in memory.
 
-**Not done this session:** opening the copy in PA Manager's KST Manager, and the `kst-inventory` comparison. The RDP session ended when the Windows App configuration was saved (folder redirection removal), and re-authentication is the owner's. A manifest of the copy was prepared but not yet captured.
+**Not done in that first run (done later, §3d):** opening the copy in PA Manager's KST Manager, and the `kst-inventory` comparison. The RDP session ended when the Windows App configuration was saved (folder redirection removal), and re-authentication is the owner's. A manifest of the copy was prepared but not yet captured.
+
+## 3d. Session 2026-11-07 (later): copy opened in KST Manager, read-only
+
+**Access (VERIFIED):** saved Windows App credentials (macOS Keychain, entered by the owner) + certificate pinned with "Always trust" only after its SHA-256 matched the owner-approved fingerprint. Two disconnect/reconnect cycles: 32 s (first, cert check) and 4 s (no prompt). No credential was typed by ORCA.
+
+**Opening the copy:** KST MANAGER tile → ".KST EXPLORER" (defaults to the Desktop KST folder, where an **original** KST is pre-selected: not loaded) → ".KST Browse…" → Windows "Browse For Folder" tree → `C:\PA-Research\work\Korg Pa5x Gold Set.KST` → OK. PA Manager shows "Please Wait… Loading… <KST>\<TYPE>" per type folder, then the KST view (load took well under a minute).
+
+**KST view (OBSERVED, screenshot):**
+
+- Header: KST path; tabs STYLE / KBD SET / PAD / SOUND; summary tiles STY / PRF / PAD / PCG; Style bank list (6 banks; FAVORITE01 = 36 items; pages P1-P6); right column: Load KST, Save, Generate Report (STYLE), Copy from another KST, Advanced Settings. None of these were pressed.
+- **Memory INFO** panel, model selector "[4 GB] | PA5X": Used 1 403 084 800 B (1.31 GB), Total 4 294 967 296 B (4.00 GB), Available 2 891 882 496 B (2.69 GB); Sample 14274 / 53130; preLoadBuffer 224 MB / 420 MB. So PA Manager budgets **4 GB** of Pa5X sample memory (PA Manager's figure; the manual value is still not found). The meaning of "Sample 14274 / 53130" (count of sample slots?) is UNKNOWN.
+
+**UIA with the KST view open (OBSERVED):** 2 windows of the PA Manager process ("KORG PA Manager v5.2", "Memory INFO"); 90 elements = 88 Pane + 2 Window; classes `ThunderRT6UserControlDC` 80, `ThunderRT6PictureBoxDC` 6, `ThunderRT6FormDC` 2, `Edit` 2. 61 named. Exposed: every button label, tab and page control, the model selector text, and the **names of the 10 Style tiles on the visible page**. Not exposed: memory figures (drawn in picture boxes), the Edit values. Conclusion: UIA can locate controls by name and read the visible list page; counts and memory need screenshots; no AutomationIds.
+
+**Integrity (VERIFIED):** manifest of the copy (relative path | size | mtime UTC, 719 entries incl. folders) taken before loading and after the UIA run: identical SHA-256, 0 differences. Original KST data not touched.
+
+**Input method:** Windows App mangles synthetic keystrokes; commands go through the Mac clipboard (synced on app activation) and a right-click paste into Windows Terminal. A right-click once landed on a browser window because the terminal was not in front (context menu dismissed, no effect); the procedure now brings the terminal forward from the taskbar and checks a screenshot before every paste.
 
 ## 3. Feature inventory
 

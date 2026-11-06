@@ -183,6 +183,13 @@ Path C reads state only: it never clicks. Navigation (opening KST Manager on the
 - Saving the PC configuration in Windows App ended the live session; a reconnect needs the owner's login.
 - UIA results: audit §3c.
 
+### 5.7 Autonomous RDP reconnection, 2026-11-07: VERIFIED
+
+- Method: Windows App saved credentials (owner-entered, macOS Keychain) + RDP certificate pinned ("Always trust") after its SHA-256 matched the owner-approved value. ORCA's connect procedure stops on any credential prompt and on any certificate whose fingerprint differs; it never types credentials.
+- Two disconnect/reconnect cycles passed (32 s, 4 s). The session window leaves the current Space when Windows App loses focus; it is brought back with the device's Open item.
+- Still required: an unlocked Mac (any lock blocks all GUI control); no background agent runs between owner messages.
+- Option B (Orca runtime on Windows) was not needed and not installed.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.

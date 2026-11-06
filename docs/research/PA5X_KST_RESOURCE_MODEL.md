@@ -107,7 +107,7 @@ These are the semantics an independent tool must respect:
   - KST Merge and Remapping workflows (not opened);
   - "used by" or dependency views;
   - export formats;
-  - whether a Pa5X memory budget is offered.
+  - ~~whether a Pa5X memory budget is offered~~: yes, "[4 GB] | PA5X" (OBSERVED, audit §3d).
 
 ## 6. Proposed independent implementation in AIArranger (macOS / iPadOS)
 
@@ -131,6 +131,6 @@ Only documented behaviour is used, with no PA Manager code and no decoding of pr
 - The meaning of PA Manager's STY / PRF / PAD / PCG / PCM counts.
 - KST Merge and Remapping dialogs (observe only).
 - PA Manager's export menu and formats.
-- The Pa5X sample-memory size. Not found in the manual's specifications (they list a 1 GB internal drive, which is storage, not sample memory).
+- The Pa5X sample-memory size **in the manual**. PA Manager v5.2 budgets 4 GB for its "PA5X" model (OBSERVED, audit §3d); the manual's specifications list a 1 GB internal drive, which is storage, not sample memory.
 
-Windows access was blocked by the Mac console lock on 2026-11-06. On 2026-11-07 the research copy's folder structure was listed (OBSERVED rows above; audit §3c); it has not yet been opened in PA Manager.
+Windows access was blocked by the Mac console lock on 2026-11-06. On 2026-11-07 the research copy's folder structure was listed (OBSERVED rows above; audit §3c); it was then opened read-only in KST Manager with no file changes (audit §3d).
