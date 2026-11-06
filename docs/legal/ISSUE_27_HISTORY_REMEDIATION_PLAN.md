@@ -68,6 +68,17 @@ Disabled without the corpus, and the synthetic fixture each one needs:
 | #26 tests T1-T6 (`docs/research/ISSUE_26_EVIDENCE.md`) | Unmarked tail after Fill In BA | `SYNTH_BREAK_TAIL.sty`: a 1-bar BA plus a 9-bar tail |
 | `test_korg_sound_map`, `test_corpus_split_validation` | Gated with the corpus | Re-point to the synthetic set |
 
+**Status (2026-11-06):** the fixtures above now exist (`SYNTH_FULL_SFF2`, `SYNTH_WALTZ_68`, `SYNTH_BREAK_TAIL`, plus the `SYNTH_FULL_SFF2.uasf` golden). `tests/exporters/test_synthetic_corpus.cpp` (public, runs without the corpus) mirrors the corpus checks for:
+- 6/8 meter and fill timing;
+- non-default tempo through UASF;
+- all 15 sections;
+- guitar NTR/NTT;
+- Korg export and Break withheld;
+- the UASF golden;
+- tail preservation.
+
+The 16 corpus-gated tests themselves are unchanged and stay as the private acceptance set.
+
 Once these exist, the corpus becomes a **private, local-only** acceptance set: same tests, with `AIARR_GENOS_CORPUS_DIR` pointing outside the repo. That is still required by `IMPORTER_GOLDEN_CORPUS_POLICY.md`. Public CI then runs on the synthetic set only.
 
 ## 5. Options
