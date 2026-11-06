@@ -32,6 +32,7 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 | 12 | Chord-recognition channel roles + Pa5X style-track output map | Claude | `src/midi/midi_input_router.h`, `src/control/midi_output_bridge.h`, `src/session/live_engine_facade.*`, `src/engine/integration/performer_adapter.*`, `src/midi/pa5x_profile.h`, 3 tests | `f63dc85` | 124/124; ASan+UBSan 50/50, TSan 50/50; mutation check | Done (opt-in, defaults byte-identical, C ABI unchanged) | HW pending: does the Pa5X play ch9-16 from USB on Style tracks under the user's preset? |
 | 13 | #27 prep: corpus optional; fixed a test that hung without it; starter sound map | Claude + REA (14 sounds from manual appendix) | `CMakeLists.txt`, `tests/engine/test_time_signature.cpp`, `docs/exporters/sound-maps/pa5x-starter.soundmap`, test | `9e770c9` | 125/125; empty corpus: 108 pass, 16 Disabled | Done | Restricted files still in the repo and history (owner decision) |
 | 14 | Windows proof-of-control | ORCA | – | – | `orca computer get-app-state` on Windows App: still `permission_denied` | **Blocked** on macOS Accessibility + Screen Recording for Orca Computer Use | – |
+| 15 | Windows proof-of-control, rerun after owner granted permissions and foreground input | ORCA | `docs/research/WINDOWS_RESEARCH_AGENT.md` §5.1 | (this commit) | 5/5 steps of §5 | **Path A VERIFIED, foreground only** (background input ignored by Windows App). PA Manager v5.2 home screen observed, untouched | Notepad restored tabs with plaintext credentials; screenshot deleted, owner told to rotate. Every action takes over the Mac screen |
 
 Flaky, not caused by this work: `test_coremidi_out` failed once ("Initialize succeeds") and passed on 2 reruns, the known CoreMIDI-server condition (#21).
 
@@ -51,7 +52,7 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 
 ### Blocked
 
-- Windows/PA Manager control: blocked on macOS permissions (Path A) or owner approval (Path B); see `docs/research/WINDOWS_RESEARCH_AGENT.md` §7.
+- Windows/PA Manager: Path A verified (row 15). PA Manager research sessions still need the owner present (foreground input) and a copy folder of test data (§7.4).
 - Hardware validation of everything above (Pa5X not attached here; the 11-05 bench is the Mac mini).
 - P0.8 CI (Actions disabled — owner), P1.6 factory sound table (owner), P1.10 native KST (formats undocumented), P3.1 Audio Intelligence (source not found on this host).
 

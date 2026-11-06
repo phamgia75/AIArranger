@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-06
 - **Purpose:** let ORCA/REA observe and operate the owner's licensed KORG PA Manager on a separate Windows Pro PC on the LAN, to build the feature-parity research (`docs/KORG_PA_MANAGER_FEATURE_PARITY.md`) from observed behaviour instead of vendor marketing.
-- **Status:** **NOT YET CONTROLLABLE.** No end-to-end test has succeeded. Do not describe ORCA/REA as able to control Windows until §5 passes.
+- **Status:** **Path A VERIFIED (2026-11-06), foreground input only.** All five steps of §5 passed through the Windows App RDP window. Path B is not set up.
 - Host addresses, account names and pairing codes are deliberately **not** recorded in this public repository.
 
 ## 1. Audit results (2026-11-06, from the Mac)
@@ -14,11 +14,11 @@
 | Remote shell / remote execution into Windows | **None available.** No SSH, no WinRM, no SMB. Nothing was enabled. |
 | RDP client on the Mac | Microsoft *Windows App* (`com.microsoft.rdc.macos`), running |
 | Mac GUI automation | `orca computer` (Orca 1.4.250, provider `orca-computer-use-macos`): click, type, keys, scroll, drag, screenshots, accessibility tree, **background input**. No OCR. |
-| Mac GUI automation permission | **BLOCKED:** `get-app-state` on Windows App returned `permission_denied`: macOS Accessibility (and Screen Recording) not granted to *Orca Computer Use*. |
+| Mac GUI automation permission | Initially `permission_denied`; **granted** by the owner (Accessibility + Screen Recording) later the same day. |
 | Remote Orca runtime | Supported: `orca serve [--grant-desktop-control]` on the remote machine, paired from the Mac with `orca environment add --pairing-code …`. A paired client cannot drive the remote desktop unless the offer was created with `--grant-desktop-control`. |
 | Other automation on the Mac | No FreeRDP, no PowerShell. SSH client only. |
 
-**Conclusion:** neither ORCA nor REA can currently see or drive the Windows desktop. Two supported paths exist, and **neither needs a custom agent.**
+**Conclusion (after §5):** ORCA can see and drive the Windows desktop through the RDP window (Path A). Path B remains optional, for an accessibility tree.
 
 ## 2. Recommended architecture
 
@@ -97,6 +97,24 @@ Pass means **every** step succeeds and its evidence is saved under `docs/evidenc
 
 Path B adds: `orca computer list-apps --environment pa-manager-win --json` lists PA Manager, and `get-app-state` on it returns an accessibility tree. Record how many PA Manager controls UIA exposes; that decides between Path A and Path B for the research.
 
+### 5.1 Result, 2026-11-06 (Path A)
+
+| # | Result | Evidence |
+|---|---|---|
+| 1 | **PASS** | 2 windows; the session window is titled with the PC address, 1008×655 pt, not minimised |
+| 2 | **PASS** | ScreenCaptureKit screenshot; Windows 11 desktop described (Edge, PA Manager, taskbar, clock) |
+| 3 | **PASS (foreground only)** | Background clicks were delivered by macOS but **ignored by Windows App**. With `--restore-window`: the first click only focused the window, the second opened Start, a click on the pinned Notepad tile opened Notepad |
+| 4 | **PASS** | PA Manager **v5.2** was already open; its home screen read from the screenshot: Language (English [British]), New KPM Window, KST Manager (PA5X), SET Manager (PA4X…PA1X), Sample Manager (.KST/.SET), File Viewer (.STY/.PRF/.PAD…). Nothing in PA Manager was clicked |
+| 5 | **PASS** | Notepad's X closed it with no dialog; gone from the taskbar |
+
+The RDP session window exposes only its frame to macOS Accessibility (6 elements); everything inside is pixels, as expected. The screenshot scale varies between captures (2.0 and 1.27), so coordinates must come from the latest capture.
+
+Screenshots are **not** committed: they showed personal chat titles and, at step 3, **Notepad restored earlier tabs that contain plaintext credentials** (a `.env` file). The screenshot holding them was deleted. Lessons for every session:
+
+- Opening any app may restore previous content. Before a session, the owner closes or moves away anything sensitive (Notepad tabs, browser tabs, `.env` files).
+- Background input does not work on the RDP window; every action needs `--restore-window`, which takes over the Mac's screen and pointer. The owner keeps hands off during a run.
+- After the last action the Mac pointer stays where it clicked inside the session (step 5 left it over Edge's close button); move it to a neutral spot before handing back.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.
@@ -108,7 +126,7 @@ Path B adds: `orca computer list-apps --environment pa-manager-win --json` lists
 
 ## 7. Blockers that need the owner
 
-1. **macOS permissions** for Orca Computer Use: Accessibility and Screen Recording (§3, Path A, steps 1-2). Path A is blocked until then.
+1. ~~macOS permissions~~: granted 2026-11-06; Path A verified (§5.1).
 2. Keep the Windows App session connected and visible during the test.
 3. For Path B only: approve installing Orca on Windows, the firewall rule and running `orca serve --grant-desktop-control`, then send the pairing code.
 4. Prepare a copy folder of test data on Windows (a Pa5X KST/SET copy, never the original).
