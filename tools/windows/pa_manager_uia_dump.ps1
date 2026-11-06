@@ -22,14 +22,17 @@
   Automation assemblies. -ExecutionPolicy Bypass applies to that one process
   only and changes no system setting.
 
-  STATUS: UNTESTED on the target PC (written on macOS, no PowerShell available).
-  The first run is the test.
+  STATUS: first run 2026-11-07 on the target PC (Windows PowerShell 5.1): worked,
+  PA Manager v5.2 home screen = 14 elements. That run used the old unanchored title
+  pattern, which also dumped browser windows; the anchored default is not yet re-run.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\pa_manager_uia_dump.ps1 -OutFile C:\PA-Research\work\uia-home.txt
 #>
 param(
-    [string]$TitlePattern = 'PA ?Manager',   # regex on top-level window titles
+    # Anchored: an unanchored 'PA ?Manager' also matched browser tabs titled "KORG PA Manager | ..."
+    # (seen 2026-11-07), and the same-process rule below then pulled in every window of that browser.
+    [string]$TitlePattern = '^KORG PA ?Manager( +- +v[0-9.]+)?$',
     [string]$OutFile = "$env:USERPROFILE\Desktop\pa_manager_uia.txt",
     [int]$MaxDepth = 12,
     [int]$MaxElements = 5000

@@ -89,6 +89,46 @@ Whether the selector offers a Pa5X memory size is UNKNOWN (not opened).
 - **Not yet verified:** that the authorized copy exists under `C:\PA-Research\work` and is a copy. Nothing on Windows was opened.
 - **Done instead:** a documentation-based resource model from the Pa5X User Manual v1.4, in `PA5X_KST_RESOURCE_MODEL.md`. It covers the file types, the "reference grid" rule, Sound → Multisample → Sample and Drum Kit → Drum Sample references by bank + number, and the load/merge/replace and User Sample rules. Every statement there is labelled DOC, OBSERVED or UNKNOWN.
 
+## 3c. Session 2026-11-07: UIA dump + research-copy structure (read-only)
+
+**Route:** owner logged in to RDP; script delivered through Windows App folder redirection (one folder, read-only, removed afterwards). Commands were pasted into a non-elevated Windows PowerShell 5.1 (synthetic keystrokes do not survive Windows App; clipboard paste does).
+
+**Transfer:** `C:\PA-Research\work\pa_manager_uia_dump.ps1`, 4157 bytes, SHA-256 `76D3017E…9313035F` = commit `b31e1dd`. The run was guarded on that hash.
+
+**UIA result (OBSERVED), PA Manager v5.2 home screen:**
+
+- PA Manager is a **Visual Basic 6** application: main window class `ThunderRT6FormDC`; every tile is a `ThunderRT6UserControlDC`.
+- 14 elements in its window: 1 `Window` "KORG PA Manager" + 13 `Pane`. Panes expose a **Name** only (New SET / KST, SAMPLE Manager, New SET, SET Manager, New KST, FILE Viewer, New KPM Window, About, English [British], minimise, close; one pane unnamed). **No AutomationIds**, no child elements, no Button/List/Edit types.
+- Interpretation (not yet tested): tiles are findable by name and have screen rectangles, so a UIA client can locate them; whether they expose Invoke is UNKNOWN (the dump does not list patterns). Lists and grids inside KST/Sample Manager are UNKNOWN until dumped with those views open.
+- Script defect found: the unanchored title pattern also matched browser windows; fixed (anchored default), not yet re-run. The dump file on Windows contains browser UI and stays there.
+
+**Research copy (OBSERVED, `C:\PA-Research\work`):** `Korg Pa5x Gold Set.KST`: 667 files, 1360 MB, plus a separate Pa4X `.set` (1 file).
+
+| Type folder | Banks (sub-folders) | Files | MB |
+|---|---|---|---|
+| STYLE | 6 | 199 | 68.6 |
+| KEYBOARDSET | 11 | 347 | 2.1 |
+| PCM | 0 | 99 | 1285.4 |
+| SOUND | 0 | 8 | 0.6 |
+| SONGBOOK | 1 | 7 | 1.5 |
+| SETTINGS | 0 | 2 | 0.0 |
+| MULTISMP | 0 | 1 | 2.1 |
+| MIDIPRESET, QTPRESET, MAXXAUDIOPRESET, MATRIXPRESET | 0 | 1 each | ~0 |
+| PAD | 10 | 0 | 0 |
+| CHORDSEQUENCE | 9 | 0 | 0 |
+| GUITARPRESET, VOICEPRESET | 0 | 0 | 0 |
+
+Extensions: `.KSC` 348, `.STG` 199, `.PCM` 99, `.PCG` 8, `.SBD` 6, and one each of `.SBL .MXP .GBL .KMP .MPR .QTP .MTP`.
+
+Differences recorded without explanation:
+
+- `.KSC` count (348) is one more than the KEYBOARDSET folder's file count (347): one `.KSC` sits in another folder (not identified yet).
+- `.MTP` is not in the manual's file-type table as read so far (UNKNOWN).
+- PAD and CHORDSEQUENCE have bank folders but no files.
+- A **PCM** folder is present: per manual p.736, loading this whole KST deletes the User Samples in memory.
+
+**Not done this session:** opening the copy in PA Manager's KST Manager, and the `kst-inventory` comparison. The RDP session ended when the Windows App configuration was saved (folder redirection removal), and re-authentication is the owner's. A manifest of the copy was prepared but not yet captured.
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |

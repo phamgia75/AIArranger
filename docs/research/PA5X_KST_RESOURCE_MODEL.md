@@ -18,6 +18,7 @@ Dependencies are **never** inferred from file or folder names (project rule).
 | Inside the KST, data is grouped by **type**, then by **bank** (folder), then by individual file (p.731-732) | DOC |
 | PA Manager's KST Explorer treats a KST as a folder and summarizes it without loading. One original KST showed: 3.40 GB; STY 1893, PRF 1105, PAD 1029, PCG 16, PCM 231 | OBSERVED (summary only) |
 | A KST that contains User Samples has a **PCM** folder (p.736) | DOC |
+| A real Pa5X KST copy (`Korg Pa5x Gold Set.KST`, 667 files) has 15 upper-case type folders (STYLE, KEYBOARDSET, PAD, SOUND, PCM, MULTISMP, SONGBOOK, CHORDSEQUENCE, SETTINGS, MIDIPRESET, VOICEPRESET, GUITARPRESET, QTPRESET, MAXXAUDIOPRESET, MATRIXPRESET); STYLE, KEYBOARDSET, PAD, CHORDSEQUENCE and SONGBOOK hold bank sub-folders, the others hold files directly (audit §3c) | OBSERVED (file listing only) |
 | What PA Manager's labels count: whether "STY" counts `.STG` files, "PRF" `.KSC` Keyboard Sets and "PAD" `.PDC` | **UNKNOWN**. The labels differ from the manual's extensions, so the mapping is not assumed |
 
 ## 2. Resource types (p.721-722)
@@ -132,4 +133,4 @@ Only documented behaviour is used, with no PA Manager code and no decoding of pr
 - PA Manager's export menu and formats.
 - The Pa5X sample-memory size. Not found in the manual's specifications (they list a 1 GB internal drive, which is storage, not sample memory).
 
-Windows access was blocked by the Mac console lock at the start of this session.
+Windows access was blocked by the Mac console lock on 2026-11-06. On 2026-11-07 the research copy's folder structure was listed (OBSERVED rows above; audit §3c); it has not yet been opened in PA Manager.

@@ -175,6 +175,14 @@ Path C reads state only: it never clicks. Navigation (opening KST Manager on the
 - Still configured: the read-only folder redirection. Remove it after the transfer (or now if the research is abandoned).
 - Lesson: Path A still needs the Mac unlocked for the whole sequence; the RDP prompts also time out, so connect + accept must happen in one supervised window.
 
+### 5.6 Path C run, 2026-11-07: PASS (transfer, hash, UIA dump)
+
+- Owner authenticated RDP manually. Transfer via read-only folder redirection; Windows hash matched the commit. Redirection disabled afterwards.
+- **Input through Windows App:** synthetic keystrokes arrive as repeated "a" and Cmd+V loses its modifier. What works: put text on the Mac clipboard, switch focus away from and back to Windows App (it only syncs the clipboard on activation), then right-click in Windows Terminal to paste, and Return. Return/Backspace keys work.
+- Switching focus moves the session window off the current Space; it is brought back with the device's **Open** menu item (no new login while connected).
+- Saving the PC configuration in Windows App ended the live session; a reconnect needs the owner's login.
+- UIA results: audit §3c.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.
