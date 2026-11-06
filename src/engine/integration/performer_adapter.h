@@ -48,7 +48,8 @@ public:
     // the engine thread or a test. For asynchronous input (a MIDI read thread),
     // post ControlAction::NoteOn/NoteOff/Sustain instead so the change is drained
     // lock-free inside tick() rather than racing the engine thread.
-    void noteOn(uint8_t note) noexcept;
+    // bypassSplit: the note feeds chord detection whatever the split point.
+    void noteOn(uint8_t note, bool bypassSplit = false) noexcept;
     void noteOff(uint8_t note) noexcept;
 
     // Sustain pedal (CC64). While down, physical note-offs are deferred: the

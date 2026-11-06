@@ -9,6 +9,7 @@
 #include "control/ui_event_queue.h"
 #include "control/midi_output_bridge.h"
 #include "engine/control/control_events.h"
+#include "midi/midi_input_router.h"   // ChannelRoles
 #include "engine/chord/chord_scan_mode.h"
 #include "engine/trace/mpsc_ring.h"
 #include "engine/uasf/types.h"
@@ -104,6 +105,28 @@ public:
         if (!ok) recordError(EngineError::DeviceUnavailable);
         return ok;
     }
+    // MIDI input channel roles for chord recognition (default: all Global, the
+    // previous behaviour). Takes effect for the next message; safe from any
+    // non-realtime thread while MIDI input is running.
+    void setInputChannelRoles(const midi::ChannelRoles& r) noexcept {
+        for (int i = 0; i < 16; ++i)
+            input_roles_[i].store(static_cast<uint8_t>(r.role[i]), std::memory_order_relaxed);
+    }
+    midi::ChannelRoles inputChannelRoles() const noexcept {
+        midi::ChannelRoles r;
+        for (int i = 0; i < 16; ++i)
+            r.role[i] = static_cast<midi::ChannelRole>(input_roles_[i].load(std::memory_order_relaxed));
+        return r;
+    }
+    // Output channel routing (default identity). Refused (false) while the
+    // transport is playing so no note can change channel mid-flight; stop, tick,
+    // then set.
+    bool setOutputChannelMap(const control::OutputChannelMap& m) noexcept {
+        if (snapshot().playing) return false;
+        out_bridge_.setChannelMap(m);
+        return true;
+    }
+    control::OutputChannelMap outputChannelMap() const noexcept { return out_bridge_.channelMap(); }
     bool selectMidiOutput(int index) noexcept {
         const bool ok = output_ ? output_->select(index) : false;
         if (!ok) recordError(EngineError::DeviceUnavailable);
@@ -175,6 +198,7 @@ private:
     // Any command thread(s) -> tick. Holds exactly EngineCapabilities::maxCommandQueue.
     trace::MpscRing<control::ControlEvent, 256>       cmd_q_;
     control::UiEventQueue<control::ControlEvent, 256> input_q_;  // MIDI-in thread -> tick
+    std::atomic<uint8_t> input_roles_[16] = {};   // midi::ChannelRole per channel; 0 = Global
 
     // Tick-thread only: the one event per queue the engine could not accept on
     // the previous tick, delivered first on the next (keeps FIFO order).

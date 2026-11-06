@@ -99,7 +99,8 @@ void PerformerAdapter::handleControl(const control::ControlEvent& ev) noexcept {
             break;
         }
         case ControlAction::NoteOn:
-            noteOn(static_cast<uint8_t>(ev.param & 0x7F));
+            noteOn(static_cast<uint8_t>(ev.param & 0x7F),
+                   (ev.param & control::kNoteBypassSplit) != 0);
             break;
         case ControlAction::NoteOff:
             noteOff(static_cast<uint8_t>(ev.param & 0x7F));
@@ -152,8 +153,8 @@ void PerformerAdapter::tick() noexcept {
     }
 }
 
-void PerformerAdapter::noteOn(uint8_t note) noexcept {
-    if (split_.zoneOf(note) != performance::Zone::Lower) return; // upper zone: ignore for chord
+void PerformerAdapter::noteOn(uint8_t note, bool bypassSplit) noexcept {
+    if (!bypassSplit && split_.zoneOf(note) != performance::Zone::Lower) return; // upper zone: ignore for chord
     // A re-press cancels any pending sustain-hold release for this note.
     forgetSustained(note);
     if (held_count_ >= kMaxHeld) return;

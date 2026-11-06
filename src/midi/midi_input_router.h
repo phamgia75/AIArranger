@@ -22,15 +22,32 @@ namespace ai_arranger::midi {
 inline constexpr uint8_t kCcSustain     = 64;   // CC64  — sustain pedal (hold)
 inline constexpr uint8_t kCcAllNotesOff = 123;  // CC123 — all notes off (panic)
 
+// What each input MIDI channel means to chord recognition (modelled on the Pa5X
+// MIDI IN channel types, User Manual v1.4 p.571-572):
+//   Global - behaves like the local keyboard: notes go through the split.
+//   Chord  - notes always feed chord detection, ignoring the split.
+//   Ignore - nothing from this channel is routed.
+enum class ChannelRole : uint8_t { Global = 0, Chord = 1, Ignore = 2 };
+
+// Default: every channel Global, i.e. the behaviour before channel roles existed.
+struct ChannelRoles {
+    ChannelRole role[16] = {};
+    ChannelRole of(uint8_t ch) const noexcept { return role[ch & 0x0F]; }
+};
+
 // Route a single parsed message. `Sink` must expose
 // `bool postEvent(const control::ControlEvent&)`.
 template <class Sink>
-inline void routeMidiInput(const MidiInputMessage& m, Sink& sink) {
+inline void routeMidiInput(const MidiInputMessage& m, Sink& sink,
+                           const ChannelRoles& roles = {}) {
     using control::ControlAction;
     using control::ControlEvent;
+    const ChannelRole role = roles.of(m.channel);
+    if (role == ChannelRole::Ignore) return;
     switch (m.type) {
         case MidiInMsgType::NoteOn:
-            sink.postEvent(ControlEvent{ControlAction::NoteOn,  m.data1, 0});
+            sink.postEvent(ControlEvent{ControlAction::NoteOn,
+                m.data1 | (role == ChannelRole::Chord ? control::kNoteBypassSplit : 0), 0});
             break;
         case MidiInMsgType::NoteOff:
             sink.postEvent(ControlEvent{ControlAction::NoteOff, m.data1, 0});
@@ -49,10 +66,11 @@ inline void routeMidiInput(const MidiInputMessage& m, Sink& sink) {
 // Convenience: parse a raw MIDI byte buffer and route every message.
 // Returns the number of parsed messages.
 template <class Sink>
-inline size_t routeMidiBytes(const uint8_t* bytes, size_t len, Sink& sink) {
+inline size_t routeMidiBytes(const uint8_t* bytes, size_t len, Sink& sink,
+                             const ChannelRoles& roles = {}) {
     MidiInputMessage buf[64];
     const size_t n = parseMidiInput(bytes, len, buf, 64);
-    for (size_t i = 0; i < n; ++i) routeMidiInput(buf[i], sink);
+    for (size_t i = 0; i < n; ++i) routeMidiInput(buf[i], sink, roles);
     return n;
 }
 

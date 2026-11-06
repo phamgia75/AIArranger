@@ -1,6 +1,8 @@
 #ifndef AI_ARRANGER_MIDI_PA5X_PROFILE_H
 #define AI_ARRANGER_MIDI_PA5X_PROFILE_H
 
+#include "midi/midi_input_router.h"   // ChannelRoles
+#include "control/midi_output_bridge.h"  // OutputChannelMap
 #include <cctype>
 #include <string_view>
 
@@ -36,6 +38,35 @@ inline PortMatch classify(std::string_view name, bool isSource) noexcept {
     if (isSource && name == kKeyboardPort) return PortMatch::Keyboard;
     if (!isSource && name == kSoundPort) return PortMatch::Sound;
     return containsPa5x(name) ? PortMatch::Candidate : PortMatch::None;
+}
+
+// Chord-recognition roles for the "Pa5X KEYBOARD" port under the Pa5X factory
+// "Default" MIDI preset (User Manual v1.4 p.585-588): MIDI OUT ch1-3 = Upper
+// 1-3, ch4 = Lower. The Lower part only exists with SPLIT on at the Pa5X, so its
+// notes are chord notes (split already applied by the Pa5X); Upper parts never
+// feed chord detection; channels the preset does not send are ignored.
+// shortcut: assumes the factory Default preset; a user-edited preset needs its own roles.
+inline ChannelRoles defaultPresetKeyboardRoles() noexcept {
+    ChannelRoles r;
+    for (auto& x : r.role) x = ChannelRole::Ignore;
+    r.role[3] = ChannelRole::Chord;   // ch4 Lower
+    return r;
+}
+
+// Live output for a Genos/Yamaha SFF1 style onto the Pa5X Style tracks (Pa5X
+// User Manual v1.4 p.1035: Bass 9, Drum 10, Percussion 11, Acc1-5 12-16; Default
+// MIDI preset: ch9-16 double as Style tracks, p.585-588). Same part mapping as the
+// marker-SMF exporter (exporters/korg korgChannelFor; a test keeps them equal):
+// Rhythm1 9 -> Perc 11, Rhythm2 10 -> Drum 10, Bass 11 -> Bass 9, Chord1..Phrase2
+// 12-16 -> Acc1-5. Channels 1-8 are dropped, and so are Yamaha Bank Select /
+// Program Change, which select unrelated sounds on a Pa5X.
+inline control::OutputChannelMap genosStyleTrackMap() noexcept {
+    control::OutputChannelMap m;
+    for (auto& d : m.dst) d = control::OutputChannelMap::kDrop;
+    m.dst[8] = 10;  m.dst[9] = 9;  m.dst[10] = 8;
+    for (uint8_t ch = 11; ch < 16; ++ch) m.dst[ch] = ch;
+    m.dropVoiceSelect = true;
+    return m;
 }
 
 } // namespace ai_arranger::midi::pa5x

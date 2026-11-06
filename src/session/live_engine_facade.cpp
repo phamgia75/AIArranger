@@ -35,7 +35,7 @@ void LiveEngineFacade::start() noexcept {
     if (input_) {
         input_->setSink([this](const midi::MidiInputMessage& m) {
             QueueSink sink{input_q_, last_error_};
-            midi::routeMidiInput(m, sink);
+            midi::routeMidiInput(m, sink, inputChannelRoles());
         });
     }
     started_ = true;

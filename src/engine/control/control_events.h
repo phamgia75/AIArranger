@@ -26,6 +26,8 @@ enum class ControlAction : uint8_t {
     // same SPSC queue as every other control event so an async input thread
     // (e.g. the CoreMIDI read callback) never touches engine state directly.
     // NoteOn/NoteOff: param = MIDI note (0-127). Sustain: param = 1 (down)/0 (up).
+    // NoteOn may carry kNoteBypassSplit: the note feeds chord detection whatever
+    // the split point (a Pa5X-style Chord channel).
     // Appended (not reordered) to keep existing values stable.
     NoteOn,
     NoteOff,
@@ -33,6 +35,8 @@ enum class ControlAction : uint8_t {
     // Break section (one-shot). Appended (not reordered) to keep values stable.
     Break,
 };
+
+inline constexpr int32_t kNoteBypassSplit = 0x100;   // NoteOn param flag
 
 struct ControlEvent {
     ControlAction action = ControlAction::None;
