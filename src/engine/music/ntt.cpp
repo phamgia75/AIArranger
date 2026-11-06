@@ -24,17 +24,24 @@ PcSet chordTones(ChordType t) noexcept {
         case ChordType::Sus4:  return {{0, 5, 7}, 3};
         case ChordType::Sus2:  return {{0, 2, 7}, 3};
         case ChordType::Power: return {{0, 7}, 2};
+        // The 4th tone takes the source maj7's degree: the 6th / b7 replaces it.
+        case ChordType::Maj6:   return {{0, 4, 7, 9}, 4};
+        case ChordType::Min6:   return {{0, 3, 7, 9}, 4};
+        case ChordType::Min7b5: return {{0, 3, 6, 10}, 4};
+        case ChordType::Dom9:   return {{0, 4, 7, 10, 2}, 5};   // 9th last: degree map uses 0-3
         default:               return {{0, 4, 7}, 3};
     }
 }
 
 bool isMinorish(ChordType t) noexcept {
     return t == ChordType::Minor || t == ChordType::Min7 ||
-           t == ChordType::Dim   || t == ChordType::Dim7;
+           t == ChordType::Dim   || t == ChordType::Dim7 ||
+           t == ChordType::Min6  || t == ChordType::Min7b5;
 }
 
 bool isDominantish(ChordType t) noexcept {
-    return t == ChordType::Dom7 || t == ChordType::Sus4 || t == ChordType::Sus2;
+    return t == ChordType::Dom7 || t == ChordType::Dom9 ||
+           t == ChordType::Sus4 || t == ChordType::Sus2;
 }
 
 // Target scale for an NTT mode + chord type. Scale modes select an explicit
@@ -46,6 +53,9 @@ PcSet scaleFor(NttMode mode, ChordType t) noexcept {
         case NttMode::NaturalMinor:  return {{0, 2, 3, 5, 7, 8, 10}, 7};
         case NttMode::Dorian:        return {{0, 2, 3, 5, 7, 9, 10}, 7};
         default:
+            // Chord-specific scales where natural minor would clash with a chord tone.
+            if (t == ChordType::Min6)   return {{0, 2, 3, 5, 7, 9, 10}, 7}; // dorian (natural 6)
+            if (t == ChordType::Min7b5) return {{0, 1, 3, 5, 6, 8, 10}, 7}; // locrian (b5)
             if (isMinorish(t))    return {{0, 2, 3, 5, 7, 8, 10}, 7}; // natural minor
             if (isDominantish(t)) return {{0, 2, 4, 5, 7, 9, 10}, 7}; // mixolydian
             return {{0, 2, 4, 5, 7, 9, 11}, 7};                       // major

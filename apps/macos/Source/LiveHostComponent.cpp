@@ -17,7 +17,9 @@ const char* chordTypeName(arranger::ChordType t) {
         case CT::Maj7:  return "maj7";   case CT::Min7:  return "m7";
         case CT::Dom7:  return "7";      case CT::Dim7:  return "dim7";
         case CT::Sus4:  return "sus4";   case CT::Sus2:  return "sus2";
-        case CT::Power: return "5";      default:        return "";
+        case CT::Power: return "5";      case CT::Maj6:  return "6";
+        case CT::Min6:  return "m6";     case CT::Dom9:  return "9";
+        case CT::Min7b5: return "m7b5";  default:        return "";
     }
 }
 
