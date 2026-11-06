@@ -56,6 +56,7 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 | 36 | CI: macOS app + iPad simulator jobs | Claude | `.github/workflows/ctest.yml` | `f108183` | CI run 42223664668: all 6 jobs green. `macos-app` builds `aiarranger-macos` + runs `test_app_smoke` with `BUILD_MACOS_APP=ON` (JUCE 8.0.4 fetched). `ipados-simulator`: log shows 48/48 host tests inside an iPad simulator, `SELFTEST PASS`, `LIFECYCLE background playing=0 stuck=0` | Done. No existing job changed or weakened |
 | 37 | P2.6 iPadOS host over C ABI 1.1.0 | Claude | `apps/ipados/` (HostEngine, CoreMidiPorts, SwiftUI app, `build.sh`, tests) | `f108183`, `acc23bc` | 49/49 natively on macOS; also clean under Swift TSan and ASan (C++ core uninstrumented there). Mutations caught: background without silence (3 fail); deinit always `queue.sync` (SIGTRAP) | Done in software. Covers init/destroy, style load, transport, Main A-D, chord injection, chord mode, MIDI out + UMP round trip, panic, lifecycle (active/inactive/background), wall clock. Self-review fixed 3 defects (deinit on own queue, tempo underflow, MIDI hot-plug). Built with `swiftc`, no Xcode project; no Xcode on the dev Mac, so the simulator runs in CI only. iPad + Pa5X over USB: HARDWARE VALIDATION PENDING |
 | 38 | Hardware detection (Phase 1) | Claude | – | – | `pa5x-doctor` on the MacBook Pro: 0 sources, 0 destinations, exit 3; no KORG USB device | **BLOCKED.** The Pa5X is not on this Mac. The Mac mini (Bonjour `_ssh._tcp`) has no configured access from here (no known host key, no Orca environment), and setting that up needs owner authorization. Nothing transmitted |
+| 39 | `pa5x-probe` hardware test driver | Claude | `tools/pa5x_probe.cpp`, `src/midi/pa5x_probe.h`, `tests/midi/test_pa5x_probe.cpp` | (this commit) | new 15/15; full suite 136/136; with no device every send path refuses (no `--confirm-send` → exit 2; no exact destination → exit 3; `AIARR_MIDI_HW_TX=0` → exit 2); `listen` with no Pa5X → exit 3 | Done (SW). Non-interactive so the runbook can be driven over SSH. `listen` is receive-only. `control` sends one Program Change without the CoreMidiOut silence-on-shutdown, which would cut a playing style. Clock/Start/Stop and style playback steps still use the engine (`setMidiClockOut`, `korg-playback`). Not yet run on a Pa5X: HARDWARE VALIDATION PENDING |
 
 Reviews 16-21: OCR Level 1 (delegation, system rules): PASS after self-found fixes (row 16; row 21: Guitar NTR scoring). No Level 2 trigger applies (realtime clock is not business-day/timezone logic), so Codex was not run.
 Review 22 (UASF format = schema trigger): OCR Level 1 PASS; **Codex Level 2 (independent, read-only, tree unchanged): 1 × P2**, writer accepted register limits its reader rejects (unloadable file). Reproduced with a failing test, fixed with one shared validity rule. Reconciled: Codex-only 1 true positive, no false positives.
@@ -67,6 +68,15 @@ Flaky, not caused by this work: `test_coremidi_out` failed once ("Initialize suc
 ## Pa5X hardware runbook (for the next session with the instrument)
 
 Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator present for anything audible.
+Per test: device + port, command, expected, observed, PASS / FAIL / BLOCKED. Bytes sent are never a PASS on their own.
+
+`build/pa5x-probe` runs one bounded step per call (works over SSH):
+
+- **Receive only (no approval needed):** `pa5x-probe listen --seconds 30 --split 60 --mode fingered`. Prints every key and the chord detected below the split. Use it for steps 3–5 while the operator plays.
+- **Sending:** needs `--confirm-send` plus an exact `--dest` name, and is run only after the operator approves that step.
+  - `pa5x-probe note --dest "Pa5X SOUND" --channel N --note 60 --ms 400 --confirm-send` sends Note On/Off, then All Sound Off.
+  - `pa5x-probe alloff --dest "Pa5X SOUND" --confirm-send`.
+  - `pa5x-probe control --dest "Pa5X SOUND" --channel N --cmd variation2 --confirm-send` sends one Program Change and nothing else, for step 10.
 
 1. `build/pa5x-doctor` → expect exit 0, `Pa5X KEYBOARD` + `Pa5X SOUND` online; save the output.
 2. Endpoints: select `Pa5X SOUND` by unique ID; confirm with `korg-playback --dest "Pa5X SOUND"`.

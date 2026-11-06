@@ -289,6 +289,9 @@ if(APPLE)
     add_executable(pa5x-doctor tools/pa5x_doctor.cpp)
     target_include_directories(pa5x-doctor PRIVATE src)
     target_link_libraries(pa5x-doctor ${COREMIDI} ${COREFOUNDATION})
+    # Hardware test driver (one bounded action per run; sending needs --confirm-send).
+    add_executable(pa5x-probe tools/pa5x_probe.cpp)
+    target_link_libraries(pa5x-probe arranger-engine platform-apple ${COREMIDI} ${COREFOUNDATION})
 endif()
 
 # ── KORG validation harness (Gate 11) ─────────────────────────────────
