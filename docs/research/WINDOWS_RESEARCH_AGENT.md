@@ -166,6 +166,15 @@ Path A needs an unlocked Mac; Path B needs an install, a firewall rule and a lis
 
 Path C reads state only: it never clicks. Navigation (opening KST Manager on the copy) stays a manual step by the owner, so no remote control is involved.
 
+### 5.5 Path C transfer attempt, 2026-11-07: BLOCKED (Mac screen lock)
+
+- Transfer file staged on the Mac from commit `b31e1dd`; SHA-256 `76d3017e80388ac4cdf77f4b3567a1573ece6e7859940015ce90c8759313035f`.
+- Windows App: folder redirection enabled for **one** folder (the staging folder), **read-only**. Saved in the PC's Windows App configuration.
+- No RDP session was live; reconnecting raised (1) a credentials prompt (the first one timed out, error 0x1f07; the owner supplied the credentials for the second), then (2) a self-signed RDP certificate warning. The owner checked the fingerprint and allowed "accept once" (not "always trust").
+- Before Continue could be clicked, the Mac screen locked (`CGSSessionScreenIsLocked=Yes`) and every accessibility read returned `permission_denied`. Foreground operations stopped, per the project rule. Nothing was transferred or run on Windows.
+- Still configured: the read-only folder redirection. Remove it after the transfer (or now if the research is abandoned).
+- Lesson: Path A still needs the Mac unlocked for the whole sequence; the RDP prompts also time out, so connect + accept must happen in one supervised window.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.
