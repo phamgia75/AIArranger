@@ -63,7 +63,62 @@ int priority(ChordType t) noexcept {
     }
 }
 
+// Templates for partial match (no dyads: a fifth plus one note is not a chord).
+struct Template { ChordType type; uint16_t mask; };
+constexpr Template kTemplates[] = {
+    {ChordType::Major, bit(0)|bit(4)|bit(7)},  {ChordType::Minor, bit(0)|bit(3)|bit(7)},
+    {ChordType::Dom7, bit(0)|bit(4)|bit(7)|bit(10)}, {ChordType::Maj7, bit(0)|bit(4)|bit(7)|bit(11)},
+    {ChordType::Min7, bit(0)|bit(3)|bit(7)|bit(10)}, {ChordType::Sus4, bit(0)|bit(5)|bit(7)},
+    {ChordType::Dim, bit(0)|bit(3)|bit(6)},    {ChordType::Aug, bit(0)|bit(4)|bit(8)},
+    {ChordType::Maj6, bit(0)|bit(4)|bit(7)|bit(9)},  {ChordType::Min6, bit(0)|bit(3)|bit(7)|bit(9)},
+    {ChordType::Dom9, bit(0)|bit(2)|bit(4)|bit(7)|bit(10)}, {ChordType::Dim7, bit(0)|bit(3)|bit(6)|bit(9)},
+    {ChordType::Min7b5, bit(0)|bit(3)|bit(6)|bit(10)}, {ChordType::Sus2, bit(0)|bit(2)|bit(7)},
+};
+
+int popcount12(uint16_t m) noexcept {
+    int n = 0;
+    for (; m; m &= static_cast<uint16_t>(m - 1)) ++n;
+    return n;
+}
+
 } // namespace
+
+// Chord-engine spec §4.4. Only one deviation from a template is accepted: one
+// chord tone missing OR one extra note, with the root among the held notes.
+// score = matched*2 - extra - missing*3; ties: the bass as root, then spec §5.1
+// order, then the root closest above the bass (never the upper-voice order).
+ChordType partialMatchChordType(const uint8_t* notes, size_t count,
+                                uint8_t& rootOut) noexcept {
+    rootOut = count ? notes[0] : 0;
+    if (count < 3) return ChordType::NoChord;
+    const int bassPc = notes[0] % 12;
+    if (popcount12(pcMask(notes, count, 0)) < 3) return ChordType::NoChord;
+
+    ChordType best = ChordType::NoChord;
+    int bestScore = 0, bestRel = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const int rootPc = notes[i] % 12;
+        bool tried = false;
+        for (size_t j = 0; j < i; ++j) tried |= (notes[j] % 12) == rootPc;
+        if (tried) continue;
+        const uint16_t in = pcMask(notes, count, rootPc);
+        const int rel = (rootPc - bassPc + 12) % 12;   // 0 = the bass is the root
+        for (const auto& t : kTemplates) {
+            const int extra = popcount12(in & static_cast<uint16_t>(~t.mask));
+            const int missing = popcount12(t.mask & static_cast<uint16_t>(~in));
+            if (extra + missing != 1) continue;
+            const int score = popcount12(in & t.mask) * 2 - extra - missing * 3;
+            const bool better =
+                best == ChordType::NoChord || score > bestScore ||
+                (score == bestScore &&
+                 ((rel == 0) != (bestRel == 0) ? rel == 0
+                  : priority(t.type) != priority(best) ? priority(t.type) < priority(best)
+                  : rel < bestRel));
+            if (better) { best = t.type; bestScore = score; bestRel = rel; rootOut = notes[i]; }
+        }
+    }
+    return best;
+}
 
 // Chord-engine spec §4.3: exact match over every rotation (inversions). The bass
 // note is the root whenever its pitch class matches (root position always wins;

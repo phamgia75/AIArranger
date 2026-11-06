@@ -59,9 +59,9 @@ int main() {
     TEST("A C Eb G = Am7b5 (bass A)",    is(det(f, {57, 60, 63, 67}), ChordType::Min7b5, 9));
     TEST("Eb G A C = Cm6 (m6 before m7b5)", is(det(f, {51, 55, 57, 60}), ChordType::Min6, 0));
     TEST("Eb G Bb C = Eb6 (bass Eb), not Cm7", is(det(f, {51, 55, 58, 60}), ChordType::Maj6, 3));
-    TEST("D C E G (no 5-note template) -> NoChord in Fingered", det(f, {50, 60, 64, 67}).type == ChordType::NoChord);
-    TEST("C E Bb D (9 without 5th) -> NoChord (no partial match yet, spec §4.4)",
-         det(f, {60, 64, 70, 74}).type == ChordType::NoChord);
+    // Since P1.7b, one note off a template is a partial match (spec §4.4).
+    TEST("D C E G = C (add9 over D: partial, one extra note)", is(det(f, {50, 60, 64, 67}), ChordType::Major, 0));
+    TEST("C E Bb D = C9 (9 without 5th: partial, one missing note)", is(det(f, {60, 64, 70, 74}), ChordType::Dom9, 0));
     bool stable = true;   // every permutation of the upper voices over the same bass agrees
     std::vector<uint8_t> upper = {55, 57, 60};
     std::sort(upper.begin(), upper.end());

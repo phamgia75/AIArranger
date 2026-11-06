@@ -29,7 +29,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P1.4 | Fix #26 (unmarked tail imported as Break) | Open issue | Import tail handled explicitly | M | – | Behaviour change on corpus | Corpus test | – | **Blocked: owner decision** (#26 lists three readings the data cannot decide) |
 | P1.5 | CASM High Key / note limit in NTT | Parsed, not applied | Applied per channel | M | – | Musical regressions; last hardware bug was in NTT | Exhaustive NTT property tests + corpus e2e | Bass/pad register on Pa5X across 12 roots | **Done** (`8e5d783` decode + this commit: High Key under Root Trans, Note Limit fold, UASF 'TRNS' block) · HW pending: ear check across 12 roots |
 | P1.6 | Factory sound map from manual appendix | 0/32 verified, user-supplied | Pa5X factory CC0/CC32/PC table usable by `--sound-map` | M | **Owner decision** on reproducing the table | Copyright of the table as a compilation | Map entries well-formed | Spot-check 10 sounds on Pa5X | **Partial `9e770c9`**: 14-entry starter map from the manual, own format; full table not reproduced · HW pending |
-| P1.7 | 6th / m6 / 9 / m7b5 chord types + partial match (spec §4.4) | Missing | ChordType + NTT tables extended | M | – | NTT table changes ripple through UASF | Chord + NTT tests | Ear check | **Done** (4 types; ambiguity rule; on-bass fix) · partial match (§4.4) still Planned · HW pending |
+| P1.7 | 6th / m6 / 9 / m7b5 chord types + partial match (spec §4.4) | Missing | ChordType + NTT tables extended | M | – | NTT table changes ripple through UASF | Chord + NTT tests | Ear check | **Done** (4 types; ambiguity rule; on-bass fix) · partial match (§4.4) **Done** (P1.7b) · HW pending |
 | P1.8 | Chord input MIDI channel filter | All channels feed detector (split by pitch only) | Honour Pa5X Global/Chord 1/Chord 2 channel roles | S | P0.3 | Depends on user's MIDI preset | Router unit tests | Pa5X Master Kbd preset | **Done `f63dc85`** (opt-in `defaultPresetKeyboardRoles`) · HW pending |
 | P1.9 | KST inventory (report-only) | None | Scan a KST folder: file types, counts, byte-identical duplicates; never writes | S | – | Files are opaque; only names/hashes | Fixture trees | Compare with Pa5X Media listing | Done (SW); HW compare pending |
 | P1.10 | Native `.STG`/`.KSC`/`.PCG` read/write | None | – | XL | Owner files + RE approval + legal review | Undocumented, OS-version-dependent | – | – | **Blocked** |
@@ -57,7 +57,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 
 ## Execution order (next sessions)
 
-1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ → 7. ~~P1.5~~ (all done; 6. P1.4 blocked on owner) → ~~8. P1.7~~ → ~~9. P1.9~~ → 10. P1.7b partial match → 11. P2.4 C ABI.
+1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ → 7. ~~P1.5~~ (all done; 6. P1.4 blocked on owner) → ~~8. P1.7~~ → ~~9. P1.9~~ → ~~10. P1.7b~~ → 11. P2.4 C ABI.
 
 Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pending" item **before** new P0 code, and record them under `docs/evidence/hardware/`.
 

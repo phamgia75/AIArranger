@@ -33,6 +33,12 @@ public:
 ChordType matchChordType(const uint8_t* notes, size_t count,
                          uint8_t& rootOut) noexcept;
 
+// Fallback after matchChordType (spec §4.4): a template with exactly one chord
+// tone missing or one extra note (3+ distinct pitch classes, root held). Same
+// `rootOut` rule. NoChord when nothing is within one note.
+ChordType partialMatchChordType(const uint8_t* notes, size_t count,
+                                uint8_t& rootOut) noexcept;
+
 } // namespace ai_arranger::chord
 
 #endif // AI_ARRANGER_CHORD_CHORD_SCAN_MODE_H
