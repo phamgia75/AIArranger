@@ -46,6 +46,15 @@ public:
         return false;
     }
 
+    // Producer (same thread as send()). Queues `ev` as is: no channel map, no
+    // voice-select drop. For device commands (e.g. Pa5X Control-channel PCs)
+    // that must reach their own channel whatever the style routing is.
+    bool sendUnmapped(const uasf::MidiEvent& ev) noexcept {
+        if (queue_.push(ev)) return true;
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
     // Consumer. Drains all queued events into the provider; returns the number
     // forwarded. (Provider may itself drop if not connected.)
     size_t pump(midi::IMidiOutputProvider& provider) noexcept {

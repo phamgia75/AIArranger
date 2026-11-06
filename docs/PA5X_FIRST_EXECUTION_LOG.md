@@ -33,6 +33,7 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 | 13 | #27 prep: corpus optional; fixed a test that hung without it; starter sound map | Claude + REA (14 sounds from manual appendix) | `CMakeLists.txt`, `tests/engine/test_time_signature.cpp`, `docs/exporters/sound-maps/pa5x-starter.soundmap`, test | `9e770c9` | 125/125; empty corpus: 108 pass, 16 Disabled | Done | Restricted files still in the repo and history (owner decision) |
 | 14 | Windows proof-of-control | ORCA | – | – | `orca computer get-app-state` on Windows App: still `permission_denied` | **Blocked** on macOS Accessibility + Screen Recording for Orca Computer Use | – |
 | 15 | Windows proof-of-control, rerun after owner granted permissions and foreground input | ORCA | `docs/research/WINDOWS_RESEARCH_AGENT.md` §5.1 | (this commit) | 5/5 steps of §5 | **Path A VERIFIED, foreground only** (background input ignored by Windows App). PA Manager v5.2 home screen observed, untouched | Notepad restored tabs with plaintext credentials; screenshot deleted, owner told to rotate. Every action takes over the Mac screen |
+| 16 | P0.5 Pa5X Control-channel commands | Claude | `src/midi/pa5x_control.h`, `src/control/midi_output_bridge.h` (`sendUnmapped`), `src/session/live_engine_facade.*` (`sendDeviceCommand`), `tests/midi/test_pa5x_control.cpp` | (this commit) | new test 11/11; full 126/126; TSan + ASan 27/27 on facade/bridge/MIDI tests; mutation (commands through the mapped path) fails 3 | Done. PC table from manual p.613-614 (raw 0-127 values per the manual). Commands bypass the style channel map, go out before the tick's notes | HW pending: needs a Control channel assigned in the user's MIDI IN Channels; whether the Default preset has one is not stated in the manual |
 
 Flaky, not caused by this work: `test_coremidi_out` failed once ("Initialize succeeds") and passed on 2 reruns, the known CoreMIDI-server condition (#21).
 
@@ -49,6 +50,7 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 7. USB unplug/replug during playback: input recovers by itself (`08b12cd`), output re-resolves, no stuck notes.
 8. Marker SMF: Pa5X Import SMF of POP_ACOUSTIC_2 (10 elements incl. f3/f4), re-export, `aiarranger-convert --compare`; check the Break marker form.
 9. Starter sound map: spot-check 8 sounds and the PC counting (0- vs 1-based).
+10. Control channel: assign one in Settings > MIDI > MIDI IN Channels; send Variation 1-4, Fill 1, Break, Ending 1, Play/Stop Player 1 with `sendDeviceCommand(pa5x::controlEvent(...))`; the Pa5X arranger follows.
 
 ### Blocked
 
@@ -58,4 +60,4 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 
 ### Next executable task
 
-**P0.5 Pa5X Control-channel commands** (Style Element PCs 80-94, manual p.613), then **P0.6 MIDI clock out**, **P1.4 #26**, **P1.5 CASM High Key** (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.
+**P0.6 MIDI clock out**, **P1.4 #26**, **P1.5 CASM High Key** (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.

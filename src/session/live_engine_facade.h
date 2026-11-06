@@ -127,6 +127,16 @@ public:
         return true;
     }
     control::OutputChannelMap outputChannelMap() const noexcept { return out_bridge_.channelMap(); }
+    // A device command sent on its own channel, bypassing the output channel
+    // map (e.g. midi::pa5x::controlEvent). Any thread; delivered on the next
+    // tick, before that tick's engine output. False (QueueFull recorded) if the
+    // queue is full, or if channel > 15 or a data byte > 127.
+    bool sendDeviceCommand(const uasf::MidiEvent& ev) noexcept {
+        if (ev.channel > 15 || ev.data1 > 127 || ev.data2 > 127) return false;
+        if (device_q_.try_push(ev)) return true;
+        recordError(EngineError::QueueFull);
+        return false;
+    }
     bool selectMidiOutput(int index) noexcept {
         const bool ok = output_ ? output_->select(index) : false;
         if (!ok) recordError(EngineError::DeviceUnavailable);
@@ -198,6 +208,7 @@ private:
     // Any command thread(s) -> tick. Holds exactly EngineCapabilities::maxCommandQueue.
     trace::MpscRing<control::ControlEvent, 256>       cmd_q_;
     control::UiEventQueue<control::ControlEvent, 256> input_q_;  // MIDI-in thread -> tick
+    trace::MpscRing<uasf::MidiEvent, 64>              device_q_; // any thread -> tick -> out_bridge_
     std::atomic<uint8_t> input_roles_[16] = {};   // midi::ChannelRole per channel; 0 = Global
 
     // Tick-thread only: the one event per queue the engine could not accept on

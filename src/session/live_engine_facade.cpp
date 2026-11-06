@@ -140,6 +140,12 @@ void LiveEngineFacade::tickLocked(uint32_t numSamples) noexcept {
     drainToAdapter([this](control::ControlEvent& e) noexcept { return input_q_.pop(e); },
                    input_carry_, has_input_carry_);
 
+    // Device commands go out ahead of this tick's notes. This thread is the
+    // bridge's only producer. A full bridge drops and counts it (dropped()),
+    // as it does engine events. Not session-stamped: a command is for the
+    // device, so one queued across stop()/start() is still sent.
+    for (uasf::MidiEvent dev; device_q_.try_pop(dev);) out_bridge_.sendUnmapped(dev);
+
     // Advance the engine and schedule output (mirrors the macOS EngineDriver).
     session_.clock().advance(numSamples);
     session_.tick();
