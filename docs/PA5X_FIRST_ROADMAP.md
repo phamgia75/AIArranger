@@ -12,7 +12,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 |---|---|---|---|---|---|---|---|---|---|
 | P0.1 | Chord inversions | E-G-C → NoChord | Spec §4.3 exact + inversions, bass preferred | S | – | 6th chords read as relative m7 | `test_chord_scan` exhaustive inversions | Play C/E, C/G, Am/C, G7/B on Pa5X lower zone; arranger chord follows | **Done `6319d30`** · HW pending |
 | P0.2 | Input hot-plug | Stub | Reconnect by unique ID, never another device | S | – | CoreMIDI behaviour of a real USB replug differs from virtual source | `test_coremidi_in_reconnect` | Unplug/replug Pa5X USB mid-performance; chords resume, no restart | **Done `08b12cd`** · HW pending |
-| P0.3 | Pa5X port profile + read-only diagnostics CLI | Generic selection; bench tools off-repo | `pa5x-doctor`: enumerate, identify `Pa5X SOUND`/`Pa5X KEYBOARD` by name+uid, report channels, **send nothing** unless `--probe` with `AIARR_MIDI_HW_TX=1` | S | – | Name differs with class-compliant driver | Unit on name matcher; CLI test with no devices | Run on bench, attach output to `docs/evidence/hardware/` | Next |
+| P0.3 | Pa5X port profile + read-only diagnostics CLI | Generic selection; bench tools off-repo | `pa5x-doctor`: enumerate, identify `Pa5X SOUND`/`Pa5X KEYBOARD` by name+uid, report channels, **send nothing** unless `--probe` with `AIARR_MIDI_HW_TX=1` | S | – | Name differs with class-compliant driver | Unit on name matcher; CLI test with no devices | Run on bench, attach output to `docs/evidence/hardware/` | **Done** (`tools/pa5x_doctor.cpp`) · HW pending |
 | P0.4 | Live Pa5X channel map | Live playback on style's own channels (Yamaha / demo 2,3,10) | Live output on Pa5X Style-track channels 9-16 under the **Default** MIDI preset (VERIFIED p.585-588), Yamaha bank/PC never sent | M | P0.3 | Default preset maps ch9-16 to Player 1 tracks *and* Style tracks; behaviour depends on the user's MIDI preset | Unit: no event leaves on ch1-8; no Yamaha bank/PC | Ear check each track on the Pa5X | Planned |
 | P0.5 | Pa5X Control-channel commands | None | Send Style Element PCs 80-94, Kbd Set 64-67, Play/Stop 104-107 on a configurable Control channel (VERIFIED p.613-614) — **drive the Pa5X's own arranger** as a second mode | M | P0.3 | Requires the user's MIDI preset to define a Control channel | Unit: byte-exact PC per command | Pa5X switches elements on command | Planned |
 | P0.6 | MIDI clock / Start / Stop out | None | Optional 0xF8/0xFA/0xFC to the selected device | S | P0.3 | Pa5X Clock Source resets to Internal at power-on (VERIFIED p.594) | Unit: 24 ppq, start/stop ordering | Pa5X follows tempo with Clock Source = External USB | Planned |
@@ -57,7 +57,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 
 ## Execution order (next sessions)
 
-1. P0.3 `pa5x-doctor` (read-only) → 2. P1.8 channel filter → 3. P0.4 live channel map → 4. P0.5 Control-channel commands → 5. P0.6 clock → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
+1. ~~P0.3 `pa5x-doctor`~~ (done) → 2. P1.8 channel filter → 3. P0.4 live channel map → 4. P0.5 Control-channel commands → 5. P0.6 clock → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
 
 Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pending" item **before** new P0 code, and record them under `docs/evidence/hardware/`.
 

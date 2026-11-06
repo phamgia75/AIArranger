@@ -260,6 +260,10 @@ target_link_libraries(aiarranger-convert exporter-korg importer-sff1 arranger-en
 if(APPLE)
     add_executable(korg-playback tools/korg_playback_cli.cpp)
     target_link_libraries(korg-playback platform-apple arranger-engine Threads::Threads)
+    # Read-only Pa5X USB-MIDI diagnostics (no ports, no sends).
+    add_executable(pa5x-doctor tools/pa5x_doctor.cpp)
+    target_include_directories(pa5x-doctor PRIVATE src)
+    target_link_libraries(pa5x-doctor ${COREMIDI} ${COREFOUNDATION})
 endif()
 
 # ── KORG validation harness (Gate 11) ─────────────────────────────────
