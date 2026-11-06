@@ -25,6 +25,12 @@ std::string sourceDisplayName(MIDIEndpointRef ep) {
     return std::string(buf);
 }
 
+int32_t sourceUniqueId(MIDIEndpointRef ep) {
+    SInt32 uid = 0;
+    if (ep == 0 || MIDIObjectGetIntegerProperty(ep, kMIDIPropertyUniqueID, &uid) != noErr) return 0;
+    return static_cast<int32_t>(uid);
+}
+
 } // namespace
 
 CoreMidiIn::~CoreMidiIn() {
@@ -65,6 +71,7 @@ void CoreMidiIn::shutdown() noexcept {
     if (in_port_) { MIDIPortDispose(in_port_); in_port_ = 0; }
     if (client_)  { MIDIClientDispose(client_); client_ = 0; }
     selected_index_.store(-1, std::memory_order_release);
+    selected_uid_.store(0, std::memory_order_release);
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -96,9 +103,13 @@ bool CoreMidiIn::selectSource(int index) noexcept {
 
     if (index < 0) {   // explicit "none"
         selected_index_.store(-1, std::memory_order_release);
+        selected_uid_.store(0, std::memory_order_release);
         selected_name_.clear();
         return true;
     }
+    // A failed selection below leaves nothing selected (no stale reconnect target).
+    selected_index_.store(-1, std::memory_order_release);
+    selected_uid_.store(0, std::memory_order_release);
     if (index >= static_cast<int>(MIDIGetNumberOfSources())) return false;
 
     MIDIEndpointRef ep = MIDIGetSource(static_cast<ItemCount>(index));
@@ -107,7 +118,42 @@ bool CoreMidiIn::selectSource(int index) noexcept {
 
     source_.store(ep, std::memory_order_release);
     selected_index_.store(index, std::memory_order_release);
+    selected_uid_.store(sourceUniqueId(ep), std::memory_order_release);
     selected_name_ = sourceDisplayName(ep);
+    return true;
+}
+
+bool CoreMidiIn::pollReconnect() noexcept {
+    if (!initialized_.load(std::memory_order_acquire)) return false;
+    const int32_t want = selected_uid_.load(std::memory_order_acquire);
+    if (want == 0) return false;   // nothing selected: never auto-connect
+
+    MIDIEndpointRef found = 0;
+    int foundIndex = -1;
+    const ItemCount n = MIDIGetNumberOfSources();
+    for (ItemCount i = 0; i < n; ++i) {
+        MIDIEndpointRef ep = MIDIGetSource(i);
+        if (sourceUniqueId(ep) == want) { found = ep; foundIndex = static_cast<int>(i); break; }
+    }
+    // An offline endpoint (device unplugged but object retained) is treated as gone.
+    if (found != 0) {
+        SInt32 offline = 0;
+        if (MIDIObjectGetIntegerProperty(found, kMIDIPropertyOffline, &offline) == noErr && offline)
+            found = 0;
+    }
+
+    const MIDIEndpointRef cur = source_.load(std::memory_order_acquire);
+    if (found == cur) {
+        if (found != 0) selected_index_.store(foundIndex, std::memory_order_release);
+        return found != 0;
+    }
+    if (cur != 0) MIDIPortDisconnectSource(in_port_, cur);
+    source_.store(0, std::memory_order_release);
+    if (found == 0) return false;   // gone: keep the uid, wait for it to return
+    if (MIDIPortConnectSource(in_port_, found, nullptr) != noErr) return false;
+    source_.store(found, std::memory_order_release);
+    selected_index_.store(foundIndex, std::memory_order_release);
+    reconnects_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -184,9 +230,8 @@ void CoreMidiIn::quiesceReadCallback() noexcept {
 }
 
 void CoreMidiIn::notifyProc(const MIDINotification* /*msg*/, void* /*refCon*/) {
-    // Hot-plug notifications arrive here when a CoreMIDI run loop is present.
-    // Source re-resolution by name is a follow-up (mirrors CoreMidiOut); the
-    // port keeps working for the currently-connected source regardless.
+    // Notifications only arrive when the creating thread runs a CFRunLoop, so
+    // hot-plug is handled by polling instead: the host calls pollReconnect().
 }
 
 } // namespace ai_arranger::midi

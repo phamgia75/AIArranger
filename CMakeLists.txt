@@ -92,7 +92,7 @@ endif()
 
 # Tests that exercise the Apple platform layer directly (CoreMidiOut /
 # CoreMidiOutputProvider / mach host time). Built and run on Apple only.
-set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety)
+set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety test_coremidi_in_reconnect)
 
 # ── Importer library (vendor SFF1/SFF2 isolation) ─────────────────────
 file(GLOB_RECURSE IMPORTER_SFF1_SRC
@@ -235,7 +235,7 @@ if(APPLE)
     set_tests_properties(${APPLE_ONLY_TESTS} PROPERTIES RUN_SERIAL TRUE)
     # Re-init test: exit 77 = first CoreMIDI client creation failed (environment,
     # #21) -> reported as Skipped; first init itself is covered by the other tests.
-    set_tests_properties(test_coremidi_reinit PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(test_coremidi_reinit test_coremidi_in_reconnect PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # ── Gate 3 latency report tool (Python, stdlib only) ──────────────────

@@ -167,6 +167,7 @@ void LiveHostComponent::loadStyleDialog() {
 }
 
 void LiveHostComponent::timerCallback() {
+    driver_.midiIn().pollReconnect();   // re-attach the selected input after a USB replug
     const auto s = driver_.facade().snapshot();
 
     chordLabel_.setText(formatChord(s), juce::dontSendNotification);
