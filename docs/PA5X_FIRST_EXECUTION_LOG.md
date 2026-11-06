@@ -39,8 +39,10 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 | 19 | **Defect found by P0.6 tests:** a tempo change while playing jumped the song position (position = all samples × the *new* tempo). 60→240 BPM after 1 s skipped 1440 ticks (the scheduler flushed every note in between); slowing down jumped back | Claude | `src/engine/realtime/clock.{h,cpp}` (rebase on setTempo/setSampleRate), `tests/engine/test_clock_tempo_rebase.cpp` | (this commit) | 9/9; mutation (fix reverted) fails 5 + the clock-out 240 BPM check; full 128/128; ASan 125/125, TSan 125/125 (CoreMIDI-server tests excluded) | Fixed. No tempo change → byte-identical | Rebase is not atomic across two fields: setTempo must run on the advance() thread (it does: facade applies tempo inside tick()) |
 | 20 | P1.4 (#26) | ORCA | – | – | – | **Blocked**: issue is an explicit owner decision | – |
 | 21 | P1.5 prerequisite. **Defect:** Ctb2 NTR/NTT read from the unused LOW zone (bytes 22-23); the applied middle zone is 28-33 (REA: Wierzba/Bedesem *Style Files* v2.1, Tables 12-16; confirmed on all 4 corpus files: split bytes 0/127, middle ≠ low on Chord1 of 3 styles and CLASSIC_6_8 Bass/Phrase1) | REA + Claude | `src/importers/sff1/sff1_{types.h,reader.cpp,report.cpp}`, `tests/engine/test_sff1_reader.cpp`, `docs/importers/casm-structure-notes.md` | (this commit) | reader 24/24 (new: middle zone wins over a decoy low zone, short entry skipped, Guitar NTR counted chord-following); mutation (offset 22) fails 2; full 128/128; ASan importer 9/9 | Fixed. Playback unaffected (the engine does not read NTR/NTT yet); import report, exporter mapping report and serialized UASF metadata now carry the applied values | Low/high zones (styles with a real split) not modelled; source is community reverse engineering, not a Yamaha spec |
+| 22 | P1.5 apply CASM High Key + Note Limit | Claude, Codex (Level 2) | `src/engine/music/ntt.*` (`RegisterLimits`), `src/engine/arranger/style_player.*`, `src/engine/uasf/{types.h,format.h,serializer.cpp,deserializer.cpp}` (optional 'TRNS' extension, version stays 1), `src/importers/sff1/sff1_mapper.cpp`, `tests/engine/test_register_limits.cpp`, 2 corpus tests adjusted | (this commit) | new 20/20 (spec example, exhaustive High Key/Note Limit/defaults, TRNS round-trip and rejects, mapper rules); mutation (High Key removed) fails 2; full 129/129; ASan 126/126, TSan 126/126 (CoreMIDI excluded) | Done. **Audible change**: corpus bass with High Key D# now plays an octave lower over E..B chords (F: C bass -7, was +5); chord/pad tracks with High Key G drop over G#..B. Defaults (no CASM data, demo style) unchanged | HW pending (ear check). Committed corpus `.uasf` fixtures not regenerated (#27): their test compares against an import with limits reset. Low/high CASM zones not modelled |
 
 Reviews 16-21: OCR Level 1 (delegation, system rules): PASS after self-found fixes (row 16; row 21: Guitar NTR scoring). No Level 2 trigger applies (realtime clock is not business-day/timezone logic), so Codex was not run.
+Review 22 (UASF format = schema trigger): OCR Level 1 PASS; **Codex Level 2 (independent, read-only, tree unchanged): 1 × P2**, writer accepted register limits its reader rejects (unloadable file). Reproduced with a failing test, fixed with one shared validity rule. Reconciled: Codex-only 1 true positive, no false positives.
 
 Credentials: during the Windows proof test (row 15) Notepad showed a plaintext Meta page access token on the PA Manager PC. **REQUIRES ROTATION by the owner.** Its value is not recorded anywhere.
 
@@ -61,6 +63,7 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 9. Starter sound map: spot-check 8 sounds and the PC counting (0- vs 1-based).
 10. Control channel: assign one in Settings > MIDI > MIDI IN Channels; send Variation 1-4, Fill 1, Break, Ending 1, Play/Stop Player 1 with `sendDeviceCommand(pa5x::controlEvent(...))`; the Pa5X arranger follows.
 11. MIDI Clock: `setMidiClockOut(true)` while stopped; Pa5X Settings > MIDI > General Controls > Clock Source = External USB (resets to Internal at power-on, p.595); start/stop the transport and change tempo; the Pa5X tempo display follows; record whether its Players also start/stop on FA/FC.
+12. Register limits: load BALLAD_FOLK; play C, F, F#, B chords; the bass must stay near its recorded register (over F about a fourth below C, not a fifth above) and never jump octaves between F2 and F4.
 
 ### Blocked
 
@@ -70,4 +73,4 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 
 ### Next executable task
 
-**P1.5 apply High Key + Note Limit in playback** (P1.4 blocked) (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.
+**P1.7 chord types** (P1.4 blocked on owner) (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.

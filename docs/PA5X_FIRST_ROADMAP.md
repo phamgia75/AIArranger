@@ -27,7 +27,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P1.2 | Pa5X Import/Export SMF round-trip | Never run | Steps 2-8 of `pa5x-hardware-validation.md` | S | Hardware + USB stick | Pa5X rejects PPQN or tempo | `--compare` clean | **Is** the test | Blocked: hardware |
 | P1.3 | Break export | Reported, not exported | Export `br` once confirmed by a Pa5X export (P1.2) and #26 fixed | S | P1.2, #26 | – | Exporter tests | Pa5X Break plays | Blocked |
 | P1.4 | Fix #26 (unmarked tail imported as Break) | Open issue | Import tail handled explicitly | M | – | Behaviour change on corpus | Corpus test | – | **Blocked: owner decision** (#26 lists three readings the data cannot decide) |
-| P1.5 | CASM High Key / note limit in NTT | Parsed, not applied | Applied per channel | M | – | Musical regressions; last hardware bug was in NTT | Exhaustive NTT property tests + corpus e2e | Bass/pad register on Pa5X across 12 roots | **Partial**: Ctb2 decoded per the Wierzba/Bedesem spec; NTR/NTT/High Key/Note Limit/RTR now read from the applied (middle) zone. Applying High Key + Note Limit in playback still to do |
+| P1.5 | CASM High Key / note limit in NTT | Parsed, not applied | Applied per channel | M | – | Musical regressions; last hardware bug was in NTT | Exhaustive NTT property tests + corpus e2e | Bass/pad register on Pa5X across 12 roots | **Done** (`8e5d783` decode + this commit: High Key under Root Trans, Note Limit fold, UASF 'TRNS' block) · HW pending: ear check across 12 roots |
 | P1.6 | Factory sound map from manual appendix | 0/32 verified, user-supplied | Pa5X factory CC0/CC32/PC table usable by `--sound-map` | M | **Owner decision** on reproducing the table | Copyright of the table as a compilation | Map entries well-formed | Spot-check 10 sounds on Pa5X | **Partial `9e770c9`**: 14-entry starter map from the manual, own format; full table not reproduced · HW pending |
 | P1.7 | 6th / m6 / 9 / m7b5 chord types + partial match (spec §4.4) | Missing | ChordType + NTT tables extended | M | – | NTT table changes ripple through UASF | Chord + NTT tests | Ear check | Planned |
 | P1.8 | Chord input MIDI channel filter | All channels feed detector (split by pitch only) | Honour Pa5X Global/Chord 1/Chord 2 channel roles | S | P0.3 | Depends on user's MIDI preset | Router unit tests | Pa5X Master Kbd preset | **Done `f63dc85`** (opt-in `defaultPresetKeyboardRoles`) · HW pending |
@@ -57,7 +57,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 
 ## Execution order (next sessions)
 
-1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ (all done) → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
+1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ → 7. ~~P1.5~~ (all done; 6. P1.4 blocked on owner) → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
 
 Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pending" item **before** new P0 code, and record them under `docs/evidence/hardware/`.
 
