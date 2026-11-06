@@ -53,8 +53,6 @@ int main() {
                               "Break", "Ending", "PANIC", "Refresh", "Load Style...", "Auto Fill"})
             TEST((juce::String("button present: ") + b).toRawUTF8(), find<juce::Button>(*host, b) != nullptr);
         TEST("starts stopped", section(*host).contains("(stopped)"));
-        auto* status = find<juce::Label>(*host, "");
-        (void)status;
 
         click(*host, "Start");
         pump(300);
