@@ -1,0 +1,37 @@
+# Pa5X starter sound map: one factory Sound per Style track, for any converted
+# style (aiarranger-convert --sound-map docs/exporters/sound-maps/pa5x-starter.soundmap).
+#
+# Status: DOCUMENTED, NOT HARDWARE-VERIFIED. Each number was read from the
+# Korg Pa5X User Manual v1.4 (2025-11-25) Sounds / Drum Kits appendix (page
+# given). This file picks 14 sounds and arranges them in our own format; it is
+# not a copy of the appendix. Open item: the appendix does not say whether
+# Program Change counts from 0 or from 1. The data match 0-based (Austrian Grand
+# = PC 0, GM-like families), which is what this format writes. Confirm on the
+# Pa5X (Mixer > Program Change combo, manual p.435) before trusting a sound.
+#
+# Per-style maps (BALLAD_FOLK.soundmap etc.) stay 'unresolved' until verified.
+
+# Drum Kit "Pop Kit 1 RR" (p.1621). Drum Kits use bank 120/0.
+drum 120 0 100
+# Percussion Kit "Standard Perc Kit" (p.1622)
+perc 120 0 69
+# Bass "JBass Fing DN1" (p.1588)
+bass 121 29 33
+# Acc1 Guitar "Strat N Cln DNC" (p.1577)
+acc1 121 38 27
+# Acc2 Electric Piano "MK I Stage" (p.1573)
+acc2 121 46 4
+# Acc3 Pad "OB Pad" (p.1582)
+acc3 121 22 89
+# Acc4 Piano "Austrian Grand" (p.1572)
+acc4 121 20 0
+# Acc5 Strings "StringEnsembleDNC" (p.1578)
+acc5 121 13 49
+
+# Alternates (same source and status), to swap in by family:
+#   Acoustic Bass 1     121 13 32  (p.1588)
+#   Jimmy Organ         121 13 18  (p.1576)
+#   Classic Gtr 1 DNC   121 29 24  (p.1577)
+#   Steel Guitar1 DNC   121 47 25  (p.1577)
+#   Big Band Brass 1    121 32 61  (p.1581)
+#   Mini Classic 1      121 26 87  (p.1584)  synth lead
