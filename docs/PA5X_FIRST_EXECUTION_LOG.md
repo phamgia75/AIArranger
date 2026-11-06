@@ -21,6 +21,34 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 
 | 8 | Windows Research Agent capability audit (PA Manager on a LAN Windows PC) | ORCA | `docs/research/WINDOWS_RESEARCH_AGENT.md` | (this commit) | LAN port check from the Mac: RDP open; SSH/SMB/WinRM closed. `orca computer get-app-state` on Windows App: `permission_denied` | Audit done; **no control yet** | macOS Accessibility/Screen Recording for Orca Computer Use; Path B needs owner approval |
 
+
+## Session 2026-11-06 (continued, after owner authorization)
+
+| # | Task | Agent | Files | Commit | Tests | Result | Remaining risk |
+|---|---|---|---|---|---|---|---|
+| 9 | Push branch, draft PR | ORCA | – | PR #38 (draft) | – | Done | Do not merge before gates |
+| 10 | Enable GitHub Actions | ORCA | repo settings | – | First CI run on #38: macOS build-and-test, Linux release, ASan+UBSan, TSan **all pass** | Done: Actions on, **GitHub-owned actions only**, default token **read-only**, Actions cannot approve PRs | – |
+| 11 | Locate Audio Intelligence code | Explore agent (read-only) | – | – | Searched all 296 commits, 27 local + 52 remote branches, 7 worktrees, stash, both GitHub copies (phamgia75, hieucat75), ~/dev, ~/orca, Documents/Desktop/Downloads, Claude/Codex transcripts | **Not found.** Only docs saying it is missing, and one chat prompt asking to look for it. `ai-style-maker` (not under git) has no tempo logic | Possibly on a Windows `C:\dev` machine (a `C--dev-rea-lab` transcript folder exists) or never written. Nothing recreated |
+| 12 | Chord-recognition channel roles + Pa5X style-track output map | Claude | `src/midi/midi_input_router.h`, `src/control/midi_output_bridge.h`, `src/session/live_engine_facade.*`, `src/engine/integration/performer_adapter.*`, `src/midi/pa5x_profile.h`, 3 tests | `f63dc85` | 124/124; ASan+UBSan 50/50, TSan 50/50; mutation check | Done (opt-in, defaults byte-identical, C ABI unchanged) | HW pending: does the Pa5X play ch9-16 from USB on Style tracks under the user's preset? |
+| 13 | #27 prep: corpus optional; fixed a test that hung without it; starter sound map | Claude + REA (14 sounds from manual appendix) | `CMakeLists.txt`, `tests/engine/test_time_signature.cpp`, `docs/exporters/sound-maps/pa5x-starter.soundmap`, test | `9e770c9` | 125/125; empty corpus: 108 pass, 16 Disabled | Done | Restricted files still in the repo and history (owner decision) |
+| 14 | Windows proof-of-control | ORCA | – | – | `orca computer get-app-state` on Windows App: still `permission_denied` | **Blocked** on macOS Accessibility + Screen Recording for Orca Computer Use | – |
+
+Flaky, not caused by this work: `test_coremidi_out` failed once ("Initialize succeeds") and passed on 2 reruns, the known CoreMIDI-server condition (#21).
+
+## Pa5X hardware runbook (for the next session with the instrument)
+
+Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator present for anything audible.
+
+1. `build/pa5x-doctor` → expect exit 0, `Pa5X KEYBOARD` + `Pa5X SOUND` online; save the output.
+2. Endpoints: select `Pa5X SOUND` by unique ID; confirm with `korg-playback --dest "Pa5X SOUND"`.
+3. Chords (Global roles, split C4): play C, Am, G7, Bdim in root position **and** inversions (C/E, C/G, G7/B); the arranger chord must follow (`6319d30`).
+4. NTT: play F2 and F4; bass/chord register identical (`40fc2ff`).
+5. Channel roles: Pa5X Default MIDI preset, Pa5X SPLIT on, `defaultPresetKeyboardRoles()`; left-hand chords drive the arranger, right-hand melody never changes the chord.
+6. Style playback: Genos style with `genosStyleTrackMap()`; each Style track audible on the right Pa5X track; no Yamaha bank/PC sent.
+7. USB unplug/replug during playback: input recovers by itself (`08b12cd`), output re-resolves, no stuck notes.
+8. Marker SMF: Pa5X Import SMF of POP_ACOUSTIC_2 (10 elements incl. f3/f4), re-export, `aiarranger-convert --compare`; check the Break marker form.
+9. Starter sound map: spot-check 8 sounds and the PC counting (0- vs 1-based).
+
 ### Blocked
 
 - Windows/PA Manager control: blocked on macOS permissions (Path A) or owner approval (Path B); see `docs/research/WINDOWS_RESEARCH_AGENT.md` §7.
@@ -29,4 +57,4 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 
 ### Next executable task
 
-**P1.8 chord-input channel filter**, then **P0.4 live Pa5X channel map** (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.
+**P0.5 Pa5X Control-channel commands** (Style Element PCs 80-94, manual p.613), then **P0.6 MIDI clock out**, **P1.4 #26**, **P1.5 CASM High Key** (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.

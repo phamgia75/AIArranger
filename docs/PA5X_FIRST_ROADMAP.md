@@ -13,11 +13,11 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P0.1 | Chord inversions | E-G-C → NoChord | Spec §4.3 exact + inversions, bass preferred | S | – | 6th chords read as relative m7 | `test_chord_scan` exhaustive inversions | Play C/E, C/G, Am/C, G7/B on Pa5X lower zone; arranger chord follows | **Done `6319d30`** · HW pending |
 | P0.2 | Input hot-plug | Stub | Reconnect by unique ID, never another device | S | – | CoreMIDI behaviour of a real USB replug differs from virtual source | `test_coremidi_in_reconnect` | Unplug/replug Pa5X USB mid-performance; chords resume, no restart | **Done `08b12cd`** · HW pending |
 | P0.3 | Pa5X port profile + read-only diagnostics CLI | Generic selection; bench tools off-repo | `pa5x-doctor`: enumerate, identify `Pa5X SOUND`/`Pa5X KEYBOARD` by name+uid, report channels, **send nothing** unless `--probe` with `AIARR_MIDI_HW_TX=1` | S | – | Name differs with class-compliant driver | Unit on name matcher; CLI test with no devices | Run on bench, attach output to `docs/evidence/hardware/` | **Done** (`tools/pa5x_doctor.cpp`) · HW pending |
-| P0.4 | Live Pa5X channel map | Live playback on style's own channels (Yamaha / demo 2,3,10) | Live output on Pa5X Style-track channels 9-16 under the **Default** MIDI preset (VERIFIED p.585-588), Yamaha bank/PC never sent | M | P0.3 | Default preset maps ch9-16 to Player 1 tracks *and* Style tracks; behaviour depends on the user's MIDI preset | Unit: no event leaves on ch1-8; no Yamaha bank/PC | Ear check each track on the Pa5X | Planned |
+| P0.4 | Live Pa5X channel map | Live playback on style's own channels (Yamaha / demo 2,3,10) | Live output on Pa5X Style-track channels 9-16 under the **Default** MIDI preset (VERIFIED p.585-588), Yamaha bank/PC never sent | M | P0.3 | Default preset maps ch9-16 to Player 1 tracks *and* Style tracks; behaviour depends on the user's MIDI preset | Unit: no event leaves on ch1-8; no Yamaha bank/PC | Ear check each track on the Pa5X | **Done `f63dc85`** (opt-in `genosStyleTrackMap`) · HW pending |
 | P0.5 | Pa5X Control-channel commands | None | Send Style Element PCs 80-94, Kbd Set 64-67, Play/Stop 104-107 on a configurable Control channel (VERIFIED p.613-614) — **drive the Pa5X's own arranger** as a second mode | M | P0.3 | Requires the user's MIDI preset to define a Control channel | Unit: byte-exact PC per command | Pa5X switches elements on command | Planned |
 | P0.6 | MIDI clock / Start / Stop out | None | Optional 0xF8/0xFA/0xFC to the selected device | S | P0.3 | Pa5X Clock Source resets to Internal at power-on (VERIFIED p.594) | Unit: 24 ppq, start/stop ordering | Pa5X follows tempo with Clock Source = External USB | Planned |
 | P0.7 | Re-run the 11-05 bench in-repo | Bench + spy tools on Mac mini only | Bench tool committed under `tools/`, results in `docs/evidence/hardware/` | S | Mac mini access | – | Builds in CI | Repeat audit tests 1-6, **with an operator** for ear checks | Blocked: needs Mac mini + operator |
-| P0.8 | Regression CI | Actions disabled | CI running on PRs | S | **Owner decision** | – | Workflow green | – | Blocked: owner |
+| P0.8 | Regression CI | Actions disabled | CI running on PRs | S | **Owner decision** | – | Workflow green | – | **Done 2026-11-06**: Actions enabled (GitHub-owned actions only, read-only token); first run on PR #38 green on all 4 jobs |
 
 ## P1 — Style Studio and KST Manager foundations
 
@@ -28,9 +28,9 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P1.3 | Break export | Reported, not exported | Export `br` once confirmed by a Pa5X export (P1.2) and #26 fixed | S | P1.2, #26 | – | Exporter tests | Pa5X Break plays | Blocked |
 | P1.4 | Fix #26 (unmarked tail imported as Break) | Open issue | Import tail handled explicitly | M | – | Behaviour change on corpus | Corpus test | – | Planned |
 | P1.5 | CASM High Key / note limit in NTT | Parsed, not applied | Applied per channel | M | – | Musical regressions; last hardware bug was in NTT | Exhaustive NTT property tests + corpus e2e | Bass/pad register on Pa5X across 12 roots | Planned |
-| P1.6 | Factory sound map from manual appendix | 0/32 verified, user-supplied | Pa5X factory CC0/CC32/PC table usable by `--sound-map` | M | **Owner decision** on reproducing the table | Copyright of the table as a compilation | Map entries well-formed | Spot-check 10 sounds on Pa5X | Blocked: owner |
+| P1.6 | Factory sound map from manual appendix | 0/32 verified, user-supplied | Pa5X factory CC0/CC32/PC table usable by `--sound-map` | M | **Owner decision** on reproducing the table | Copyright of the table as a compilation | Map entries well-formed | Spot-check 10 sounds on Pa5X | **Partial `9e770c9`**: 14-entry starter map from the manual, own format; full table not reproduced · HW pending |
 | P1.7 | 6th / m6 / 9 / m7b5 chord types + partial match (spec §4.4) | Missing | ChordType + NTT tables extended | M | – | NTT table changes ripple through UASF | Chord + NTT tests | Ear check | Planned |
-| P1.8 | Chord input MIDI channel filter | All channels feed detector (split by pitch only) | Honour Pa5X Global/Chord 1/Chord 2 channel roles | S | P0.3 | Depends on user's MIDI preset | Router unit tests | Pa5X Master Kbd preset | Planned |
+| P1.8 | Chord input MIDI channel filter | All channels feed detector (split by pitch only) | Honour Pa5X Global/Chord 1/Chord 2 channel roles | S | P0.3 | Depends on user's MIDI preset | Router unit tests | Pa5X Master Kbd preset | **Done `f63dc85`** (opt-in `defaultPresetKeyboardRoles`) · HW pending |
 | P1.9 | KST inventory (report-only) | None | Scan a KST folder: file types, counts, byte-identical duplicates; never writes | S | – | Files are opaque; only names/hashes | Fixture trees | Compare with Pa5X Media listing | Planned |
 | P1.10 | Native `.STG`/`.KSC`/`.PCG` read/write | None | – | XL | Owner files + RE approval + legal review | Undocumented, OS-version-dependent | – | – | **Blocked** |
 
@@ -57,14 +57,14 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 
 ## Execution order (next sessions)
 
-1. ~~P0.3 `pa5x-doctor`~~ (done) → 2. P1.8 channel filter → 3. P0.4 live channel map → 4. P0.5 Control-channel commands → 5. P0.6 clock → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
+1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ (all done) → 4. P0.5 Control-channel commands → 5. P0.6 clock → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
 
 Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pending" item **before** new P0 code, and record them under `docs/evidence/hardware/`.
 
 ## Owner decisions needed
 
-1. Enable GitHub Actions (P0.8).
-2. Reproduce the Pa5X factory sound table in-repo (P1.6).
+1. ~~Enable GitHub Actions (P0.8)~~: done.
+2. ~~Factory sound table~~: owner chose independent mapping data; starter map committed (P1.6).
 3. Any work on native KST internals (P1.10) — needs owner-provided files and legal sign-off.
-4. Location of the Audio Intelligence pipeline source (P3.1).
-5. Issue #27 (Genos `.sty` files with "no redistribution" in a public repo) remains a legal blocker for release.
+4. Audio Intelligence source (P3.1): searched 2026-11-06, **not found** anywhere reachable (see execution log). Possibly on a Windows `C:\dev` machine.
+5. Issue #27 remains a legal blocker. Since `9e770c9` the corpus is optional (`AIARR_GENOS_CORPUS_DIR`; corpus tests Disabled when absent), so the files can be moved out once the owner decides; history purge is the owner's call.
