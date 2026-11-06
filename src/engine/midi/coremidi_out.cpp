@@ -1,4 +1,5 @@
 #include "engine/midi/coremidi_out.h"
+#include "engine/midi/midi_bytes.h"
 #include "engine/trace/latency_trace.h"
 
 #include <chrono>
@@ -17,30 +18,7 @@ namespace ai_arranger::midi {
 // ── Pure conversion (no CoreMIDI) ────────────────────────────────────
 
 size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept {
-    const uint8_t status = static_cast<uint8_t>(ev.type) | (ev.channel & 0x0F);
-    switch (ev.type) {
-        case uasf::MidiEventType::NoteOff:
-        case uasf::MidiEventType::NoteOn:
-        case uasf::MidiEventType::PolyPressure:
-        case uasf::MidiEventType::ControlChange:
-        case uasf::MidiEventType::PitchBend:
-            out[0] = status;
-            out[1] = ev.data1 & 0x7F;
-            out[2] = ev.data2 & 0x7F;
-            return 3;
-        case uasf::MidiEventType::ProgramChange:
-        case uasf::MidiEventType::ChannelPressure:
-            out[0] = status;
-            out[1] = ev.data1 & 0x7F;
-            return 2;
-        case uasf::MidiEventType::TimingClock:
-        case uasf::MidiEventType::Start:
-        case uasf::MidiEventType::Stop:
-            out[0] = static_cast<uint8_t>(ev.type);
-            return 1;
-        default:
-            return 0;
-    }
+    return encodeMidiEvent(ev, out);
 }
 
 // ── Name resolution helpers (control / dispatch threads only) ────────

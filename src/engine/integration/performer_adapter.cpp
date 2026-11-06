@@ -21,6 +21,9 @@ void PerformerAdapter::startPlayback() noexcept {
     sync_.start();
     sm_.apply(performance::PerformerInput::Start);
     player_.start(0);   // StylePlayer also starts the clock
+    // start() resets the player to C major; a chord already held keeps playing
+    // (before: the snapshot showed it while the accompaniment played C).
+    if (last_chord_.type != arranger::ChordType::NoChord) player_.setChord(last_chord_);
 }
 
 void PerformerAdapter::doPanic() noexcept {
