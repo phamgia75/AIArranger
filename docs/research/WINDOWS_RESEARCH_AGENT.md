@@ -1,0 +1,114 @@
+# Windows Research Agent — capability audit and plan
+
+- **Date:** 2026-11-06
+- **Purpose:** let ORCA/REA observe and operate the owner's licensed KORG PA Manager on a separate Windows Pro PC on the LAN, to build the feature-parity research (`docs/KORG_PA_MANAGER_FEATURE_PARITY.md`) from observed behaviour instead of vendor marketing.
+- **Status:** **NOT YET CONTROLLABLE.** No end-to-end test has succeeded. Do not describe ORCA/REA as able to control Windows until §5 passes.
+- Host addresses, account names and pairing codes are deliberately **not** recorded in this public repository.
+
+## 1. Audit results (2026-11-06, from the Mac)
+
+| Check | Result |
+|---|---|
+| Mac on the LAN | Yes, same /24 as the Windows PC |
+| Windows PC reachable | TCP 3389 (RDP) **open**, TCP 135 (RPC endpoint mapper) open. ICMP ping blocked. TCP 22 (SSH), 445 (SMB), 5985/5986 (WinRM) closed or filtered. |
+| Remote shell / remote execution into Windows | **None available.** No SSH, no WinRM, no SMB. Nothing was enabled. |
+| RDP client on the Mac | Microsoft *Windows App* (`com.microsoft.rdc.macos`), running |
+| Mac GUI automation | `orca computer` (Orca 1.4.250, provider `orca-computer-use-macos`): click, type, keys, scroll, drag, screenshots, accessibility tree, **background input**. No OCR. |
+| Mac GUI automation permission | **BLOCKED:** `get-app-state` on Windows App returned `permission_denied`: macOS Accessibility (and Screen Recording) not granted to *Orca Computer Use*. |
+| Remote Orca runtime | Supported: `orca serve [--grant-desktop-control]` on the remote machine, paired from the Mac with `orca environment add --pairing-code …`. A paired client cannot drive the remote desktop unless the offer was created with `--grant-desktop-control`. |
+| Other automation on the Mac | No FreeRDP, no PowerShell. SSH client only. |
+
+**Conclusion:** neither ORCA nor REA can currently see or drive the Windows desktop. Two supported paths exist, and **neither needs a custom agent.**
+
+## 2. Recommended architecture
+
+### Path A — drive the RDP window on the Mac (no Windows changes)
+
+```
+ORCA (Mac) --orca computer--> Windows App window (Mac) --RDP 3389--> Windows session --> PA Manager
+```
+
+- Needs only the two macOS permissions for *Orca Computer Use*.
+- The remote desktop is a **bitmap**: no Windows accessibility tree, no UI Automation. ORCA works from screenshots and window-local coordinates, and reads text visually from screenshots (the provider has no OCR).
+- Good for: observing screens, menus and dialogs; capturing screenshots for the parity matrix.
+- Weak for: reliable clicks on small controls, reading lists/grids, anything long-running.
+
+### Path B — Orca runtime inside the Windows interactive session (recommended for real research)
+
+```
+ORCA (Mac) --paired, LAN only, TCP 6768--> orca serve --grant-desktop-control (Windows, user session) --UI Automation--> PA Manager
+```
+
+- Gives the native Windows accessibility tree of PA Manager (whatever UIA exposes; a Delphi/VCL or custom-drawn UI may expose little — §5 measures this), real screenshots, and a shell for copying test data.
+- Runs **in the foreground of the logged-in user's desktop**, not as a service, and stops with Ctrl+C.
+- Authenticated by Orca's pairing code (one-time offer); scoped to desktop control only when `--grant-desktop-control` is given.
+
+**Plan:** prove Path A first (zero install). Adopt Path B only with explicit owner approval, if PA Manager research needs reliable control.
+
+## 3. Installation and configuration steps
+
+### Path A (owner, on the Mac — about 2 minutes)
+
+1. Run `orca computer permissions --id accessibility` and enable **Orca Computer Use** in System Settings > Privacy & Security > Accessibility.
+2. Run `orca computer permissions --id screenshots` and enable it under **Screen & System Audio Recording**.
+3. In Windows App, set the PC's display to a **fixed resolution (e.g. 1920×1080), "Optimize for Retina" off, Windows scaling 100%**, and use a normal (not full-screen) window. This keeps screenshot pixels equal to action coordinates.
+4. Keep the RDP window **open and not minimised** while ORCA works.
+
+### Path B (owner, on Windows — each step needs explicit approval first)
+
+1. Install Orca for Windows from its official source, as the normal user, not as administrator. *(installation)*
+2. Confirm the network is **Private**: `Get-NetConnectionProfile`. Do not change a Public network to Private on untrusted networks.
+3. Add one inbound rule, Private profile only, limited to the Mac's address: *(firewall change)*
+   ```powershell
+   New-NetFirewallRule -DisplayName "Orca serve (LAN, Mac only)" -Direction Inbound -Protocol TCP `
+     -LocalPort 6768 -RemoteAddress <MAC_LAN_IP> -Profile Private -Action Allow
+   ```
+   If Windows shows its own "allow on networks" prompt, tick **Private only**.
+4. In a normal PowerShell window inside the logged-in session, start the runtime for a research session only:
+   ```powershell
+   orca serve --port 6768 --pairing-address <WINDOWS_LAN_IP> --grant-desktop-control
+   ```
+   *(remote execution setup)*
+5. Give the printed `orca://pair?…` code to ORCA **in the chat only**. On the Mac: `orca environment add --name pa-manager-win --pairing-code '<code>'`. The code is never committed or logged.
+6. Ending a session: Ctrl+C in that window. To remove: `orca environment rm --environment pa-manager-win` on the Mac, then `Remove-NetFirewallRule -DisplayName "Orca serve (LAN, Mac only)"` on Windows.
+
+## 4. Security restrictions
+
+1. **LAN only.** No router port forwarding, UPnP, public tunnel or relay for 3389 or 6768. If remote access from outside is ever needed, use a VPN such as Tailscale, never an exposed port.
+2. **No passwords or licence data** are requested, typed, stored or transmitted by ORCA/REA. The owner logs in to Windows and to PA Manager by hand. If a login or licence dialog appears, ORCA stops and hands over.
+3. **No unattended service.** `orca serve` runs only in the owner's visible session, only during research.
+4. **Read-only first.** The first tests only open applications, read UI state and take screenshots.
+5. **Copies only.** All file work uses copies in a dedicated folder, e.g. `C:\PA-Research\work\`, copied from originals that ORCA never opens for writing. PA Manager "save", "convert" or "clean up" runs only against copies.
+6. **Destructive actions need per-action approval:** delete, overwrite, cleanup, merge into an existing set, registry, firewall and installs.
+7. **Pairing code = credential:** chat only, never in Git, docs or logs. It is revoked by stopping `orca serve` and running `orca environment rm`.
+8. **Licence terms:** observe PA Manager's behaviour only. No decompiling, no copying of its binaries or internal files, no bypassing its licence checks (see the parity document).
+
+## 5. Minimal proof-of-control test
+
+Pass means **every** step succeeds and its evidence is saved under `docs/evidence/windows-agent/` (screenshots with personal data cropped out).
+
+| # | Step | Path A command (Mac) | Pass criterion |
+|---|---|---|---|
+| 1 | See the RDP window | `orca computer list-windows --app com.microsoft.rdc.macos --json` | At least one window with the PC's title |
+| 2 | Read state | `orca computer get-app-state --app com.microsoft.rdc.macos --json` | A screenshot saved; ORCA describes the visible Windows desktop correctly and the owner confirms |
+| 3 | Open an app | Click Start, type `notepad`, press Return | Notepad visible in the next screenshot |
+| 4 | Read-only PA Manager | Owner opens PA Manager by hand (licence state untouched); ORCA takes a screenshot | Main window identified; ORCA lists its visible menus and panels |
+| 5 | Close Notepad without saving | Alt+F4, choose "Don't save" | Notepad gone |
+
+Path B adds: `orca computer list-apps --environment pa-manager-win --json` lists PA Manager, and `get-app-state` on it returns an accessibility tree. Record how many PA Manager controls UIA exposes; that decides between Path A and Path B for the research.
+
+## 6. RDP, locking and display limitations
+
+- **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.
+- **Lock screen:** a locked session (Win+L, timeout) blocks automation. Disable the lock timeout **only for research sessions**, at the owner's discretion.
+- **Minimised RDP window:** the client may stop sending frames. Keep it visible, which also lets the owner watch every action.
+- **Display scaling:** Retina scaling in Windows App and Windows DPI scaling both shift coordinates. Use fixed resolution and 100% scaling, and always take coordinates from the latest screenshot (`scale` field).
+- **One interactive session:** Windows Pro allows one user session at a time. Logging in at the physical console disconnects the RDP session, and the other way round.
+- **UAC prompts** appear on the secure desktop and cannot be automated. That is intended: elevation stays with the owner.
+
+## 7. Blockers that need the owner
+
+1. **macOS permissions** for Orca Computer Use: Accessibility and Screen Recording (§3, Path A, steps 1-2). Path A is blocked until then.
+2. Keep the Windows App session connected and visible during the test.
+3. For Path B only: approve installing Orca on Windows, the firewall rule and running `orca serve --grant-desktop-control`, then send the pairing code.
+4. Prepare a copy folder of test data on Windows (a Pa5X KST/SET copy, never the original).

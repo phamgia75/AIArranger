@@ -19,8 +19,11 @@ Agents actually available on 2026-11-06: ORCA (this Claude Code session, orchest
 
 Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencodereview/rule.json`) on 3, 4, 5 and 7: PASS, no findings. None of these is a critical-category change, so no Codex Level 2 was run.
 
+| 8 | Windows Research Agent capability audit (PA Manager on a LAN Windows PC) | ORCA | `docs/research/WINDOWS_RESEARCH_AGENT.md` | (this commit) | LAN port check from the Mac: RDP open; SSH/SMB/WinRM closed. `orca computer get-app-state` on Windows App: `permission_denied` | Audit done; **no control yet** | macOS Accessibility/Screen Recording for Orca Computer Use; Path B needs owner approval |
+
 ### Blocked
 
+- Windows/PA Manager control: blocked on macOS permissions (Path A) or owner approval (Path B); see `docs/research/WINDOWS_RESEARCH_AGENT.md` §7.
 - Hardware validation of everything above (Pa5X not attached here; the 11-05 bench is the Mac mini).
 - P0.8 CI (Actions disabled — owner), P1.6 factory sound table (owner), P1.10 native KST (formats undocumented), P3.1 Audio Intelligence (source not found on this host).
 
