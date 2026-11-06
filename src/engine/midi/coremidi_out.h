@@ -49,7 +49,8 @@ namespace ai_arranger::midi {
 
 // Convert a UASF MidiEvent into raw MIDI status/data bytes.
 // Writes up to 3 bytes into out (must hold 3). Returns the byte count
-// (2 for ProgramChange/ChannelPressure, 3 otherwise, 0 if unsupported).
+// (1 for Clock/Start/Stop, 2 for ProgramChange/ChannelPressure, 3 for the
+// other channel messages, 0 if unsupported).
 // Pure function — no CoreMIDI dependency, safe to unit test on CI.
 size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept;
 

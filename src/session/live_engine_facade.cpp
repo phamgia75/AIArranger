@@ -60,6 +60,7 @@ void LiveEngineFacade::stop() noexcept {
     // Deliver the silence now rather than on a later tick (a host may stop
     // ticking after stop()). The scheduler holds only the panic's events.
     session_.scheduler().advanceTo(INT64_MAX);
+    emitMidiClock();   // transport is stopped now: sends Stop if clock was running
     if (output_) control::pumpEngineOutput(out_bridge_, *output_);
     // Commands issued for this session must not act on a later one (a pending
     // Start used to restart playback after stop()). Draining cmd_q_ is not
@@ -149,10 +150,38 @@ void LiveEngineFacade::tickLocked(uint32_t numSamples) noexcept {
     // Advance the engine and schedule output (mirrors the macOS EngineDriver).
     session_.clock().advance(numSamples);
     session_.tick();
+    emitMidiClock();   // after the tick applied Start/Stop, before this tick's notes
     session_.scheduler().advanceTo(session_.clock().getPosition());
     if (output_) control::pumpEngineOutput(out_bridge_, *output_);
 
     publishSnapshot(/*fromTick=*/true);
+}
+
+void LiveEngineFacade::emitMidiClock() noexcept {
+    using uasf::MidiEventType;
+    auto rt = [](MidiEventType t) { return uasf::MidiEvent{t, 0, 0, 0, 0}; };
+    const bool playing = session_.player().isPlaying();
+    if (clock_running_ && !playing) {
+        out_bridge_.sendUnmapped(rt(MidiEventType::Stop));
+        clock_running_ = false;
+    }
+    if (!playing || !clock_out_.load(std::memory_order_relaxed)) return;
+    const auto& clk = session_.clock();
+    const int64_t pos = clk.getPosition();
+    // Start resets the engine clock to 0, so a position going back while still
+    // playing is a restart within one tick (Stop + Start): Start again.
+    if (!clock_running_ || pos < last_clock_pos_) {
+        out_bridge_.sendUnmapped(rt(MidiEventType::Start));
+        clock_running_ = true;
+        next_pulse_ = 0;
+    }
+    last_clock_pos_ = pos;
+    // Pulse n sits at tick n*PPQN/24 (exact for any PPQN, no drift).
+    const int64_t ppqn = clk.getResolution();
+    while (next_pulse_ * ppqn / 24 <= pos) {
+        out_bridge_.sendUnmapped(rt(MidiEventType::TimingClock));
+        ++next_pulse_;
+    }
 }
 
 template <class PopFn>

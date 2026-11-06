@@ -33,6 +33,11 @@ size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept {
             out[0] = status;
             out[1] = ev.data1 & 0x7F;
             return 2;
+        case uasf::MidiEventType::TimingClock:
+        case uasf::MidiEventType::Start:
+        case uasf::MidiEventType::Stop:
+            out[0] = static_cast<uint8_t>(ev.type);
+            return 1;
         default:
             return 0;
     }

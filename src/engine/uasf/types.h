@@ -19,6 +19,10 @@ enum class MidiEventType : uint8_t {
     ProgramChange    = 0xC0,
     ChannelPressure  = 0xD0,
     PitchBend        = 0xE0,
+    // System Real-Time (1 byte, `channel` ignored). Output only, never in a style.
+    TimingClock      = 0xF8,
+    Start            = 0xFA,
+    Stop             = 0xFC,
 };
 
 struct MidiEvent {

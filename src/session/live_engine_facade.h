@@ -137,6 +137,17 @@ public:
         recordError(EngineError::QueueFull);
         return false;
     }
+    // MIDI Clock out (24 per quarter note) with Start/Stop, on the output
+    // device, while the transport plays. Off by default. Refused (false) while
+    // playing, so a receiver never sees clock without a Start.
+    // shortcut: pulses leave at tick() granularity (jitter = one tick's buffer, the
+    // same as the notes); timestamp them if a receiver needs sample-accurate clock.
+    bool setMidiClockOut(bool on) noexcept {
+        if (snapshot().playing) return false;
+        clock_out_.store(on, std::memory_order_relaxed);
+        return true;
+    }
+    bool midiClockOut() const noexcept { return clock_out_.load(std::memory_order_relaxed); }
     bool selectMidiOutput(int index) noexcept {
         const bool ok = output_ ? output_->select(index) : false;
         if (!ok) recordError(EngineError::DeviceUnavailable);
@@ -185,6 +196,7 @@ public:
 
 private:
     void tickLocked(uint32_t numSamples) noexcept;
+    void emitMidiClock() noexcept;   // tick thread (or owner thread with tick excluded)
     // fromTick: the realtime path never waits for a concurrent lifecycle publish.
     void publishSnapshot(bool fromTick = false) noexcept;
     bool push(control::ControlAction a, int32_t param = 0) noexcept {
@@ -217,6 +229,12 @@ private:
     control::ControlEvent input_carry_{};
     bool has_cmd_carry_{false};
     bool has_input_carry_{false};
+
+    // MIDI Clock out. clock_out_ any thread; the rest tick-thread only.
+    std::atomic<bool> clock_out_{false};
+    bool    clock_running_{false};   // Start sent, Stop not yet
+    int64_t next_pulse_{0};          // index of the next 0xF8 since Start
+    int64_t last_clock_pos_{0};
 
     std::atomic<uint32_t>       pending_tempo_{0};
     std::atomic<uint64_t>       session_gen_{0};   // bumped by stop(); stamps commands

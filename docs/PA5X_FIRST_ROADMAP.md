@@ -15,7 +15,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P0.3 | Pa5X port profile + read-only diagnostics CLI | Generic selection; bench tools off-repo | `pa5x-doctor`: enumerate, identify `Pa5X SOUND`/`Pa5X KEYBOARD` by name+uid, report channels, **send nothing** unless `--probe` with `AIARR_MIDI_HW_TX=1` | S | – | Name differs with class-compliant driver | Unit on name matcher; CLI test with no devices | Run on bench, attach output to `docs/evidence/hardware/` | **Done** (`tools/pa5x_doctor.cpp`) · HW pending |
 | P0.4 | Live Pa5X channel map | Live playback on style's own channels (Yamaha / demo 2,3,10) | Live output on Pa5X Style-track channels 9-16 under the **Default** MIDI preset (VERIFIED p.585-588), Yamaha bank/PC never sent | M | P0.3 | Default preset maps ch9-16 to Player 1 tracks *and* Style tracks; behaviour depends on the user's MIDI preset | Unit: no event leaves on ch1-8; no Yamaha bank/PC | Ear check each track on the Pa5X | **Done `f63dc85`** (opt-in `genosStyleTrackMap`) · HW pending |
 | P0.5 | Pa5X Control-channel commands | None | Send Style Element PCs 80-94, Kbd Set 64-67, Play/Stop 104-107 on a configurable Control channel (VERIFIED p.613-614) — **drive the Pa5X's own arranger** as a second mode | M | P0.3 | Requires the user's MIDI preset to define a Control channel | Unit: byte-exact PC per command | Pa5X switches elements on command | **Done** (`midi/pa5x_control.h`, `LiveEngineFacade::sendDeviceCommand`; Control channel passed by the caller, no default assumed) · HW pending |
-| P0.6 | MIDI clock / Start / Stop out | None | Optional 0xF8/0xFA/0xFC to the selected device | S | P0.3 | Pa5X Clock Source resets to Internal at power-on (VERIFIED p.594) | Unit: 24 ppq, start/stop ordering | Pa5X follows tempo with Clock Source = External USB | Planned |
+| P0.6 | MIDI clock / Start / Stop out | None | Optional 0xF8/0xFA/0xFC to the selected device | S | P0.3 | Pa5X Clock Source resets to Internal at power-on (VERIFIED p.594) | Unit: 24 ppq, start/stop ordering | Pa5X follows tempo with Clock Source = External USB | **Done** (`LiveEngineFacade::setMidiClockOut`, off by default; fixed tempo-change position jump in `RealtimeClock`) · HW pending |
 | P0.7 | Re-run the 11-05 bench in-repo | Bench + spy tools on Mac mini only | Bench tool committed under `tools/`, results in `docs/evidence/hardware/` | S | Mac mini access | – | Builds in CI | Repeat audit tests 1-6, **with an operator** for ear checks | Blocked: needs Mac mini + operator |
 | P0.8 | Regression CI | Actions disabled | CI running on PRs | S | **Owner decision** | – | Workflow green | – | **Done 2026-11-06**: Actions enabled (GitHub-owned actions only, read-only token); first run on PR #38 green on all 4 jobs |
 
@@ -57,7 +57,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 
 ## Execution order (next sessions)
 
-1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ (all done) → 5. P0.6 clock → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
+1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ (all done) → 6. P1.4 #26 → 7. P1.5 CASM High Key → 8. P1.7 chord types → 9. P1.9 KST inventory → 10. P2.4 C ABI.
 
 Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pending" item **before** new P0 code, and record them under `docs/evidence/hardware/`.
 
