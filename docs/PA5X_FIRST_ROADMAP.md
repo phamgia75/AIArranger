@@ -43,7 +43,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P2.3 | Memory estimator | Bytes vs 4 GB user PCM | S | P2.2 | Compression ratio unknown | Unit | Compare with Pa5X | Planned |
 | P2.4 | C ABI completion | Style load, MIDI input injection, chord input, device selection | M | – | ABI stability | `test_bridge_c_consumer` extended | – | **Done** (contract 1.1.0; HW pending: iPad/macOS host over USB) |
 | P2.5 | macOS app hardening | JUCE app exists, GUI never exercised | M | P2.4 | – | UI smoke test | Live set on Pa5X | **UI smoke test done** (`test_app_smoke`, BUILD_MACOS_APP builds only; not in CI) · Live set on Pa5X: HW pending |
-| P2.6 | iPadOS app | SwiftUI over the C ABI, CoreMIDI USB to Pa5X; **no VST hosting on iPad** | L | P2.4 | Background audio/MIDI rules on iPadOS | Simulator tests | iPad + Pa5X over USB | Planned |
+| P2.6 | iPadOS app | SwiftUI over the C ABI, CoreMIDI USB to Pa5X; **no VST hosting on iPad** | L | P2.4 | Background audio/MIDI rules on iPadOS | Simulator tests | iPad + Pa5X over USB | **SW done** (simulator tests in CI, `apps/ipados`) · iPad + Pa5X: HW pending |
 
 ## P3 — AI expansion and other sources
 
