@@ -95,7 +95,10 @@ int listen(const std::map<std::string, std::string>& f) {
         return 3;
     }
 
-    std::mutex mu;   // printing + held state; the CoreMIDI read thread is the only writer
+    // shortcut: printf + a mutex on the CoreMIDI read thread breaks CoreMidiIn's
+    // "cheap, lock-free sink" rule; fine for a human-paced diagnostic, move to a
+    // ring buffer + printer thread if this ever feeds timing measurements.
+    std::mutex mu;
     probe::HeldNotes held;
     std::atomic<uint64_t> events{0};
     in.setSink([&](const MidiInputMessage& m) {
