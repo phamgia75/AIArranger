@@ -39,12 +39,23 @@ Offset  Field
 [10]    Editable flag
 [11..17] Note / chord mute bitfields
 [18..19] Source chord (root=00 C, type=02)
-[20]    Note Limit Low
-[21]    Note Limit High
-[22]    NTR  (Note Transposition Rule)
-[23]    NTT  (bit 7 = bass-note flag; bits 0-6 = table type)
-[24..]  Repeats for additional section variants (ignored — Gate 8+)
+[20]    Middle zone lowest note  (00 = low zone unused)
+[21]    Middle zone highest note (7F = high zone unused)
+[22..27] Low zone    {NTR, NTT, High Key, Note Low Limit, Note High Limit, RTR}
+[28..33] Middle zone (same layout)  <- the one that applies when [20..21] = 00/7F
+[34..39] High zone   (same layout)
+[40..46] Undocumented
 ```
+
+> **Corrected 2026-11-06.** Until then [20..23] were read as Note Limit Low/High,
+> NTR, NTT. Per Wierzba/Bedesem, *Style Files – Introduction and Details* v2.1
+> (2015), Tables 12-16, [20..21] are the zone split points and [22..27] is the
+> **low** zone. All 4 Genos files have 00/7F (middle zone only), and their middle
+> zone differs from the low zone on several tracks (C_WHISPER and CLASSIC_6_8
+> Chord1: NTR 2 Guitar / NTT 0; POP_ACOUSTIC_2 Chord1: Root Fixed / Melody;
+> CLASSIC_6_8 Bass: High Key B, Note Low 24). The importer now reads [28..33].
+> The NTR/NTT tables below were observed at the old offsets and are kept for
+> history only.
 
 > The earlier draft put the name at bytes 0-19 and NTT at byte 5; both
 > were wrong. The leading byte is the source channel (the `0x09` that

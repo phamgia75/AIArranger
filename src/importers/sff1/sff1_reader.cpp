@@ -500,20 +500,23 @@ bool Sff1Reader::parseCasm(const uint8_t* data, size_t size, int depth) {
 }
 
 void Sff1Reader::parseCtb2Block(const uint8_t* data, size_t size) {
-    // A Ctb2 sub-chunk holds one source-channel configuration. Layout
-    // (offsets within the entry), validated against 4 real Genos files:
-    //   [0]      Source Channel
-    //   [1..8]   Name (8 bytes, space-padded)
-    //   [9]      Destination Channel
-    //   [10]     Editable flag
-    //   [11..17] Note/chord mute bitfields
+    // A Ctb2 sub-chunk holds one source-channel configuration (Wierzba/Bedesem
+    // "Style Files" v2.1, Tables 12-16):
+    //   [0]      Source Channel        [1..8] Name   [9] Destination Channel
+    //   [10]     Editable flag         [11..17] Note/chord mute bitfields
     //   [18..19] Source chord (root, type)
-    //   [20]     Note Limit Low
-    //   [21]     Note Limit High
-    //   [22]     NTR (Note Transposition Rule)
-    //   [23]     NTT (bit 7 = bass-note flag, bits 0-6 = table type)
-    //   [24..]   Repeats for additional section variants (SFF2)
-    constexpr size_t kMinEntry = 24;   // need through NTT at [23]
+    //   [20]     Middle zone lowest note  (0   = low zone unused)
+    //   [21]     Middle zone highest note (127 = high zone unused)
+    //   [22..27] Low zone    {NTR, NTT, High Key, Note Low, Note High, RTR}
+    //   [28..33] Middle zone (same layout)
+    //   [34..39] High zone   (same layout)
+    //   [40..46] Undocumented
+    // Reading [22..23] as "the" NTR/NTT (before 2026-11-06) took the LOW zone,
+    // which no Genos corpus file uses (all have 0/127): e.g. C_WHISPER Chord1
+    // is Guitar/All-Purpose in its middle zone, not Root Trans/Chord.
+    // shortcut: only the middle zone is kept; a style with a real low/high
+    // zone (zone_low > 0 or zone_high < 127) needs per-zone configs.
+    constexpr size_t kMinEntry = 34;   // need the middle zone [28..33]
     if (size < kMinEntry) return;      // buffer too short — skip, no crash
 
     CasmTrackConfig cfg{};
@@ -527,13 +530,16 @@ void Sff1Reader::parseCtb2Block(const uint8_t* data, size_t size) {
         cfg.name.pop_back();
 
     cfg.dest_channel = data[9];
-    cfg.low_key  = data[20];
-    cfg.high_key = data[21];
-    cfg.ntr      = data[22];
-
-    const uint8_t ntt_raw = data[23];
-    cfg.ntt_bass = (ntt_raw & 0x80) != 0;
-    cfg.ntt      = ntt_raw & 0x7F;
+    cfg.zone_low  = data[20];
+    cfg.zone_high = data[21];
+    const uint8_t* mid = data + 28;
+    cfg.ntr       = mid[0];
+    cfg.ntt_bass  = (mid[1] & 0x80) != 0;
+    cfg.ntt       = mid[1] & 0x7F;
+    cfg.high_key  = mid[2];
+    cfg.note_low  = mid[3];
+    cfg.note_high = mid[4];
+    cfg.rtr       = mid[5];
 
     // MegaVoice is detected from velocity data (see report generator),
     // not from CASM track config — do not guess here.

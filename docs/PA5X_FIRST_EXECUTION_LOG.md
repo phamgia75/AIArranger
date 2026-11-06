@@ -37,8 +37,10 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 | 17 | CI on `bad13d0` | ORCA | – | – | PR #38: all 4 jobs green | P0.5 stays **software-verified, hardware-unverified** | – |
 | 18 | P0.6 MIDI Clock out (F8 24 ppq, FA, FC) | Claude | `src/engine/uasf/types.h` (TimingClock/Start/Stop, output only), `src/engine/midi/coremidi_out.*` (1-byte encode), `src/session/live_engine_facade.*` (`setMidiClockOut`, `emitMidiClock`), `tests/midi/test_midi_clock_out.cpp` | (this commit) | 20/20: grid after every tick, Start before pulse 0, Stop last, nothing while stopped, restart, facade stop(), 60/240 BPM rates, passes the Genos map, Control PC goes out ahead of the tick's pulses, style PCs still dropped | Done. Off by default; refused while playing. Pulses at tick granularity, same as notes | HW pending. Unknown: whether the Pa5X Players start/stop on FA/FC with Clock Source = External USB, and how that interacts with Control PC 104 |
 | 19 | **Defect found by P0.6 tests:** a tempo change while playing jumped the song position (position = all samples × the *new* tempo). 60→240 BPM after 1 s skipped 1440 ticks (the scheduler flushed every note in between); slowing down jumped back | Claude | `src/engine/realtime/clock.{h,cpp}` (rebase on setTempo/setSampleRate), `tests/engine/test_clock_tempo_rebase.cpp` | (this commit) | 9/9; mutation (fix reverted) fails 5 + the clock-out 240 BPM check; full 128/128; ASan 125/125, TSan 125/125 (CoreMIDI-server tests excluded) | Fixed. No tempo change → byte-identical | Rebase is not atomic across two fields: setTempo must run on the advance() thread (it does: facade applies tempo inside tick()) |
+| 20 | P1.4 (#26) | ORCA | – | – | – | **Blocked**: issue is an explicit owner decision | – |
+| 21 | P1.5 prerequisite. **Defect:** Ctb2 NTR/NTT read from the unused LOW zone (bytes 22-23); the applied middle zone is 28-33 (REA: Wierzba/Bedesem *Style Files* v2.1, Tables 12-16; confirmed on all 4 corpus files: split bytes 0/127, middle ≠ low on Chord1 of 3 styles and CLASSIC_6_8 Bass/Phrase1) | REA + Claude | `src/importers/sff1/sff1_{types.h,reader.cpp,report.cpp}`, `tests/engine/test_sff1_reader.cpp`, `docs/importers/casm-structure-notes.md` | (this commit) | reader 24/24 (new: middle zone wins over a decoy low zone, short entry skipped, Guitar NTR counted chord-following); mutation (offset 22) fails 2; full 128/128; ASan importer 9/9 | Fixed. Playback unaffected (the engine does not read NTR/NTT yet); import report, exporter mapping report and serialized UASF metadata now carry the applied values | Low/high zones (styles with a real split) not modelled; source is community reverse engineering, not a Yamaha spec |
 
-Reviews 16-19: OCR Level 1 (delegation, system rules): PASS after one self-found fix (row 16). No Level 2 trigger applies (realtime clock is not business-day/timezone logic), so Codex was not run.
+Reviews 16-21: OCR Level 1 (delegation, system rules): PASS after self-found fixes (row 16; row 21: Guitar NTR scoring). No Level 2 trigger applies (realtime clock is not business-day/timezone logic), so Codex was not run.
 
 Credentials: during the Windows proof test (row 15) Notepad showed a plaintext Meta page access token on the PA Manager PC. **REQUIRES ROTATION by the owner.** Its value is not recorded anywhere.
 
@@ -57,8 +59,8 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 7. USB unplug/replug during playback: input recovers by itself (`08b12cd`), output re-resolves, no stuck notes.
 8. Marker SMF: Pa5X Import SMF of POP_ACOUSTIC_2 (10 elements incl. f3/f4), re-export, `aiarranger-convert --compare`; check the Break marker form.
 9. Starter sound map: spot-check 8 sounds and the PC counting (0- vs 1-based).
-11. MIDI Clock: `setMidiClockOut(true)` while stopped; Pa5X Settings > MIDI > General Controls > Clock Source = External USB (resets to Internal at power-on, p.595); start/stop the transport and change tempo; the Pa5X tempo display follows; record whether its Players also start/stop on FA/FC.
 10. Control channel: assign one in Settings > MIDI > MIDI IN Channels; send Variation 1-4, Fill 1, Break, Ending 1, Play/Stop Player 1 with `sendDeviceCommand(pa5x::controlEvent(...))`; the Pa5X arranger follows.
+11. MIDI Clock: `setMidiClockOut(true)` while stopped; Pa5X Settings > MIDI > General Controls > Clock Source = External USB (resets to Internal at power-on, p.595); start/stop the transport and change tempo; the Pa5X tempo display follows; record whether its Players also start/stop on FA/FC.
 
 ### Blocked
 
@@ -68,4 +70,4 @@ Record every result in `docs/evidence/hardware/<date>-pa5x-<topic>.md`, operator
 
 ### Next executable task
 
-**P1.4 #26**, **P1.5 CASM High Key** (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.
+**P1.5 apply High Key + Note Limit in playback** (P1.4 blocked) (see roadmap). When the Pa5X is attached: run `build/pa5x-doctor` first and save its output under `docs/evidence/hardware/`.
