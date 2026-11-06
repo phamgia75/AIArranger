@@ -74,7 +74,12 @@ SongBook entry ──> Style / Keyboard Set / Sounds / Pads / MID / MP3 / TXT (p
 | USR multisamples are loaded "when loading some User Sounds" | p.1077 | DOC |
 | Multisample → Samples | Not read in the manual | **UNKNOWN** |
 | Drum Kit key → layers → drum samples by bank (FTY/USR) + number, velocity switching | p.1091 | DOC (editor view) |
-| Which Style uses which Sound in a **real** KST | PA Manager not yet seen with a loaded copy | **UNKNOWN** |
+| Which Style uses which Sound in a **real** KST | PA Manager "Search Where this Sound is used…" lists, per Style, the **Style Element × track** using a Sound (audit §3e) | **OBSERVED** (PA Manager view; encoding UNKNOWN) |
+| Keyboard Set → Sound, Pad → Sound in a real KST | Same search reports per-type use counts for KBD SETs and PADs (0 for the Sound tested) | **OBSERVED** (search exists; no positive case seen yet) |
+| Drum Kit key → sample | DK Report: per key, RAM/ROM/RAM [Comp] + sample number + name (audit §3e) | **OBSERVED** (PA Manager view) |
+| One user sample shared by several keys of a Drum Kit | Same sample number on two keys in the DK Report | **OBSERVED** |
+| Ordinary Sound → Multisample → Sample in a real KST | Not shown by the USER SOUND REPORT | **UNKNOWN** |
+| User Sound / Drum Kit slot capacity | PA Manager: 12 banks × 128 and 6 × 128 (= 1 536 / 768, manual p.1935) | **OBSERVED** (PA Manager model) + DOC |
 | Sample Manager tabs (Sample / Drum Sample / MultiSample) and columns (ID, Sample Name, File Size, Sample Rate, Duration, Orig Note, Loop Start, Loop End, Type, PreLoad) | PA Manager v5.2, nothing loaded | OBSERVED |
 
 ## 4. Load / merge behaviour on the Pa5X (DOC, p.733-736)

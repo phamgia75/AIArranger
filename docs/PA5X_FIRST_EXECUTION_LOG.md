@@ -66,6 +66,7 @@ Reviews: OCR Level 1 (delegation mode, system rules; repo has no `.opencoderevie
 | 46 | P3.5 SF2 pre-import overlap check (`sf2-check`) | Claude | `src/media/sf2_check.h`, `tools/sf2_check.cpp`, `tests/integration/test_sf2_check.cpp` | `af8acc6` |
 | 47 | **Windows UIA first real run** + research-copy structure; UIA title-pattern fix | Claude | audit §3c, `WINDOWS_RESEARCH_AGENT.md` §5.6, `tools/windows/pa_manager_uia_dump.ps1` | `22b932e` |
 | 48 | **Autonomous RDP reconnection VERIFIED**; research copy opened read-only in KST Manager (4 GB PA5X budget, UIA 90 elements), before/after manifest identical | Claude | audit §3d, `WINDOWS_RESEARCH_AGENT.md` §5.7 | `713fc53` |
+| 49 | PA Manager resource tabs + reverse-dependency and DK reports observed; observed-capability gap matrix | Claude | audit §3e, resource model §3, `KORG_PA_MANAGER_FEATURE_PARITY.md`, `WINDOWS_RESEARCH_AGENT.md` §5.8 | pending |
 
 Reviews 16-21: OCR Level 1 (delegation, system rules): PASS after self-found fixes (row 16; row 21: Guitar NTR scoring). No Level 2 trigger applies (realtime clock is not business-day/timezone logic), so Codex was not run.
 Review 22 (UASF format = schema trigger): OCR Level 1 PASS; **Codex Level 2 (independent, read-only, tree unchanged): 1 × P2**, writer accepted register limits its reader rejects (unloadable file). Reproduced with a failing test, fixed with one shared validity rule. Reconciled: Codex-only 1 true positive, no false positives.

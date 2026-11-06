@@ -146,6 +146,34 @@ Differences recorded without explanation:
 
 **Input method:** Windows App mangles synthetic keystrokes; commands go through the Mac clipboard (synced on app activation) and a right-click paste into Windows Terminal. A right-click once landed on a browser window because the terminal was not in front (context menu dismissed, no effect); the procedure now brings the terminal forward from the taskbar and checks a screenshot before every paste.
 
+## 3e. Session 2026-11-07: resource tabs, reports and reverse dependencies (read-only)
+
+All on the research copy. No Save / Save Report / Export / Copy / Remap / Delete / Rename was pressed; context menus were opened to read them and dismissed with Escape. Integrity re-checked afterwards: manifest identical (719 entries, 0 differences). Names of user content are not reproduced here.
+
+| Area | OBSERVED |
+|---|---|
+| **STYLE** | 6 banks; bank 1 = 36 items; 10 tiles per page, pages P1-P6; tile shows name, source tag (e.g. "PA5X OS 1.2") and slot number |
+| **KBD SET** | 11 banks (USER01-USER11); USER01 = 9 items; same 10-per-page grid; empty slot shown "- - -"; tile tag "PA5X" |
+| **PAD** | No banks listed, all slots "- - -", header shows "NEW KST" (the copy has 10 empty PAD bank folders) |
+| **SOUND** | "USER SOUND": 12 banks (User 1-12), "MEMORY User 1 128/128" → **128 slots per bank**; tiles tagged with source model (PA4X, PA3X, PA900); some tiles carry an orange corner mark (meaning UNKNOWN) |
+| **DRUM KIT** | Same tab, "DK 1-6" switch → "USER DK": 6 banks (UserDK 1-6), UserDK 1 = **119/128** |
+| Slot totals | 12×128 = 1 536 User Sounds, 6×128 = 768 User Drum Kits: matches manual p.1935 (PA Manager's model; not checked on hardware) |
+| Tile context menu (KBD SET) | Cut, Swap, Copy, Delete, Rename, Icon |
+| Tile context menu (SOUND/DK) | Cut, Swap, Copy, Paste, Delete, Reset Sound, Rename, Options ▸ {Check Sample Size, **Search Where this Sound is used…**, Export All Samples to .Wav, …} |
+| Other actions | Load KST, Save, Generate Report (per tab), Copy from another KST, Advanced Settings, **RE-MAP MODE** (Sound tab), User DK Report / DK Report |
+
+**Reverse dependency (OBSERVED): "Search Where this Sound is used…"** scans every Style bank ("STYLE Bank n / 6" progress), then reports for one Drum Kit: total uses in the KST (13); per Style: its bank/position and each **Style Element × track** that uses it (Intro 1-3, Var 1-4, Fill 1-4, Break, End 3 on the Perc track); then "KBD SET - Used 0 times" and "PAD - Used 0 times". So PA Manager resolves Style→Sound per Element and track, and Keyboard Set→Sound and Pad→Sound, from the KST data. *How* those references are encoded is still undecoded.
+
+**Drum Kit report (OBSERVED, "DK Report"):** header (KST path, DK name, DK size 8.36 MB, position, version PA4X); then one row per key from C-1: Type (**RAM** = user sample, **ROM** = factory sample, **RAM [Comp]** = compressed user sample), Sample No (RAM: two numbers `n [m]`; ROM: one number), Sample Name. The same user sample number appears on more than one key → **samples are shared between keys**.
+
+**Check Sample Size (OBSERVED):** a message box with the Sound's sample footprint (e.g. 8.36 MB, equal to the DK report's size).
+
+**USER SOUND REPORT (OBSERVED, Generate Report on SOUND):** per bank: index, Sound name, Sound Version (source model), page; KST size. No multisample or sample references for ordinary Sounds.
+
+**UI limitations:** reports are scrollable read-only text windows (each with "Save Report"); bank contents appear only after clicking a bank; the DK switch keeps the previous grid until a bank is clicked; counts are per bank (no KST-wide totals except in reports); UIA exposes tile names of the visible page and button labels, not report text (not yet tested: the report window may expose its text).
+
+**Not yet inspected:** Sample Manager with the copy loaded (P1), Sound → Multisample for non-drum Sounds, RE-MAP MODE behaviour, duplicate detection, Copy from another KST (merge), Advanced Settings.
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |

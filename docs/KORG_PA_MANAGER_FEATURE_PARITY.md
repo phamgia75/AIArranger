@@ -47,6 +47,24 @@ Columns map to the directive's nine fields: (1) what PA Manager demonstrably doe
 | **Output validation** | HTML/TXT reports, empty-track check, repair corrupt Kbd Sets (F, C) | Set → report | No validator against Korg rules claimed | **Marker-SMF validator** implementing every documented Korg import rule + independent parser + report | Native formats | Extend validator as rules are confirmed on hardware | Existing | Each rule confirmed by a Pa5X import |
 | **Backup & restore** | (Implied by set copy tools) | – | – | None | – | The Pa5X does its own Backup (Media). AIArranger tools never modify a KST in place; every write goes to a new folder | Unit: writer refuses to overwrite | – |
 
+## Observed-capability gap matrix (2026-11-07, PA Manager v5.2 on the research copy)
+
+Unlike the matrix above (vendor claims), every PA Manager cell here was **seen** in a read-only session (`research/PA_MANAGER_WINDOWS_FUNCTIONAL_AUDIT.md` §3c-3e). AIArranger cells are the current code.
+
+| Capability | PA Manager (OBSERVED) | AIArranger today | Gap | Feasible independent step |
+|---|---|---|---|---|
+| Open a Pa5X KST | Loads a KST folder, per-type progress, does not modify it (manifest check) | `kst-inventory`: folder/type/bank/extension counts, PCM warning, never writes | Content view (names, slots) | Names/slots need `.STG/.KSC/.PCG` decoding: blocked (P1.10) |
+| Bank / slot model | Styles, KBD SETs in banks × 10-per-page × 6 pages; Sounds 12×128, DK 6×128 | `by_bank` from folders only | Slot positions | Document slot capacity as constants once confirmed on hardware |
+| Memory budget | "[4 GB] PA5X": used / total / available bytes, sample count, preload buffer | None (P2.3 planned) | Total | Memory estimator: sum `PCM`/`KMP` bytes against a configurable budget (4 GB = PA Manager's figure, not a hardware spec) |
+| Per-Sound sample size | "Check Sample Size" | None | Total | Needs Sound→sample links: blocked |
+| Reverse dependency | "Search Where this Sound is used": Style Element × track, KBD SET, PAD | None | Total | Blocked on reference encoding; a hardware-free path is to diff PA Manager reports (owner-run, saved outside the repo) — not planned without approval |
+| Drum Kit → samples | DK Report: key → RAM/ROM/compressed, sample number, name; sharing visible | None | Total | Same blocker; the report columns define the target data model |
+| Reports | Text reports per tab (Style, KBD SET, Sound, DK) | `kst-inventory` text report; marker-SMF validator report | Content-level reports | — |
+| Sound remapping | RE-MAP MODE button present (behaviour not inspected) | Export-side `--sound-map` | Native remap | Research only (P3) |
+| Merge | "Copy from another KST" button present (not used) | None | Total | KST merge *plan* by name (manual p.731-733), no writes |
+| SF2 pre-check | (not observed) | `sf2-check` (overlapping zones, manual p.1206) | AIArranger ahead | Hardware validation of which overlaps the Pa5X rejects |
+| Edit operations | Cut/Swap/Copy/Paste/Delete/Rename/Icon/Reset Sound/Export WAV | None (by design: AIArranger never writes KST) | — | Not planned |
+
 ## Conclusion
 
 - **Parity is not a near-term goal.** PA Manager's core (reading and writing native SET/KST internals) depends on undocumented binary formats. AIArranger will not reverse-engineer them without owner-provided files and an explicit decision.

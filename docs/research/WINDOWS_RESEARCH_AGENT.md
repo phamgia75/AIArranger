@@ -190,6 +190,14 @@ Path C reads state only: it never clicks. Navigation (opening KST Manager on the
 - Still required: an unlocked Mac (any lock blocks all GUI control); no background agent runs between owner messages.
 - Option B (Orca runtime on Windows) was not needed and not installed.
 
+### 5.8 Operating procedure (as used 2026-11-07)
+
+1. Bring the session window back (device **Open**) after any focus change; confirm it is ≥ 1000 px wide.
+2. Before a click into PA Manager or a paste into PowerShell: bring that window forward from the Windows taskbar and check a fresh screenshot.
+3. Commands: Mac clipboard → Finder/Windows App focus toggle → right-click paste into Windows Terminal → screenshot check → Return.
+4. Context menus are read and dismissed with Escape; report windows are closed with **Close**, never **Save Report**.
+5. After each research block: manifest re-check of the copy (path | size | mtime) against the pre-load manifest.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.
