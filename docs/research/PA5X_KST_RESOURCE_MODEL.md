@@ -1,6 +1,6 @@
 # Pa5X KST resource model
 
-**Status: DRAFT (2026-11-06).** Built from the Pa5X User Manual and two read-only PA Manager screens. No KST has been opened or decoded, so every dependency below is documented, not verified.
+**Status: REVIEWED (2026-11-06).** Every DOC claim was re-checked against the manual text, with page numbers. No KST has been opened in PA Manager or decoded, so every dependency below is documented, not verified on data.
 
 Labels:
 
@@ -43,25 +43,38 @@ The table lists the documented extensions. The meaning column is a short paraphr
 - **Reference-grid** data must always sit "where expected by other types of data": positions are fixed, so empty locations exist.
 - Name-organized data (Styles, Keyboard Sets, Pads, Chord Sequences, Songs) is listed alphabetically.
 
-Consequence: other resources point at a Sound by its **grid position**, not by its name. *How* a Style or Keyboard Set encodes that position inside the file is **UNKNOWN** (undecoded; roadmap P1.10, blocked).
+How to read this: the manual says grid data must be found "where expected by other types of data" and that its positions are fixed. That implies other resources refer to Sounds by **position**, but the manual does not spell out a reference format. *How* a Style or Keyboard Set file encodes its Sound reference is **UNKNOWN** (undecoded; roadmap P1.10, blocked).
 
 ## 3. Dependency graph
 
+Solid arrows are documented; `?` marks an edge whose existence or mechanism is not documented.
+
 ```
-Style (.STG) ──┐                          ┌─> Multisample (bank FTY|USR, number) ──> Sample(s)
-Keyboard Set ──┼─> Sound (.PCG, grid) ────┤      High/Low layer per oscillator, velocity switch
-Pad (.PDC) ────┘   or Drum Kit            └─> Drum Kit key layers ──> Drum Sample (bank FTY|USR, number)
-SongBook entry ──> Style / Keyboard Set / Sounds / MID / MP3 / TXT (relinked on conversion)
+Style (.STG) ──> Sound per Style track (whole Style), optionally per Style Element (p.932)
+      ├──> 4 Keyboard Sets recalled when the Style is selected (p.84)
+      └──> 4 Pads recalled when the Style is selected (p.194)
+Keyboard Set (.KSC) ──> the set of Sounds played on the keyboard (p.84)
+Pad (.PDC) ──?──> Sound                 (chapter title only, p.932: UNKNOWN)
+Sound (.PCG) ──> 1-2 stereo Multisamples per oscillator (High/Low, velocity switch),
+                 chosen as bank FTY|USR + number (p.1076-1077) ──> Samples (?)
+Drum Kit = a special Sound (p.934) ──> per key, layers ──> Drum Samples, bank FTY|USR + number (p.1091)
+SongBook entry ──> Style / Keyboard Set / Sounds / Pads / MID / MP3 / TXT (p.737)
 ```
 
 | Edge | Evidence | Label |
 |---|---|---|
-| Sound oscillator → 1-2 stereo **multisamples** (High/Low, velocity switch), chosen by **bank (FTY factory / USR user) + number** (p.1076-1077) | DOC |
-| USR multisamples are loaded "when loading some User Sounds" (p.1077) | DOC |
-| Drum Kit key → layers → **drum samples** by bank (FTY/USR) + number, velocity switching (p.1091) | DOC |
-| Style / Keyboard Set / Pad → Sound or Drum Kit | DOC by implication only: "Wrong sounds" is fixed by reloading the right User Drum Kits, Styles or Keyboard Sets (p.1933). How the link is encoded: **UNKNOWN** |
-| Which Style uses which Sound, in a real KST | **UNKNOWN**: PA Manager's own views not yet seen with a loaded copy |
-| Sample Manager shows Sample / Drum Sample / MultiSample tabs with Orig Note, Loop Start/End and Sample Rate columns | OBSERVED (empty) |
+| Style → Sound for each Style track, for the whole Style. Per-Style-Element Sounds can override it (Style Edit). Saved with the Style (User Styles only) | p.932-934 | DOC |
+| Style → 4 Keyboard Sets assigned to the KEYBOARD SET buttons each time the Style (or SongBook Entry) is selected | p.84 | DOC |
+| Style → its 4 Pads, recalled when the Style is selected | p.194 | DOC |
+| Keyboard Set → the Sounds playing together on the keyboard, with their settings | p.84 | DOC |
+| Pad → Sound | Only the chapter title "Choosing the Style and Pad Sounds" (p.932); the mechanism was not found | **UNKNOWN** |
+| Drum Kits (including Percussion Kits) are special Sounds: one percussive instrument per key, not transposed | p.934 | DOC |
+| Sound oscillator → 1-2 stereo multisamples (High/Low, velocity switch), selected in the editor by bank (FTY factory / USR user) + number | p.1076-1077 | DOC (editor view; file encoding UNKNOWN) |
+| USR multisamples are loaded "when loading some User Sounds" | p.1077 | DOC |
+| Multisample → Samples | Not read in the manual | **UNKNOWN** |
+| Drum Kit key → layers → drum samples by bank (FTY/USR) + number, velocity switching | p.1091 | DOC (editor view) |
+| Which Style uses which Sound in a **real** KST | PA Manager not yet seen with a loaded copy | **UNKNOWN** |
+| Sample Manager tabs (Sample / Drum Sample / MultiSample) and columns (ID, Sample Name, File Size, Sample Rate, Duration, Orig Note, Loop Start, Loop End, Type, PreLoad) | PA Manager v5.2, nothing loaded | OBSERVED |
 
 ## 4. Load / merge behaviour on the Pa5X (DOC, p.733-736)
 
@@ -99,10 +112,12 @@ These are the semantics an independent tool must respect:
 
 Only documented behaviour is used, with no PA Manager code and no decoding of protected executables.
 
-1. **Now (no decoding):** extend `kst-inventory` (P1.9) to report, for a KST **copy**:
-   - the type → bank → file tree, by the documented extensions;
-   - whether a **PCM** folder exists. If it does, warn that loading the whole KST on a Pa5X deletes the User Samples in memory (p.736);
+1. **Done in `2226694` (no decoding):** `kst-inventory` (P1.9) reports, for a KST **copy**:
+   - the type folder → bank folder grouping (p.731-732), plus counts by documented extension;
+   - whether a **PCM** folder exists. If it does, it warns that loading the whole KST on a Pa5X deletes the User Samples in memory (p.736);
    - per-type counts and sizes, for comparison with PA Manager's KST Explorer summary.
+
+   Still to do: a run on the research copy, to compare with PA Manager's KST Explorer.
 
    Read-only and never writes a KST. It runs the same on macOS and on iPadOS (sandboxed folder access).
 2. **Memory estimate (P2.3):** sum the PCM / KMP sizes against a configurable sample-memory budget. PA Manager's own budget comes per model, and the Pa5X figure is UNKNOWN until it is observed or found in the manual.

@@ -127,6 +127,45 @@ Next: one retry after the owner unlocks the Mac. Meanwhile, the owner can run th
 
 Owner unlocked the Mac and authorized foreground. Lock flags cleared; Windows App window listed (1008×655, not minimised). One `get-app-state`: accessibility tree + ScreenCaptureKit screenshot OK. Background coordinate clicks then opened KST Manager and Sample Manager (one click needed a second attempt). Observations: `PA_MANAGER_WINDOWS_FUNCTIONAL_AUDIT.md` §3a. Root cause of §5.2 confirmed: the Mac console lock.
 
+### 5.4 Path C — owner-run UIA dump, local to Windows (no Mac unlock needed)
+
+Path A needs an unlocked Mac; Path B needs an install, a firewall rule and a listening service. Path C needs none of those: the owner runs the read-only script `tools/windows/pa_manager_uia_dump.ps1` **at the Windows PC** (or inside RDP), and the Mac is not involved.
+
+**Static review (2026-11-06, on macOS; no PowerShell here, so UNTESTED on Windows):**
+
+- Reads only: `AutomationElement` properties plus `TreeWalker` navigation. No patterns (Invoke/Toggle/SetValue), no `SetFocus`, no input, no network. One file write (`-OutFile`).
+- Uses the UIA assemblies shipped with Windows PowerShell 5.1; nothing to install.
+- `-ExecutionPolicy Bypass` on the command line applies to that one `powershell.exe` process only; no system policy changes.
+- Fixed before the first run:
+  - off-screen elements have an empty rectangle (`X = Infinity`), and `[int]` on it would have aborted the whole dump: now written as `offscreen`;
+  - an element that disappears mid-walk (a closing dialog) threw and aborted the run: now logged as `<unavailable: …>` and the walk continues;
+  - KST Explorer / Sample Manager may be separate top-level windows whose titles lack "PA Manager": every top-level window of the matched process is now dumped.
+- No window matching `-TitlePattern` → stops with an error that lists the open window titles (nothing written).
+- Password fields are skipped. Names can include KST file names shown in the UI: review before sharing.
+
+**Minimal proof test (owner, about 3 minutes; read-only):**
+
+1. On the Windows PC, open PA Manager and leave it on its home screen. Open nothing else in it.
+2. Copy `pa_manager_uia_dump.ps1` to `C:\PA-Research\work\` (the research folder; the original KST is not touched).
+3. Start **Windows PowerShell** from the Start menu, normal user — **not** "Run as administrator".
+4. Run exactly:
+   ```
+   cd C:\PA-Research\work
+   powershell -ExecutionPolicy Bypass -File .\pa_manager_uia_dump.ps1 -OutFile C:\PA-Research\work\uia-home.txt
+   ```
+5. Report: the `Wrote N elements` line, the `windows=` value from the first line of `uia-home.txt`, and any error text verbatim. Do not send the file itself until it has been reviewed for personal file names.
+6. If a dialog, UAC prompt or SmartScreen warning appears: cancel it and report it; do not approve anything.
+
+**How to read the result:**
+
+| Result | Meaning | Next |
+|---|---|---|
+| Hundreds of elements with button / tab / list names | PA Manager exposes UIA: local read-only research is viable | Repeat with KST Manager open on the **copy** (P3) |
+| Only a few elements (a window and a pane) | Custom-drawn UI: UIA sees nothing inside | Screenshots only; Path B would not help either |
+| Error before writing | Report the text; do not retry with other options | Fix the script on the Mac, re-test |
+
+Path C reads state only: it never clicks. Navigation (opening KST Manager on the copy) stays a manual step by the owner, so no remote control is involved.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.

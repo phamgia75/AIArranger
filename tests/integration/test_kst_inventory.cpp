@@ -105,6 +105,9 @@ int main() {
          i2.by_type.at("Style").files == 2 && i2.by_type.at("Keyboard Set").files == 1 &&
          i2.by_type.at("Sound").files == 1 && i2.by_type.at("Sample").files == 1 &&
          i2.by_type.at("Multisample").files == 1 && !i2.by_type.count("(not a documented Pa5X type)"));
+    TEST("bank level: STYLE/USER01 holds 2 files; files directly in a type folder are not a bank",
+         i2.by_bank.size() == 1 && i2.by_bank.at("STYLE/USER01").files == 2 && i2.by_bank.at("STYLE/USER01").bytes == 2);
+    TEST("first tree: no file sits two levels down, so no banks", inv.by_bank.empty());
     TEST("PCM folder detected (any case) and warned about",
          i2.has_pcm_folder && format(i2, "x").find("deletes the User Samples") != std::string::npos);
     fs::remove_all(k2 / "pcm");

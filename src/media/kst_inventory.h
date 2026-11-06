@@ -25,6 +25,7 @@ struct Inventory {
     uintmax_t bytes = 0;
     std::map<std::string, ExtStats> by_ext;      // ".STY" (upper case), "(none)"
     std::map<std::string, ExtStats> by_folder;   // first path component, "." = root
+    std::map<std::string, ExtStats> by_bank;     // "TYPE/BANK" for files at depth >= 3 (manual p.731-732: type -> bank -> file)
     std::vector<std::vector<std::string>> duplicates;  // byte-identical groups (relative paths, sorted)
     std::vector<std::string> skipped;            // symlinks, special files, unreadable entries
     std::map<std::string, ExtStats> by_type;     // documented Pa5X file type (manual v1.4 p.721-722)
@@ -116,6 +117,13 @@ inline Inventory scan(const std::filesystem::path& root) {
         const auto slash = f.rel.find('/');
         auto& d = inv.by_folder[slash == std::string::npos ? "." : f.rel.substr(0, slash)];
         ++d.files; d.bytes += f.size;
+        if (slash != std::string::npos) {
+            const auto slash2 = f.rel.find('/', slash + 1);
+            if (slash2 != std::string::npos) {
+                auto& b = inv.by_bank[f.rel.substr(0, slash2)];
+                ++b.files; b.bytes += f.size;
+            }
+        }
         bySize[f.size].push_back(&f);
     }
     // Hash only files that share a size, then confirm every match byte by byte.
@@ -158,6 +166,8 @@ inline std::string format(const Inventory& inv, const std::string& label) {
           : "no") << "\n";
     o << "\nBy top-level folder:\n";
     for (const auto& [k, v] : inv.by_folder) o << "  " << k << "  " << v.files << " files, " << v.bytes << " bytes\n";
+    o << "\nBy type folder / bank folder (files two or more levels down):\n";
+    for (const auto& [k, v] : inv.by_bank) o << "  " << k << "  " << v.files << " files, " << v.bytes << " bytes\n";
     o << "\nByte-identical duplicates: " << inv.duplicates.size() << " group(s)\n";
     for (const auto& g : inv.duplicates) {
         o << "  -";

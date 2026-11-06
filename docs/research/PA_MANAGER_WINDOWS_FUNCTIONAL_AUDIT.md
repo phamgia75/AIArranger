@@ -45,6 +45,7 @@ The earlier blocker is kept below for the record.
   - It writes one text file of the element tree.
   - **UNTESTED** until its first run on the PC.
 
+  Reviewed and hardened 2026-11-06 (still UNTESTED on Windows); exact owner-run proof steps: `WINDOWS_RESEARCH_AGENT.md` §5.4 (Path C).
   It shows how much of PA Manager UIA exposes, which decides whether Path B (Orca on Windows: install + firewall + `orca serve`, all needing owner authorization) is worth it.
 - **Also needed for anything past the home screen:** a **copy** of Pa5X KST/SET data in `C:\PA-Research\work\`. No authorized copy exists yet.
 

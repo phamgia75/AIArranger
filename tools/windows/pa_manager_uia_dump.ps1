@@ -15,6 +15,13 @@
   in the UI, so review the file before sharing it. It contains no passwords:
   password fields are skipped.
 
+  Every other top-level window of the same process is dumped too (KST Explorer,
+  Sample Manager...), since those titles do not contain "PA Manager".
+
+  Run it with Windows PowerShell 5.1 (powershell.exe), which ships the UI
+  Automation assemblies. -ExecutionPolicy Bypass applies to that one process
+  only and changes no system setting.
+
   STATUS: UNTESTED on the target PC (written on macOS, no PowerShell available).
   The first run is the test.
 
@@ -36,10 +43,13 @@ $AE = [System.Windows.Automation.AutomationElement]
 $root = $AE::RootElement
 $cond = [System.Windows.Automation.Condition]::TrueCondition
 $tops = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
-$targets = @($tops | Where-Object { $_.Current.Name -match $TitlePattern })
-if ($targets.Count -eq 0) {
+$matched = @($tops | Where-Object { $_.Current.Name -match $TitlePattern })
+if ($matched.Count -eq 0) {
     Write-Error "No top-level window title matches '$TitlePattern'. Open titles: $(( $tops | ForEach-Object { $_.Current.Name } ) -join ' | ')"
 }
+# Same process, any title: PA Manager opens its managers as separate windows.
+$pids = @($matched | ForEach-Object { $_.Current.ProcessId } | Sort-Object -Unique)
+$targets = @($tops | Where-Object { $pids -contains $_.Current.ProcessId })
 
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $lines = New-Object System.Collections.Generic.List[string]
@@ -47,17 +57,24 @@ $script:count = 0
 
 function Dump($el, [int]$depth) {
     if ($script:count -ge $MaxElements -or $depth -gt $MaxDepth) { return }
-    $c = $el.Current
-    $script:count++
-    $name = if ($c.IsPassword) { '<password field skipped>' } else { ($c.Name -replace '[\r\n\t]', ' ') }
-    $r = $c.BoundingRectangle
-    $lines.Add(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6},{7},{8},{9}" -f `
-        $depth, $c.ControlType.ProgrammaticName, $name, $c.AutomationId, $c.ClassName, $c.IsEnabled,
-        [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height))
-    $child = $walker.GetFirstChild($el)
+    try {
+        $c = $el.Current
+        $script:count++
+        $name = if ($c.IsPassword) { '<password field skipped>' } else { ($c.Name -replace '[\r\n\t]', ' ') }
+        $r = $c.BoundingRectangle
+        # Off-screen elements report an empty rect (X = Infinity); [int] would throw.
+        $rect = if ($r.IsEmpty) { 'offscreen' } else { '{0},{1},{2},{3}' -f [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height }
+        $lines.Add(("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f `
+            $depth, $c.ControlType.ProgrammaticName, $name, $c.AutomationId, $c.ClassName, $c.IsEnabled, $rect))
+        $child = $walker.GetFirstChild($el)
+    } catch {
+        # The element vanished (a dialog closed) or refused a property: note it, keep walking.
+        $lines.Add(("{0}`t<unavailable: {1}>" -f $depth, $_.Exception.GetType().Name))
+        return
+    }
     while ($child -ne $null) {
         Dump $child ($depth + 1)
-        $child = $walker.GetNextSibling($child)
+        try { $child = $walker.GetNextSibling($child) } catch { $child = $null }
     }
 }
 
