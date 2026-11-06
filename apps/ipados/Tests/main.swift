@@ -167,6 +167,26 @@ do {
     e.stopClock()
 } catch { TEST("engine: \(error)", false) }
 
+// ── Regression: the last reference is released on the engine queue (inside a
+// timer fire). deinit must not queue.sync onto its own queue (libdispatch trap).
+final class Dropper: MidiSink {
+    var engine: HostEngine?
+    func send(_ b: [UInt8]) { engine = nil }
+}
+do {
+    let d = Dropper()
+    var e: HostEngine? = try HostEngine(sink: d)
+    weak let w = e
+    try e!.loadStyle(uasf: style)
+    try e!.play()
+    d.engine = e
+    e!.startClock()
+    e = nil   // the Dropper now holds the only reference
+    var waited = 0
+    while w != nil && waited < 300 { Thread.sleep(forTimeInterval: 0.01); waited += 1 }
+    TEST("regression: engine released inside a timer fire tears down (no self-deadlock)", w == nil)
+} catch { TEST("regression setup: \(error)", false) }
+
 // ── CoreMIDI adapter (no device; HW TX blocked) ──
 do {
     let ports = CoreMidiPorts()

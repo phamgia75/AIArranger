@@ -28,8 +28,9 @@ struct LiveView: View {
                 }
             }
             Stepper("Tempo \(model.snap.tempoBpm)",
-                    onIncrement: { model.act { try $0.setTempo(model.snap.tempoBpm + 1) } },
-                    onDecrement: { model.act { try $0.setTempo(model.snap.tempoBpm - 1) } })
+                    // Read the engine, not the 10 Hz UI copy (0 before its first refresh).
+                    onIncrement: { model.act { try $0.setTempo(min($0.snapshot().tempoBpm, 399) + 1) } },
+                    onDecrement: { model.act { try $0.setTempo(max($0.snapshot().tempoBpm, 21) - 1) } })
             Picker("Chord mode", selection: $model.chordMode) {
                 Text("Fingered").tag(0); Text("Fingered on Bass").tag(1); Text("Single Finger").tag(2)
             }.pickerStyle(.segmented)

@@ -22,13 +22,26 @@ public final class CoreMidiPorts: MidiSink {
     public private(set) var ready = false
 
     public init() {
-        guard MIDIClientCreateWithBlock("AIArranger" as CFString, &client, nil) == noErr,
+        // A device plugged in later (the Pa5X over USB) changes the setup: reconnect inputs.
+        guard MIDIClientCreateWithBlock("AIArranger" as CFString, &client, { [weak self] note in
+                  if note.pointee.messageID == .msgSetupChanged { self?.connectAllSources() }
+              }) == noErr,
               MIDIOutputPortCreate(client, "AIArranger Out" as CFString, &outPort) == noErr,
               MIDIInputPortCreateWithProtocol(client, "AIArranger In" as CFString, ._1_0, &inPort,
                                               { [weak self] list, _ in self?.receive(list) }) == noErr
         else { return }
         ready = true
-        for i in 0..<MIDIGetNumberOfSources() { MIDIPortConnectSource(inPort, MIDIGetSource(i), nil) }
+        connectAllSources()
+    }
+
+    /// Every current source -> input. Disconnect first so a source is never connected twice.
+    public func connectAllSources() {
+        guard ready else { return }
+        for i in 0..<MIDIGetNumberOfSources() {
+            let src = MIDIGetSource(i)
+            MIDIPortDisconnectSource(inPort, src)
+            MIDIPortConnectSource(inPort, src, nil)
+        }
     }
 
     deinit { if client != 0 { MIDIClientDispose(client) } }

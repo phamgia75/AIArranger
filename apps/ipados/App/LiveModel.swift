@@ -45,6 +45,8 @@ final class LiveModel: ObservableObject {
     func refreshDestinations() {
         destinations = CoreMidiPorts.destinationNames()
         if destination >= destinations.count { destination = -1 }
+        ports.selectDestination(destination)   // endpoint refs change when a device is replugged
+        ports.connectAllSources()
     }
 
     func loadStyle(from url: URL) {

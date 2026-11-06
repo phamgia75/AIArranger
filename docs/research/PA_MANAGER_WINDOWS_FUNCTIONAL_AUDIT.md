@@ -1,6 +1,6 @@
 # KORG PA Manager v5.2 on Windows: functional audit
 
-**Status: NOT STARTED beyond the home screen.** GUI control is currently blocked (see §2). Nothing below the home screen has been observed. This document must not be read as a completed audit.
+**Status: STARTED (2026-11-06).** The KST Manager file explorer and the Sample Manager main screen have been observed (§3a). **No file has been loaded**, so nothing inside a KST has been seen. This document must not be read as a completed audit.
 
 Each statement carries one of these labels:
 
@@ -18,7 +18,16 @@ Each statement carries one of these labels:
   - no licence or login handling;
   - no changes to original SET/KST files or to licensing.
 
-## 2. Current blocker (2026-11-06)
+## 2. GUI control status
+
+**Cleared 2026-11-06 (supervised session, owner present and authorized foreground).** The Mac was unlocked (`IOConsoleLocked = No`, `CGSSessionScreenIsLocked` absent). The single authorized retry succeeded: `get-app-state` on Windows App returned the accessibility tree and a ScreenCaptureKit screenshot. Input was delivered in **background** mode (no `--restore-window`).
+
+- The RDP session is **one opaque scroll area** in the macOS accessibility tree. PA Manager's own controls are not visible to it, so reading PA Manager is screenshot-only and clicks are by coordinate.
+- Background clicks are **unreliable**. The KST Manager tile opened on the first click (after about 3 s). The Sample Manager tile showed only a hover on the first click and opened on the second. Every action needs a fresh screenshot to confirm it.
+
+The earlier blocker is kept below for the record.
+
+### 2.1 Earlier blocker (2026-11-06, resolved)
 
 - **Proof-of-control test: COMPLETE.** 5/5 PASS (Path A, foreground only), recorded 2026-11-06 in `WINDOWS_RESEARCH_AGENT.md` §5.1.
 - **GUI capture now fails.** `orca computer get-app-state --app com.microsoft.rdc.macos` returns `permission_denied`: "app 'Windows App' has visible windows but no accessibility window (AX reads stayed blocked for 1500ms after retries)".
@@ -39,15 +48,49 @@ Each statement carries one of these labels:
   It shows how much of PA Manager UIA exposes, which decides whether Path B (Orca on Windows: install + firewall + `orca serve`, all needing owner authorization) is worth it.
 - **Also needed for anything past the home screen:** a **copy** of Pa5X KST/SET data in `C:\PA-Research\work\`. No authorized copy exists yet.
 
+## 3a. Observations, 2026-11-06 (read-only, no file loaded)
+
+Screenshots are kept off the repo: the desktop showed personal browser content. Actions taken: two clicks to open the KST Manager and Sample Manager tiles, and one click on the KST Explorer close button. **Not pressed:** Load .KST, Load .SET, Browse, New KST/SET, Rec, Save, Compress, Import, or the memory selector.
+
+**Home screen (OBSERVED).** Tiles for KST Manager (label "PA5X"), SET Manager, Sample Manager (label ".KST .SET") and File Viewer (labels ".STY .PRF .PAD"). Each manager tile has a "New KST", "New SET" or "New SET / KST" button. SET Manager lists the models it covers: PA4X; PA700-PA1000; PA3X - 3x Le; PA900-600-300; PA2X-800-500; PA1X-PA80.
+
+**KST Manager -> ".KST EXPLORER" (OBSERVED).** Opening KST Manager first shows a folder browser, not an editor:
+
+- Prompt: "Select the '.KST' Folder to Load."
+- A count of the KSTs found ("3 .KSTs"), a Search box, and quick places: Recent SET List, Desktop, and "Drag & Drop Folder for Quick Access".
+- Buttons: "Load .KST" and ".KST Browse…".
+- **Without loading**, it shows a summary for the highlighted KST folder. For the KST on the Windows desktop (an **original, not a research copy**): **.KST Size 3.40 GB; STY 1893, PRF 1105, PAD 1029, PCG 16, PCM 231.**
+
+So PA Manager models a KST as a **folder** and classifies its contents into STY / PRF / PAD / PCG / PCM. The meaning of those categories (for example whether PCM means sample files) is **UNKNOWN** until a copy is loaded.
+
+**Sample Manager (OBSERVED, empty).** Title "KORG PA SAMPLE Manager". It opens with a ".SET EXPLORER" overlay that has ".SET" and ".KST" filter toggles (both ON) and lists 5 items: the 3 KST folders and 2 SET folders.
+
+- **Main screen:**
+  - Tabs: **Sample [0], Drum Sample [0], MultiSample [0]**; "Auto Play" toggle (ON); << >> paging.
+  - Table columns: **ID, Sample Name, File Size, Sample Rate, Duration, Orig Note, Loop Start, Loop End, Type, PreLoad.**
+- **Toolbar:** Rec, Search, New SET, a target-model label "PA4X", a settings icon.
+- **Right-hand panel** (partly cut off at the window edge):
+  - Load SET, Save, New MultiSample;
+  - a "COMPRESSION" section with Options, Compress, a 0% progress bar and De-Compress;
+  - a text "aif / wav / kmp / …" next to an Import button;
+  - "Save Rep…" (probably Save Report; cut off, so UNKNOWN).
+- **Footer:** "Available Memory" selector set to **[400 MB] | PA4X**; Used Size 0 [0 bytes]; Total Size 419430400 [400 MB].
+
+Whether the selector offers a Pa5X memory size is UNKNOWN (not opened).
+
+**Import formats seen (OBSERVED as labels only):** aif, wav and kmp for Sample Manager import, and "…" means more.
+
+**State left behind:** Sample Manager is open with the SET Explorer overlay and nothing loaded. The PA Manager home window is underneath.
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |
 |---|---|---|
 | Home screen | **OBSERVED** 2026-11-06 (screenshot, not committed; it contained personal data) | Version **5.2**. Entries: Language (English [British]), New KPM Window, **KST Manager (PA5X)**, **SET Manager (PA4X…PA1X)**, **Sample Manager (.KST/.SET)**, **File Viewer (.STY/.PRF/.PAD…)**. Nothing was clicked |
-| KST Manager (Pa5X) | UNKNOWN | Not opened |
+| KST Manager (Pa5X) | **OBSERVED** (explorer only) | Folder browser with per-KST summary: size, STY/PRF/PAD/PCG/PCM counts (§3a). Editor not seen: nothing loaded |
 | SET Manager (older Pa) | UNKNOWN | Not opened. Out of the Pa5X-first scope except for import paths |
-| Sample Manager | UNKNOWN | The label says it works on .KST/.SET. Behaviour not seen |
-| Sound / Multisample / PCM dependencies | UNKNOWN | Not seen |
+| Sample Manager | **OBSERVED** (empty) | Sample / Drum Sample / MultiSample tabs, per-sample loop and rate columns, compression, aif/wav/kmp import, memory budget per model (§3a). Nothing loaded |
+| Sound / Multisample / PCM dependencies | UNKNOWN | Sample Manager has a MultiSample tab; no "used by" view seen yet. Needs a loaded copy |
 | Style management | UNKNOWN | The File Viewer label lists .STY. Editing ability unknown |
 | Keyboard Sets, Drum Kits | UNKNOWN | Not seen |
 | Import / export formats | UNKNOWN beyond the home-screen labels (.KST, .SET, .STY, .PRF, .PAD) | |
@@ -99,7 +142,7 @@ Feasible next step: run `kst-inventory` on an authorized **copy** of a real KST.
 
 ## 7. Missing evidence and next tests (supervised, read-only, on copies)
 
-1. Clear the §2 blocker; take a fresh home-screen screenshot with personal data cropped.
+1. ~~Clear the §2 blocker~~ Done 2026-11-06. Still to do: a home-screen screenshot with personal data cropped, for the repo.
 2. Open KST Manager (Pa5X) with no file loaded: record menus, panels and supported file types from its Open dialog (cancel the dialog).
 3. Load the KST **copy**: record the tree, item types, any dependency or "used by" views, and the export options shown (do not run them).
 4. Sample Manager on the same copy: record what it lists for Multisamples and PCM samples, and whether it shows which Sounds use them.

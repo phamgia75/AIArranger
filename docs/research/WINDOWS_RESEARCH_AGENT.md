@@ -123,6 +123,10 @@ Cause: **the Mac's login session was locked** (`ioreg`: `CGSSessionScreenIsLocke
 
 Next: one retry after the owner unlocks the Mac. Meanwhile, the owner can run the read-only UIA dump (`tools/windows/pa_manager_uia_dump.ps1`) inside the session.
 
+### 5.3 Supervised retry after unlock, 2026-11-06: PASS
+
+Owner unlocked the Mac and authorized foreground. Lock flags cleared; Windows App window listed (1008×655, not minimised). One `get-app-state`: accessibility tree + ScreenCaptureKit screenshot OK. Background coordinate clicks then opened KST Manager and Sample Manager (one click needed a second attempt). Observations: `PA_MANAGER_WINDOWS_FUNCTIONAL_AUDIT.md` §3a. Root cause of §5.2 confirmed: the Mac console lock.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.

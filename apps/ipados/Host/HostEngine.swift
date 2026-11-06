@@ -7,7 +7,8 @@ import CAIArranger
 import Foundation
 
 /// Where engine MIDI output goes (CoreMIDI on device, a recorder in tests).
-/// Called on the engine queue with one 1-3 byte short message.
+/// Called on the engine queue with one 1-3 byte short message; must not call
+/// back into HostEngine (its methods sync onto that queue).
 public protocol MidiSink: AnyObject {
     func send(_ bytes: [UInt8])
 }
@@ -26,6 +27,7 @@ public final class HostEngine {
 
     private let handle: OpaquePointer
     private let queue = DispatchQueue(label: "aiarranger.engine", qos: .userInteractive)
+    private static let onQueue = DispatchSpecificKey<Bool>()
     private weak var sink: MidiSink?
     private var timer: DispatchSourceTimer?
     private var clockStart: UInt64 = 0, samplesTicked: UInt64 = 0
@@ -52,18 +54,21 @@ public final class HostEngine {
         guard r == AIARR_OK else { aiarr_engine_destroy(h); throw EngineError(code: r) }
         handle = h
         self.sink = sink
+        queue.setSpecific(key: Self.onQueue, value: true)
     }
 
     deinit {
         timer?.cancel()
-        queue.sync {
+        let teardown = {
             // Silence before teardown so nothing is left sounding on the Pa5X.
-            _ = aiarr_engine_transport_stop(handle)
-            _ = aiarr_engine_panic(handle)
-            pump(0)
-            _ = aiarr_engine_stop(handle)
-            aiarr_engine_destroy(handle)
+            _ = aiarr_engine_transport_stop(self.handle)
+            _ = aiarr_engine_panic(self.handle)
+            self.pump(0)
+            _ = aiarr_engine_stop(self.handle)
+            aiarr_engine_destroy(self.handle)
         }
+        // The last reference can drop inside a timer fire, i.e. on the queue itself.
+        if DispatchQueue.getSpecific(key: Self.onQueue) == true { teardown() } else { queue.sync(execute: teardown) }
     }
 
     // ── Commands ──
