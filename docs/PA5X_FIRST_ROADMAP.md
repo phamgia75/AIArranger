@@ -53,7 +53,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P3.2 | KMP/KSF import (Kronos/Nautilus sample source) | Documented chunk format; libgig reader exists | Planned |
 | P3.3 | Kronos/Nautilus PCG | No public spec; Pa5X itself imports Triton PCG only | Blocked |
 | P3.4 | Yamaha SFF2 | Detection only today | Planned |
-| P3.5 | SF2 → Pa5X | Pa5X imports SF2 natively (no overlapping zones); a zone-overlap checker is cheap | Planned |
+| P3.5 | SF2 → Pa5X | Pa5X imports SF2 natively (no overlapping zones); a zone-overlap checker is cheap | **Done** (`sf2-check`, read-only: overlapping key×velocity zones per Instrument, linked stereo pairs exempt; manual p.1206) · HW pending: which overlaps the Pa5X actually rejects |
 
 ## Execution order (next sessions)
 

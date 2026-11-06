@@ -280,6 +280,8 @@ target_link_libraries(aiarranger-convert exporter-korg importer-sff1 arranger-en
 # ── KST inventory CLI (P1.9, read-only report) ─────────────────────────
 add_executable(kst-inventory tools/kst_inventory.cpp)
 target_include_directories(kst-inventory PRIVATE src)
+add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
+target_include_directories(sf2-check PRIVATE src)
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────
 if(APPLE)
