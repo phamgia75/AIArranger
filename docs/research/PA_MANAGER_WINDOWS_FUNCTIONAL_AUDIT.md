@@ -24,7 +24,19 @@ Each statement carries one of these labels:
 - **GUI capture now fails.** `orca computer get-app-state --app com.microsoft.rdc.macos` returns `permission_denied`: "app 'Windows App' has visible windows but no accessibility window (AX reads stayed blocked for 1500ms after retries)".
   - `orca computer permissions` reports Accessibility and Screen Recording as **granted**.
   - `list-windows` still sees the session window (titled with the PC address, 1008×655, not minimised).
-- **Owner action:** in System Settings → Privacy & Security → Accessibility, toggle **Orca Computer Use** off and on, then say "foreground" with the RDP window visible. ORCA will not use `--restore-window`, which takes over the screen, unless the owner is watching.
+- **Diagnosis (2026-11-06, read-only):**
+  - AX reads fail for **every** app, not just Windows App. Finder returns the same `permission_denied`.
+  - The helper's code signature and binary are unchanged since 2026-11-05.
+  - `ioreg` shows **`CGSSessionScreenIsLocked = true`** and **`IOConsoleLocked = true`**: the Mac's login session is **locked**. While locked, macOS withholds Accessibility windows and screen capture from all clients.
+  - **Root cause:** the Mac console lock. It is not a permission or RDP problem, so toggling Accessibility would not fix it.
+- **Owner action:** unlock the Mac and keep it unlocked (no screen saver or lock) for the supervised session, keep the RDP window visible, then say "foreground". ORCA then retries discovery and capture **once**. If that fails, it stops and reports. ORCA will not use `--restore-window`, which takes over the screen, unless the owner is watching.
+- **Windows-native alternative (no install, no service):** `tools/windows/pa_manager_uia_dump.ps1` is a **read-only** UI Automation dump that the owner runs in PowerShell inside the RDP session, with PA Manager open.
+  - It uses the UIA client built into Windows.
+  - It sends no input, makes no network access and skips password fields.
+  - It writes one text file of the element tree.
+  - **UNTESTED** until its first run on the PC.
+
+  It shows how much of PA Manager UIA exposes, which decides whether Path B (Orca on Windows: install + firewall + `orca serve`, all needing owner authorization) is worth it.
 - **Also needed for anything past the home screen:** a **copy** of Pa5X KST/SET data in `C:\PA-Research\work\`. No authorized copy exists yet.
 
 ## 3. Feature inventory

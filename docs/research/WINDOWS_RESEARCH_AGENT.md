@@ -115,9 +115,18 @@ Screenshots are **not** committed: they showed personal chat titles and, at step
 - Background input does not work on the RDP window; every action needs `--restore-window`, which takes over the Mac's screen and pointer. The owner keeps hands off during a run.
 - After the last action the Mac pointer stays where it clicked inside the session (step 5 left it over Edge's close button); move it to a neutral spot before handing back.
 
+### 5.2 Re-run attempt, 2026-11-06 (later)
+
+**FAILED, not reproduced.** `get-app-state` returned `permission_denied` ("no accessibility window") for Windows App **and** for Finder, although permissions read as granted.
+
+Cause: **the Mac's login session was locked** (`ioreg`: `CGSSessionScreenIsLocked = true`, `IOConsoleLocked = true`). Path A requires an unlocked, awake Mac as well as a connected, visible RDP window. This is the same reason it is supervised-only.
+
+Next: one retry after the owner unlocks the Mac. Meanwhile, the owner can run the read-only UIA dump (`tools/windows/pa_manager_uia_dump.ps1`) inside the session.
+
 ## 6. RDP, locking and display limitations
 
 - **Disconnected RDP session = no GUI.** When the RDP window is closed, the Windows session is disconnected: nothing is rendered, screenshots come back black, and synthetic input fails, for both paths. Keep RDP connected during a session. For Path B without RDP, an administrator can move the session to the console (`tscon <id> /dest:console`), but on a PC with no monitor that needs a display or a dummy HDMI plug. That is an optional later step, and it needs approval.
+- **Mac lock screen:** a locked **Mac** blocks Path A entirely (all AX and capture), see §5.2.
 - **Lock screen:** a locked session (Win+L, timeout) blocks automation. Disable the lock timeout **only for research sessions**, at the owner's discretion.
 - **Minimised RDP window:** the client may stop sending frames. Keep it visible, which also lets the owner watch every action.
 - **Display scaling:** Retina scaling in Windows App and Windows DPI scaling both shift coordinates. Use fixed resolution and 100% scaling, and always take coordinates from the latest screenshot (`scale` field).
