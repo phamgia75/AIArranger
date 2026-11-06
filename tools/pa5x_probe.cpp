@@ -6,6 +6,11 @@
 //       RECEIVE ONLY. Prints every Note On/Off from the Pa5X keyboard port and the
 //       chord the engine's detector finds in the keys held below the split.
 //
+//   pa5x-probe listen --raw [--seconds 20] [--source "Pa5X KEYBOARD"]
+//       RECEIVE ONLY, below the parser: every non-realtime message as hex, and a
+//       count of each realtime byte (clock, Active Sensing...). Shows whether the
+//       port delivers anything at all.
+//
 //   pa5x-probe note    --dest "Pa5X SOUND" --channel N --note 60 [--vel 64] [--ms 400] --confirm-send
 //   pa5x-probe alloff  --dest "Pa5X SOUND" --confirm-send
 //   pa5x-probe control --dest "Pa5X SOUND" --channel N --cmd variation1 --confirm-send
@@ -24,6 +29,7 @@
 #include "midi/pa5x_profile.h"
 #include <CoreMIDI/CoreMIDI.h>
 #include <cstdlib>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -44,7 +50,7 @@ std::map<std::string, std::string> parseFlags(int argc, char** argv, int from) {
     for (int i = from; i < argc; ++i) {
         std::string k = argv[i];
         if (k.rfind("--", 0) != 0) { f["!bad"] = k; break; }
-        if (k == "--confirm-send") { f[k] = "1"; continue; }
+        if (k == "--confirm-send" || k == "--raw") { f[k] = "1"; continue; }
         if (i + 1 >= argc) { f["!bad"] = k; break; }
         f[k] = argv[++i];
     }
@@ -60,7 +66,75 @@ int intFlag(const std::map<std::string, std::string>& f, const char* k, int def,
     return static_cast<int>(v);
 }
 
+std::string endpointName(MIDIEndpointRef ep);
+
+int listenRaw(const std::map<std::string, std::string>& f) {
+    bool ok = true;
+    const int seconds = intFlag(f, "--seconds", 20, 1, 600, ok);
+    if (!ok) return 2;
+    // The endpoint list can read empty until this process has a CoreMIDI client.
+    MIDIClientRef client = 0;
+    if (MIDIClientCreate(CFSTR("pa5x-probe raw"), nullptr, nullptr, &client) != noErr) {
+        std::fprintf(stderr, "CoreMIDI unavailable\n"); return 1;
+    }
+    MIDIEndpointRef src = 0;
+    std::string name;
+    int matches = 0;
+    for (ItemCount i = 0; i < MIDIGetNumberOfSources(); ++i) {
+        const std::string n = endpointName(MIDIGetSource(i));
+        const bool hit = f.count("--source") ? n == f.at("--source") : pa5x::classify(n, true) == pa5x::PortMatch::Keyboard;
+        if (hit) { src = MIDIGetSource(i); name = n; ++matches; }
+    }
+    if (matches != 1) {
+        std::fprintf(stderr, "need exactly one matching source, found %d\n", matches);
+        MIDIClientDispose(client); return 3;
+    }
+    MIDIPortRef port = 0;
+    struct State {
+        std::mutex mu;
+        std::array<uint64_t, 8> realtime{};   // 0xF8..0xFF
+        uint64_t other = 0;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    } state;
+    State* st = &state;   // blocks capture by const copy; share through a pointer
+    if (MIDIInputPortCreateWithBlock(client, CFSTR("pa5x-probe raw in"), &port,
+            ^(const MIDIPacketList* list, void*) {
+                // shortcut: printing on the CoreMIDI thread, same as the parsed listen.
+                std::lock_guard<std::mutex> lk(st->mu);
+                const MIDIPacket* p = &list->packet[0];
+                for (UInt32 k = 0; k < list->numPackets; ++k, p = MIDIPacketNext(p)) {
+                    std::string hex;
+                    for (UInt16 b = 0; b < p->length; ++b) {
+                        const Byte x = p->data[b];
+                        if (x >= 0xF8) { ++st->realtime[x - 0xF8]; continue; }
+                        char h[4]; std::snprintf(h, sizeof h, "%02X ", x); hex += h;
+                    }
+                    if (!hex.empty()) {
+                        ++st->other;
+                        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - st->t0).count();
+                        std::printf("+%9.1f ms  %s\n", ms, hex.c_str());
+                        std::fflush(stdout);
+                    }
+                }
+            }) != noErr ||
+        MIDIPortConnectSource(port, src, nullptr) != noErr) {
+        std::fprintf(stderr, "CoreMIDI unavailable\n"); return 1;
+    }
+    std::printf("raw listening %d s on %s (receive only: nothing is sent)\n", seconds, name.c_str());
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    MIDIPortDisconnectSource(port, src);
+    MIDIClientDispose(client);   // no more callbacks after this returns
+    std::lock_guard<std::mutex> lk(state.mu);
+    static const char* rt[] = {"F8 clock", "F9", "FA start", "FB continue", "FC stop", "FD", "FE active sensing", "FF reset"};
+    std::printf("done: %llu non-realtime packets;", static_cast<unsigned long long>(state.other));
+    for (int i = 0; i < 8; ++i) if (state.realtime[i]) std::printf(" %s x%llu;", rt[i], static_cast<unsigned long long>(state.realtime[i]));
+    std::printf("\n");
+    return 0;
+}
+
 int listen(const std::map<std::string, std::string>& f) {
+    if (f.count("--raw")) return listenRaw(f);
     bool ok = true;
     const int seconds = intFlag(f, "--seconds", 20, 1, 600, ok);
     const int split = intFlag(f, "--split", 60, 1, 128, ok);
@@ -130,7 +204,8 @@ int listen(const std::map<std::string, std::string>& f) {
     std::this_thread::sleep_for(std::chrono::seconds(seconds));
     in.setSink(nullptr);   // blocks until the read thread has left the sink
     in.shutdown();
-    std::printf("done: %llu note events\n", static_cast<unsigned long long>(events.load()));
+    std::printf("done: %llu note events, %llu messages parsed in total (realtime bytes are not counted here; use --raw)\n",
+                static_cast<unsigned long long>(events.load()), static_cast<unsigned long long>(in.receivedCount()));
     return 0;
 }
 
@@ -150,16 +225,20 @@ int sendProgramChangeOnly(const std::string& dest, uint8_t ch, uint8_t program) 
     if (const char* g = std::getenv("AIARR_MIDI_HW_TX"); g && std::string(g) == "0") {
         std::fprintf(stderr, "refused: AIARR_MIDI_HW_TX=0 is set\n"); return 2;
     }
-    MIDIEndpointRef ep = 0;
-    int matches = 0;
-    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); ++i)
-        if (endpointName(MIDIGetDestination(i)) == dest) { ep = MIDIGetDestination(i); ++matches; }
-    if (matches != 1) { std::fprintf(stderr, "refused: %d destinations named exactly \"%s\"\n", matches, dest.c_str()); return 3; }
+    // The endpoint list can read empty until this process has a CoreMIDI client.
     MIDIClientRef client = 0;
     MIDIPortRef port = 0;
     if (MIDIClientCreate(CFSTR("pa5x-probe"), nullptr, nullptr, &client) != noErr ||
         MIDIOutputPortCreate(client, CFSTR("pa5x-probe out"), &port) != noErr) {
         std::fprintf(stderr, "CoreMIDI unavailable\n"); return 1;
+    }
+    MIDIEndpointRef ep = 0;
+    int matches = 0;
+    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); ++i)
+        if (endpointName(MIDIGetDestination(i)) == dest) { ep = MIDIGetDestination(i); ++matches; }
+    if (matches != 1) {
+        std::fprintf(stderr, "refused: %d destinations named exactly \"%s\"\n", matches, dest.c_str());
+        MIDIClientDispose(client); return 3;
     }
     std::printf("send: Program Change %d on ch %d, nothing else\n", program, ch + 1);
     Byte buf[64];
