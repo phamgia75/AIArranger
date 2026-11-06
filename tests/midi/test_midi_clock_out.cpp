@@ -4,7 +4,6 @@
 // Control-channel commands and the style's own voice selects).
 
 #include "session/live_engine_facade.h"
-#include "engine/midi/coremidi_out.h"
 #include "midi/pa5x_control.h"
 #include "midi/pa5x_profile.h"
 #include "engine/chord/fingered_detector.h"
@@ -58,16 +57,7 @@ struct Rig {
 int main() {
     std::printf("Test: MIDI clock out\n");
 
-    // ── Encoding ──
-    {
-        uint8_t b[3] = {0, 0, 0};
-        bool ok = true;
-        for (auto t : {MidiEventType::TimingClock, MidiEventType::Start, MidiEventType::Stop}) {
-            const MidiEvent e{t, 9, 0, 0, 0};
-            ok &= midi::midiEventToBytes(e, b) == 1 && b[0] == static_cast<uint8_t>(t);
-        }
-        TEST("F8/FA/FC encode as one byte, channel ignored", ok);
-    }
+    // (1-byte encoding of F8/FA/FC: Apple-only test_coremidi_out.)
 
     // ── Off by default ──
     {
