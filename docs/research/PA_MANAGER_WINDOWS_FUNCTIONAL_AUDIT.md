@@ -82,6 +82,12 @@ Whether the selector offers a Pa5X memory size is UNKNOWN (not opened).
 
 **State left behind:** Sample Manager is open with the SET Explorer overlay and nothing loaded. The PA Manager home window is underneath.
 
+## 3b. Session 2026-11-06 (evening): blocked
+
+- Owner priority: the KST copy research. At session start the Mac console was locked (`IOConsoleLocked = Yes`, `CGSSessionScreenIsLocked = Yes`) and `get-app-state` returned `permission_denied` (no accessibility window). One attempt, no retry, no permission change.
+- **Not yet verified:** that the authorized copy exists under `C:\PA-Research\work` and is a copy. Nothing on Windows was opened.
+- **Done instead:** a documentation-based resource model from the Pa5X User Manual v1.4, in `PA5X_KST_RESOURCE_MODEL.md`. It covers the file types, the "reference grid" rule, Sound → Multisample → Sample and Drum Kit → Drum Sample references by bank + number, and the load/merge/replace and User Sample rules. Every statement there is labelled DOC, OBSERVED or UNKNOWN.
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |
