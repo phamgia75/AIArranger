@@ -42,7 +42,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P2.2 | Multisample writer | WAV set → **TX16Wx TXPROG** (Korg-supported since OS 1.3.0) and KMP+KSF | M | P2.1 | TXPROG field mapping (read Korg's "Making Pa5X Sounds using TX16Wx" guide first) | Independent reader round-trip | Pa5X Import; every zone plays at correct root | Planned |
 | P2.3 | Memory estimator | Bytes vs 4 GB user PCM | S | P2.2 | Compression ratio unknown | Unit | Compare with Pa5X | Planned |
 | P2.4 | C ABI completion | Style load, MIDI input injection, chord input, device selection | M | – | ABI stability | `test_bridge_c_consumer` extended | – | **Done** (contract 1.1.0; HW pending: iPad/macOS host over USB) |
-| P2.5 | macOS app hardening | JUCE app exists, GUI never exercised | M | P2.4 | – | UI smoke test | Live set on Pa5X | Planned |
+| P2.5 | macOS app hardening | JUCE app exists, GUI never exercised | M | P2.4 | – | UI smoke test | Live set on Pa5X | **UI smoke test done** (`test_app_smoke`, BUILD_MACOS_APP builds only; not in CI) · Live set on Pa5X: HW pending |
 | P2.6 | iPadOS app | SwiftUI over the C ABI, CoreMIDI USB to Pa5X; **no VST hosting on iPad** | L | P2.4 | Background audio/MIDI rules on iPadOS | Simulator tests | iPad + Pa5X over USB | Planned |
 
 ## P3 — AI expansion and other sources
@@ -57,7 +57,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 
 ## Execution order (next sessions)
 
-1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ → 7. ~~P1.5~~ (all done; 6. P1.4 blocked on owner) → ~~8. P1.7~~ → ~~9. P1.9~~ → ~~10. P1.7b~~ → ~~11. P2.4~~ → 12. P2.5 macOS app hardening / #27 synthetic replacements (plan §4).
+1. ~~P0.3~~ → 2. ~~P1.8~~ → 3. ~~P0.4~~ → 4. ~~P0.5~~ → 5. ~~P0.6~~ → 7. ~~P1.5~~ (all done; 6. P1.4 blocked on owner) → ~~8. P1.7~~ → ~~9. P1.9~~ → ~~10. P1.7b~~ → ~~11. P2.4~~ → ~~12. P2.5 smoke + #27 replacements~~ → 13. P2.6 iPadOS host over the C ABI.
 
 Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pending" item **before** new P0 code, and record them under `docs/evidence/hardware/`.
 
