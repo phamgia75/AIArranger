@@ -88,6 +88,29 @@ int main() {
          report.find("read-only") != std::string::npos &&
          report.find("HARDWARE VALIDATION PENDING") != std::string::npos);
 
+    // Documented Pa5X types (manual v1.4 p.721) and the PCM folder flag (p.736).
+    TEST("no PCM folder in the first tree", !inv.has_pcm_folder && report.find("PCM folder: no") != std::string::npos);
+    TEST(".STY is not a documented Pa5X type (Pa5X Styles are .STG)",
+         inv.by_type.count("(not a documented Pa5X type)") && !inv.by_type.count("Style"));
+    TEST("EMPTY.TXT is a documented Text file", inv.by_type.count("Text") && inv.by_type.at("Text").files == 1);
+    const fs::path k2 = root / "PA5X.KST";
+    put(k2 / "STYLE/USER01/A.STG", "s");
+    put(k2 / "STYLE/USER01/b.stg", "t");
+    put(k2 / "KEYBOARD SET/K.KSC", "k");
+    put(k2 / "SOUND/S.PCG", "p");
+    put(k2 / "pcm/X.PCM", "xx");                       // lower-case folder name
+    put(k2 / "MULTISAMPLE/M.KMP", "m");
+    const Inventory i2 = scan(k2);
+    TEST("documented types by extension, case-insensitive",
+         i2.by_type.at("Style").files == 2 && i2.by_type.at("Keyboard Set").files == 1 &&
+         i2.by_type.at("Sound").files == 1 && i2.by_type.at("Sample").files == 1 &&
+         i2.by_type.at("Multisample").files == 1 && !i2.by_type.count("(not a documented Pa5X type)"));
+    TEST("PCM folder detected (any case) and warned about",
+         i2.has_pcm_folder && format(i2, "x").find("deletes the User Samples") != std::string::npos);
+    fs::remove_all(k2 / "pcm");
+    put(k2 / "SOUND/PCM.PCG", "p");                     // a FILE named PCM.* is not a PCM folder
+    TEST("a file named PCM is not the PCM folder", !scan(k2).has_pcm_folder);
+
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
