@@ -3,6 +3,7 @@
 
 #include "midi/midi_input_router.h"   // ChannelRoles
 #include "control/midi_output_bridge.h"  // OutputChannelMap
+#include "midi/output_routing.h"
 #include <cctype>
 #include <string_view>
 
@@ -79,6 +80,29 @@ inline control::OutputChannelMap demoStyleTrackMap() noexcept {
     m.dst[1] = 8;  m.dst[9] = 9;  m.dst[2] = 11;
     m.dropVoiceSelect = true;
     return m;
+}
+
+// Pa5X MIDI IN Style-track channels of the owner's "Ai Arranger" preset, read from the
+// owner's Settings > MIDI photos (2026-11-07): ch 9 STY Bass, ch 10 STY Drum, ch 11 STY Perc,
+// ch 12-16 STY Acc1-Acc5 (also the manual's Default preset, p.585-588, p.1035).
+// Evidence = OwnerPhoto: NOT device-confirmed. No note has been sent on these channels
+// (checks R2-R4 in docs/evidence/hardware/PA5X_MIDI_ROUTING_MATRIX.md are pending).
+inline RoutingProfile aiArrangerPresetRouting() noexcept {
+    RoutingProfile p;
+    p.channel[static_cast<size_t>(StylePart::Bass)] = 8;
+    p.channel[static_cast<size_t>(StylePart::Drum)] = 9;
+    p.channel[static_cast<size_t>(StylePart::Perc)] = 10;
+    for (size_t i = 0; i < 5; ++i) p.channel[static_cast<size_t>(StylePart::Acc1) + i] = static_cast<uint8_t>(11 + i);
+    p.evidence.fill(RouteEvidence::OwnerPhoto);
+    return p;
+}
+
+// The output map a host applies for a destination: the "Ai Arranger" preset routing when
+// it is exactly the "Pa5X SOUND" port, identity (engine channels unchanged) for anything
+// else, including Pa5X candidates by a looser name. Apply only while stopped.
+inline control::OutputChannelMap outputMapFor(std::string_view destinationName, const PartLayout& layout) noexcept {
+    if (classify(destinationName, /*isSource=*/false) != PortMatch::Sound) return control::OutputChannelMap{};
+    return buildChannelMap(layout, aiArrangerPresetRouting(), /*dropVoiceSelect=*/true);
 }
 
 } // namespace ai_arranger::midi::pa5x

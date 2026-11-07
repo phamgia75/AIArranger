@@ -163,7 +163,7 @@ void LiveHostComponent::loadStyleDialog() {
         // reloadStyle() quiesces the engine tick thread (stopTimer blocks until the
         // in-flight callback returns) before swapping, so the load never races
         // tick(). Transport is left stopped — press Start to play the new style.
-        driver_.reloadStyle(mr.style);
+        driver_.reloadStyle(mr.style, midi::sffPartLayout());   // SFF1 part channels 9-16
         styleLabel(styleLabel_, "Style: " + juce::String(f.getFileNameWithoutExtension()));
     });
 }

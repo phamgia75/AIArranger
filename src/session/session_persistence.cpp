@@ -1,4 +1,5 @@
 #include "session/session_persistence.h"
+#include "midi/output_routing.h"
 
 #include <fstream>
 #include <limits>
@@ -57,6 +58,7 @@ bool SessionPersistence::isValid(const PerformerSession& s) noexcept {
     if (s.chord_scan_mode > 3) return false;
     if (s.groove_profile > 4) return false;
     if (s.ui_layout > 1) return false;
+    if (!s.output_routing.empty() && !midi::parseRoutingProfile(s.output_routing)) return false;
     return true;
 }
 
@@ -74,7 +76,8 @@ std::string SessionPersistence::serialize(const PerformerSession& s) {
       << "  \"groove_profile\": " << (int)s.groove_profile << ",\n"
       << "  \"midi_output_name\": \"" << esc(s.midi_output_name) << "\",\n"
       << "  \"ui_layout\": " << (int)s.ui_layout << ",\n"
-      << "  \"theme\": " << (int)s.theme << "\n"
+      << "  \"theme\": " << (int)s.theme << ",\n"
+      << "  \"output_routing\": \"" << esc(s.output_routing) << "\"\n"
       << "}\n";
     return o.str();
 }
@@ -110,6 +113,7 @@ bool SessionPersistence::deserialize(const std::string& j, PerformerSession& out
     readStr(j, "midi_output_name", s.midi_output_name); // optional
     if (!field("ui_layout", s.ui_layout)) return false;
     if (!field("theme", s.theme)) return false;
+    readStr(j, "output_routing", s.output_routing);     // optional (added after v1 files existed)
 
     if (!isValid(s)) return false;
     out = s;
