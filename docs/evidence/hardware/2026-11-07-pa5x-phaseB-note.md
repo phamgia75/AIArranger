@@ -110,4 +110,39 @@ Decide from the photos first; no transmission until then:
 - `pa5x-probe note` cleanup narrowed (commit `6608497`): normal completion now sends **only `B0|ch 7B 00`, `B0|ch 78 00` on the tested channel** (2 messages; for `--channel 1`: `B0 7B 00`, `B0 78 00`). `alloff` is unchanged and is the separately authorized 16-channel **PANIC** (32 messages). Mechanism: `CoreMidiOut::setCleanupChannels(mask)`, default all 16, 0 = all 16, reset by `initialize()`; the engine and app never narrow it.
 - Abnormal paths: hold signals (HUP, INT, TERM, PIPE) ignored; Note On without Note Off at shutdown still gets the narrowed cleanup (guarded safety test); deselect/disconnect uses the same scope; SIGKILL or power loss cannot be handled in-process (recovery: `alloff`, separately authorized, or the Pa5X STOP button).
 - Tests: exact cleanup bytes for ch 1 and ch 16, PANIC order (32), mask 0 never disables cleanup, hold-signal set (`tests/midi/test_pa5x_probe.cpp`); narrowed shutdown/deselect counts and scope reset on re-initialize against a guarded virtual sink (`tests/engine/test_midi_output_safety.cpp`, 31/31). Full suite 138/138.
-- Review: risk classified by hand as **MEDIUM** (shared MIDI output component; `risk.mjs` is blocked by the policy guard in this session). OCR Level 1 on `6608497`: 7/7 files reviewed, one P3 (stale comment) fixed; no other findings. Not an independent review.
+- Review: risk classified by hand as **MEDIUM** (shared MIDI output component; `risk.mjs` is blocked by the policy guard in this session). OCR Level 1 on `6608497`: 7/7 files reviewed, one P3 (stale comment) fixed; no other findings. **Independent Level 2 (Codex, read-only) on `5efdc5f..4e305fa`: PASS**, no material defects (cleanup scope, atomics, encoder bounds, shutdown/destructor, re-initialize, hot-plug, engine/app callers; engine keeps 16-channel cleanup; C ABI unchanged). Codex ran the probe tests (34 passed) but its sandbox could not run the CoreMIDI safety test, which passed locally (31/31). Working tree unchanged by Codex (verified).
+
+## Configuration evidence: owner photos, 2026-11-07 ~18:05 (transcription; photos kept private)
+
+The photos were taken about 35 min **after** the 17:30:08 send. That the state was the same at 17:30 is the owner's account, not verified.
+
+| Page | Setting |
+|---|---|
+| MIDI IN Controls | **Track Mute Active: OFF** (unticked). Upper/Lower Octave Transpose ON; Upper Track Octave Transpose +0; Lower Track Octave Transpose +0; Chord 1 Channel Off; Chord 2 Channel Off; Note Velocity Value Normal; Fixed Note Off Velocity off. Mic Processor channel 5, in octave +0, range C-1..G9; Guitar Processor channel Off |
+| Filters | MIDI IN filters 01-08 **Off**; MIDI OUT filters 01-08 Off (all slots shown) |
+| Main > Mixer (keyboard parts) | **Upper 3: "Stra. Vel. Pro", not muted (M off), volume 22**, pan C 00. Upper 2: Guitar Feedback, 63, L-07. Upper 1: Clean Funk RX3, 43. **Lower: Tine EP Distorted, MUTED, 97.** Pad 3 Octo Lead 127, Pad 4 Electro Lead 127. Players: Player 1 "…Soul (V4)" Var2; Player 2 "Fty\Pop / Pop '21" Var3, 93 bpm. Header: "b/#: +1", keyboard transpose +0 |
+| General Controls | unchanged from ~17:25: preset "Ai Arranger", Clock Send off, Clock Source Internal, Local Control on, Note to RX Noise on, Send Style&KbdSet FXs SysEx on |
+
+### Does the configuration explain the silent result?
+
+Ruled out by these photos (for the state shown):
+- **Track Mute** (cause 1): Track Mute Active is OFF, and Upper 3 is not muted anyway. Not the cause.
+- **MIDI IN filters** (cause 3): all filter slots Off.
+- **Routing**: MIDI IN ch 1 = Upper 3 (17:25 photo); Upper octave transpose +0; velocity "Normal" (not fixed), so vel 64 is used as sent.
+
+Remaining, consistent with the evidence but **not proven**:
+- **Level (causes 2 and 5):** Upper 3 volume **22 of 127**, with the master at about 1/4 (owner) and velocity 64. As a rough guide only, 22/127 on a MIDI-style volume curve is around 30 dB below full; on a velocity-switched Strat sound at medium velocity, one 400 ms note may simply be too quiet to notice. This is the most likely explanation from configuration, but nobody has heard Upper 3 at this level to confirm.
+- **Transport (cause 6):** still never confirmed by ear in either direction of doubt.
+- "b/#: +1" in the header suggests a +1 semitone master transpose: the note would sound as C#4. Pitch only; no effect on audibility.
+- Lower is muted (M lit). Irrelevant to this test (ch 1 = Upper 3), but relevant later: with Track Mute Active OFF, MIDI to Lower would still sound.
+
+### Smallest safe follow-up test (prepared, NOT executed, needs fresh authorization)
+
+1. **Owner, no MIDI:** decide whether to raise the **Upper 3 fader** (for example from 22 to about 90) for the test only, without saving the Keyboard Set, and restore it afterwards. This is a temporary panel change the owner makes; we do not change Pa5X settings. Alternatively keep 22 and listen on headphones.
+2. **Claude, read-only, immediately before:** `pa5x-doctor` (one `Pa5X SOUND`, uid 1907663670) and the process check (no MusicAIApp / Music / Moises).
+3. **One command, unchanged parameters** (velocity and duration not increased):
+   `pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send`
+   With probe `4e305fa`, cleanup is now only `B0 7B 00`, `B0 78 00` (channel 1).
+4. **Evidence:** tool output + operator: heard yes/no, which sound, stopped yes/no, and the Upper 3 fader value used.
+
+Reading the outcome: heard → the USB transmit path works end to end and level was the cause; still silent with Upper 3 clearly audible from the panel → transport or routing, investigated further without transmitting.
