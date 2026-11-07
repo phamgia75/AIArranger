@@ -34,10 +34,24 @@ Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5
 
 | Gate | Status |
 |---|---|
-| 1. Photos of Settings > MIDI: MIDI IN, MIDI OUT, General | waiting for owner |
-| 2. MusicAIApp, Music, Moises stopped | waiting for owner (last check: all three running) |
+| 1. Photos of Settings > MIDI: MIDI IN, MIDI OUT, General | **received 17:2x** (transcribed below; photos kept private, not in the repo) |
+| 2. MusicAIApp, Music, Moises stopped | waiting for owner (checked 17:27:02: **all three still running**, pids 72689, 11698, 76868) |
 | 3. Pa5X master low, FLOW 8 Pa5X faders down | waiting for owner |
 | 4. Separate explicit authorization of the exact command below | waiting for owner |
+
+**Pa5X Settings > MIDI as photographed by the owner, 2026-11-07 ~17:25 (transcription):**
+
+| Page | Setting |
+|---|---|
+| General Controls | MIDI Preset **"Ai Arranger"** (the 11-06 record said "Hieu"); Clock Send **off**; Clock Source **Internal**; Local Control **on**; Note to RX Noise **on**; Send Style&KbdSet FXs SysEx **on** |
+| MIDI IN Channel | ch 1 = **Upper 3**; ch 2-8 Off; ch 9 Ply.1 Tr 9 / STY Bass; ch 10 Tr 10 / STY Drum; ch 11 Tr 11 / STY Perc; ch 12-16 Tr 12-16 / STY Acc1-Acc5 |
+| MIDI OUT Channel | ch 1 = **Upper 1**; ch 4 = **Lower**; all others Off |
+
+Consequences:
+- MIDI OUT confirms the receive evidence: lower = ch 4, upper = ch 1. No OUT channel for Upper 2/3, so the ch 1 + ch 4 duplicates of C5/C6 seen at 11:31 are **not explained** by this page (open).
+- No MIDI IN channel is assigned to Chord 1/2 or Control, so the Pa5X's own arranger cannot be driven from the engine with this preset (steps 2-note and 5a).
+- Step 1 (ch 1, C4) should sound **Upper 3**. Step 4 per-channel map: ch 9 Bass, 10 Drum, 11 Perc, 12-16 Acc1-5 (to compare with the engine's track map in P0.4).
+- Not on these pages: the Filters page, MIDI IN Controls, keyboard mode (Split/Full) and split point.
 
 **Immediately before sending** (Claude, read-only, same session, after gates 1-4):
 
