@@ -77,11 +77,12 @@ inline Instrument buildDemoOrgan(double* worstCents = nullptr) {
     const std::vector<double> bright = {1.0, 0.8, 0.6, 0.5, 0.35, 0.3, 0.2, 0.15};
     Instrument in;
     in.name = "AIA Demo Organ";
-    in.velocitySwitch = 90;
     double worst = 0;
     for (int l = 0; l < 2; ++l) {
         Layer layer;
         layer.name = l == 0 ? "AIA Organ Soft" : "AIA Organ Bright";
+        layer.velLo = l == 0 ? 0 : 90;
+        layer.velHi = l == 0 ? 89 : 127;
         for (int root = 24; root <= 96; root += 4) {
             char nm[21];
             std::snprintf(nm, sizeof nm, "AIA Org%c %s%d", l == 0 ? 'S' : 'B', kNames[root % 12], root / 12 - 1);

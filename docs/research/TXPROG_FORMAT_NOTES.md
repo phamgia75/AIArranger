@@ -40,11 +40,13 @@ Sources:
 - Key names: C-1 = MIDI 0 … G9 = 127 (INF EX: full-range bounds are C-1..G9).
 - **Loop end is exclusive**: in Korg's piano example the first sample has 89 567 frames and its loop ends at `89567` (INF EX, measured with ffprobe). The writer emits `loopEnd` with `[loopStart, loopEnd)` semantics.
 - The path separator is `\` in the piano example and `/` in the drum examples. The writer uses `/` (INF; **UNK** whether the Pa5X accepts both).
+- Stereo: Korg's example projects use stereo WAV/AIFF samples (INF EX), and the manual lists TX Sound import as "mono or stereo" (DOC MAN p.1206). The writer writes stereo samples as stereo WAVs.
+- Layers: one Group per velocity layer, up to 24 (GUIDE p.14: up to 24 Multisamples per Sound, one per Oscillator).
 - Group velocity: the examples use full-range velocity bounds. The writer puts the two layers' ranges on the regions (Low 0..switch-1, High switch..127), which is what GUIDE pp.14-16 describes (INF).
 
 ## Unknowns (closed only by an import on a real Pa5X, roadmap S6)
 
-1. Whether the Pa5X needs `tx:created-by`. Since the S6 preflight the writer emits the same element paths, attribute names and order as Korg's example Sound, including the program-level full-range `tx:bounds` and the empty second loop on each wave, and omits only that TX16Wx build stamp.
+1. `tx:created-by`: every Korg example has `30601`, and the open-source ConvertWithMoss writer (LGPL-3.0, `TX16WxCreator.java`, `CREATED_BY_VERSION = "30601"`) writes the same value on programs, performances and banks. So it works as a file-format version stamp. The writer emits it, and its structure now equals Korg's example Sound. Whether the Pa5X checks anything beyond the structure stays unknown until S6.
 2. Whether a 48 kHz 16-bit mono WAV with a `smpl` chunk imports with root and loop exactly as written.
 3. Whether `/` paths are accepted (the drum examples use them).
 4. Licence: TX16Wx's free licence covers the software; it says nothing about files created with it (DOC tx16wx.com licence). The generated files are AIArranger's own output from original samples.

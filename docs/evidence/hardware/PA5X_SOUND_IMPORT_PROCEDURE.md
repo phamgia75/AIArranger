@@ -7,6 +7,8 @@ Roadmap `docs/SOUND_CONVERSION_ROADMAP.md` S6. Proves the success criterion on a
 - Owner checks O1–O5 (§2) are pending.
 - **No write to the Pa5X is authorized.** Exactly **one** attempt follows the owner's explicit approval of the gate packet (§3): TX Sound (.txprog) import only. After a failure there is no SF2 attempt, no second destination and no retry.
 
+**Transport boundary.** Files reach the Pa5X **only** on a USB storage device, through the Pa5X's own Sample Edit > Import page. The Mac ↔ Pa5X USB MIDI link carries performance MIDI; it is not a file path and is never used for Sound data. The Pa5X's internal-drive access from a computer (MAN p.797) is not used either. Copying to a physical USB device also waits for the owner's authorization.
+
 Page numbers: **MAN** = Pa5X User Manual v1.4 (printed); **GUIDE** = Korg's *Making Pa5X Sounds and Drum Kits with TX16Wx* (printed).
 
 ## 1. Preflight (Mac only, done 2026-11-07)
@@ -17,21 +19,21 @@ Page numbers: **MAN** = Pa5X User Manual v1.4 (printed); **GUIDE** = Korg's *Mak
 | P2 | Originality | The demo path reads no input files. The audio is a sum of sine harmonics (`src/media/sound/additive_source.h`). Each WAV holds only `fmt `, `data` and `smpl` chunks (no metadata from elsewhere) |
 | P3 | Independent validation | `tools/validate_sound_package.py`: PASS (FluidSynth pitch worst 0.004 cent; Python XML/WAV re-read; each WAV's `smpl` root/loop equals the `.txprog` root/loop). A deliberately altered copy FAILs |
 | P4 | Package structure | Follows GUIDE pp.9, 16, 31, 44-45 (table below) |
-| P6 | Structure vs Korg's example | Our `.txprog` has the same element paths, attribute names and top-level order (wave, bounds, soundshape, group) as Korg's example Sound `Acoustic Piano.txprog`. The only difference is `tx:created-by` (TX16Wx's build stamp), omitted on purpose. Compared locally; Korg's file is not in the repo |
+| P6 | Structure vs Korg's example | Our `.txprog` has the same element paths, attribute names and top-level order (wave, bounds, soundshape, group) as Korg's example Sound `Acoustic Piano.txprog`. Including `tx:created-by="30601"`, the format stamp carried by every Korg example and also written by the open-source ConvertWithMoss TX16Wx writer. No structural difference remains. Compared locally; Korg's file is not in the repo |
 | P5 | Staged USB content | Mac folder `~/orca/workspaces/AIArranger/pa5x-import-stage/USB_ROOT/`, copied with `tools/kst_copy.py` and verified (`--verify`) |
 
 Staged content (this is the **whole** stick content, nothing else):
 
 ```
 USB_ROOT/
-  AIA Demo Organ/                        39 files, 1 641 637 bytes
-    AIA Demo Organ.txprog                sha256 b47630ce60a525e29792970df16fa87db7d21025eb65a3c8e0099dac214e51a9
+  AIA Demo Organ/                        39 files, 1 641 662 bytes
+    AIA Demo Organ.txprog                sha256 21a2936cb53ce2b9cd8f1f22c77817641e3bafecfe381bd75d6b48d8bbf083cb
     AIA Demo Organ Samples/              38 WAV, mono 16-bit 48 kHz, looped
       AIA OrgS C1.wav, AIA OrgS E1.wav, ... AIA OrgS C7.wav   (Low layer, 19 files, roots every 4 semitones)
       AIA OrgB C1.wav, ... AIA OrgB C7.wav                    (High layer, 19 files)
       ('#' in note names is written '_' in file names, e.g. AIA OrgS G_5.wav = G#5)
   AIA Demo Organ.manifest.sha256         per-file SHA-256 of the folder above
-                                         (file sha256 206f3894c4a324152abb5a222bc1412f8c3876e678aa217e856867976c425575)
+                                         (file sha256 81c1be0b97b9c2a15ca4ee6daf96d282aa76f0a3b0112d08d5cc564c140a88d0)
 ```
 
 The `.txprog` refers to samples as `AIA Demo Organ Samples/<name>.wav`, relative to its own folder, so the samples folder sits inside the project folder as GUIDE p.31 requires. On the USB stick, verify with `python3 -I tools/kst_copy.py --verify "/Volumes/<STICK>/AIA Demo Organ"`.
@@ -65,6 +67,7 @@ Restoring the backup (MAN p.7): FILE > Drives > the KST folder > Load, **selecti
 | Import source | `AIA Demo Organ/AIA Demo Organ.txprog` on a USB stick that holds only the staged content above (hashes in §1) |
 | Method | Sample Edit > Menu > Import/Export > Import (MAN p.1207), pop-up **TX Sound (.txprog)**, Path > Select the `.txprog`, Execute (MAN p.1210; GUIDE pp.87-88) |
 | Destination | The empty User Sound location from O2. Name kept as `AIA Demo Organ`. **Compression off** |
+| Required free User Sample memory | About 1.64 MB (the 38 WAVs; 16-bit, uncompressed). O3 records the free memory before import |
 | Resources created (DOC MAN p.1206 "Importing it will also import all the linked samples", GUIDE p.88 "together with the Multisample(s) … and the linked Samples") | 1 User Sound; 2 Multisamples (`AIA Organ Soft`, `AIA Organ Bright`, GUIDE p.24: Group name → Multisample name); 38 Samples; about 1.6 MB of User Sample memory (stored permanently, MAN p.1207) |
 | Not touched | Other Sounds, Styles, Keyboard Sets, Global/MIDI settings, existing samples and multisamples. No KST load, no MIDI from the Mac, no compression, no Pa5X internal-drive access from a computer (MAN p.797). The USB stick is the only path |
 | Expected result | One import dialog, then the Sound in the chosen location. Play C2-C6 soft and hard: steady organ tone, correct pitch, brighter above velocity 90, no click while held |
@@ -83,7 +86,7 @@ Run these in order. Each step removes only the `AIA…` items:
 
 ## 4. Uncertain assumptions (UNK until the import)
 
-1. **Fields:** the Pa5X might require `tx:created-by`, the only attribute in Korg's example that we omit (P6). Values differ from the example where the content differs (names, keys, loops). The likely symptom is an import error.
+1. **Fields:** the structure equals Korg's example (P6); values differ where the content differs (names, keys, loops, 2 Groups instead of 1). Whether the Pa5X checks anything beyond the structure is unknown. The likely symptom of a mismatch is an import error.
 2. **Path separator:** `/` in wave paths. Korg's drum examples use it; its piano example uses `\`.
 3. **Loop source:** whether the loop and root are read from the `.txprog`, the WAV `smpl` chunk or both. Both say the same thing (P3), so either should give the same result.
 4. **Imported names:** whether samples are named after the WAV file (then `G_5` for G#5) or the `.txprog`, and whether a 20-character Sound name is accepted as is (the dialog allows editing, MAN p.1210).

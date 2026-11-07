@@ -38,7 +38,7 @@ int main() {
     spec.name = "Test Plugin";
     spec.lowRoot = 36; spec.highRoot = 84; spec.step = 6;
     spec.velocities = {64, 120};
-    spec.velocitySwitch = 96;
+    spec.splits = {96};
     int calls = 0;
     RenderReport rep;
     const Instrument in = buildFromRenders(spec, synth(3.0, &calls), &rep);
@@ -84,8 +84,13 @@ int main() {
         TEST("a detuned source (+25 cents) is reported per sample, still built", validate(d).empty() && r.warnings.size() == 18);
         const Instrument q = buildFromRenders(spec, [](uint8_t, uint8_t) { return std::vector<float>(48000, 0.f); }, &r);
         TEST("silence is refused with a warning", q.samples.empty() && r.warnings.size() == 1);
-        RenderSpec bad = spec; bad.velocities = {10, 20, 30};
-        TEST("3 velocities are refused", buildFromRenders(bad, synth(0), &r).samples.empty() && !r.warnings.empty());
+        RenderSpec bad = spec; bad.velocities = {80, 40}; bad.splits.clear();
+        RenderSpec badSplit = spec; badSplit.splits = {130};
+        RenderSpec tooMany = spec; tooMany.velocities.clear(); tooMany.splits.clear();
+        for (int v = 1; v <= 25; ++v) tooMany.velocities.push_back(uint8_t(v * 5));
+        TEST("refused: descending velocities, a split outside its two renders, 25 layers",
+             buildFromRenders(bad, synth(0), &r).samples.empty() && buildFromRenders(badSplit, synth(0), &r).samples.empty() &&
+             buildFromRenders(tooMany, synth(0), &r).samples.empty());
         // regression: a note still loud when the render stops (e.g. a piano cut at hold + release)
         // must still end at exactly 0 (the fade used to stop at x/(fade+1), a step up to ~136 LSB).
         const Instrument cut = buildFromRenders(spec, [](uint8_t, uint8_t) {
@@ -146,6 +151,43 @@ int main() {
         size_t seamWarn = 0;
         for (const auto& w : r3.warnings) seamWarn += w.find("loop seam") != std::string::npos;
         TEST("white noise: the poor seam match is reported per sample", validate(noise).empty() && seamWarn == 10);
+    }
+    {   // 3 velocity layers, default splits halfway; stereo rendering with different L/R levels
+        RenderSpec s3 = spec;
+        s3.step = 12; s3.velocities = {40, 80, 120}; s3.splits.clear(); s3.channels = 2;
+        RenderReport r;
+        const RenderFn mono = synth(0.0);
+        const Instrument in3 = buildFromRenders(s3, [&](uint8_t n, uint8_t v) {
+            const auto m = mono(n, v);
+            std::vector<float> lr;
+            for (float x : m) { lr.push_back(x); lr.push_back(0.5f * x); }   // R at half level
+            return lr;
+        }, &r);
+        bool ranges = in3.layers.size() == 3 && in3.layers[0].velHi == 60 && in3.layers[1].velLo == 61 && in3.layers[1].velHi == 100 &&
+                      in3.layers[2].velLo == 101 && in3.layers[2].velHi == 127;
+        TEST("3 layers: valid, velocity zones 0-60 / 61-100 / 101-127 (halfway), names V1..V3",
+             validate(in3).empty() && ranges && in3.layers[2].name == "Test Plugin V3" && in3.samples[0].name == "Test Plugin C2 1");
+        bool stereoOk = !in3.samples.empty();
+        for (const auto& s : in3.samples) {
+            stereoOk &= s.channels == 2 && s.pcm.size() == 2 * s.frames();
+            for (size_t f = 1000; f < s.frames(); f += 997) stereoOk &= std::abs(s.pcm[2 * f + 1] * 2 - s.pcm[2 * f]) <= 2;
+        }
+        TEST("stereo: L/R kept interleaved with their level difference (R = L/2)", stereoOk);
+        bool pitch = r.rows.size() == 15;
+        for (const auto& row : r.rows) pitch &= std::fabs(row.cents) < 0.2;
+        TEST("stereo: pitch measured on the channel average, in tune", pitch && r.warnings.empty());
+        RenderSpec sl = s3; sl.loopHoldSec = 1.6;
+        RenderReport rl;
+        const Instrument looped = buildFromRenders(sl, [&](uint8_t n, uint8_t v) {
+            const auto m = mono(n, v); std::vector<float> lr;
+            for (float x : m) { lr.push_back(x); lr.push_back(0.5f * x); }
+            return lr;
+        }, &rl);
+        bool seam = validate(looped).empty();
+        for (const auto& s : looped.samples)
+            for (size_t c = 0; c < 2; ++c)
+                seam &= s.looped && s.pcm[(s.loopEnd - 1) * 2 + c] == s.pcm[(s.loopStart - 1) * 2 + c] && s.pcm[s.loopEnd * 2 + c] == s.pcm[s.loopStart * 2 + c];
+        TEST("stereo loop: one seam for both channels, each continues exactly", seam && rl.warnings.empty());
     }
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

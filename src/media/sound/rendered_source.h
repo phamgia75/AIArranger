@@ -2,9 +2,10 @@
 #define AI_ARRANGER_MEDIA_SOUND_RENDERED_SOURCE_H
 
 // Multisample an instrument from rendered notes (docs/SOUND_CONVERSION_ROADMAP.md S7). The caller
-// supplies render(note, velocity): mono float audio of one held note plus its release, e.g. from a
-// VST/AU instrument the user is licensed for, rendered offline (apps/macos plugin sampler). This
-// builds the S1 model: one zone per sampled root, 1 or 2 velocity layers, leading silence trimmed,
+// supplies render(note, velocity): float audio (mono, or interleaved L/R) of one held note plus its
+// release, e.g. from a VST/AU instrument the user is licensed for, rendered offline (apps/macos
+// plugin sampler). This builds the S1 model: one zone per sampled root, 1-24 velocity layers
+// (one per rendered velocity), mono or stereo samples, leading silence trimmed,
 // one gain for the whole instrument (keeps the plugin's own level differences), a short fade-out,
 // and a per-sample pitch measurement so a detuned or unpitched result is reported, not hidden.
 // One-shot by default; with loopHoldSec the held part is looped (loopSustain) so sustained sounds
@@ -21,14 +22,15 @@ namespace ai_arranger::media::sound {
 struct RenderSpec {
     std::string name;                        // instrument name, 1-20 characters
     int lowRoot = 36, highRoot = 96, step = 3;   // sampled roots: lowRoot, lowRoot+step, ... <= highRoot
-    std::vector<uint8_t> velocities = {100}; // one per layer: [Low] or [Low, High]
-    uint8_t velocitySwitch = 90;             // with 2 layers
+    std::vector<uint8_t> velocities = {100}; // rendered velocity per layer, ascending (1-24 layers)
+    std::vector<uint8_t> splits;             // lowest velocity of layers 2..N; empty = halfway between renders
+    uint8_t channels = 1;                    // what render() returns: 1 mono, 2 interleaved stereo
     uint32_t rate = 48000;
     double silenceDb = -60;                  // trim threshold relative to the instrument's peak
     double loopHoldSec = 0;                  // > 0: the renderer releases the note at this time; loop the held part
 };
 
-using RenderFn = std::function<std::vector<float>(uint8_t note, uint8_t velocity)>;
+using RenderFn = std::function<std::vector<float>(uint8_t note, uint8_t velocity)>;   // interleaved when stereo
 
 struct RenderReport {
     struct Row { uint8_t note, velocity; size_t frames; double cents; double loopMatch; };   // loopMatch NaN = one-shot
@@ -76,14 +78,15 @@ inline double measurePitch(const int16_t* x, size_t n, uint32_t rate, double exp
 // copied from the loop start, for interpolation); the release then comes from the player's envelope.
 // Returns the correlation (1 = identical neighbourhoods), or -1 when the held part is too short.
 inline double loopSustain(Sample& s, size_t noteOff) {
-    const size_t R = s.rate, W = 256, minLen = R / 4, startMin = R * 3 / 10;
-    noteOff = std::min(noteOff, s.pcm.size());
+    const size_t R = s.rate, W = 256, minLen = R / 4, startMin = R * 3 / 10, ch = s.channels;
+    noteOff = std::min(noteOff, s.frames());
     if (noteOff < R / 20 + startMin + minLen + W) return -1;
     const size_t e = noteOff - R / 20;
-    auto corr = [&](size_t p) {
+    auto mid = [&](size_t f) { double m = 0; for (size_t c = 0; c < ch; ++c) m += s.pcm[f * ch + c]; return m; };
+    auto corr = [&](size_t p) {   // on the channel sum, so a stereo loop uses one seam for both channels
         double xy = 0, xx = 0, yy = 0;
         for (size_t k = 0; k < 2 * W; ++k) {
-            const double u = s.pcm[p - W + k], v = s.pcm[e - W + k];
+            const double u = mid(p - W + k), v = mid(e - W + k);
             xy += u * v; xx += u * u; yy += v * v;
         }
         return xx > 0 && yy > 0 ? xy / std::sqrt(xx * yy) : -1.0;
@@ -97,11 +100,12 @@ inline double loopSustain(Sample& s, size_t noteOff) {
     const size_t C = std::min<size_t>((e - best) / 4, 2048);
     for (size_t k = 0; k < C; ++k) {
         const double w = double(k + 1) / C;   // the last frame before the end becomes the one before the start
-        const size_t i = e - C + k, j = best - C + k;
-        s.pcm[i] = static_cast<int16_t>(std::lround(s.pcm[i] * (1 - w) + s.pcm[j] * w));
+        const size_t i = (e - C + k) * ch, j = (best - C + k) * ch;
+        for (size_t c = 0; c < ch; ++c)
+            s.pcm[i + c] = static_cast<int16_t>(std::lround(s.pcm[i + c] * (1 - w) + s.pcm[j + c] * w));
     }
-    s.pcm.resize(e + 64);
-    for (size_t k = 0; k < 64; ++k) s.pcm[e + k] = s.pcm[best + k];
+    s.pcm.resize((e + 64) * ch);
+    for (size_t k = 0; k < 64 * ch; ++k) s.pcm[e * ch + k] = s.pcm[best * ch + k];
     s.looped = true; s.loopStart = static_cast<uint32_t>(best); s.loopEnd = static_cast<uint32_t>(e);
     return bc;
 }
@@ -114,8 +118,17 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
     std::vector<int> roots;
     for (int r = spec.lowRoot; r <= spec.highRoot && r <= 127; r += std::max(1, spec.step))
         if (r >= 0) roots.push_back(r);
-    if (roots.empty() || spec.velocities.empty() || spec.velocities.size() > 2) {
-        rep.warnings.push_back("nothing to render: need roots in 0-127 and 1 or 2 velocities");
+    const size_t N = spec.velocities.size(), ch = spec.channels;
+    bool ascending = N >= 1 && N <= kMaxLayers && (ch == 1 || ch == 2) && (spec.splits.empty() || spec.splits.size() + 1 == N) &&
+                     spec.velocities.front() >= 1 && spec.velocities.back() <= 127;
+    for (size_t l = 1; ascending && l < N; ++l) {
+        ascending &= spec.velocities[l - 1] < spec.velocities[l];
+        if (!spec.splits.empty())
+            ascending &= spec.velocities[l - 1] < spec.splits[l - 1] && spec.splits[l - 1] <= spec.velocities[l] &&
+                         (l == 1 || spec.splits[l - 2] < spec.splits[l - 1]);
+    }
+    if (roots.empty() || !ascending) {
+        rep.warnings.push_back("nothing to render: need roots in 0-127, 1-24 ascending velocities, splits between them, 1 or 2 channels");
         return {};
     }
 
@@ -136,32 +149,44 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
 
     Instrument in;
     in.name = spec.name;
-    in.velocitySwitch = spec.velocitySwitch;
     const std::string pfx = spec.name.substr(0, 12);
-    for (size_t l = 0; l < spec.velocities.size(); ++l) {
+    for (size_t l = 0; l < N; ++l) {
         Layer layer;
-        layer.name = spec.name.substr(0, 17) + (spec.velocities.size() == 1 ? "" : l == 0 ? " Lo" : " Hi");
+        // 2 layers keep the Lo/Hi names; more are numbered from the softest
+        const std::string tag = N == 1 ? "" : N == 2 ? (l == 0 ? "Lo" : "Hi") : "V" + std::to_string(l + 1);
+        layer.name = spec.name.substr(0, 17) + (tag.empty() ? "" : " " + tag);
+        layer.velLo = static_cast<uint8_t>(l == 0 ? 0 : in.layers.back().velHi + 1);
+        layer.velHi = static_cast<uint8_t>(l + 1 == N ? 127
+                      : spec.splits.empty() ? (spec.velocities[l] + spec.velocities[l + 1]) / 2 : spec.splits[l] - 1);
+        const std::string stag = N == 1 ? "" : N == 2 ? (l == 0 ? " L" : " H") : " " + std::to_string(l + 1);
         for (size_t i = 0; i < roots.size(); ++i) {
             const int r = roots[i];
             const std::vector<float>& x = raw[l * roots.size() + i];
-            size_t a = 0, b = x.size();
-            while (a < b && std::fabs(x[a]) < thr) ++a;
-            while (b > a && std::fabs(x[b - 1]) < thr) --b;
+            const size_t total = x.size() / ch;
+            auto loud = [&](size_t f) { for (size_t c = 0; c < ch; ++c) if (std::fabs(x[f * ch + c]) >= thr) return true; return false; };
+            size_t a = 0, b = total;
+            while (a < b && !loud(a)) ++a;
+            while (b > a && !loud(b - 1)) --b;
             a -= std::min<size_t>(a, spec.rate / 500);   // keep 2 ms before the onset
-            b = std::min<size_t>({b, a + 1048576, x.size()});
+            b = std::min<size_t>({b, a + 1048576, total});
             Sample s;
             char nm[32];
-            std::snprintf(nm, sizeof nm, "%s %s%d%s", pfx.c_str(), kNames[r % 12], r / 12 - 1,
-                          spec.velocities.size() == 1 ? "" : l == 0 ? " L" : " H");
-            s.name = nm; s.rate = spec.rate; s.root = static_cast<uint8_t>(r);
+            std::snprintf(nm, sizeof nm, "%s %s%d%s", pfx.c_str(), kNames[r % 12], r / 12 - 1, stag.c_str());
+            s.name = nm; s.rate = spec.rate; s.root = static_cast<uint8_t>(r); s.channels = static_cast<uint8_t>(ch);
             const size_t n = b - a, fade = std::min<size_t>(n / 4, spec.rate / 200);   // 5 ms fade-out
-            s.pcm.resize(std::max<size_t>(n, 1));
+            s.pcm.assign(std::max<size_t>(n, 1) * ch, 0);
+            std::vector<int16_t> mono(std::max<size_t>(n, 1), 0);   // channel average, for the pitch measurement
             for (size_t k = 0; k < n; ++k) {
                 const double env = fade && k + fade >= n ? double(n - 1 - k) / fade : 1.0;   // reaches exactly 0
-                s.pcm[k] = static_cast<int16_t>(std::lround(std::clamp(x[a + k] * rep.gain * env, -32767.0, 32767.0)));
+                double m = 0;
+                for (size_t c = 0; c < ch; ++c) {
+                    s.pcm[k * ch + c] = static_cast<int16_t>(std::lround(std::clamp(x[(a + k) * ch + c] * rep.gain * env, -32767.0, 32767.0)));
+                    m += s.pcm[k * ch + c];
+                }
+                mono[k] = static_cast<int16_t>(std::lround(m / ch));
             }
             const size_t from = std::min<size_t>(n, spec.rate / 5), len = std::min<size_t>(n - from, spec.rate);
-            const double f = measurePitch(s.pcm.data() + from, len, spec.rate, 440.0 * std::pow(2.0, (r - 69) / 12.0));
+            const double f = measurePitch(mono.data() + from, len, spec.rate, 440.0 * std::pow(2.0, (r - 69) / 12.0));
             const double cents = f > 0 ? 1200 * std::log2(f / (440.0 * std::pow(2.0, (r - 69) / 12.0))) : NAN;
             double match = NAN;
             if (spec.loopHoldSec > 0) {
@@ -174,7 +199,7 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
                     rep.warnings.push_back(w);
                 }
             }
-            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.pcm.size(), cents, match});
+            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.frames(), cents, match});
             if (!(std::fabs(cents) <= 10)) {
                 char w[96];
                 std::snprintf(w, sizeof w, "%s: pitch %+.1f cents from %s%d (detuned, unpitched or too short)",

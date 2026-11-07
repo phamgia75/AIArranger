@@ -7,8 +7,8 @@
 // wave root -> Original Note, Region attenuation -> sample Level, loops kept (Korg guide "Making
 // Pa5X Sounds and Drum Kits with TX16Wx", pp.14-16, 24-27, 84). Package layout follows the guide
 // (p.31): <folder>/<name>.txprog with the samples in a subfolder, paths relative.
-// One Group per velocity layer; with two layers the Low Group's regions take velocities 0..switch-1
-// and the High Group's switch..127. Envelopes and filters do not transfer (guide p.85).
+// One Group per velocity layer, its regions limited to the layer's velocity zone. Stereo samples are
+// written as stereo WAVs, as in Korg's example projects. Envelopes and filters do not transfer (guide p.85).
 // SOFTWARE output: no file from this writer has been imported on a Pa5X yet.
 
 #include "media/sound/instrument.h"
@@ -70,9 +70,11 @@ inline std::vector<PackageFile> writeTxProg(const Instrument& in) {
     std::set<std::string> seen;
     std::string x = "\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n";
     // Element and attribute set mirrors Korg's example Sound (guide download, "Acoustic Piano.txprog"),
-    // the one .txprog known to import on a Pa5X. Omitted on purpose: tx:created-by (TX16Wx's own build stamp).
+    // the one .txprog known to import on a Pa5X. tx:created-by="30601" is the file-format version stamp
+    // every Korg example carries; the open-source ConvertWithMoss writer emits the same value
+    // (docs/research/TXPROG_FORMAT_NOTES.md).
     x += "<tx:program tx:quality=\"Default\" tx:name=\"" + esc(in.name) +
-         "\" xsi:schemaLocation=\"http://www.tx16wx.com/3.0/ program\" xmlns:tx=\"http://www.tx16wx.com/3.0/program\"\n"
+         "\" xsi:schemaLocation=\"http://www.tx16wx.com/3.0/ program\"\n   tx:created-by=\"30601\" xmlns:tx=\"http://www.tx16wx.com/3.0/program\"\n"
          "   xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n";
     for (size_t i = 0; i < in.samples.size(); ++i) {
         const Sample& s = in.samples[i];
@@ -109,8 +111,7 @@ inline std::vector<PackageFile> writeTxProg(const Instrument& in) {
          "   </tx:soundshape>\n";
     for (size_t l = 0; l < in.layers.size(); ++l) {
         const Layer& L = in.layers[l];
-        const int vlo = in.layers.size() == 2 && l == 1 ? in.velocitySwitch : 0;
-        const int vhi = in.layers.size() == 2 && l == 0 ? in.velocitySwitch - 1 : 127;
+        const int vlo = L.velLo, vhi = L.velHi;   // one velocity zone per Group (guide p.44)
         x += "   <tx:group tx:name=\"" + esc(L.name) + "\" tx:volume=\"0 dB\" tx:pan=\"0%\" tx:coarse=\"0\" tx:fine=\"0\" "
              "tx:playmode=\"Normal\"\n      tx:polymode=\"Poly\" tx:playback=\"Resample\" tx:noteprio=\"Last\" tx:scale=\"100\" "
              "tx:choke-group=\"0\" tx:output=\"--\"\n      tx:quality=\"Default\" tx:color=\"yellow\" tx:soundshape=\"" + std::string(shape) + "\">\n";

@@ -5,9 +5,10 @@
 //
 //   aiarranger-plugin-sampler list
 //   aiarranger-plugin-sampler render --plugin NAME --name "Sound Name" --out DIR
-//        [--program N] [--low 36] [--high 96] [--step 3] [--vel 100 | --vel 64,120] [--switch 90]
-//        [--hold 2.0] [--release 1.0] [--loop on]
-// --loop on: loop the held part of each note (sustained sounds hold while the key is down).
+//        [--program N] [--low 36] [--high 96] [--step 3] [--vel 100 | --vel 40,80,120] [--splits 60,100]
+//        [--hold 2.0] [--release 1.0] [--loop on] [--stereo on]
+// --vel: one velocity layer per rendered velocity (up to 24); --splits: lowest velocity of layers
+// 2..N (default: halfway). --loop on: loop the held part. --stereo on: keep L/R (default: mono sum).
 // Exit 0 = done, 1 = usage/plugin/package error.
 
 #include "media/sound/package_writer.h"
@@ -45,8 +46,8 @@ int main(int argc, char** argv) {
     if (cmd != "render" || !a.count("--plugin") || !a.count("--name") || !a.count("--out") || (argc % 2) != 0) {
         std::fprintf(stderr, "usage: aiarranger-plugin-sampler list\n"
                              "       aiarranger-plugin-sampler render --plugin NAME --name \"Sound Name\" --out DIR\n"
-                             "            [--program N] [--low 36] [--high 96] [--step 3] [--vel 100|64,120] [--switch 90]\n"
-                             "            [--hold 2.0] [--release 1.0] [--loop on]\n");
+                             "            [--program N] [--low 36] [--high 96] [--step 3] [--vel 100|40,80,120] [--splits 60,100]\n"
+                             "            [--hold 2.0] [--release 1.0] [--loop on] [--stereo on]\n");
         return 1;
     }
     auto num = [&](const char* k, double d) { return a.count(k) ? std::atof(a[k].c_str()) : d; };
@@ -55,7 +56,10 @@ int main(int argc, char** argv) {
     spec.lowRoot = static_cast<int>(num("--low", 36));
     spec.highRoot = static_cast<int>(num("--high", 96));
     spec.step = static_cast<int>(num("--step", 3));
-    spec.velocitySwitch = static_cast<uint8_t>(num("--switch", 90));
+    if (a.count("--splits"))
+        for (const auto& v : juce::StringArray::fromTokens(a["--splits"], ",", ""))
+            spec.splits.push_back(static_cast<uint8_t>(juce::jlimit(1, 127, v.getIntValue())));
+    const bool stereo = a.count("--stereo") && a["--stereo"] == "on";
     spec.velocities.clear();
     for (const auto& v : juce::StringArray::fromTokens(a.count("--vel") ? a["--vel"] : "100", ",", ""))
         spec.velocities.push_back(static_cast<uint8_t>(juce::jlimit(1, 127, v.getIntValue())));
@@ -83,6 +87,8 @@ int main(int argc, char** argv) {
     const int chans = juce::jmax(plugin->getTotalNumInputChannels(), plugin->getTotalNumOutputChannels());
     const int outs = plugin->getTotalNumOutputChannels();
     if (outs < 1) { std::fprintf(stderr, "%s has no audio output\n", desc->name.toRawUTF8()); return 1; }
+    spec.channels = stereo && outs >= 2 ? 2 : 1;
+    if (stereo && outs < 2) std::fprintf(stderr, "warning: %s has %d output channel(s); writing mono\n", desc->name.toRawUTF8(), outs);
 
     const RenderFn render = [&](uint8_t note, uint8_t vel) {
         plugin->reset();
@@ -91,7 +97,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < static_cast<int>(0.1 * rate) / block; ++i) { buf.clear(); plugin->processBlock(buf, none); }   // settle
         const int64_t offAt = static_cast<int64_t>(hold * rate), total = static_cast<int64_t>((hold + release) * rate);
         std::vector<float> x;
-        x.reserve(static_cast<size_t>(total + block));
+        x.reserve(static_cast<size_t>(total + block) * spec.channels);
         for (int64_t pos = 0; pos < total; pos += block) {
             buf.clear();
             juce::MidiBuffer m;
@@ -99,9 +105,10 @@ int main(int argc, char** argv) {
             if (offAt >= pos && offAt < pos + block) m.addEvent(juce::MidiMessage::noteOff(1, note), static_cast<int>(offAt - pos));
             plugin->processBlock(buf, m);
             for (int i = 0; i < block; ++i) {
+                if (spec.channels == 2) { x.push_back(buf.getSample(0, i)); x.push_back(buf.getSample(1, i)); continue; }
                 float s = 0;
                 for (int c = 0; c < outs; ++c) s += buf.getSample(c, i);
-                x.push_back(s / static_cast<float>(outs));   // shortcut: mono sum; stereo needs _L/_R samples in the model
+                x.push_back(s / static_cast<float>(outs));   // mono: sum of all outputs
             }
         }
         juce::MidiBuffer off;
@@ -117,7 +124,7 @@ int main(int argc, char** argv) {
     for (const auto& w : rep.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
     if (in.samples.empty()) return 1;
     std::string notes = "Source: " + desc->name.toStdString() + " (" + desc->manufacturerName.toStdString() + ", " +
-                        desc->pluginFormatName.toStdString() + ") rendered offline at 48 kHz, mono sum, " +
+                        desc->pluginFormatName.toStdString() + ") rendered offline at 48 kHz, " + (spec.channels == 2 ? "stereo" : "mono sum") + ", " +
                         (spec.loopHoldSec > 0 ? "held part looped" : "one-shot samples") + ".\n"
                         "Rights: the user must hold a licence that permits sampling this instrument.\n"
                         "Measured pitch per sample (cents from equal temperament), loop seam match (1 = identical):\n";

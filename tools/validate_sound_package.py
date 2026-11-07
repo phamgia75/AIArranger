@@ -53,7 +53,7 @@ def txprog(root):
         if exists:
             with wave.open(f) as r:
                 frames, rate = r.getnframes(), r.getframerate()
-                good = r.getnchannels() == 1 and r.getsampwidth() == 2 and 11025 <= rate <= 48000 and frames <= 1048576
+                good = r.getnchannels() in (1, 2) and r.getsampwidth() == 2 and 11025 <= rate <= 48000 and frames <= 1048576
         loops = w.findall("tx:loop", ns)
         lp_ok = all(0 <= int(A(l, "start")) < int(A(l, "end")) <= frames for l in loops)
         if exists:   # the WAV's own 'smpl' chunk must say the same as the .txprog (either may be what the Pa5X reads)
@@ -62,7 +62,7 @@ def txprog(root):
             lp_ok &= sm is not None and sm[0] == key(A(w, "root")) and sm[1] == want_loop
         waves[A(w, "id")] = (exists and good and lp_ok, key(A(w, "root")))
     check(waves and all(v[0] for v in waves.values()),
-          f"{len(waves)} waves: file exists next to the .txprog, mono 16-bit 11025-48000 Hz, <= 1048576 frames, loop inside, "
+          f"{len(waves)} waves: file exists next to the .txprog, mono/stereo 16-bit 11025-48000 Hz, <= 1048576 frames, loop inside, "
           "WAV smpl root/loop == .txprog root/loop")
     groups = prog.findall("tx:group", ns)
     tiles = True; vel = []
@@ -71,11 +71,11 @@ def txprog(root):
                        for r in g.findall("tx:region", ns) for b in [r.find("tx:bounds", ns)]))
         nxt = 0
         for lo, hi, vlo, vhi, wid in regs:
-            tiles &= lo == nxt and wid in waves and lo <= waves[wid][1] + 2 and waves[wid][1] - 1 <= hi + 1
+            tiles &= lo == nxt and wid in waves and lo <= waves[wid][1] <= hi
             nxt = hi + 1
         tiles &= nxt == 128
         vel.append({(r[2], r[3]) for r in regs})
-    check(len(groups) in (1, 2) and tiles, f"{len(groups)} group(s); each tiles keys 0-127 with no gap/overlap, root inside its zone")
+    check(1 <= len(groups) <= 24 and tiles, f"{len(groups)} group(s); each tiles keys 0-127 with no gap/overlap, root inside its zone")
     flat = sorted(v for s in vel for v in s)
     check(all(len(s) == 1 for s in vel) and flat[0][0] == 0 and flat[-1][1] == 127 and
           all(flat[i][1] + 1 == flat[i + 1][0] for i in range(len(flat) - 1)),

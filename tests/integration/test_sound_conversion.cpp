@@ -62,8 +62,16 @@ int main() {
         bad.layers.push_back(bad.layers[0]);                      // 3 layers
         const auto e = validate(bad);
         auto has = [&](const char* s) { for (const auto& m : e) if (m.find(s) != std::string::npos) return true; return false; };
-        TEST("validate names each violation: rate, >1 048 576 frames, short loop, overlap, 3 layers",
-             has("rate outside") && has("1 048 576") && has("shorter than 32") && has("overlap") && has("1 or 2 velocity layers"));
+        TEST("validate names each violation: rate, >1 048 576 frames, short loop, overlap, velocity zones not tiling",
+             has("rate outside") && has("1 048 576") && has("shorter than 32") && has("overlap") && has("velocity zones must tile"));
+        Instrument many = org;
+        many.layers.clear();
+        for (int l = 0; l < 25; ++l) { Layer L = org.layers[0]; L.velLo = uint8_t(l * 5); L.velHi = uint8_t(l == 24 ? 127 : l * 5 + 4); many.layers.push_back(L); }
+        Instrument gap = org; gap.layers[1].velLo = 91;
+        Instrument odd = org; odd.samples[3].channels = 2; odd.samples[3].pcm.pop_back();
+        TEST("validate: > 24 layers, a velocity gap, stereo audio with half a frame",
+             [&] { auto e = validate(many); for (auto& m : e) if (m.find("1-24") != std::string::npos) return true; return false; }() &&
+             !validate(gap).empty() && !validate(odd).empty());
         TEST("the SF2 writer refuses an invalid instrument", writeSf2(bad).empty());
     }
 
@@ -154,10 +162,10 @@ int main() {
              x.find("tx:path=\"AIA Demo Organ Samples/AIA OrgS C1.wav\" tx:id=\"0\" tx:root=\"C1\"") != std::string::npos &&
              x.find("tx:name=\"1\" tx:end=\"" + std::to_string(s0.loopEnd) + "\" tx:mode=\"Forward\" tx:start=\"" +
                     std::to_string(s0.loopStart) + "\"") != std::string::npos);
-        TEST("mirrors Korg's example: empty loop 2 + full-range bounds per wave, DFD regions, UUID-shaped soundshape id, program bounds before the soundshape",
+        TEST("mirrors Korg's example: empty loop 2 + full-range bounds per wave, DFD regions, UUID-shaped soundshape id, format stamp created-by 30601, program bounds before the soundshape",
              count("tx:name=\"2\" tx:end=\"1\" tx:mode=\"None\"") == 38 && count("tx:low-key=\"C-1\" tx:high-key=\"G9\"") >= 38 &&
              count("tx:mode=\"DFD\"") == 38 && x.find("tx:soundshape=\"a1a0a1a0-0000-4000-8000-") != std::string::npos &&
-             x.find("created-by") == std::string::npos &&
+             x.find("tx:created-by=\"30601\"") != std::string::npos &&
              x.find("</tx:wave>\n   <tx:bounds tx:high-vel=\"127\" tx:low-key=\"C-1\" tx:high-key=\"G9\" tx:low-vel=\"0\"/>\n   <tx:soundshape") != std::string::npos);
         TEST("key names span C-1..G9; Low group velocities 0-89, High 90-127",
              x.find("tx:low-key=\"C-1\" tx:high-key=\"C#1\" tx:low-vel=\"0\" tx:high-vel=\"89\"") != std::string::npos &&
@@ -181,6 +189,41 @@ int main() {
              qp[0].path == "A___B/A___B.txprog");
     }
 
+    // ── stereo + more than 2 layers ──
+    {
+        Instrument st = org;   // stereo copy of the organ: R = L at 0.5, so channels are told apart
+        for (auto& sm : st.samples) {
+            std::vector<int16_t> lr;
+            for (int16_t v : sm.pcm) { lr.push_back(v); lr.push_back(static_cast<int16_t>(v / 2)); }
+            sm.pcm = lr; sm.channels = 2;
+        }
+        Layer mid = st.layers[0]; mid.name = "AIA Organ Mid"; mid.velLo = 60; mid.velHi = 89;
+        st.layers[0].velHi = 59;
+        st.layers.insert(st.layers.begin() + 1, mid);
+        TEST("stereo, 3 velocity layers (0-59, 60-89, 90-127): valid", validate(st).empty() && st.samples[0].frames() == org.samples[0].pcm.size());
+        const auto b = writeSf2(st);
+        const auto c = sf2::check(b);
+        TEST("stereo SF2: 76 SF2 samples (L/R), 3 instruments, linked pairs not reported as overlaps",
+             c.ok && c.samples.size() == 76 && c.instruments.size() == 3 && c.overlapping() == 0 && c.instruments[0].zones.size() == 38);
+        {
+            const size_t o = findChunk(b, "shdr") + 8;
+            auto u16at = [&](size_t q) { return uint32_t(b[q] | b[q + 1] << 8); };
+            const size_t r0 = o, r1 = o + 46;
+            bool smplOk = true;   // left channel of sample 0 is the mono organ sample 0, right is half of it
+            const size_t sd = findChunk(b, "smpl") + 8, startR = rd32(b, r1 + 20);
+            for (size_t f = 0; f < org.samples[0].pcm.size(); f += 501)
+                smplOk &= int16_t(u16at(sd + 2 * f)) == org.samples[0].pcm[f] && int16_t(u16at(sd + 2 * (startR + f))) == org.samples[0].pcm[f] / 2;
+            TEST("stereo SF2: L/R names, link each other, types left(4)/right(2); data de-interleaved per channel",
+                 std::string(reinterpret_cast<const char*>(&b[r0])) == "AIA OrgS C1-L" &&
+                 std::string(reinterpret_cast<const char*>(&b[r1])) == "AIA OrgS C1-R" && u16at(r0 + 42) == 1 && u16at(r0 + 44) == 4 && u16at(r1 + 42) == 0 && u16at(r1 + 44) == 2 && smplOk);
+        }
+        const auto pkg = writeTxProg(st);
+        const std::string x = pkg.empty() ? "" : std::string(pkg[0].bytes.begin(), pkg[0].bytes.end());
+        TEST("stereo TXPROG: stereo WAVs (fmt channels 2, block align 4), 3 groups with velocity 0-59 / 60-89 / 90-127",
+             pkg.size() == 39 && pkg[1].bytes[22] == 2 && pkg[1].bytes[32] == 4 &&
+             x.find("tx:low-vel=\"60\" tx:high-vel=\"89\"") != std::string::npos && x.find("tx:low-vel=\"0\" tx:high-vel=\"59\"") != std::string::npos);
+    }
+
     // ── S4/S8 package folder ──
     {
         namespace fs = std::filesystem;
@@ -192,7 +235,7 @@ int main() {
         if (fs::is_directory(dir)) for (const auto& e : fs::recursive_directory_iterator(dir)) files += e.is_regular_file();
         TEST("package: .sf2 + .txprog + 38 tx WAVs + 38 wav/ + REPORT = 79 files; report lists 4 GB use",
              !rep.empty() && files == 79 && fs::exists(dir / "AIA_Demo_Organ.sf2") &&
-             fs::exists(dir / "wav" / "AIA_Organ_Soft_024_000_025.wav") && rep.find("of the 4 GB") != std::string::npos);
+             fs::exists(dir / "wav" / "AIA_Organ_Soft_024_000_025.wav") && rep.find("of the 4 GB User Sample memory)\n\nLayer 0  velocity 0-89  AIA Organ Soft\n") != std::string::npos);
         std::string err2;
         TEST("package refuses an existing folder and writes nothing", writePackage(org, dir, "", &err2).empty() &&
              err2.find("already exists") != std::string::npos);

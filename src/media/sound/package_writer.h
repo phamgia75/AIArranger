@@ -44,22 +44,23 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     for (const auto& f : tx) save(out / "tx" / f.path, f.bytes);
 
     std::string rep = "AIArranger Sound package (SOFTWARE evidence only until imported on a Pa5X)\n\n";
-    char line[320];
+    char line[1024];   // the header line with a 20-char name and paths is ~330 chars
     std::snprintf(line, sizeof line,
                   "Instrument: %s\nSF2: %s.sf2  %zu bytes  fnv1a %016llx\nTXPROG: tx/%s + %zu WAVs (copy the whole folder, structure unchanged)\n"
-                  "Velocity layers: %zu%s\nSamples: %zu, 16-bit mono, %.2f MB (%.4f%% of the 4 GB User Sample memory)\n\n",
+                  "Velocity layers: %zu (= multisamples, one oscillator each)\nSamples: %zu (%zu stereo), 16-bit, %.2f MB (%.4f%% of the 4 GB User Sample memory)\n\n",
                   in.name.c_str(), stem.c_str(), sf2.size(), static_cast<unsigned long long>(h), tx[0].path.c_str(), tx.size() - 1,
-                  in.layers.size(), in.layers.size() == 2 ? (" (High from velocity " + std::to_string(in.velocitySwitch) + ")").c_str() : "",
-                  in.samples.size(), sampleBytes(in) / 1e6, 100.0 * sampleBytes(in) / 4e9);
+                  in.layers.size(), in.samples.size(),
+                  static_cast<size_t>(std::count_if(in.samples.begin(), in.samples.end(), [](const Sample& x) { return x.channels == 2; })),
+                  sampleBytes(in) / 1e6, 100.0 * sampleBytes(in) / 4e9);
     rep += line;
     for (size_t l = 0; l < in.layers.size(); ++l) {
         const Layer& L = in.layers[l];
-        rep += "Layer " + std::to_string(l) + (in.layers.size() == 1 ? " " : l == 0 ? " (Low)  " : " (High) ") + L.name + "\n";
-        rep += "  keys     root  sample                frames    rate   loop\n";
+        rep += "Layer " + std::to_string(l) + "  velocity " + std::to_string(L.velLo) + "-" + std::to_string(L.velHi) + "  " + L.name + "\n";
+        rep += "  keys     root  sample                frames    rate  ch  loop\n";
         for (const Zone& z : L.zones) {
             const Sample& s = in.samples[static_cast<size_t>(z.sample)];
-            std::snprintf(line, sizeof line, "  %3u-%-3u  %3u   %-20s  %7zu  %5u   %s\n", z.lo, z.hi, z.root, s.name.c_str(),
-                          s.pcm.size(), s.rate, s.looped ? (std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd)).c_str() : "one-shot");
+            std::snprintf(line, sizeof line, "  %3u-%-3u  %3u   %-20s  %7zu  %5u  %u   %s\n", z.lo, z.hi, z.root, s.name.c_str(),
+                          s.frames(), s.rate, s.channels, s.looped ? (std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd)).c_str() : "one-shot");
             rep += line;
             std::snprintf(line, sizeof line, "%s_%03u_%03u_%03u.wav", under(txw::fileSafe(L.name)).c_str(), z.root, z.lo, z.hi);
             save(out / "wav" / line, writeWav(s));
@@ -71,8 +72,8 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
            "  A) Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX Sound (TXPROG),\n"
            "     select tx/.../<name>.txprog, choose an empty User Sound location: one step (p.1210).\n"
            "  B) Same page, format SoundFont (SF2), Complete Bank (p.1209): one multisample per layer; then\n"
-           "     in Sound Edit assign them to an oscillator's Low/High layers with the velocity switch above\n"
-           "     and save to an empty User Sound.\n";
+           "     in Sound Edit assign each to its own oscillator with the velocity zone above and save to an\n"
+           "     empty User Sound.\n";
     save(out / "REPORT.txt", std::vector<uint8_t>(rep.begin(), rep.end()));
     if (!ok) return fail("write failed under " + out.string());
     return rep;
