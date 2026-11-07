@@ -195,6 +195,7 @@ Path C reads state only: it never clicks. Navigation (opening KST Manager on the
 1. Bring the session window back (device **Open**) after any focus change; confirm it is ≥ 1000 px wide.
 2. Before a click into PA Manager or a paste into PowerShell: bring that window forward from the Windows taskbar and check a fresh screenshot.
 3. Commands: Mac clipboard → Finder/Windows App focus toggle → right-click paste into Windows Terminal → screenshot check → Return.
+   The Mac clipboard is shared with other sessions: compare `pbpaste` with the intended command **immediately before** the paste, and cancel any Windows Terminal multi-line-paste warning (our commands are one line).
 4. Context menus are read and dismissed with Escape; report windows are closed with **Close**, never **Save Report**.
 5. After each research block: manifest re-check of the copy (path | size | mtime) against the pre-load manifest.
 

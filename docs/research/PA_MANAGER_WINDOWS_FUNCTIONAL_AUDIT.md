@@ -174,6 +174,42 @@ All on the research copy. No Save / Save Report / Export / Copy / Remap / Delete
 
 **Not yet inspected:** Sample Manager with the copy loaded (P1), Sound → Multisample for non-drum Sounds, RE-MAP MODE behaviour, duplicate detection, Copy from another KST (merge), Advanced Settings.
 
+## 3f. Session 2026-11-07 (2): Sample Manager, duplicates, unused Sounds, remap and merge UI (read-only)
+
+Same research copy. Nothing was saved, applied, remapped, copied, compressed, exported or deleted: dialogs were closed with **Close** / **Cancel** / the window X, menus dismissed with Escape. One app-level prompt (**Select TARGET Keyboard**, "Keyboard Model Environment", PA5X preselected) was answered **OK** with PA5X: it sets the view mode, not KST data. Integrity re-checked afterwards: manifest identical (719 entries, 0 differences). User content names are not reproduced.
+
+**Settings menu (title-bar sliders icon):** File Viewer, New KPM Window, Memory Info Window, Sound Settings, Check for Duplicates [PCG], Check for Unused Sounds, Global Sound ReMap, Delete All Locked items [PCG] (disabled), Stream Drive (C, 2.50 GB), RAM / Memory.
+
+| Feature | OBSERVED |
+|---|---|
+| **Check for Duplicates [PCG]** | Scans the KST, then a "SOUND Duplicate Report": count (104 here), groups of Sounds with Type **Name** (names equal apart from a suffix/number) or **Content**, and each one's Location (bank, position). Report only; Save Report not pressed |
+| **Check for Unused Sounds** | Scans every Style bank, then an "Unused Sound Report": count (12 here), per Sound: Location, Name, and **Sound Pos as three numbers** |
+| Sound Pos numbers | User bank *n*, position *p* → `121, 63+n, p-1`; User DK bank → `120, 64, p-1` (e.g. User 2 pos 38 → 121, 65, 37). Read as **Bank Select MSB, LSB, Program Change**; this reading is an interpretation, consistent on all 12 rows, not checked on the Pa5X |
+| **Global Sound ReMAP** | "Change & Replace All Sound Instances of: SOUND A with SOUND B throughout the whole SET"; up to 4 pairs A1-A4 → B1-B4, each ON/Off; scope checkboxes STYLE, KBD SET / PERF, PAD. Cancelled |
+| **RE-MAP MODE** (Sound tab) | Toggle: header becomes "USER RE-MAP", work area outlined, "Copy from another KST" disabled. What a tile click does in this mode was **not** tried (UNKNOWN). Toggled off |
+| **Copy from another KST** | Opens a second KST pane (Load SET, Copy Options, "**Automatically Copy Related USER Sounds**" ON by default, a `<<` copy button) and a KST explorer. No source KST was loaded |
+| KST explorer summary of the copy | ".KST Size 1.26 GB", STY 199, PRF 347, PAD 0, PCG 8, PCM 99. These counts equal the file counts per type folder (audit §3c), so the explorer counts files |
+
+**Sample Manager** (launcher → SAMPLE Manager → Load .SET on the copy; reads `…KST\MULTISMP`, "Version: 7,0"):
+
+| Item | OBSERVED |
+|---|---|
+| Counts | Sample **14 274**, Drum Sample **4 291**, MultiSample **483**; "No Ref (0)" (no unreferenced samples flagged) |
+| Sample columns | ID, Name, File Size (bytes), Sample Rate (shown as "44100 kHz / 16bits" — the unit label is PA Manager's), Duration, Orig Note, Loop Start, Loop End, Type (Normal / Compressed / Locked), Stereo (mono/stereo), PreLoad (checkbox) |
+| Loop and size | Loop points are in sample frames (898 ms × 44.1 kHz ≈ the loop end). A **Compressed** sample's file is about **1 byte per frame** where 16-bit PCM needs 2 (interpretation of a few rows) |
+| MultiSample columns | ID, Name, Unlinked Samples, Zones, File Size |
+| MultiSample menu | Properties, Rename, Get MultiSample Info, **Search Where this MultiSample is used…**, Export MultiSample, MultiSample Replace, Options ▸, Compress MS, De-Compress MS, Delete |
+| Get MultiSample Info | Member samples: sample number, name, size; total |
+| **Search Where this MultiSample is used** | Per Sound: name, User bank / position, and the oscillator slot as **OSC High: n / OSC Low: n**. One multisample was used 9 times by 3 Sounds → **Sound → Multisample is OBSERVED and multisamples are shared between Sounds** |
+| Zone editor (Properties) | "MULTISAMPLE Manager": keyboard map of zones; per zone: sample, **From / To key**, **Original Note**, Level (dB), Pitch; Add Zone / Delete Zone / Save Changes / Close. **No velocity range per zone**: velocity layering appears only at Sound level (OSC High / Low). MIDI audition shown "Not Connected". Closed without saving |
+| Drum Sample columns | ID, Name, Category, Stereo; a lower pane for the selected item's samples |
+| Compression | Compress SET / De-Compress SET, a "34%" bar (meaning UNKNOWN: likely the compressed share), Options ▸ {Options ▸, Threads ▸} |
+| Import formats | Label "aif / wav / ksf / kmp / rex" next to Import (not used) |
+| Memory profiles | 8 MB / 16 MB PA80, 32 MB PA1X/PA300, 64 MB PA800, 96 MB PA600, 128 MB PA2X/3X/700, 192 MB PA900, 256 MB, 480 MB PA1000, 400 MB PA4X, 1.5 GB PA4X OS Next, **4 GB PA5X** (Total Size 4 294 967 296 B). Sample-count limit with PA5X: 53 130; preLoadBuffer 420 MB. PA Manager's figures, not hardware-verified |
+| Memory vs disk | PA Manager "Used Size" 1 403 084 800 B; the copy's PCM folder ≈ 1285 MB and the explorer's ".KST Size 1.26 GB". How PA Manager computes Used Size is UNKNOWN; it is not simply the PCM file total |
+
+**Procedure incident:** one paste into Windows Terminal showed a multi-line-paste warning whose preview was **unrelated text from the shared Mac clipboard** (another session had replaced it). Cancelled; nothing was pasted or run. Since then the clipboard is compared to the intended command immediately before each paste (`WINDOWS_RESEARCH_AGENT.md` §5.8).
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |

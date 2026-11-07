@@ -24,7 +24,8 @@
 
   STATUS: first run 2026-11-07 on the target PC (Windows PowerShell 5.1): worked,
   PA Manager v5.2 home screen = 14 elements. That run used the old unanchored title
-  pattern, which also dumped browser windows; the anchored default is not yet re-run.
+  pattern, which also dumped browser windows. The KST-view run used the pattern that
+  is now the default (it also matches the dash-less KST-view title), via -TitlePattern.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\pa_manager_uia_dump.ps1 -OutFile C:\PA-Research\work\uia-home.txt
@@ -32,7 +33,8 @@
 param(
     # Anchored: an unanchored 'PA ?Manager' also matched browser tabs titled "KORG PA Manager | ..."
     # (seen 2026-11-07), and the same-process rule below then pulled in every window of that browser.
-    [string]$TitlePattern = '^KORG PA ?Manager( +- +v[0-9.]+)?$',
+    # Titles seen: "KORG PA Manager  -  v5.2" (home) and "KORG PA Manager v5.2" (KST view, no dash).
+    [string]$TitlePattern = '^KORG PA ?Manager( +-)?( +v[0-9.]+)?$',
     [string]$OutFile = "$env:USERPROFILE\Desktop\pa_manager_uia.txt",
     [int]$MaxDepth = 12,
     [int]$MaxElements = 5000

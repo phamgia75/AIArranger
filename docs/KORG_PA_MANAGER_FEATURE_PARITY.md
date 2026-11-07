@@ -55,13 +55,16 @@ Unlike the matrix above (vendor claims), every PA Manager cell here was **seen**
 |---|---|---|---|---|
 | Open a Pa5X KST | Loads a KST folder, per-type progress, does not modify it (manifest check) | `kst-inventory`: folder/type/bank/extension counts, PCM warning, never writes | Content view (names, slots) | Names/slots need `.STG/.KSC/.PCG` decoding: blocked (P1.10) |
 | Bank / slot model | Styles, KBD SETs in banks × 10-per-page × 6 pages; Sounds 12×128, DK 6×128 | `by_bank` from folders only | Slot positions | Document slot capacity as constants once confirmed on hardware |
-| Memory budget | "[4 GB] PA5X": used / total / available bytes, sample count, preload buffer | None (P2.3 planned) | Total | Memory estimator: sum `PCM`/`KMP` bytes against a configurable budget (4 GB = PA Manager's figure, not a hardware spec) |
+| Memory budget | Per-model profiles (8 MB PA80 … 4 GB PA5X): used / total / available bytes, sample count limit, preload buffer | `kst-inventory` P2.3: `.PCM`/`.KMP` **disk** bytes vs `--budget-bytes` (default 4 GiB, PA Manager's figure) | RAM model | Measure Pa5X sample-RAM use on hardware (paused) |
 | Per-Sound sample size | "Check Sample Size" | None | Total | Needs Sound→sample links: blocked |
 | Reverse dependency | "Search Where this Sound is used": Style Element × track, KBD SET, PAD | None | Total | Blocked on reference encoding; a hardware-free path is to diff PA Manager reports (owner-run, saved outside the repo) — not planned without approval |
+| Sound → Multisample | "Search Where this MultiSample is used": Sound, position, OSC High/Low | None | Total | Blocked on `.PCG` encoding |
+| Multisample zones | Zone editor: key range, root, level, pitch per zone | `sf2-check` reads SF2 zones (import side only) | Native zones | Blocked on `.KMP` encoding |
+| Duplicates / unused | Sound duplicates by name and content; unused Sounds | Byte-identical file duplicates only | Name/content/usage level | Name-similarity grouping is feasible from file names alone, usage needs references |
 | Drum Kit → samples | DK Report: key → RAM/ROM/compressed, sample number, name; sharing visible | None | Total | Same blocker; the report columns define the target data model |
 | Reports | Text reports per tab (Style, KBD SET, Sound, DK) | `kst-inventory` text report; marker-SMF validator report | Content-level reports | — |
-| Sound remapping | RE-MAP MODE button present (behaviour not inspected) | Export-side `--sound-map` | Native remap | Research only (P3) |
-| Merge | "Copy from another KST" button present (not used) | None | Total | KST merge *plan* by name (manual p.731-733), no writes |
+| Sound remapping | Global Sound ReMAP: up to 4 A→B pairs across Style / KBD SET / PAD; RE-MAP MODE toggle (§3f) | Export-side `--sound-map` | Native remap | Research only (P3) |
+| Merge | "Copy from another KST": second pane, "Automatically Copy Related USER Sounds" (§3f) | None | Total | KST merge *plan* by name (manual p.731-733), no writes |
 | SF2 pre-check | (not observed) | `sf2-check` (overlapping zones, manual p.1206) | AIArranger ahead | Hardware validation of which overlaps the Pa5X rejects |
 | Edit operations | Cut/Swap/Copy/Paste/Delete/Rename/Icon/Reset Sound/Export WAV | None (by design: AIArranger never writes KST) | — | Not planned |
 

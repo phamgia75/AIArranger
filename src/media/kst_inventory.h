@@ -152,7 +152,30 @@ inline Inventory scan(const std::filesystem::path& root) {
     return inv;
 }
 
-inline std::string format(const Inventory& inv, const std::string& label) {
+// PA Manager v5.2 "[4 GB] | PA5X" memory profile: Total Size 4 294 967 296 bytes (audit §3f).
+// An application observation, not an independently verified Pa5X hardware specification.
+constexpr uintmax_t kPaManagerPa5xBudgetBytes = 4294967296ull;
+
+// P2.3: sample-data DISK size (.PCM Sample + .KMP Multisample files) against a budget.
+// shortcut: disk bytes only; replace with a RAM model once Pa5X allocation is measured on hardware.
+inline std::string formatMemoryEstimate(const Inventory& inv, uintmax_t budget) {
+    auto stat = [&](const char* t) { const auto it = inv.by_type.find(t); return it == inv.by_type.end() ? ExtStats{} : it->second; };
+    const ExtStats pcm = stat("Sample"), kmp = stat("Multisample");
+    const uintmax_t disk = pcm.bytes + kmp.bytes;
+    const uintmax_t permille = budget ? disk * 1000 / budget : 0;
+    std::ostringstream o;
+    o << "\nSample memory estimate (P2.3) - DISK SIZE, not Pa5X sample RAM:\n"
+      << "  .PCM Sample files       " << pcm.files << " files, " << pcm.bytes << " bytes\n"
+      << "  .KMP Multisample files  " << kmp.files << " files, " << kmp.bytes << " bytes\n"
+      << "  Disk total " << disk << " bytes = " << permille / 10 << "." << permille % 10 << "% of budget " << budget << " bytes"
+      << (budget == kPaManagerPa5xBudgetBytes ? " (PA Manager v5.2 '[4 GB] | PA5X' profile; application figure, not a hardware spec)" : "")
+      << (disk > budget ? "\n  OVER BUDGET on disk size" : "") << "\n"
+      << "  Not modelled: sample compression, per-sample overhead, how the Pa5X allocates sample RAM.\n"
+      << "  PA Manager's own 'Used Size' differs from file sizes on disk (audit §3f). HARDWARE VALIDATION PENDING.\n";
+    return o.str();
+}
+
+inline std::string format(const Inventory& inv, const std::string& label, uintmax_t budget = kPaManagerPa5xBudgetBytes) {
     std::ostringstream o;
     o << "KST inventory (read-only): " << label << "\n";
     if (!inv.ok) { o << "ERROR: " << inv.error << "\n"; return o.str(); }
@@ -176,6 +199,7 @@ inline std::string format(const Inventory& inv, const std::string& label) {
     }
     o << "\nSkipped (not regular files or unreadable): " << inv.skipped.size() << "\n";
     for (const auto& s : inv.skipped) o << "  " << s << "\n";
+    o << formatMemoryEstimate(inv, budget);
     o << "\nFile contents were not interpreted. Compare against the Pa5X Media listing "
          "(HARDWARE VALIDATION PENDING).\n";
     return o.str();

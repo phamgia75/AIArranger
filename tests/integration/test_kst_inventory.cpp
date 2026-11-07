@@ -110,6 +110,15 @@ int main() {
     TEST("first tree: no file sits two levels down, so no banks", inv.by_bank.empty());
     TEST("PCM folder detected (any case) and warned about",
          i2.has_pcm_folder && format(i2, "x").find("deletes the User Samples") != std::string::npos);
+    // P2.3 memory estimate: .PCM + .KMP disk bytes only (X.PCM 2 bytes + M.KMP 1 byte).
+    const std::string est = formatMemoryEstimate(i2, 1000);
+    TEST("estimate sums PCM and KMP disk bytes against the budget",
+         est.find("Disk total 3 bytes = 0.3% of budget 1000 bytes") != std::string::npos &&
+         est.find("not Pa5X sample RAM") != std::string::npos && est.find("OVER BUDGET") == std::string::npos);
+    TEST("over budget is flagged", formatMemoryEstimate(i2, 2).find("OVER BUDGET") != std::string::npos);
+    TEST("default budget is PA Manager's 4 GiB profile, labelled as an application figure",
+         format(i2, "x").find("of budget 4294967296 bytes (PA Manager") != std::string::npos);
+    TEST("no sample files: zero, no crash", formatMemoryEstimate(inv, 1).find("Disk total 0 bytes = 0.0%") != std::string::npos);
     fs::remove_all(k2 / "pcm");
     put(k2 / "SOUND/PCM.PCG", "p");                     // a FILE named PCM.* is not a PCM folder
     TEST("a file named PCM is not the PCM folder", !scan(k2).has_pcm_folder);

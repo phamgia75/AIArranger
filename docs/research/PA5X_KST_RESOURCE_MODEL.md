@@ -78,7 +78,12 @@ SongBook entry ──> Style / Keyboard Set / Sounds / Pads / MID / MP3 / TXT (p
 | Keyboard Set → Sound, Pad → Sound in a real KST | Same search reports per-type use counts for KBD SETs and PADs (0 for the Sound tested) | **OBSERVED** (search exists; no positive case seen yet) |
 | Drum Kit key → sample | DK Report: per key, RAM/ROM/RAM [Comp] + sample number + name (audit §3e) | **OBSERVED** (PA Manager view) |
 | One user sample shared by several keys of a Drum Kit | Same sample number on two keys in the DK Report | **OBSERVED** |
-| Ordinary Sound → Multisample → Sample in a real KST | Not shown by the USER SOUND REPORT | **UNKNOWN** |
+| Ordinary Sound → Multisample in a real KST | Sample Manager "Search Where this MultiSample is used…": per Sound and oscillator slot (OSC High / Low) (audit §3f) | **OBSERVED** (PA Manager view; encoding UNKNOWN) |
+| One Multisample shared by several Sounds | One multisample used 9 times by 3 Sounds | **OBSERVED** |
+| Multisample → Sample, zone model | Zone editor: per zone sample, From/To key, Original Note, Level, Pitch; no per-zone velocity range; velocity layers at Sound level (OSC High/Low) | **OBSERVED** (PA Manager view) |
+| Sample properties | Rate, bit depth, duration, original note, loop start/end (frames), Normal/Compressed/Locked, mono/stereo, PreLoad | **OBSERVED** (PA Manager view) |
+| User Sound MIDI address | Unused Sound Report "Sound Pos": `121, 63+bank, pos-1`; User DK `120, 64, pos-1` (interpreted as MSB/LSB/PC) | **OBSERVED** (PA Manager figures) · HW pending |
+| Duplicate / unused detection | PA Manager: Sound duplicates by name and by content; unused Sounds after scanning all Styles | **OBSERVED** (feature exists) |
 | User Sound / Drum Kit slot capacity | PA Manager: 12 banks × 128 and 6 × 128 (= 1 536 / 768, manual p.1935) | **OBSERVED** (PA Manager model) + DOC |
 | Sample Manager tabs (Sample / Drum Sample / MultiSample) and columns (ID, Sample Name, File Size, Sample Rate, Duration, Orig Note, Loop Start, Loop End, Type, PreLoad) | PA Manager v5.2, nothing loaded | OBSERVED |
 
@@ -126,7 +131,7 @@ Only documented behaviour is used, with no PA Manager code and no decoding of pr
    Still to do: a run on the research copy, to compare with PA Manager's KST Explorer.
 
    Read-only and never writes a KST. It runs the same on macOS and on iPadOS (sandboxed folder access).
-2. **Memory estimate (P2.3):** sum the PCM / KMP sizes against a configurable sample-memory budget. PA Manager's own budget comes per model, and the Pa5X figure is UNKNOWN until it is observed or found in the manual.
+2. **Memory estimate (P2.3, done):** `kst-inventory` sums `.PCM` / `.KMP` disk bytes against a budget (`--budget-bytes`, default PA Manager's 4 GiB PA5X profile). It is a **disk-size** figure: PA Manager's own Used Size differs from the file total, and Pa5X sample-RAM allocation is UNKNOWN.
 3. **Dependency graph:** only once the reference encoding inside `.STG` / `.KSC` / `.PDC` / `.PCG` is known. That needs owner-approved format research (P1.10 stays **blocked**). Until then the graph has typed nodes and no edges, never name-guessed edges.
 4. **Write / merge:** not planned. If it ever is, it must reproduce the §4 semantics (grid positions, Replace All vs merge, the User Sample deletion rule).
 
