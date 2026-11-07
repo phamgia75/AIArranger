@@ -109,7 +109,7 @@ Sample ──> audio data (rate, bits, loop, compression, mono/stereo)   OBS (Sa
 | Sound oscillator | **Velocity**: each oscillator has a High and a Low Multisample, switched by velocity | DOC p.1076-1077; PA Manager reports uses as "OSC High: n" / "OSC Low: n" |
 | Multisample zone | **Key**: From key, To key, Original Note, Level (dB), Pitch, one Sample per zone | Zone editor; it shows **no velocity range per zone** |
 
-So "velocity layers" belong to the Sound, and "key splits" belong to the Multisample. A converter that brings in an SF2 instrument with per-zone velocity ranges cannot map them onto one Pa5X Multisample: it needs the Sound's High/Low switch (two layers at most per oscillator, DOC) or more oscillators. This matches the manual's SF2 import caution (p.1206) that `sf2-check` already reports. Whether the Pa5X rejects or flattens such imports is HARDWARE VALIDATION PENDING.
+So "velocity layers" belong to the Sound, and "key splits" belong to the Multisample. The **root note** exists twice: each Sample has its own Orig Note, and a Multisample zone has an Original Note that can differ (C4 vs G3 seen, audit §3h); the zone value is the one PA Manager edits. A converter that brings in an SF2 instrument with per-zone velocity ranges cannot map them onto one Pa5X Multisample: it needs the Sound's High/Low switch (two layers at most per oscillator, DOC) or more oscillators. This matches the manual's SF2 import caution (p.1206) that `sf2-check` already reports. Whether the Pa5X rejects or flattens such imports is HARDWARE VALIDATION PENDING.
 
 **Shared resources and reference counts (OBS):**
 
@@ -194,12 +194,15 @@ Only documented behaviour is used, with no PA Manager code and no decoding of pr
    Rules: no mutating calls; every edge carries its `Source`; `closure()` feeds a future memory estimate over **unique** samples and a future merge *plan* (no writes). Implementation waits for P1.10; writing this code now would only produce an empty graph.
 4. **Write / merge:** not planned. If it ever is, it must reproduce the §4 semantics (grid positions, Replace All vs merge, the User Sample deletion rule).
 
+Parser feasibility plan, gates and oracle: `KST_PARSER_FEASIBILITY.md`.
+
 ## 7. Missing evidence
 
 - ~~A research copy loaded in PA Manager~~: done (audit §3d-3f), including "used by" views for Sounds and Multisamples.
 - ~~The meaning of PA Manager's STY / PRF / PAD / PCG / PCM counts~~: file counts per type folder (audit §3f).
 - ~~KST Merge and Remapping dialogs~~: observed, not applied (audit §3f). Still UNKNOWN: what a tile click does in RE-MAP MODE, and exactly which Sounds "Automatically Copy Related USER Sounds" copies.
 - Whether one Sample can belong to two Multisamples.
+- What PreLoad marks and how the 420 MB preload buffer is filled (audit §3h).
 - Where any reference is stored inside `.STG` / `.KSC` / `.PDC` / `.PCG` / `.KMP` (P1.10, blocked).
 - PA Manager's export menu and formats.
 - The Pa5X sample-memory size **in the manual**. PA Manager v5.2 budgets 4 GB for its "PA5X" model (OBSERVED, audit §3d); the manual's specifications list a 1 GB internal drive, which is storage, not sample memory.

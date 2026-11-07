@@ -214,6 +214,19 @@ Same research copy. Nothing was saved, applied, remapped, copied, compressed, ex
 
 On reconnecting at 08:41 the session showed a **File Explorer window open on the research copy's `MULTISMP` folder** that this agent did not open (between 07:54 and 08:41 someone, or something else, used the PC). The integrity check run immediately afterwards (command recalled from PowerShell history, no clipboard) showed the copy unchanged: 719 entries, 0 differences. GUI research was **stopped** until the owner confirms who else is using the PC. Not yet observed, therefore: Copy Options dialog, Compress Options / Threads submenus, PreLoad semantics, RE-MAP MODE tile behaviour, and what "Automatically Copy Related USER Sounds" copies. The last two can only be seen by performing a remap or a copy, which needs separate authorization even on the copy.
 
+## 3h. Session 2026-11-07 (4): compression options, threads, PreLoad, Copy Options
+
+The owner confirmed opening the File Explorer window of §3g; the session was cleared. Integrity before (09:14) and after (09:18): 719 entries, 0 differences. Commands were recalled from PowerShell history; no clipboard was used. Menus were expanded with the keyboard (Down / Right) and closed with Escape; nothing was selected.
+
+| Item | OBSERVED |
+|---|---|
+| Compress ▸ Options | **✓ Compress All Samples** (current), or "Duration Above > 1 / 2 / 3 / 4 / 5 / 10 Sec": compression can be limited to samples longer than a threshold |
+| Compress ▸ Threads | 1, 2, **✓ 3** (current), 4 Thread(s): PC-side compression worker count |
+| PreLoad | A per-sample checkbox; every visible row unchecked, yet "preLoadBuffer: 224 MB / 420 MB" (PA5X profile; 300 MB in the PA4X profile). What PreLoad marks and how the buffer is filled is **UNKNOWN**. Clicking the column header does not sort |
+| Root note, two levels | Samples 43-47 show Orig Note C4 in the Sample tab, while the zone editor showed Original Note **G3** for the zone using sample 43: a Multisample zone can override a sample's own root note |
+| Sample rates seen | 24 000, 44 100 and 48 000 Hz, all 16-bit, in one KST |
+| Copy Options | Not reachable: the KST explorer is modal until a **source** KST is loaded into the right pane. Loading one was not done (it puts the `<<` copy button one click away); needs the owner's decision |
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |
