@@ -1,7 +1,9 @@
 // pa5x-probe pure helpers: held-note tracking, chord naming, argument parsing.
 #include "midi/pa5x_probe.h"
 #include "engine/chord/fingered_detector.h"
+#include "engine/chord/fingered_on_bass_detector.h"
 #include <cstdio>
+#include <vector>
 
 using namespace ai_arranger;
 using namespace ai_arranger::midi;
@@ -58,6 +60,32 @@ int main() {
     TEST("clock plan: out-of-range tempo or length is refused",
          probe::clockPlan(19, 1).empty() && probe::clockPlan(301, 1).empty() &&
          probe::clockPlan(120, 0).empty() && probe::clockPlan(120, 257).empty() && !probe::clockPlan(300, 256).empty());
+
+    // Gate 2 retry (2026-11-07 12:07, evidence/hardware/2026-11-07-pa5x-gate2-chords.md): Note On
+    // bytes exactly as the Pa5X KEYBOARD sent them (status 0x93 = ch 4, the lower part), in arrival
+    // order, replayed through HeldNotes and the fingered detector as `listen` does.
+    {
+        const chord::FingeredDetector fd;
+        struct Case { const char* name; std::vector<uint8_t> ons; arranger::ChordType type; int root, bass; };
+        const Case hw[] = {
+            {"hw C2-E2-G2 -> C major, bass C", {0x24, 0x28, 0x2B}, arranger::ChordType::Major, 0, 0},
+            {"hw E1-G1-C2 -> C major, root C (fingered ignores the bass)", {0x1C, 0x24, 0x1F}, arranger::ChordType::Major, 0, 0},
+            {"hw F1-A1-C2 -> F major, bass F", {0x1D, 0x21, 0x24}, arranger::ChordType::Major, 5, 5},
+            {"hw C2-Bb2-E2 (no 5th) -> C7, bass C", {0x24, 0x2E, 0x28}, arranger::ChordType::Dom7, 0, 0},
+        };
+        for (const auto& c : hw) {
+            probe::HeldNotes held;
+            for (uint8_t n : c.ons) held.apply(on(3, n));
+            const size_t n = held.below(3, 60, buf, sizeof buf);
+            const arranger::Chord ch = fd.detect(buf, n);
+            const int bass = (ch.bass ? ch.bass : ch.root) % 12;
+            TEST(c.name, n == 3 && ch.type == c.type && ch.root % 12 == c.root && bass == c.bass);
+        }
+        probe::HeldNotes held;  // the same captured inversion in Fingered-on-Bass keeps E as the bass
+        for (uint8_t n : {0x1C, 0x24, 0x1F}) held.apply(on(3, n));
+        const arranger::Chord ob = chord::FingeredOnBassDetector{}.detect(buf, held.below(3, 60, buf, sizeof buf));
+        TEST("hw E1-G1-C2 on-bass -> C major over E1", ob.type == arranger::ChordType::Major && ob.root % 12 == 0 && ob.bass == 0x1C);
+    }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
