@@ -162,6 +162,10 @@ int main() {
         Instrument q = org; q.name = "A<&\"B"; q.layers[0].name = "x'y";
         const auto qp = writeTxProg(q);
         const std::string qx = qp.empty() ? "" : std::string(qp[0].bytes.begin(), qp[0].bytes.end());
+        Instrument nn = org; nn.name = "";
+        Instrument nl = org; nl.name = std::string(21, 'x');
+        TEST("regression: empty or > 20-char instrument name is invalid (an empty name made the package path '/.txprog', absolute)",
+             !validate(nn).empty() && writeTxProg(nn).empty() && writeSf2(nn).empty() && !validate(nl).empty());
         TEST("refuses: zone root != sample root, duplicate sample file names, invalid instrument",
              writeTxProg(r).empty() && writeTxProg(d).empty() && writeTxProg(Instrument{}).empty());
         TEST("names are XML-escaped and file-safe",

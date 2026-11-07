@@ -48,6 +48,7 @@ struct Instrument {
 inline std::vector<std::string> validate(const Instrument& in) {
     std::vector<std::string> e;
     auto err = [&](std::string m) { e.push_back(std::move(m)); };
+    if (in.name.empty() || in.name.size() > 20) err("instrument name must be 1-20 characters (SF2 preset name; package folder name)");
     if (in.layers.empty() || in.layers.size() > 2) err("an instrument needs 1 or 2 velocity layers (Pa5X oscillator Low/High)");
     if (in.layers.size() == 2 && (in.velocitySwitch < 2 || in.velocitySwitch > 127)) err("velocity switch must be 2..127");
     for (size_t i = 0; i < in.samples.size(); ++i) {
