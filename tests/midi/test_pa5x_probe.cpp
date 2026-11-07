@@ -87,6 +87,15 @@ int main() {
         TEST("hw E1-G1-C2 on-bass -> C major over E1", ob.type == arranger::ChordType::Major && ob.root % 12 == 0 && ob.bass == 0x1C);
     }
 
+    // Phase B 17:30: the tool printed "sent bytes so far: 2" for 2 messages (Note On + Note Off).
+    TEST("send summary counts messages, not bytes",
+         probe::sentSummary(2).find("2 MIDI messages") != std::string::npos &&
+         probe::sentSummary(2).find("bytes") == std::string::npos &&
+         probe::sentSummary(1).find("1 MIDI message ") != std::string::npos);
+    TEST("send summary says host-side only and that All Sound Off follows",
+         probe::sentSummary(2).find("not proof the device sounded") != std::string::npos &&
+         probe::sentSummary(2).find("All Sound Off follows") != std::string::npos);
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

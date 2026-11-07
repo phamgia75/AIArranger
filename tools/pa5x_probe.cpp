@@ -359,9 +359,9 @@ int send(const std::string& cmd, const std::map<std::string, std::string>& f) {
     } else {
         std::printf("send: All Sound Off (CC 120) + All Notes Off (CC 123) on all 16 channels\n");
     }
-    std::printf("sent bytes so far: %llu\n", static_cast<unsigned long long>(out.sentCount()));
+    std::printf("%s\n", probe::sentSummary(out.sentCount()).c_str());
     out.shutdown();   // All Sound Off on the still-selected destination
-    std::printf("done (bytes sent: see above; shutdown adds the silence). Observe the Pa5X and record the result.\n");
+    std::printf("done. Observe the Pa5X and record what was heard; exit 0 is not an audible result.\n");
     return 0;
 }
 

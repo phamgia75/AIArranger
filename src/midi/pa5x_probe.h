@@ -97,6 +97,15 @@ inline std::vector<TimedByte> clockPlan(int bpm, int beats) {
     return v;
 }
 
+/// What `note` / `alloff` report after sending. CoreMidiOut::sentCount() counts MIDI *messages*
+/// whose MIDISend returned noErr (not bytes), and shutdown's All Sound Off is not in it. Host-side
+/// acceptance only: it says nothing about whether the instrument received or sounded anything.
+inline std::string sentSummary(uint64_t messagesAccepted) {
+    return "CoreMIDI accepted " + std::to_string(messagesAccepted) + " MIDI message" +
+           (messagesAccepted == 1 ? "" : "s") +
+           " (MIDISend noErr; host side only, not proof the device sounded); All Sound Off follows at shutdown";
+}
+
 } // namespace ai_arranger::midi::pa5x::probe
 
 #endif

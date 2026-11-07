@@ -30,7 +30,7 @@ Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5
 4. **Bounded command ready:** step 1 below; `note` sends one Note On, waits `--ms` (20-5000), sends Note Off, then All Sound Off. Since this change it ignores SIGHUP/SIGINT/SIGTERM/SIGPIPE during that window, so a dropped SSH session or Ctrl-C cannot leave the note hanging (verified by reading the code; not exercised, because exercising it means sending). Only SIGKILL or a power loss can interrupt it: then `alloff`, or the Pa5X STOP button.
 5. **Explicit owner authorization** for step 1, in the session.
 
-### Phase B gate status (2026-11-07): PREPARED, NOT SENT
+### Phase B gate status (2026-11-07): step 1 SENT ONCE 17:30:08 — software-side success, **no sound heard**, see `2026-11-07-pa5x-phaseB-note.md`; all transmission stopped
 
 | Gate | Status |
 |---|---|
