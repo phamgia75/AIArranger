@@ -289,6 +289,8 @@ add_executable(kst-inventory tools/kst_inventory.cpp)
 target_include_directories(kst-inventory PRIVATE src)
 add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
 target_include_directories(sf2-check PRIVATE src)
+add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder
+target_include_directories(aiarranger-sound PRIVATE src)
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────
 if(APPLE)
