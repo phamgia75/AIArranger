@@ -369,6 +369,7 @@ void help() {
 } // namespace
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);  // events must reach a pipe/log live, not only at exit
     if (argc < 2 || !std::strcmp(argv[1], "--help")) { help(); return argc < 2 ? 2 : 0; }
     const std::string cmd = argv[1];
     const auto f = parseFlags(argc, argv, 2);
