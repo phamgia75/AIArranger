@@ -8,6 +8,7 @@
 #include "engine/music/ntt.h"
 #include "engine/arranger/chord_input.h"
 #include <cstdio>
+#include <initializer_list>
 
 using namespace ai_arranger;
 using namespace ai_arranger::music;
@@ -178,6 +179,62 @@ int main() {
                 if (out % 12 != b || move < -6 - 12 || move > 6) every = false;
             }
         TEST("all 12 roots x 12 bass notes: bass root plays the bass pitch class", every);
+    }
+
+    // ── Phase C audit: every chord quality (the octave test above covers 7 of 15) ──
+    {
+        struct Q { ChordType t; std::initializer_list<int> tones; };
+        const Q all[] = {
+            {ChordType::Major, {0, 4, 7}}, {ChordType::Minor, {0, 3, 7}}, {ChordType::Dim, {0, 3, 6}},
+            {ChordType::Aug, {0, 4, 8}}, {ChordType::Maj7, {0, 4, 7, 11}}, {ChordType::Min7, {0, 3, 7, 10}},
+            {ChordType::Dom7, {0, 4, 7, 10}}, {ChordType::Dim7, {0, 3, 6, 9}}, {ChordType::Sus4, {0, 5, 7}},
+            {ChordType::Sus2, {0, 2, 7}}, {ChordType::Power, {0, 7}}, {ChordType::Maj6, {0, 4, 7, 9}},
+            {ChordType::Min6, {0, 3, 7, 9}}, {ChordType::Dom9, {0, 2, 4, 7, 10}}, {ChordType::Min7b5, {0, 3, 6, 10}},
+        };
+        auto isTone = [](int pcRel, std::initializer_list<int> tones) {
+            for (int t : tones) if (t == pcRel) return true;
+            return false;
+        };
+        bool chordMode = true, guitarMode = true, bassRoot = true, bassFifth = true, melodyTones = true, near = true;
+        char first[160] = "";
+        auto fail = [&](bool& flag, const char* what, int q, int root, int in, int out) {
+            if (flag && !first[0]) std::snprintf(first, sizeof first, "%s: type %d root %d in %d out %d", what, q, root, in, out);
+            flag = false;
+        };
+        for (const auto& q : all)
+            for (int r = 0; r < 12; ++r) {
+                const Chord c{q.t, static_cast<uint8_t>(60 + r), 0, 0};
+                for (int oct = 1; oct <= 6; ++oct)
+                    for (int pc = 0; pc < 12; ++pc) {
+                        const int in = oct * 12 + pc;
+                        const int shifted = in + r;   // root transposition: up 0..11
+                        const int outC = transpose(in, c, NtrRule::RootTransposition, NttMode::Chord);
+                        const int outG = transpose(in, c, NtrRule::RootTransposition, NttMode::Guitar);
+                        const int outM = transpose(in, c, NtrRule::RootTransposition, NttMode::Melody);
+                        const int outB = transpose(in, c, NtrRule::RootTransposition, NttMode::Bass);
+                        auto relOf = [&](int o) { return ((o - r) % 12 + 12) % 12; };
+                        if (!isTone(relOf(outC), q.tones)) fail(chordMode, "Chord mode off chord tone", (int)q.t, r, in, outC);
+                        if (!isTone(relOf(outG), q.tones)) fail(guitarMode, "Guitar mode off chord tone", (int)q.t, r, in, outG);
+                        const bool srcTone = pc == 0 || pc == 4 || pc == 7 || pc == 11;   // Cmaj7 source
+                        if (srcTone && !isTone(relOf(outM), q.tones)) fail(melodyTones, "Melody chord tone lost", (int)q.t, r, in, outM);
+                        if (pc == 0 && relOf(outB) != 0) fail(bassRoot, "Bass root", (int)q.t, r, in, outB);
+                        if (pc == 7 && !isTone(relOf(outB), q.tones)) fail(bassFifth, "Bass fifth", (int)q.t, r, in, outB);
+                        for (int o : {outC, outG, outM, outB})
+                            if (o < shifted - 6 || o > shifted + 6) fail(near, "moved more than a tritone", (int)q.t, r, in, o);
+                    }
+            }
+        if (first[0]) std::fprintf(stderr, "    first failure: %s\n", first);
+        TEST("15 qualities x 12 roots, Chord NTT: every note lands on a target chord tone", chordMode);
+        TEST("15 qualities x 12 roots, Guitar NTT: every note lands on a target chord tone", guitarMode);
+        TEST("15 qualities x 12 roots, Melody NTT: source chord tones stay chord tones", melodyTones);
+        TEST("15 qualities x 12 roots, Bass NTT: source root plays the target root", bassRoot);
+        TEST("15 qualities x 12 roots, Bass NTT: source fifth plays a target chord tone", bassFifth);
+        TEST("15 qualities x 12 roots, all modes: no note moves more than a tritone from its root-shifted pitch", near);
+        bool inRange = true;
+        for (int n = 0; n < 128; ++n)
+            for (NttMode m : {NttMode::Chord, NttMode::Bass, NttMode::Melody})
+                inRange &= transpose(static_cast<uint8_t>(n), Chord{ChordType::NoChord, 60, 0, 0}, NtrRule::RootTransposition, m) <= 127;
+        TEST("NoChord target: every note stays a valid MIDI note", inRange);
     }
 
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
