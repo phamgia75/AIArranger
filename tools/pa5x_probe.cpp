@@ -362,7 +362,7 @@ int send(const std::string& cmd, const std::map<std::string, std::string>& f) {
         std::printf("send: PANIC: All Notes Off (CC 123) + All Sound Off (CC 120) on all 16 channels\n");
     }
     std::printf("%s\n", probe::sentSummary(out.sentCount()).c_str());
-    out.shutdown();   // All Sound Off on the still-selected destination
+    out.shutdown();   // cleanup (CC 123 + CC 120) on the cleanup channels of the selected destination
     std::printf("done. Observe the Pa5X and record what was heard; exit 0 is not an audible result.\n");
     return 0;
 }
