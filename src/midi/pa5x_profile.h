@@ -5,6 +5,7 @@
 #include "control/midi_output_bridge.h"  // OutputChannelMap
 #include "midi/output_routing.h"
 #include <cctype>
+#include <string>
 #include <string_view>
 
 // ── Korg Pa5X USB-MIDI port profile (vendor data, no I/O) ───────────────────
@@ -104,6 +105,16 @@ inline control::OutputChannelMap outputMapFor(std::string_view destinationName, 
     if (classify(destinationName, /*isSource=*/false) != PortMatch::Sound) return control::OutputChannelMap{};
     return buildChannelMap(layout, aiArrangerPresetRouting(), /*dropVoiceSelect=*/true);
 }
+
+// Host-side routing state: the destination the user chose (its name captured once, at
+// selection, while it is enumerable) and the loaded style's part layout. The map never
+// depends on a later enumeration, so a style loaded while the Pa5X is unplugged keeps the
+// Pa5X routing, and CoreMIDI's reconnect of the retained endpoint plays on the right channels.
+struct HostOutputRouting {
+    std::string destination;   // "" = no output selected
+    PartLayout layout;
+    control::OutputChannelMap map() const noexcept { return outputMapFor(destination, layout); }
+};
 
 } // namespace ai_arranger::midi::pa5x
 

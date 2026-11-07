@@ -75,7 +75,7 @@ public:
     // `layout` says which engine channel carries which Style part (sffPartLayout() for an
     // SFF1 import); the output routing is rebuilt for it while the transport is stopped.
     void reloadStyle(const uasf::StyleDefinition& style, const midi::PartLayout& layout) {
-        layout_ = layout;
+        routing_.layout = layout;
         if (!running_) {                 // no tick thread yet: nothing to race
             facade_.loadStyle(style);
             applyRouting();
@@ -99,6 +99,9 @@ public:
     // device synchronously first, so its all-notes-off never leaks to the new one.
     // Transport is left stopped after the switch (press Start to resume).
     void switchOutput(int index) {
+        // The name is taken now, while the chosen device is enumerable (review of 27ca014).
+        routing_.destination.clear();
+        for (const auto& d : midi_out_.enumerate()) if (index >= 0 && d.index == index) routing_.destination = d.name;
         if (!running_) {                 // no tick thread yet: plain select
             facade_.selectMidiOutput(index);
             applyRouting();
@@ -150,15 +153,10 @@ private:
     // RAII TickGuard in reloadStyle() can re-arm it on any exit path).
     void restartTick() noexcept { startTimer(1); }
 
-    // Output routing for the selected destination and the loaded style's part layout
-    // (pa5x::outputMapFor). Called only with the transport stopped.
-    void applyRouting() {
-        std::string name;
-        const int sel = midi_out_.selected();
-        for (const auto& d : midi_out_.enumerate()) if (d.index == sel) name = d.name;
-        facade_.setOutputChannelMap(midi::pa5x::outputMapFor(name, layout_));
-    }
-    midi::PartLayout layout_ = midi::partLayoutFromRoles(arranger::buildDemoStyle());   // the boot style
+    // Output routing for the chosen destination and the loaded style's part layout
+    // (pa5x::HostOutputRouting). Called only with the transport stopped.
+    void applyRouting() { facade_.setOutputChannelMap(routing_.map()); }
+    midi::pa5x::HostOutputRouting routing_{"", midi::partLayoutFromRoles(arranger::buildDemoStyle())};   // boot style
     // Declared before facade_: the facade constructor captures &midi_in_/&midi_out_.
     midi::CoreMidiIn             midi_in_;
     midi::CoreMidiOutputProvider midi_out_;

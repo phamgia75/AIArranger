@@ -2,35 +2,13 @@
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/chord_input.h"
+#include "session/chord_label.h"
 
 namespace ai_arranger::app {
 
 namespace {
-const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F",
-                              "F#", "G", "G#", "A", "A#", "B"};
-
-const char* chordTypeName(arranger::ChordType t) {
-    using CT = arranger::ChordType;
-    switch (t) {
-        case CT::Major: return "";       case CT::Minor: return "m";
-        case CT::Dim:   return "dim";    case CT::Aug:   return "aug";
-        case CT::Maj7:  return "maj7";   case CT::Min7:  return "m7";
-        case CT::Dom7:  return "7";      case CT::Dim7:  return "dim7";
-        case CT::Sus4:  return "sus4";   case CT::Sus2:  return "sus2";
-        case CT::Power: return "5";      case CT::Maj6:  return "6";
-        case CT::Min6:  return "m6";     case CT::Dom9:  return "9";
-        case CT::Min7b5: return "m7b5";  default:        return "";
-    }
-}
-
 juce::String formatChord(const session::EngineSnapshot& s) {
-    if (static_cast<arranger::ChordType>(s.chordType) == arranger::ChordType::NoChord)
-        return "--";
-    juce::String name = kNoteNames[s.chordRoot % 12];
-    name << chordTypeName(static_cast<arranger::ChordType>(s.chordType));
-    if (s.chordBass != 0 && s.chordBass % 12 != s.chordRoot % 12)   // pitch classes: C2 bass under a C4 root is not a slash
-        name << "/" << kNoteNames[s.chordBass % 12];
-    return name;
+    return juce::String(session::chordLabel(s.chordType, s.chordRoot, s.chordBass));
 }
 
 void styleLabel(juce::Label& l, const juce::String& text, float pt = 15.0f) {

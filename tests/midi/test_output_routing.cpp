@@ -91,6 +91,16 @@ int main() {
          sameMap(pa5x::outputMapFor("Pa5X KEYBOARD", demoLayout), control::OutputChannelMap{}) &&
          sameMap(pa5x::outputMapFor("", demoLayout), control::OutputChannelMap{}));
 
+    // ── Host state: the map follows the chosen destination, not a later enumeration ──
+    {
+        pa5x::HostOutputRouting h{"Pa5X SOUND", demoLayout};
+        h.layout = sffPartLayout();   // a style loaded while the Pa5X is unplugged
+        TEST("host: Pa5X chosen, SFF style loaded later -> Genos preset map (no re-enumeration)",
+             sameMap(h.map(), pa5x::genosStyleTrackMap()));
+        h.destination = "";
+        TEST("host: no destination -> identity", sameMap(h.map(), control::OutputChannelMap{}));
+    }
+
     // ── Role layout edge cases ──
     {
         uasf::StyleDefinition st;
@@ -201,6 +211,32 @@ int main() {
         TEST("old file without the field loads; every value kept; routing empty",
              SessionPersistence::deserialize(v1, old) && old.output_routing.empty() && old.tempo_bpm == 98 &&
              old.split_point == 55 && old.theme == 2 && old.midi_output_name == "Pa5X SOUND");
+        for (const char* tricky : {"output_routing", "tempo_bpm", "theme"}) {
+            session::PerformerSession t;
+            t.style_name = tricky;            // a key name as the style name (review of 27ca014)
+            t.tempo_bpm = 97;
+            session::PerformerSession u;
+            const bool ok = SessionPersistence::deserialize(SessionPersistence::serialize(t), u) &&
+                            u.style_name == t.style_name && u.tempo_bpm == 97 && u.output_routing.empty();
+            if (!ok) std::fprintf(stderr, "    style name %s\n", tricky);
+            TEST("a style named like a key loads; that key is read from its property, not the value", ok);
+        }
+        {   // a quoted key inside a value is escaped (\"), so it is never taken as the property.
+            // (readStr does not decode escapes, so such a style name does not round-trip; pre-existing.)
+            session::PerformerSession t;
+            t.style_name = "a\"output_routing\": \"bass=1";
+            t.tempo_bpm = 97;
+            session::PerformerSession u;
+            TEST("escaped \"output_routing\": inside a value is not read as the routing",
+                 SessionPersistence::deserialize(SessionPersistence::serialize(t), u) && u.output_routing.empty() && u.tempo_bpm == 97);
+        }
+        {   // the old (v1) layout with that style name: loads, routing empty
+            std::string v1b = v1;
+            v1b.replace(v1b.find("\"x\""), 3, "\"output_routing\"");
+            session::PerformerSession o;
+            TEST("old file with style_name \"output_routing\" loads", SessionPersistence::deserialize(v1b, o) &&
+                 o.style_name == "output_routing" && o.output_routing.empty() && o.tempo_bpm == 98);
+        }
         s.output_routing = "bass=9,acc1=9";
         TEST("invalid routing refused by isValid (save would fail)", !SessionPersistence::isValid(s));
     }

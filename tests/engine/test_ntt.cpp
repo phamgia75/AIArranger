@@ -7,6 +7,7 @@
 
 #include "engine/music/ntt.h"
 #include "engine/arranger/chord_input.h"
+#include <algorithm>
 #include <cstdio>
 #include <initializer_list>
 
@@ -179,6 +180,18 @@ int main() {
                 if (out % 12 != b || move < -6 - 12 || move > 6) every = false;
             }
         TEST("all 12 roots x 12 bass notes: bass root plays the bass pitch class", every);
+    }
+
+    // ── KNOWN LIMITATION, NOT FIXED (Codex review of 7507012, shortcut in ntt.cpp) ──
+    // NTT is per note: a bass track playing C2+E2 together over C/F gives F2+E2, so E (not the
+    // slash bass F) is the lowest sounding note. This test pins today's behaviour so a fix has
+    // to update it on purpose; it does not claim the case is correct.
+    {
+        const Chord cOverF{ChordType::Major, 36, 29, 0};
+        const int lo = transpose(36, cOverF, NtrRule::RootTransposition, NttMode::Bass);
+        const int hi = transpose(40, cOverF, NtrRule::RootTransposition, NttMode::Bass);
+        TEST("KNOWN LIMITATION: C2+E2 over C/F -> F2+E2, lowest note E, not the bass F",
+             lo == 41 && hi == 40 && std::min(lo, hi) % 12 == 4);
     }
 
     // ── Phase C audit: every chord quality (the octave test above covers 7 of 15) ──
