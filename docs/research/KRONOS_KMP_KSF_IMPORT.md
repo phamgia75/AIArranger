@@ -27,7 +27,7 @@ Evidence classes:
 |---|---|---|
 | A. Native | Kronos KMP/KSF → USB → Pa5X Import KMP (one multisample, then build the Sound by hand) | UNK: whether Kronos-generation KMP/KSF (newer than Triton) is accepted. Needs one owner test, under the same gate rules as S6 |
 | B. Convert | KMP/KSF → `Instrument` model → TXPROG package (whole Sound, velocity layers, loops) | Needs a KMP/KSF reader, BLOCKED on material |
-| C. Via WAV | Owner exports WAV from the Kronos (or a DAW) → `Instrument` from WAV + key map → TXPROG | Possible today for root/loop: WAV `smpl` and the `_OrgKey_LowKey_HighKey` naming (MAN p.1212). Needs a WAV-folder reader (small; no proprietary format) |
+| C. Via WAV | Owner exports WAV from the Kronos (or a DAW) → `Instrument` from WAV + key map → TXPROG | **Built (SOFTWARE):** `aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR` (`src/media/sound/wav_folder_source.h`). Files named `<layer>_<OrgKey>_<LowKey>_<HighKey>.wav` (MAN p.1212); root and forward loop from `smpl`; 16-bit mono/stereo only; anything else refused. Round trip of the demo package is exact. Not yet run on Kronos-exported WAVs (BLOCKED, material) |
 
 **Recommended order:** C (no proprietary parsing), then A (one owner test), then B only if A fails and authorized material exists.
 
