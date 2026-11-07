@@ -80,8 +80,11 @@ public:
         return reconnects_.load(std::memory_order_relaxed);
     }
 
-private:
+    // CoreMIDI read callback (readRefCon = this). Public only so a test can feed it a
+    // MIDIPacketList built in memory, without a MIDI server or device.
     static void readProc(const MIDIPacketList* pktList, void* readRefCon, void* srcRefCon);
+
+private:
     static void notifyProc(const MIDINotification* msg, void* refCon);
 
     // Stop sink delivery and spin until any in-flight readProc has returned. Call
