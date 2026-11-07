@@ -78,3 +78,19 @@ What remains open (not tested, no fix applied):
 - Whether this is a transient USB-MIDI fault on the Pa5X side.
 
 The next step is the repeatability test in `PA5X_MIDI_VALIDATION_SEQUENCE.md` §2b, not a code or setting change.
+
+## Repeatability 2b, run 1 of 3: 12:24:20-12:27:20 (180 s), probe `c425c6f` — PASS
+
+Listeners: parsed `--channel 4 --split 60 --mode fingered`, raw all channels. Operator started ~12:25 (owner's time).
+
+| Check | Result |
+|---|---|
+| C2-E2-G2 presses (Note On C2 on ch 4) | 14 (operator played more than the 10 asked) |
+| Complete chords received (raw `93 24`, `93 28`, `93 2B`) | 14 / 14 / 14: no note lost |
+| Detected on the full chord | `Cmaj (bass C)` 14/14 |
+| Transitional names while keys go down | `C2+E2` -> NoChord (11), `C2+G2` -> `C5` = C **power chord** (3, when G landed before E); each followed by Cmaj once the third key arrived |
+| Upper control note | `90 54` = **C6** on ch 1 (operator played C6, not C5): upper part on ch 1 confirmed |
+| FE Active Sensing | 694 in 180 s (3.86/s), continuous |
+| Raw packets / parsed events | 64 / 84 |
+
+No dropout. Runs 2 (after 10 min idle) and 3 (after normal use of the Pa5X screen) still to do.
