@@ -102,7 +102,7 @@ No dropout.
 | C2-E2-G2 presses | 10 |
 | Complete chords received (raw `93 24` / `93 28` / `93 2B`) | 10 / 10 / 10 |
 | Detected on the full chord | `Cmaj (bass C)` 10/10 (transitions: C2+E2 NoChord 9, C2+G2 power chord 1) |
-| Upper control note (C5 on ch 1) | **none received** (no ch 1 event in raw). Operator's playing action: **UNCONFIRMED** until the owner explicitly verifies it; does not affect the ch 4 result |
+| Upper control note | **UNCONFIRMED** (not FAIL). Owner clarification: a single C was played at the end, octave not remembered (C4 or C5). See "Run 2 upper-note check" below |
 | FE Active Sensing | 704 in 180 s (3.91/s), continuous |
 | Raw packets / parsed events | 43 / 60; first chord at 15.6 s, last release at 66.6 s |
 
@@ -124,6 +124,18 @@ No dropout.
 | 2 | after ~12 min idle | 10/10 | 10/10 |
 | 3 | after normal screen use | 10/10 | 10/10 (9 Cmaj, 1 Cmaj7 with an extra B1) |
 
-**34/34 chords, no lost note, ch 4 stable.** The 11:36 zero-note run was **not reproduced**; it stays recorded as an unresolved intermittent. Run 2 C5 control: none received; whether it was played is **UNCONFIRMED**.
+**34/34 chords, no lost note, ch 4 stable.** The 11:36 zero-note run was **not reproduced**; it stays recorded as an unresolved intermittent. Run 2 upper-note check: **UNCONFIRMED** (see below); the earlier "C5 lost" reading is withdrawn.
 
 **Owner acceptance (2026-11-07):** the three runs are accepted as hardware evidence: 34/34 complete chords on ch 4, upper reception on ch 1. The 11:36 no-note incident remains **unresolved; not fixed**.
+
+## Run 2 upper-note check (correction 2026-11-07)
+
+Owner: a single C was played at the end of run 2; C4 or C5 not remembered. The earlier statement that a C5 was lost is **withdrawn**; the check is **UNCONFIRMED, not FAIL**.
+
+Raw capture `rep2-raw` searched for Note On (`9n`) with any C pitch class (C0-C8: notes 12, 24, ..., 108) on **all 16 channels**:
+
+- Found: 10 x `93 24` (C2, ch 4), each inside a C2-E2-G2 chord packet. Nothing else: no single C on ch 1, ch 4 or any other channel, in any octave.
+- Octave naming does not change this: the probe names note 60 "C4" (60 = C4, Korg/Yamaha convention; some software calls it C3), but the search was by note number across every octave, so the name used by the operator does not matter.
+- Last non-realtime event 66.6 s after start (release of the 10th chord); the window ran to 180 s with Active Sensing continuing (704 total).
+
+Not established: whether the single C was played inside 12:39:38-12:42:38. No conclusion about a lost event is drawn from this; it stays separate from the open 11:36 anomaly, which remains **OPEN**. The 34/34 lower-chord PASS is unaffected.
