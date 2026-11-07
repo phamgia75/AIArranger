@@ -69,8 +69,11 @@ inline std::vector<PackageFile> writeTxProg(const Instrument& in) {
     files[0].path = base + "/" + base + ".txprog";
     std::set<std::string> seen;
     std::string x = "\xEF\xBB\xBF<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n";
+    // Element and attribute set mirrors Korg's example Sound (guide download, "Acoustic Piano.txprog"),
+    // the one .txprog known to import on a Pa5X. Omitted on purpose: tx:created-by (TX16Wx's own build stamp).
     x += "<tx:program tx:quality=\"Default\" tx:name=\"" + esc(in.name) +
-         "\" xmlns:tx=\"http://www.tx16wx.com/3.0/program\">\n";
+         "\" xsi:schemaLocation=\"http://www.tx16wx.com/3.0/ program\" xmlns:tx=\"http://www.tx16wx.com/3.0/program\"\n"
+         "   xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n";
     for (size_t i = 0; i < in.samples.size(); ++i) {
         const Sample& s = in.samples[i];
         const std::string wav = fileSafe(s.name) + ".wav";
@@ -78,30 +81,45 @@ inline std::vector<PackageFile> writeTxProg(const Instrument& in) {
         files.push_back({base + "/" + dir + "/" + wav, writeWav(s)});
         x += "   <tx:wave tx:path=\"" + esc(dir + "/" + wav) + "\" tx:id=\"" + std::to_string(i) +
              "\" tx:root=\"" + noteName(s.root) + "\">\n";
-        if (s.looped)   // end is exclusive: Korg's piano example ends a loop at the sample's frame count
-            x += "      <tx:loop tx:name=\"1\" tx:start=\"" + std::to_string(s.loopStart) + "\" tx:end=\"" +
-                 std::to_string(s.loopEnd) + "\" tx:mode=\"Forward\"/>\n";
-        x += "   </tx:wave>\n";
+        // loop 1 = the sample's loop (end exclusive: Korg's piano example ends a loop at the frame count),
+        // loop 2 = the empty "None" loop every example wave carries
+        x += s.looped ? "      <tx:loop tx:name=\"1\" tx:end=\"" + std::to_string(s.loopEnd) + "\" tx:mode=\"Forward\" tx:start=\"" +
+                            std::to_string(s.loopStart) + "\"/>\n"
+                      : "      <tx:loop tx:name=\"1\" tx:end=\"1\" tx:mode=\"None\" tx:start=\"0\"/>\n";
+        x += "      <tx:loop tx:name=\"2\" tx:end=\"1\" tx:mode=\"None\" tx:start=\"0\"/>\n"
+             "      <tx:bounds tx:high-vel=\"127\" tx:low-key=\"C-1\" tx:high-key=\"G9\" tx:low-vel=\"1\"/>\n"
+             "   </tx:wave>\n";
     }
     // Preview shape only (the Pa5X ignores it, guide p.85): 0.1 s release like the SF2 writer,
     // velocity curve Exponential 2 = the Pa5X's Velocity Intensity 80 (guide p.42).
-    x += "   <tx:soundshape tx:id=\"aia-shape-1\" tx:name=\"" + esc(in.name) + "\">\n"
-         "      <tx:aeg tx:attack=\"0ms\" tx:release=\"100ms\" tx:sustain=\"0 dB\"/>\n"
+    x += "   <tx:bounds tx:high-vel=\"127\" tx:low-key=\"C-1\" tx:high-key=\"G9\" tx:low-vel=\"0\"/>\n";   // program range, as in every example
+    uint64_t h = 1469598103934665603ull;   // deterministic UUID-shaped id (the examples use UUIDs)
+    for (char c : in.name) { h ^= static_cast<uint8_t>(c); h *= 1099511628211ull; }
+    char shape[40];
+    std::snprintf(shape, sizeof shape, "a1a0a1a0-0000-4000-8000-%012llx", static_cast<unsigned long long>(h & 0xFFFFFFFFFFFFull));
+    x += std::string("   <tx:soundshape tx:id=\"") + shape + "\" tx:name=\"" + esc(in.name) + "\" tx:pan=\"0%\" tx:unison-depth=\"100%\"\n"
+         "      tx:unison=\"1\" tx:pwm=\"0%\" tx:volume=\"0 dB\" tx:glide-mode=\"Held\" tx:unison-spread=\"0Ct\" tx:unison-pan=\"100%\"\n"
+         "      tx:unison-start=\"0ms\" tx:unison-cyclic-spread=\"false\">\n"
+         "      <tx:aeg tx:attack=\"0ms\" tx:attack-shape=\"-50%\" tx:decay1=\"500ms\" tx:decay1-shape=\"-50%\" tx:decay2=\"500ms\"\n"
+         "         tx:decay2-shape=\"-50%\" tx:release=\"100ms\" tx:release-shape=\"-50%\" tx:level1=\"0 dB\" tx:level2=\"0 dB\"\n"
+         "         tx:sustain=\"0 dB\"/>\n"
+         "      <tx:send tx:level=\"0 dB\"/>\n      <tx:send tx:level=\"0 dB\"/>\n      <tx:send tx:level=\"0 dB\"/>\n"
+         "      <tx:modulation/>\n"
          "      <tx:velocity-curve tx:smooth=\"true\" tx:shape=\"Exponential 2\"/>\n"
          "   </tx:soundshape>\n";
     for (size_t l = 0; l < in.layers.size(); ++l) {
         const Layer& L = in.layers[l];
         const int vlo = in.layers.size() == 2 && l == 1 ? in.velocitySwitch : 0;
         const int vhi = in.layers.size() == 2 && l == 0 ? in.velocitySwitch - 1 : 127;
-        x += "   <tx:group tx:name=\"" + esc(L.name) + "\" tx:volume=\"0 dB\" tx:pan=\"0%\" tx:coarse=\"0\" "
-             "tx:fine=\"0\" tx:playmode=\"Normal\" tx:soundshape=\"aia-shape-1\">\n";
+        x += "   <tx:group tx:name=\"" + esc(L.name) + "\" tx:volume=\"0 dB\" tx:pan=\"0%\" tx:coarse=\"0\" tx:fine=\"0\" "
+             "tx:playmode=\"Normal\"\n      tx:polymode=\"Poly\" tx:playback=\"Resample\" tx:noteprio=\"Last\" tx:scale=\"100\" "
+             "tx:choke-group=\"0\" tx:output=\"--\"\n      tx:quality=\"Default\" tx:color=\"yellow\" tx:soundshape=\"" + std::string(shape) + "\">\n";
         for (const Zone& z : L.zones) {
             char att[32];
-            std::snprintf(att, sizeof att, "%.1f dB", -z.levelCentibels / 10.0);
-            const bool looped = in.samples[static_cast<size_t>(z.sample)].looped;
-            x += "      <tx:region tx:wave=\"" + std::to_string(z.sample) + "\" tx:attenuation=\"" + att +
-                 "\" tx:pan=\"0%\" tx:tune=\"" + std::to_string(z.tuneCents) + "\"" +
-                 (looped ? " tx:loop=\"0\"" : "") + ">\n";
+            if (z.levelCentibels) std::snprintf(att, sizeof att, "%.1f dB", -z.levelCentibels / 10.0);
+            else std::snprintf(att, sizeof att, "0 dB");   // the examples write zero as "0 dB"
+            x += "      <tx:region tx:mode=\"DFD\" tx:attenuation=\"" + std::string(att) + "\" tx:pan=\"0%\" tx:loop=\"0\" "
+                 "tx:release=\"0\" tx:wave=\"" + std::to_string(z.sample) + "\" tx:tune=\"" + std::to_string(z.tuneCents) + "\">\n";
             x += "         <tx:bounds tx:low-key=\"" + noteName(z.lo) + "\" tx:high-key=\"" + noteName(z.hi) +
                  "\" tx:low-vel=\"" + std::to_string(vlo) + "\" tx:high-vel=\"" + std::to_string(vhi) + "\"/>\n";
             x += "      </tx:region>\n";

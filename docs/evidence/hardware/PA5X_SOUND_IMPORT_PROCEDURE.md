@@ -13,24 +13,25 @@ Page numbers: **MAN** = Pa5X User Manual v1.4 (printed); **GUIDE** = Korg's *Mak
 
 | # | Check | Result |
 |---|---|---|
-| P1 | Generator | `build/aiarranger-sound demo --out DIR` at commit `9e13f86`. Two runs are byte-identical (`diff -r`) |
+| P1 | Generator | `build/aiarranger-sound demo --out DIR` at the commit that adds this preflight (the `.txprog` writer change after `9e13f86`). Two runs are byte-identical (`diff -r`) |
 | P2 | Originality | The demo path reads no input files. The audio is a sum of sine harmonics (`src/media/sound/additive_source.h`). Each WAV holds only `fmt `, `data` and `smpl` chunks (no metadata from elsewhere) |
 | P3 | Independent validation | `tools/validate_sound_package.py`: PASS (FluidSynth pitch worst 0.004 cent; Python XML/WAV re-read; each WAV's `smpl` root/loop equals the `.txprog` root/loop). A deliberately altered copy FAILs |
 | P4 | Package structure | Follows GUIDE pp.9, 16, 31, 44-45 (table below) |
+| P6 | Structure vs Korg's example | Our `.txprog` has the same element paths, attribute names and top-level order (wave, bounds, soundshape, group) as Korg's example Sound `Acoustic Piano.txprog`. The only difference is `tx:created-by` (TX16Wx's build stamp), omitted on purpose. Compared locally; Korg's file is not in the repo |
 | P5 | Staged USB content | Mac folder `~/orca/workspaces/AIArranger/pa5x-import-stage/USB_ROOT/`, copied with `tools/kst_copy.py` and verified (`--verify`) |
 
 Staged content (this is the **whole** stick content, nothing else):
 
 ```
 USB_ROOT/
-  AIA Demo Organ/                        39 files, 1 633 654 bytes
-    AIA Demo Organ.txprog                sha256 3bda6474d936cddc1759408ae24cc4c2654183a8d6129b893600f6500cae615e
+  AIA Demo Organ/                        39 files, 1 641 637 bytes
+    AIA Demo Organ.txprog                sha256 b47630ce60a525e29792970df16fa87db7d21025eb65a3c8e0099dac214e51a9
     AIA Demo Organ Samples/              38 WAV, mono 16-bit 48 kHz, looped
       AIA OrgS C1.wav, AIA OrgS E1.wav, ... AIA OrgS C7.wav   (Low layer, 19 files, roots every 4 semitones)
       AIA OrgB C1.wav, ... AIA OrgB C7.wav                    (High layer, 19 files)
       ('#' in note names is written '_' in file names, e.g. AIA OrgS G_5.wav = G#5)
   AIA Demo Organ.manifest.sha256         per-file SHA-256 of the folder above
-                                         (file sha256 d86ff79b80c9201801b44c93fa8f44e5d81bf091bfb4905b1b1ef9bc660d15c5)
+                                         (file sha256 206f3894c4a324152abb5a222bc1412f8c3876e678aa217e856867976c425575)
 ```
 
 The `.txprog` refers to samples as `AIA Demo Organ Samples/<name>.wav`, relative to its own folder, so the samples folder sits inside the project folder as GUIDE p.31 requires. On the USB stick, verify with `python3 -I tools/kst_copy.py --verify "/Volumes/<STICK>/AIA Demo Organ"`.
@@ -82,7 +83,7 @@ Run these in order. Each step removes only the `AIA…` items:
 
 ## 4. Uncertain assumptions (UNK until the import)
 
-1. **Fields:** the Pa5X may need `.txprog` attributes our writer leaves out. Our file follows the structure of Korg's example but omits some attributes (region `mode`, `release`, most soundshape fields). The likely symptom is an import error.
+1. **Fields:** the Pa5X might require `tx:created-by`, the only attribute in Korg's example that we omit (P6). Values differ from the example where the content differs (names, keys, loops). The likely symptom is an import error.
 2. **Path separator:** `/` in wave paths. Korg's drum examples use it; its piano example uses `\`.
 3. **Loop source:** whether the loop and root are read from the `.txprog`, the WAV `smpl` chunk or both. Both say the same thing (P3), so either should give the same result.
 4. **Imported names:** whether samples are named after the WAV file (then `G_5` for G#5) or the `.txprog`, and whether a 20-character Sound name is accepted as is (the dialog allows editing, MAN p.1210).

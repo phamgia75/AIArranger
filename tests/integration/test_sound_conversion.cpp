@@ -152,7 +152,13 @@ int main() {
         const Sample& s0 = org.samples[0];
         TEST("wave 0: relative path, root C1, loop end exclusive (= model loopEnd)",
              x.find("tx:path=\"AIA Demo Organ Samples/AIA OrgS C1.wav\" tx:id=\"0\" tx:root=\"C1\"") != std::string::npos &&
-             x.find("tx:start=\"" + std::to_string(s0.loopStart) + "\" tx:end=\"" + std::to_string(s0.loopEnd) + "\"") != std::string::npos);
+             x.find("tx:name=\"1\" tx:end=\"" + std::to_string(s0.loopEnd) + "\" tx:mode=\"Forward\" tx:start=\"" +
+                    std::to_string(s0.loopStart) + "\"") != std::string::npos);
+        TEST("mirrors Korg's example: empty loop 2 + full-range bounds per wave, DFD regions, UUID-shaped soundshape id, program bounds before the soundshape",
+             count("tx:name=\"2\" tx:end=\"1\" tx:mode=\"None\"") == 38 && count("tx:low-key=\"C-1\" tx:high-key=\"G9\"") >= 38 &&
+             count("tx:mode=\"DFD\"") == 38 && x.find("tx:soundshape=\"a1a0a1a0-0000-4000-8000-") != std::string::npos &&
+             x.find("created-by") == std::string::npos &&
+             x.find("</tx:wave>\n   <tx:bounds tx:high-vel=\"127\" tx:low-key=\"C-1\" tx:high-key=\"G9\" tx:low-vel=\"0\"/>\n   <tx:soundshape") != std::string::npos);
         TEST("key names span C-1..G9; Low group velocities 0-89, High 90-127",
              x.find("tx:low-key=\"C-1\" tx:high-key=\"C#1\" tx:low-vel=\"0\" tx:high-vel=\"89\"") != std::string::npos &&
              x.find("tx:low-key=\"A#6\" tx:high-key=\"G9\" tx:low-vel=\"90\" tx:high-vel=\"127\"") != std::string::npos &&

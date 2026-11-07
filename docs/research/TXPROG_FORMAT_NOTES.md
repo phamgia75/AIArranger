@@ -44,7 +44,7 @@ Sources:
 
 ## Unknowns (closed only by an import on a real Pa5X, roadmap S6)
 
-1. Whether the Pa5X needs any element or attribute that the writer leaves out (the writer omits the per-region `mode`, `release` and the soundshape's other attributes that the examples carry). If an import fails, the first step is to add the remaining example attributes.
+1. Whether the Pa5X needs `tx:created-by`. Since the S6 preflight the writer emits the same element paths, attribute names and order as Korg's example Sound, including the program-level full-range `tx:bounds` and the empty second loop on each wave, and omits only that TX16Wx build stamp.
 2. Whether a 48 kHz 16-bit mono WAV with a `smpl` chunk imports with root and loop exactly as written.
 3. Whether `/` paths are accepted (the drum examples use them).
 4. Licence: TX16Wx's free licence covers the software; it says nothing about files created with it (DOC tx16wx.com licence). The generated files are AIArranger's own output from original samples.
