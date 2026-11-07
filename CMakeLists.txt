@@ -236,6 +236,8 @@ add_test(NAME test_bridge_c_consumer COMMAND test_bridge_c_consumer)
 # KST test-dataset input samples (docs/research/KST_TEST_DATASET_SPEC.md): generator self-test.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test_kst_copy
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py --self-test)
     add_test(NAME test_make_kst_test_samples
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_kst_test_samples.py --self-test)
 endif()

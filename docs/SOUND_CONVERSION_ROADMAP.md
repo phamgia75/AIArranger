@@ -90,6 +90,7 @@ Sources, in legal order: (a) original samples synthesized by AIArranger; (b) VST
 | S6 | Procedure written; **not executed** | `docs/evidence/hardware/PA5X_SOUND_IMPORT_PROCEDURE.md`; needs owner approval (§5.1) |
 | S7 | Done (one-shot samples, mono) | `media/sound/rendered_source.h` (zones, trim, one gain, per-sample pitch report; `test_rendered_source` 16/16) + macOS `aiarranger-plugin-sampler` (AU/VST3, offline, no audio device, no MIDI port). Local functional run on Apple's DLSMusicDevice (host test only, output not kept): 18 samples, sf2-check 0 overlaps, FluidSynth pitch worst 3.2 cents (piano stretch). Limits: no loop search, stereo summed to mono |
 | S8 | Partial | `media/sound/package_writer.h`: one folder per instrument (.sf2, tx/, wav/, REPORT with % of 4 GB); refuses existing folders. Budget across several instruments not built |
+| K1 | Done (folder level) | `tools/kst_copy.py SRC DST` / `--verify DST`: copy to a partial folder, re-hash every file, re-hash the source after the copy, rename into place; SHA-256 manifest next to the copy (the KST folder stays byte-identical); refuses existing targets, DST inside SRC, symlinks. Self-test in ctest (`test_kst_copy`). No KST file is parsed. Not yet run on owner data |
 
 ## 5. Owner decisions and blockers
 
