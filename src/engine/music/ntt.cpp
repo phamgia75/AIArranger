@@ -134,6 +134,8 @@ uint8_t transpose(uint8_t note, Chord target,
     // bassNote"): in Bass mode the source root plays the chord's bass pitch class, by the smaller
     // move (C/E: up a third; C/G: down a fourth). Root position (bass == root) and bass 0 (no
     // slash information) are unchanged. The bassNote may be foreign to the chord (C/D).
+    // shortcut: per-note, so a polyphonic bass voicing (C2+E2 over C/F -> F2+E2) can leave another
+    // voice lowest; needs voicing-aware transposition if real styles stack bass notes (Codex review 7507012).
     if (ntt == NttMode::Bass && degree == 0 && target.bass != 0) {
         int b = (static_cast<int>(target.bass) - static_cast<int>(target.root)) % 12;
         if (b < 0) b += 12;
