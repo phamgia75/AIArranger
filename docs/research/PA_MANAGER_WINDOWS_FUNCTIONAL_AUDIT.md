@@ -227,6 +227,21 @@ The owner confirmed opening the File Explorer window of §3g; the session was cl
 | Sample rates seen | 24 000, 44 100 and 48 000 Hz, all 16-bit, in one KST |
 | Copy Options | Not reachable: the KST explorer is modal until a **source** KST is loaded into the right pane. Loading one was not done (it puts the `<<` copy button one click away); needs the owner's decision |
 
+## 3i. Session 2026-11-07 (5): Copy Options (source loaded, nothing copied)
+
+Owner-authorized: the research copy was loaded as the **source** of "Copy from another KST" (so source and target were the same copy). Copy Options was read tab by tab and closed with the window X (not OK); the source pane was collapsed with "<". The `<<` copy button was not touched. Integrity before (09:37) and after (09:41): 719 entries, 0 differences. No write prompt or unexpected dialog appeared.
+
+Copy Options, "AUTO SOUND COPY" (current values):
+
+| Tab | Options |
+|---|---|
+| STYLE | Automatically Copy Related USER Sounds **ON**; "Copy STYLE Tracks User Sounds" per track BASS, DK, PERC, ACC1-5 all **ON**, with a Style / Variation selector; "Copy KBD SET User Sounds" STS1-4 Off; "Copy PAD User Sounds" PAD1-4 Off; Do not Copy Muted Sounds **ON**; Do Not copy ZERO Volume Sounds Off; Do Not copy a Sound from an Empty Track Off; reMAP Missing USER Sound to Factory Off; reMAP to Factory Sound Off; Change Volume to ZERO Off; Convert MG > STD > MG **ON** |
+| KBD SET | Automatically Copy Related USER Sounds **ON**; parts UPPER 1, UPPER 2, UPPER 3, LOWER **ON**; same muted / zero-volume / reMAP-to-Factory / volume-zero filters |
+| PAD | Automatically Copy Related USER Sounds **ON** (no other options) |
+| SOUND | Automatically Copy Related USER Sounds **ON**; "Check for Duplicates": reMap to an existing Sound if a Duplicate is found **ON** |
+
+Reading (interpretation of labels, not tested by copying): copying a Style brings the User Sounds of its tracks, and optionally those of its linked Keyboard Sets (STS1-4) and Pads; muted and zero-volume parts can be skipped; a missing User Sound can be remapped to a factory Sound; a Sound that already exists in the target is reused instead of duplicated. "MG > STD > MG" is not explained in the UI (UNKNOWN).
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |

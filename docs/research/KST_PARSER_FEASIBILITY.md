@@ -10,9 +10,11 @@ Non-goals: writing or repairing KST data; reading PA Manager or Pa5X executables
 
 ## 2. Gates: all must be confirmed before byte-level work starts
 
+Provenance inventory, rights matrix, legal checklist and the private-report proposal: `KST_DATA_PROVENANCE_AND_RIGHTS.md`.
+
 | Gate | Question | Owner of the answer | Status |
 |---|---|---|---|
-| G1 Data | Which KSTs may be analysed (copies only, kept outside the repo)? The research copy is authorized for PA Manager observation; is it authorized for byte-level analysis? | Owner | **Open** |
+| G1 Data | Which KSTs may be analysed (copies only, kept outside the repo)? Owner rule 2026-11-07: byte-level analysis only for original, user-created or demonstrably authorized data. D1's provenance is UNKNOWN, so D1 is **not** cleared | Owner | **Open** (needs provenance, §1 of the rights doc) |
 | G2 Licence | Do the Pa5X and PA Manager licence terms restrict analysing *data files* the owner created or bought? Are any of those KST contents third-party commercial sets with their own terms? | Owner + legal review | **Open** |
 | G3 Method | Clean-room only: evidence comes from the data files and from PA Manager's *displayed output*, never from disassembling or debugging PA Manager or the Pa5X OS | Owner sign-off | Proposed |
 | G4 Publication | Format notes and code go in the public repo only after legal review; fixtures are synthetic | Owner + legal review | Proposed (consistent with issue #27) |

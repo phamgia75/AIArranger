@@ -120,6 +120,8 @@ So "velocity layers" belong to the Sound, and "key splits" belong to the Multisa
 | Sample | Several keys of one Drum Kit (same sample number on 2 keys) | DK Report |
 | Sample → Multisample | Not yet seen whether one Sample is in two Multisamples | UNK |
 
+PA Manager's **copy closure** (Copy Options, audit §3i) follows the same edges: a Style copy pulls the User Sounds of its 8 tracks, optionally of its 4 linked Keyboard Sets and 4 Pads, filtered by mute and volume, and dedupes against Sounds already in the target. That is the `closure()` of §6.3 with filters.
+
 PA Manager also flags **unreferenced** items: "No Ref (n)" for samples, "Check for Unused Sounds" for Sounds (a Sound with no Style/KBD SET/PAD use). It therefore keeps, or computes, a reference count per resource. Consequences for any tool, AIArranger included:
 - deleting or replacing a shared resource affects every referrer; a remap or delete is only safe after a full reverse lookup;
 - memory is per unique resource, not per use: a sample used by 9 oscillators is stored once. A disk-size sum over unique files (P2.3) is therefore the right *lower bound* shape, but not a RAM figure.
