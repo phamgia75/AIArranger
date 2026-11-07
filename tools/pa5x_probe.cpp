@@ -32,6 +32,7 @@
 #include "midi/pa5x_profile.h"
 #include <CoreMIDI/CoreMIDI.h>
 #include <mach/mach_time.h>
+#include <csignal>
 #include <cstdlib>
 #include <array>
 #include <atomic>
@@ -346,6 +347,9 @@ int send(const std::string& cmd, const std::map<std::string, std::string>& f) {
     };
     using T = uasf::MidiEventType;
     if (cmd == "note") {
+        // The hold is bounded (--ms <= 5000): a dropped SSH session (SIGHUP/SIGPIPE) or Ctrl-C must
+        // not kill us between Note On and the Note Off + All Sound Off below. SIGKILL: run `alloff`.
+        for (int sig : {SIGHUP, SIGINT, SIGTERM, SIGPIPE}) std::signal(sig, SIG_IGN);
         std::printf("send: Note On ch %d note %d vel %d, %d ms, Note Off, then All Sound Off\n", *ch + 1, note, vel, ms);
         out.send({T::NoteOn, *ch, static_cast<uint8_t>(note), static_cast<uint8_t>(vel), 0});
         waitDispatched(1);

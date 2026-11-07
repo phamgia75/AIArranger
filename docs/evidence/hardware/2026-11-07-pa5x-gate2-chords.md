@@ -1,6 +1,6 @@
 # Pa5X Gate 2: keyboard reception and chord recognition (receive only), 2026-11-07
 
-**Result: retry 12:07 = 4/4 PASS (see "Retry"); first attempt 11:36 = 4/4 BLOCKED. Nothing was transmitted in either.** Bench: Mac mini, `pa5x-probe` built from `fa780a2`, source `Pa5X KEYBOARD` (uid 534315493), `--channel any --split 60 --mode fingered`, parsed and `--raw` listeners in parallel. Pre-flight: `pa5x-doctor` KEYBOARD + SOUND online; no AIArranger / pa5x / korg-playback process; MusicAIApp, Music, Moises open (irrelevant to receiving, blocks Phase B).
+**Result: accepted by the owner as receive-path evidence. Retry 12:07 = 4/4 PASS (see "Retry"); first attempt 11:36 = 4/4 BLOCKED. Nothing was transmitted in either.** Bench: Mac mini, `pa5x-probe` built from `fa780a2`, source `Pa5X KEYBOARD` (uid 534315493), `--channel any --split 60 --mode fingered`, parsed and `--raw` listeners in parallel. Pre-flight: `pa5x-doctor` KEYBOARD + SOUND online; no AIArranger / pa5x / korg-playback process; MusicAIApp, Music, Moises open (irrelevant to receiving, blocks Phase B).
 
 ## Captures
 
@@ -18,7 +18,7 @@
 | 3 | F1-A1-C2 | F major, bass F | nothing | BLOCKED |
 | 4 | C3-E3-Bb3 (C7 no 5th; spec §4.4 partial, one tone missing) | C7, bass C | nothing | BLOCKED |
 
-## Finding
+## Finding (first attempt; hypothesis withdrawn, see "Intermittent receive")
 
 The Pa5X transmits the upper-keyboard parts over USB (ch 1 and ch 4; two parts with MIDI OUT channels) but **not the lower part below its split point**. Hypothesis, not verified: the Lower part has no MIDI OUT channel in the current MIDI preset, so lower-hand chords reach only the Pa5X's own chord recognition. This is consistent with the 11-06 record (OUT ch1 = Upper 1, nothing for Lower) but the ch 4 sender is not in that record, so the preset photo is needed.
 
@@ -35,7 +35,7 @@ Consequence for AIArranger: with this preset the engine never sees the left hand
 
 ## Retry 12:07:53-12:12:53 (300 s), line-buffered probe `addd4bc`
 
-Listeners: parsed `--channel 1 --split 128` (set up for upper-register playing) and `--raw --channel any`. The owner played the four chords in the **lower register** and the lower part **was transmitted this time, on ch 4** (status `0x93`/`0x83`); the cause of the empty 11:36 capture is not established (no Pa5X setting was changed by us; ask the owner whether anything changed on the panel). The parsed listener filtered ch 1 and so saw only right-hand single notes (G4, C5, B4 -> NoChord, correct for one note). The chords come from the raw capture; each was played twice (at ~0.2-36 s and ~60-81 s) with the same notes.
+Listeners: parsed `--channel 1 --split 128` (set up for upper-register playing) and `--raw --channel any`. The owner played the four chords in the **lower register** and the lower part **was transmitted this time, on ch 4** (status `0x93`/`0x83`); the cause of the empty 11:36 capture is not established; the owner confirmed no change to Split, LOWER, MIDI OUT channels or MIDI preset between the runs. The parsed listener filtered ch 1 and so saw only right-hand single notes (G4, C5, B4 -> NoChord, correct for one note). The chords come from the raw capture; each was played twice (at ~0.2-36 s and ~60-81 s) with the same notes.
 
 | # | Raw Note On (ch 4) | Notes | Fingered detector (engine code, replayed from these bytes) | Verdict |
 |---|---|---|---|---|
@@ -49,3 +49,32 @@ Method, stated plainly: the notes and channels are hardware evidence. The chord 
 Observations: lower part = ch 4 Note On with velocity, Note Off as `0x83` with release velocity; upper part = ch 1. Lower-hand velocities were low (13-51). The 11:31 window's ch 1 + ch 4 duplicates of C5/C6 suggest ch 4 also carries notes above the split in some keyboard modes; not resolved.
 
 Still open: the low-register "F major" check passed for F1-A1-C2; NTT/bass-register behaviour on the Pa5X itself is Gate step 3 (transmit), not tested.
+
+## Intermittent receive (unresolved)
+
+The owner confirmed (2026-11-07) that **no Pa5X setting changed** between the 11:36 run (0 notes) and the 12:07 run (93 packets). The "Lower has no MIDI OUT channel" hypothesis above is therefore **withdrawn**: the lower part is sent on **ch 4** with the unchanged configuration. Do not assume ch 2 (or any other) is the LOWER channel; ch 4 is the verified one.
+
+Comparison of the three listener runs (all on the same bench, same CoreMIDI source):
+
+| | 11:31:02 (300 s) | 11:36:08 (600 s) | 12:07:53 (300 s) |
+|---|---|---|---|
+| Probe build | `fa780a2` | `fa780a2` | `addd4bc` (stdout line-buffered only) |
+| Parsed filter | any / split 60 | any / split 60 | ch 1 / split 128 |
+| Raw filter | none (all channels) | none | none |
+| Source | `[0] Pa5X KEYBOARD` | same | same |
+| Raw non-realtime packets | 20 | **0** | 93 |
+| FE Active Sensing | 1180 (3.93/s) | 2381 (3.97/s) | 1163 (3.88/s) |
+| CoreMIDI client connection | opened 11:31:02.30, closed 11:36:02.31 | opened 11:36:08.72, closed 11:46:08.73 | opened 12:07:54.13, closed 12:12:54 |
+
+What this rules out, from evidence:
+- **Channel filtering:** the raw listener has no channel filter and also saw 0 packets.
+- **Output buffering:** the 0 is the raw listener's end-of-run counter, not missing output.
+- **Wrong or lost source:** the same named source in all runs; Active Sensing from that source arrived at the normal ~4/s rate for the whole 600 s, so the subscription was live throughout.
+- **CoreMIDI or USB reset:** `MIDIServer` is the same process (pid 69718, since 11-05); the system log 11:36-12:13 has no kernel USB, device or setup-change events, and no CoreMIDI activity other than our own tool connections.
+
+What remains open (not tested, no fix applied):
+- Whether keys were actually played inside 11:36:08-11:46:08: the owner reported "Done" ~76 s after start; no timestamped confirmation of what was played when.
+- Whether the Pa5X was in a state that suppresses note transmission while Active Sensing continues (a screen, page or mode), with no setting change.
+- Whether this is a transient USB-MIDI fault on the Pa5X side.
+
+The next step is the repeatability test in `PA5X_MIDI_VALIDATION_SEQUENCE.md` §2b, not a code or setting change.

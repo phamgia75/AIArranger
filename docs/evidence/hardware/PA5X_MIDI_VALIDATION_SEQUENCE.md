@@ -1,6 +1,6 @@
-# Pa5X MIDI hardware validation sequence (prepared 2026-11-07, NOT RUN)
+# Pa5X MIDI hardware validation sequence (prepared 2026-11-07; step 2 run and accepted, transmit steps NOT RUN)
 
-**Status: nothing in this sequence has been sent.** Every step that transmits needs the owner's explicit authorization *for that step*, given in the session, plus `--confirm-send` on the command line. Results go to a dated file next to this one; a step is PASS only with direct evidence (tool output) and, where marked, the operator's audible confirmation. Software tests passing says nothing about these results.
+**Status: nothing in this sequence has been sent.** Step 2 (receive only) was run on 2026-11-07 and accepted by the owner; see below. Every step that transmits needs the owner's explicit authorization *for that step*, given in the session, plus `--confirm-send` on the command line. Results go to a dated file next to this one; a step is PASS only with direct evidence (tool output) and, where marked, the operator's audible confirmation. Software tests passing says nothing about these results.
 
 Bench: Mac mini over SSH (key-only, strict host key). Tools built from `fa780a2` in the separate worktree `~/developer/AIArranger-pa5x-doctor` (`build/pa5x-doctor`, `build/pa5x-probe`). Below, `P=~/developer/AIArranger-pa5x-doctor/build`.
 
@@ -22,6 +22,14 @@ Bench: Mac mini over SSH (key-only, strict host key). Tools built from `fa780a2`
 
 Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5x-probe alloff --dest "Pa5X SOUND" --confirm-send` (itself a send; pre-authorized as recovery once step 1 is authorized), record, stop.
 
+### Before any transmit step (checklist, all required, re-done on the day)
+
+1. **MIDI routing rechecked:** owner photographs Settings > MIDI (IN, OUT, General) and confirms which part MIDI IN ch 1 drives; nothing changed by us.
+2. **No competing sender to Pa5X SOUND:** MusicAIApp quit, Music and Moises quit or paused, `ps` shows no other CoreMIDI app, no AIArranger tool running (checked by Claude on the bench).
+3. **Safe volume:** Pa5X master volume low, monitoring on the Pa5X or headphones only, FLOW 8 Pa5X faders down (operator).
+4. **Bounded command ready:** step 1 below; `note` sends one Note On, waits `--ms` (20-5000), sends Note Off, then All Sound Off. Since this change it ignores SIGHUP/SIGINT/SIGTERM/SIGPIPE during that window, so a dropped SSH session or Ctrl-C cannot leave the note hanging (verified by reading the code; not exercised, because exercising it means sending). Only SIGKILL or a power loss can interrupt it: then `alloff`, or the Pa5X STOP button.
+5. **Explicit owner authorization** for step 1, in the session.
+
 ### 1. Basic Note On / Off (transmit)
 - Command: `$P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send`
 - Expected: one C4 on the part that MIDI IN ch1 drives (Upper 3 in preset "Hieu"), 0.4 s, then silence.
@@ -34,6 +42,28 @@ Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5
 - Expected: each Note On/Off printed; detector names match what was played.
 - Evidence: listen output. No transmission, so it can run before step 1 is authorized.
 - Note: the Pa5X's own chord recognition from MIDI needs Chord 1/2 channels set; with them Off this step tests **AIArranger's** detector only.
+
+**Result 2026-11-07 (accepted, `2026-11-07-pa5x-gate2-chords.md`):**
+
+| Played | Received (Note On bytes) | Channel | Fingered | Fingered on Bass |
+|---|---|---|---|---|
+| C2 E2 G2 | `93 24` `93 28` `93 2B` | 4 | C major | C major, bass C2 |
+| E1 G1 C2 | `93 1C` `93 24` `93 1F` | 4 | C major (bass not carried, by design) | C major over E1 |
+| F1 A1 C2 | `93 1D` `93 21` `93 24` | 4 | F major | F major, bass F1 |
+| C2 Bb2 E2 | `93 24` `93 2E` `93 28` | 4 | C7 (partial, fifth missing) | not run |
+
+- **Verified channels:** lower part = **MIDI ch 4**; upper part = ch 1 (11:31 run: upper notes also appeared on ch 4 as duplicates; unresolved). The 11-06 record does not list ch 4; do not assume ch 2 is LOWER.
+- Chord names were computed offline from the captured bytes by the engine detectors (regression test `tests/midi/test_pa5x_probe.cpp`), not displayed live.
+- The listener for this step is therefore `--channel 4 --split 60`.
+- **Unresolved intermittent:** an earlier 600 s run (11:36) received 0 notes while Active Sensing continued and no setting was changed (owner confirmed). Comparison and what it rules out: evidence file, "Intermittent receive".
+
+### 2b. Receive repeatability (receive only; before any transmit step)
+
+Purpose: show ch 4 reception is stable, or catch the dropout with timestamps.
+
+1. Start both listeners and note the start time: `$P/pa5x-probe listen --seconds 180 --channel 4 --split 60 --mode fingered` and `$P/pa5x-probe listen --raw --seconds 180` (line-buffered since `addd4bc`, so events show live).
+2. The operator plays **C2-E2-G2 ten times**, ~2 s held, ~2 s apart, then **one C5 alone** (upper-part control), and says the time they started and stopped.
+3. PASS: 10 lines ending `-> CMajor` on ch 4 in the parsed log, the C5 on ch 1 in the raw log, and FE at ~4/s for the whole run. FAIL (intermittent reproduced): fewer than 10 with FE still arriving; record which repetitions are missing and their times. Run it **three times** (immediately, after 10 min idle, after the Pa5X screen has been changed by normal use). Nothing is transmitted and no setting is changed.
 
 ### 3. NTT low-register regression (transmit; P1.5)
 - Purpose: the bass / pad register stays in range across all 12 roots (the last hardware bug was in NTT).
