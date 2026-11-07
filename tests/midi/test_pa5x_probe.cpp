@@ -2,6 +2,7 @@
 #include "midi/pa5x_probe.h"
 #include "engine/chord/fingered_detector.h"
 #include "engine/chord/fingered_on_bass_detector.h"
+#include "engine/midi/midi_bytes.h"
 #include <cstdio>
 #include <vector>
 
@@ -95,6 +96,19 @@ int main() {
     TEST("send summary says host-side only and that All Sound Off follows",
          probe::sentSummary(2).find("not proof the device sounded") != std::string::npos &&
          probe::sentSummary(2).find("All Sound Off follows") != std::string::npos);
+
+    // Phase B 17:30 command `note --channel 1 --note 60 --vel 64`: CLI channel 1 is wire channel 0.
+    {
+        const auto c1 = probe::parseChannel("1");
+        uint8_t on3[3] = {}, off3[3] = {};
+        const size_t a = encodeMidiEvent({uasf::MidiEventType::NoteOn, c1.value_or(99), 60, 64, 0}, on3);
+        const size_t b = encodeMidiEvent({uasf::MidiEventType::NoteOff, c1.value_or(99), 60, 0, 0}, off3);
+        TEST("--channel 1 --note 60 --vel 64 is 90 3C 40, then 80 3C 00",
+             c1 == 0 && a == 3 && on3[0] == 0x90 && on3[1] == 0x3C && on3[2] == 0x40 &&
+             b == 3 && off3[0] == 0x80 && off3[1] == 0x3C && off3[2] == 0x00);
+        TEST("--channel 16 is status nibble F; 0 and 17 are refused",
+             probe::parseChannel("16") == 15 && !probe::parseChannel("0") && !probe::parseChannel("17"));
+    }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

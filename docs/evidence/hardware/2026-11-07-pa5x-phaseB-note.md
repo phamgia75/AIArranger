@@ -27,7 +27,7 @@ exit=0 17:30:08
 
 ## Confirmed facts
 
-1. CoreMIDI accepted 2 messages for the endpoint selected by the exact name `Pa5X SOUND` (uid checked by the pre-send step): `90 3C 40` then, after 400 ms, `80 3C 00`; then CC 120 (All Sound Off) at shutdown. Code path: `dispatchOne` counts `sent_count_` only on `MIDISend == noErr` (`src/engine/midi/coremidi_out.cpp`).
+1. CoreMIDI accepted 2 messages for the endpoint selected by the exact name `Pa5X SOUND` (uid checked by the pre-send step): `90 3C 40` then, after 400 ms, `80 3C 00`; then, at shutdown, **CC 123 (All Notes Off) and CC 120 (All Sound Off) on all 16 channels** (32 messages, `B0..BF 7B 00` / `B0..BF 78 00`; corrected 2026-11-07, first written as "CC 120" only). Code path: `dispatchOne` counts `sent_count_` only on `MIDISend == noErr` (`src/engine/midi/coremidi_out.cpp`).
 2. Nothing went to FLOW 8 (selection is by exact name; a second match would have refused).
 3. Pa5X MIDI IN ch 1 = **Upper 3**, from the owner's photo of Settings > MIDI > MIDI IN Channel (~17:25). MIDI OUT ch 1 = Upper 1, ch 4 = Lower. Preset "Ai Arranger". Local Control on.
 4. **No earlier bench run has ever confirmed audible output from the Mac to the Pa5X.** The 11-05 audit sent notes and a 25 s live loop with an independent send monitor, but states "Nothing in this log is an ear check". This test was the first ear check of the transmit path.
@@ -69,3 +69,37 @@ $P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 100 --ms 1500
 ```
 
 Same pre-send check, one note, Note Off, All Sound Off. A positive result proves the USB transmit path end to end; a second silent result with Upper 3 confirmed on, unmuted and audible locally points at the transport or the MIDI IN routing, to be investigated further without transmitting.
+
+## Read-only diagnostics (2026-11-07, after the owner's stop; nothing sent)
+
+### Probe channel numbering and bytes (verified by test)
+
+- `--channel 1` parses to wire channel 0, so status `0x90`/`0x80`; the command produced `90 3C 40`, then `80 3C 00`. New test `--channel 1 --note 60 --vel 64 is 90 3C 40, then 80 3C 00` and channel bounds (1-16 only) in `tests/midi/test_pa5x_probe.cpp`; the encoder's channel folding is already covered in `tests/engine/test_coremidi_out.cpp`.
+- Shutdown cleanup is `CoreMidiOut::sendAllSoundOff`: CC 123 **and** CC 120 on every channel. Consequence: every `note` command also sends All Notes Off on all 16 channels. Any future authorization must cover that, or the cleanup must be narrowed first (owner decision; not changed).
+- Timing: Note On, a 400 ms wait after it was dispatched, Note Off, then cleanup. The cleanup cannot have cut the note **before** 400 ms; it does remove any release tail.
+
+### Official documentation on MIDI IN to a muted part
+
+- Korg, *Pa-Series: Connecting an external controller* (official PDF, model-generic "Pa-Series"), p.11 and p.13: with MIDI IN Ch01 = Upper 3, an external keyboard on channel 1 plays the Upper 3 Sound; "go to the Global > MIDI > MIDI IN Controls page, and see how the **Track Mute Active** parameter has been deselected. This will let you play from an external keyboard any Sound that is set in mute in the Pa-Series instrument." The examples keep Upper 3 **muted** in the Keyboard Set on purpose.
+- Pa4X, Pa2X and Pa300 user manuals (same parameter): Track Mute Active **On** = muted tracks do not play received MIDI; **Off** = they do; the Pa4X/Pa2X/Pa300 text applies it to data from MIDI IN and the **USB Device** port.
+- **Pa5X-specific text was not found** (the Pa5X manual is not available locally; the 78 MB PDF was not retrieved). That the Pa5X has the same parameter with the same meaning is **UNVERIFIED**.
+
+Reading: a muted or switched-off Upper 3 does **not necessarily** block incoming MIDI. It blocks it if Track Mute Active (or the Pa5X equivalent) is On. So cause #1 needs **two** facts: Upper 3's mute state and the Track Mute Active state on MIDI IN Controls.
+
+### USB MIDI IN to the sound engine
+
+- Pa5X spec sheet (korg.com): "USB to MIDI through the USB Device port"; Pa4X/Pa2X manuals treat USB Device data like the MIDI IN port for these settings. The bench uses the USB Device port (`Pa5X SOUND` destination). Consistent with the documentation; **not verified for the Pa5X**, and no audible confirmation exists yet (fact 4).
+
+### Still needed from the owner (photos, no transmission)
+
+1. Settings > MIDI > **MIDI IN Controls** (Track Mute Active, and anything about velocity or octave).
+2. Settings > MIDI > **Filters** (MIDI IN filters for Note on ch 1).
+3. **Main screen**: Keyboard Set name, Upper 1/2/3 and Lower on/off (mute) state, the **Upper 3 Sound name**.
+4. **Mixer / Volume** page for the keyboard parts (Upper 3 level).
+
+### Smallest safe next hardware test (needs fresh, explicit authorization)
+
+Decide from the photos first; no transmission until then:
+- If Upper 3 is muted **and** Track Mute Active is On: the note was blocked by design. The next step is the owner's decision on the panel (unmute Upper 3 or untick Track Mute Active; both are Pa5X state changes we do not make). Then repeat the **same** command (vel 64, 400 ms; no increase without separate approval).
+- If Upper 3 can sound (unmuted, or Track Mute Active Off) and its level is > 0: repeat the **same** command once to test reproducibility, operator listening at the Pa5X.
+- Either way the command also sends CC 123 + CC 120 on 16 channels at shutdown (above); the authorization must say so.
