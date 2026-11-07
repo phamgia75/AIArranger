@@ -1,6 +1,6 @@
 # Pa5X Phase B controlled retest: one bounded Note On/Off, 2026-11-07 18:25:25
 
-**Software side:** SUCCESS. **Audible output:** HEARD (owner). Exactly one note and that it stopped: **not yet stated** by the owner.
+**Verdict (owner, 2026-11-07): PASS — Basic USB MIDI Note On/Off and audible sound generation.** Pitch verification **pending**.
 
 ## Authorization
 
@@ -27,11 +27,27 @@ Sent: `90 3C 40`, 400 ms, `80 3C 00`, then `B0 7B 00`, `B0 78 00` (channel 1 onl
 
 Owner photo after the test (Main > Mixer): **Upper 3 = "Gospel Organ", not muted, volume 62**; Upper 2 Global Concert 105 (L-30); Upper 1 NylonSlide 4x V5 90; Lower Tine EP Distorted muted 97; Pad 4 Steel Guitar RX1 84. Header "b/#: -5", key E, 93 -> 57 bpm on Player 2 "Pop '21". The owner changed the Upper 3 Sound (and the other parts differ from the 18:05 photo), so this is not the same Keyboard Set state as the first test.
 
-## Verdict
+## Owner's audible confirmation (verbatim, directive "PHASE B: OWNER AUDIBLE CONFIRMATION")
+
+> 1. Exactly one note was heard: YES.
+> 2. The note stopped after approximately 400 ms: YES.
+> 3. The pitch relative to middle C (C4): UNKNOWN — the owner could not determine it by ear.
+> 4. Sound heard: Gospel Organ, matching the Upper 3 sound shown on the Pa5X.
+
+**Tested configuration:** MIDI IN ch 1 -> Upper 3 = **Gospel Organ, volume 62/127**, not muted (owner photo after the test; the directive planned ~70, the photo shows 62). Track Mute Active OFF, MIDI filters Off (18:05 photos). Header "b/#: -5".
+
+| Verified (PASS) | Not verified |
+|---|---|
+| Mac mini transmitted MIDI to `Pa5X SOUND` (uid 1907663670) | Exact sounding pitch and the effect of "b/#: -5" (expected G3 if -5 semitones applies; not heard-verified) |
+| Pa5X produced exactly one audible organ note | Cause of the 17:30 silence (original sound, low volume 22, or another factor) |
+| The note stopped after ~400 ms | NTT, Style playback, MIDI Clock/Start/Stop, other MIDI channels, Control channel |
+| MIDI IN ch 1 triggered Upper 3 | Channel-scoped cleanup's audible effect (nothing was left sounding to clean up) |
+
+## Verdict (before the owner's confirmation)
 
 - **USB MIDI transmit path Mac -> Pa5X SOUND -> MIDI IN ch 1 -> Upper 3 -> audio: confirmed by ear for the first time.** The sound heard (organ) matches the part routed from ch 1 (Upper 3 = Gospel Organ).
 - With "b/#: -5" the C4 would sound as G3 (pitch not reported by the owner).
-- Exactly one note, and stop after ~400 ms: **to be confirmed** by the owner.
+- Exactly one note, and stop after ~400 ms: confirmed by the owner (above).
 
 ## The first (17:30) silence, revisited
 

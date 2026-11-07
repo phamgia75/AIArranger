@@ -30,7 +30,7 @@ Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5
 4. **Bounded command ready:** step 1 below; `note` sends one Note On, waits `--ms` (20-5000), sends Note Off, then All Sound Off. Since this change it ignores SIGHUP/SIGINT/SIGTERM/SIGPIPE during that window, so a dropped SSH session or Ctrl-C cannot leave the note hanging (verified by reading the code; not exercised, because exercising it means sending). Only SIGKILL or a power loss can interrupt it: then `alloff`, or the Pa5X STOP button.
 5. **Explicit owner authorization** for step 1, in the session.
 
-### Phase B gate status (2026-11-07): step 1 SENT ONCE 17:30:08 — software-side success, **no sound heard**, see `2026-11-07-pa5x-phaseB-note.md`; all transmission stopped
+### Phase B gate status (2026-11-07): step 1 attempt 1 at 17:30:08 silent (`2026-11-07-pa5x-phaseB-note.md`, kept as is); **attempt 2 at 18:25:25 PASS** (`2026-11-07-pa5x-phaseB-retest.md`); no further transmission authorized
 
 | Gate | Status |
 |---|---|
@@ -72,7 +72,7 @@ Evidence to record: tool output (bytes sent) + operator: which sound played, tha
 
 ### 1. Basic Note On / Off (transmit)
 
-**Result 2026-11-07 18:25:25: HEARD** (organ, Upper 3 = Gospel Organ at 62); software side success; one note / stop to confirm. Evidence: `2026-11-07-pa5x-phaseB-retest.md`. The 17:30 attempt was silent (`2026-11-07-pa5x-phaseB-note.md`).
+**Result 2026-11-07 18:25:25: PASS** (owner): exactly one audible note, Gospel Organ on Upper 3 (volume 62), stopped after ~400 ms. **Pitch verification pending** (owner could not judge pitch; "b/#: -5" active). Evidence: `2026-11-07-pa5x-phaseB-retest.md`. The 17:30 attempt was silent (`2026-11-07-pa5x-phaseB-note.md`).
 
 - Command: `$P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send`
 - Expected: one C4 on the part that MIDI IN ch1 drives (Upper 3 in preset "Hieu"), 0.4 s, then silence.
