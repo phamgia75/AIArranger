@@ -40,8 +40,9 @@ uint8_t korgChannelFor(uint8_t g) noexcept {
 
 const char* korgMarkerFor(SectionType t) noexcept {
     // One Chord Variation per element: Genos sections have no chord variations.
-    // Intro/Fill/Ending numbers above 2 and Break have no documented marker
-    // code (Korg tutorial table) and are reported, not guessed.
+    // Codes per Pa5X User Manual v1.4 p.1035. Break ("br", no number, no CV) is
+    // documented but held back: the exact form is unconfirmed by a Pa5X export,
+    // and Genos break import is known to be wrong (#26). It is reported instead.
     switch (t) {
         case SectionType::Main1:   return "v1cv1";
         case SectionType::Main2:   return "v2cv1";
@@ -49,10 +50,14 @@ const char* korgMarkerFor(SectionType t) noexcept {
         case SectionType::Main4:   return "v4cv1";
         case SectionType::Intro1:  return "i1cv1";
         case SectionType::Intro2:  return "i2cv1";
+        case SectionType::Intro3:  return "i3cv1";
         case SectionType::Fill1:   return "f1cv1";
         case SectionType::Fill2:   return "f2cv1";
+        case SectionType::Fill3:   return "f3cv1";
+        case SectionType::Fill4:   return "f4cv1";
         case SectionType::Ending1: return "e1cv1";
         case SectionType::Ending2: return "e2cv1";
+        case SectionType::Ending3: return "e3cv1";
         default: return nullptr;
     }
 }
@@ -118,9 +123,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         size_t secEvents = 0;
         for (const auto& t : sec.tracks) secEvents += t.events.size();
         if (!marker) {
-            row.note = sec.type == SectionType::Break
-                ? "no documented Korg marker code for Break"
-                : "Korg marker spec documents element 1-2 only for intro/fill/ending";
+            row.note = "Break not exported: marker form unconfirmed on Pa5X, Genos break import open (#26)";
             rep.dropped[kDropSection] += static_cast<uint32_t>(secEvents);
             rep.sections.push_back(row);
             continue;

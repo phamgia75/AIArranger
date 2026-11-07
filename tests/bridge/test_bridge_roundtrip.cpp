@@ -44,8 +44,9 @@ int main() {
     TEST("capabilities Ok", aiarr_engine_capabilities(eng, &caps) == AIARR_OK);
     TEST("caps contract version matches free function",
          caps.contractVersion == aiarr_contract_version());
-    TEST("caps: headless bridge has no MIDI in/out",
-         caps.hasMidiInput == 0 && caps.hasMidiOutput == 0);
+    // Contract 1.1.0: the bridge owns host-fed MIDI ports (both start disconnected).
+    TEST("caps: bridge has host MIDI in/out ports",
+         caps.hasMidiInput == 1 && caps.hasMidiOutput == 1);
 
     // ── NULL out pointer rejected even with a valid handle ──
     TEST("snapshot NULL out -> NULL_ARGUMENT",

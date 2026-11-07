@@ -1,0 +1,8 @@
+// Swift view of the C ABI (contract 1.1.0). Link with -L <cmake build dir>.
+module CAIArranger {
+    header "../../../include/aiarranger/aiarranger_engine.h"
+    link "arranger-bridge"
+    link "arranger-engine"
+    link "c++"
+    export *
+}

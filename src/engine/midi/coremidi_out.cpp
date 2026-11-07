@@ -1,4 +1,5 @@
 #include "engine/midi/coremidi_out.h"
+#include "engine/midi/midi_bytes.h"
 #include "engine/trace/latency_trace.h"
 
 #include <chrono>
@@ -17,25 +18,7 @@ namespace ai_arranger::midi {
 // ── Pure conversion (no CoreMIDI) ────────────────────────────────────
 
 size_t midiEventToBytes(const uasf::MidiEvent& ev, uint8_t* out) noexcept {
-    const uint8_t status = static_cast<uint8_t>(ev.type) | (ev.channel & 0x0F);
-    switch (ev.type) {
-        case uasf::MidiEventType::NoteOff:
-        case uasf::MidiEventType::NoteOn:
-        case uasf::MidiEventType::PolyPressure:
-        case uasf::MidiEventType::ControlChange:
-        case uasf::MidiEventType::PitchBend:
-            out[0] = status;
-            out[1] = ev.data1 & 0x7F;
-            out[2] = ev.data2 & 0x7F;
-            return 3;
-        case uasf::MidiEventType::ProgramChange:
-        case uasf::MidiEventType::ChannelPressure:
-            out[0] = status;
-            out[1] = ev.data1 & 0x7F;
-            return 2;
-        default:
-            return 0;
-    }
+    return encodeMidiEvent(ev, out);
 }
 
 // ── Name resolution helpers (control / dispatch threads only) ────────
@@ -78,6 +61,7 @@ CoreMidiOut::~CoreMidiOut() {
 
 bool CoreMidiOut::initialize(const char* clientName) noexcept {
     if (initialized_.load(std::memory_order_acquire)) return true;
+    cleanup_mask_.store(0xFFFF, std::memory_order_release);   // a new session starts with full cleanup
 
     // Hardware-transmission guard, read once here (never on the realtime path).
     const char* tx = std::getenv("AIARR_MIDI_HW_TX");
@@ -220,20 +204,18 @@ bool CoreMidiOut::selectEndpoint(MIDIEndpointRef ep, int index) noexcept {
 
 void CoreMidiOut::sendAllSoundOff(MIDIEndpointRef ep) noexcept {
     if (ep == 0 || out_port_ == 0) return;
+    uint8_t msgs[32][3];
+    const size_t n = encodeCleanup(cleanup_mask_.load(std::memory_order_acquire), msgs);
     if (!hw_tx_allowed_) {   // guard: cleanup never reaches an unauthorized endpoint
-        blocked_count_.fetch_add(32, std::memory_order_relaxed);
+        blocked_count_.fetch_add(n, std::memory_order_relaxed);
         return;
     }
-    for (uint8_t ch = 0; ch < 16; ++ch) {
-        const uint8_t ctrls[2] = {123 /*All Notes Off*/, 120 /*All Sound Off*/};
-        for (uint8_t cc : ctrls) {
-            uint8_t bytes[3] = {static_cast<uint8_t>(0xB0 | ch), cc, 0};
-            uint8_t listBuf[64];
-            MIDIPacketList* pl = reinterpret_cast<MIDIPacketList*>(listBuf);
-            MIDIPacket* pkt = MIDIPacketListInit(pl);
-            pkt = MIDIPacketListAdd(pl, sizeof(listBuf), pkt, /*timestamp=*/0, 3, bytes);
-            if (pkt) MIDISend(out_port_, ep, pl);
-        }
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t listBuf[64];
+        MIDIPacketList* pl = reinterpret_cast<MIDIPacketList*>(listBuf);
+        MIDIPacket* pkt = MIDIPacketListInit(pl);
+        pkt = MIDIPacketListAdd(pl, sizeof(listBuf), pkt, /*timestamp=*/0, 3, msgs[i]);
+        if (pkt) MIDISend(out_port_, ep, pl);
     }
 }
 

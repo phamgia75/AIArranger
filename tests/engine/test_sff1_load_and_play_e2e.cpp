@@ -245,14 +245,16 @@ static void runFixture(const std::string& label, const std::string& needle) {
 
     // ── The chord's octave never moves the pattern (Pa5X 2026-11-05) ──
     // A left-hand F2 and an F4 are the same chord: identical output, and the bass
-    // stays in its recorded register instead of dropping ~1.5 octaves.
+    // stays in its recorded register instead of dropping ~1.5 octaves. Since the
+    // CASM High Key applies (2026-11-06) a root above it plays an octave down
+    // (High Key D#: F bass = C bass - 7), so the register bound is +-11.
     const Captured f2 = playAndCapture(mr.style, {arranger::ChordType::Major, 41, 0, 0});
     const Captured f4 = playAndCapture(mr.style, {arranger::ChordType::Major, 65, 0, 0});
     TEST((label + ": F2 and F4 chords give an identical note stream").c_str(),
          f2.noteStreamHash == f4.noteStreamHash && f2.noteOn == f4.noteOn);
     if (c.bassMax >= 0)
-        TEST((label + ": bass over F2 stays within C-chord bass range +0..11").c_str(),
-             f2.bassMin >= c.bassMin - 2 && f2.bassMax <= c.bassMax + 11);
+        TEST((label + ": bass over F2 stays within C-chord bass range +-11").c_str(),
+             f2.bassMin >= c.bassMin - 11 && f2.bassMax <= c.bassMax + 11);
 
     std::printf("  [bass range] C:%d..%d F2:%d..%d F4:%d..%d\n", c.bassMin, c.bassMax,
                 f2.bassMin, f2.bassMax, f4.bassMin, f4.bassMax);

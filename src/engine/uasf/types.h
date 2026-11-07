@@ -19,6 +19,10 @@ enum class MidiEventType : uint8_t {
     ProgramChange    = 0xC0,
     ChannelPressure  = 0xD0,
     PitchBend        = 0xE0,
+    // System Real-Time (1 byte, `channel` ignored). Output only, never in a style.
+    TimingClock      = 0xF8,
+    Start            = 0xFA,
+    Stop             = 0xFC,
 };
 
 struct MidiEvent {
@@ -94,6 +98,15 @@ struct ArticulationMetadata {
     PlaybackRecommendation recommended;
     uint8_t ntr = 0;             // Note Transposition Rule (0=Root,1=Fifth,2=Chord,3=Bass,6=Fixed)
     uint8_t ntt = 0;             // Note Transposition Table (from CASM)
+    // Register limits applied after NTR/NTT (CASM Ctb2; defaults = no effect):
+    uint8_t high_key = 11;       // 0-11: chord roots above this pitch class play an octave down
+    uint8_t note_low = 0;        // octave-fold notes below this MIDI note up
+    uint8_t note_high = 127;     // octave-fold notes above this MIDI note down
+    bool hasRegisterLimits() const noexcept { return high_key != 11 || note_low != 0 || note_high != 127; }
+    // What the UASF 'TRNS' block may hold (writer and reader share this rule).
+    static bool registerLimitsValid(uint8_t hk, uint8_t lo, uint8_t hi) noexcept {
+        return hk <= 11 && hi <= 127 && lo <= hi && hi - lo >= 11;
+    }
     std::string vendor;
     std::string vendor_articulation;
     bool has_keyswitch = false;

@@ -2,33 +2,13 @@
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/chord_input.h"
+#include "session/chord_label.h"
 
 namespace ai_arranger::app {
 
 namespace {
-const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F",
-                              "F#", "G", "G#", "A", "A#", "B"};
-
-const char* chordTypeName(arranger::ChordType t) {
-    using CT = arranger::ChordType;
-    switch (t) {
-        case CT::Major: return "";       case CT::Minor: return "m";
-        case CT::Dim:   return "dim";    case CT::Aug:   return "aug";
-        case CT::Maj7:  return "maj7";   case CT::Min7:  return "m7";
-        case CT::Dom7:  return "7";      case CT::Dim7:  return "dim7";
-        case CT::Sus4:  return "sus4";   case CT::Sus2:  return "sus2";
-        case CT::Power: return "5";      default:        return "";
-    }
-}
-
 juce::String formatChord(const session::EngineSnapshot& s) {
-    if (static_cast<arranger::ChordType>(s.chordType) == arranger::ChordType::NoChord)
-        return "--";
-    juce::String name = kNoteNames[s.chordRoot % 12];
-    name << chordTypeName(static_cast<arranger::ChordType>(s.chordType));
-    if (s.chordBass != 0 && s.chordBass != s.chordRoot)
-        name << "/" << kNoteNames[s.chordBass % 12];
-    return name;
+    return juce::String(session::chordLabel(s.chordType, s.chordRoot, s.chordBass));
 }
 
 void styleLabel(juce::Label& l, const juce::String& text, float pt = 15.0f) {
@@ -161,12 +141,13 @@ void LiveHostComponent::loadStyleDialog() {
         // reloadStyle() quiesces the engine tick thread (stopTimer blocks until the
         // in-flight callback returns) before swapping, so the load never races
         // tick(). Transport is left stopped — press Start to play the new style.
-        driver_.reloadStyle(mr.style);
+        driver_.reloadStyle(mr.style, midi::sffPartLayout());   // SFF1 part channels 9-16
         styleLabel(styleLabel_, "Style: " + juce::String(f.getFileNameWithoutExtension()));
     });
 }
 
 void LiveHostComponent::timerCallback() {
+    driver_.midiIn().pollReconnect();   // re-attach the selected input after a USB replug
     const auto s = driver_.facade().snapshot();
 
     chordLabel_.setText(formatChord(s), juce::dontSendNotification);

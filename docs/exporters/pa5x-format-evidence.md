@@ -16,7 +16,8 @@ until §5 passes on a real instrument (see `docs/policy/CLAIMS_AND_RELEASE_NOTES
 
 - SMF **format 0** only.
 - Style track / MIDI channel table: Bass 9, Drum 10, Percussion 11, Acc1-Acc5 12-16. Other channels are ignored on import.
-- Marker names `EnCVn`, **lowercase only**: E = `v` variation, `i` intro, `f` fill, `e` ending. Element number 1-4 for variations, 1-2 for the rest. `cv` is fixed. CV number 1-6 for variations, 1-2 for the rest. Valid: `i1cv2`, `v4cv3`. Rejected: `V1cv2`, `v1CV2`, `intro i1cv2`, `v1cv1 chorus`.
+- Marker names `EnCVn`, **lowercase only**: E = `v` variation, `i` intro, `f` fill, `e` ending, `br` break. `cv` is fixed. Valid: `i1cv2`, `v4cv3`. Rejected: `V1cv2`, `v1CV2`, `intro i1cv2`, `v1cv1 chorus`.
+  - **Pa5X User Manual v1.4 p.1035-1036** (korg.com/us/support/download/manual/0/895/5309/, read 2026-11-06) widens the 2009 tutorial's ranges: element number "'1'~'4' for Variations and Fills, '1'~'3' for Intros and Endings. The Break has no number." CV number "1~6 for Variations, 1~2 for all the others; the Break has no Chord Variations." The validator follows this grammar (`br` accepted, `brcv1`/`br1` rejected).
 - Marker order inside the SMF does not matter.
 - Moved to the element header on import: Time signature (**mandatory**), CC0/CC32, Program Change, CC11. CC0, CC32 and PC **must be at tick 0** of each CV.
 - Import: Initialize checked for a new style; SHIFT + Execute imports every marker in one pass.
@@ -27,8 +28,8 @@ until §5 passes on a real instrument (see `docs/policy/CLAIMS_AND_RELEASE_NOTES
 
 | Question | Conservative choice |
 |---|---|
-| Marker code for **Break** | Break is not exported. It is reported. |
-| Codes for Intro 3, Fill 3-4, Ending 3 (Pa5X has these elements, but the 2009 table stops at 2) | Not exported. They are reported. |
+| Exact **Break** marker (`br` per the manual's grammar, but no example is given) | Break is not exported. It is reported. Also held back by issue #26 (Genos break import). |
+| Intro 3 / Fill 3-4 / Ending 3 | **Resolved 2026-11-06** by Pa5X manual v1.4 p.1035: exported as `i3cv1`, `f3cv1`, `f4cv1`, `e3cv1`. Note: the Pa5X Control-channel table calls Intro 3 "Intro 3/Count In" (p.613); whether a Genos Intro C sounds right there is a hardware check. |
 | Accepted PPQN | Source resolution is kept (1920). `--ppqn N` rescales exactly if Pa5X rejects it. |
 | Whether a tempo meta event is used | One FF 51 is written at tick 0. Also set the tempo on Pa5X. |
 | Default Key/Chord and Chord Table after Initialize | Not encodable in the SMF. Set them on Pa5X (§4). |
@@ -46,8 +47,9 @@ Exit codes: 0 means written and validated. 1 means a usage or input error. 2 mea
 
 ## 3. Mapping tables
 
-**Sections**: Main A-D → `v1cv1`..`v4cv1`; Intro A/B → `i1cv1`/`i2cv1`; Fill In AA/BB → `f1cv1`/`f2cv1`; Ending A/B → `e1cv1`/`e2cv1`.
-Not exported (reported): Intro C, Fill In CC/DD, Ending C, and Break (Genos "Fill In BA").
+**Sections**: Main A-D → `v1cv1`..`v4cv1`; Intro A/B/C → `i1cv1`..`i3cv1`; Fill In AA/BB/CC/DD → `f1cv1`..`f4cv1`; Ending A/B/C → `e1cv1`..`e3cv1`.
+Not exported (reported): Break (Genos "Fill In BA").
+Since 2026-11-06 (`feat/pa5x-first-baseline`) the POP_ACOUSTIC_2 export has 10 elements (Fill CC/DD added); its SHA-256 is no longer the `f31d3058…` recorded in `docs/evidence/hardware/2026-11-05-pa5x-midi-audit.md`.
 That last one includes the C_WHISPER 10-bar block with its unmarked 9-bar tail (issue #26).
 Zero-length and duplicate sections are reported.
 Every element gets one Chord Variation (`cv1`), because Genos sections have no chord variations.
@@ -102,7 +104,7 @@ The fill-in result form, with the round-trip compare step, is `pa5x-hardware-val
 
 1. Copy `X.mid` to a USB stick (or the Pa5X internal drive over USB).
 2. On Pa5X, choose any User style and open Style Edit > Menu > Import/Export > Import SMF. Select the file, check **Initialize**, then press **SHIFT + Execute**. Record the exact message if it fails.
-3. Confirm the elements appear: Variation 1-4, Intro 1-2, Fill 1-2, Ending 1, and Ending 2 where present.
+3. Confirm the elements appear: Variation 1-4, Intro 1-3, Fill 1-4, Ending 1-3, where the source has them.
 4. Set Key/Chord to C Maj7 for each element (the Genos source chord). Set the Chord Table so every chord uses CV1. Set tempo. Assign Sounds from the report's family column.
 5. Play Variation 1-4, Fill, Intro and Ending. Use C, Am, G7 and Bdim. Check that bass follows the root, chords follow the quality, and drums do not transpose.
 6. Check CLASSIC_6_8: the meter is 6/8 and no extra measure is appended to any element.
@@ -113,6 +115,6 @@ The fill-in result form, with the round-trip compare step, is `pa5x-hardware-val
 ## 6. Open blockers
 
 1. **Hardware**: there is no Pa5X result yet for steps 2-8 of §5.
-2. **Break / Intro 3 / Fill 3-4 / Ending 3 marker codes**: not in public docs. A Pa5X Export SMF from step 8 resolves this.
-3. **Pa5X sound and drum-kit numbers**: there is no lawful table. The owner must provide a `--sound-map`, or the sounds are assigned on the instrument.
+2. **Break marker form**: the manual's grammar gives `br`, without an example. A Pa5X Export SMF from step 8 confirms it. Intro 3 / Fill 3-4 / Ending 3 codes are resolved by the v1.4 manual (§1).
+3. **Pa5X sound and drum-kit numbers**: the Pa5X User Manual v1.4 appendix (from p.1572) lists CC0 / CC32 / Program Change for every factory Sound (e.g. Austrian Grand = 121 / 20 / 0). Building a `--sound-map` from it is now possible; reproducing the full table in this repo needs an owner decision. Until then the owner provides a `--sound-map`, or the sounds are assigned on the instrument.
 4. **Native KST style container**: undocumented. Out of scope unless the owner provides Pa5X files and approves a reverse-engineering effort.

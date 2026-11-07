@@ -79,6 +79,11 @@ constexpr uint32_t kFlagExtensions = 1u << 0;
 // 'TMPO': style tempo, payload = uint32 whole BPM in [kMinTempoBpm, kMaxTempoBpm]
 // (types.h). Absent = no stored tempo (the reader uses 120 BPM, as v1.0 did).
 constexpr uint32_t kExtTempo = 0x4F504D54;
+// 'TRNS': per-track register limits (ArticulationMetadata high_key/note_low/
+// note_high), payload = N x {u8 section, u8 track, u8 high_key 0-11, u8 note_low,
+// u8 note_high}, note_high - note_low >= 11. Written only for tracks that differ
+// from the defaults (11, 0, 127); absent = defaults, as before.
+constexpr uint32_t kExtTranspose = 0x534E5254;
 
 // ── Validation constants ───────────────────────────────────────────
 

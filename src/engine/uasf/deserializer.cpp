@@ -147,7 +147,7 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
     // ── Extension blocks (v1.1): only when flagged; v1.0 files never set the
     // flag, and trailing bytes without it are ignored as before. ─────────────
     if (header.flags & format::kFlagExtensions) {
-        bool haveTempo = false;
+        bool haveTempo = false, haveTrns = false;
         while (pos_ < size_) {
             if (!ensure(sizeof(format::ExtensionHeader))) {
                 result.error = "Truncated extension header";
@@ -158,6 +158,25 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
             if (ext.length > size_ - pos_) {
                 result.error = "Truncated extension block";
                 return result;
+            }
+            if (ext.tag == format::kExtTranspose) {
+                if (haveTrns || ext.length % 5 != 0) {
+                    result.error = haveTrns ? "Duplicate transposition block" : "Malformed transposition block";
+                    return result;
+                }
+                for (uint32_t k = 0; k < ext.length / 5; ++k) {
+                    const uint8_t si = readU8(), ti = readU8();
+                    const uint8_t hk = readU8(), lo = readU8(), hi = readU8();
+                    if (si >= style.sections.size() || ti >= style.sections[si].tracks.size() ||
+                        !ArticulationMetadata::registerLimitsValid(hk, lo, hi)) {
+                        result.error = "Invalid transposition entry " + std::to_string(k);
+                        return result;
+                    }
+                    auto& a = style.sections[si].tracks[ti].articulation;
+                    a.high_key = hk; a.note_low = lo; a.note_high = hi;
+                }
+                haveTrns = true;
+                continue;
             }
             if (ext.tag != format::kExtTempo) {   // unknown: keep verbatim for the writer
                 const uint8_t* blk = data_ + pos_ - sizeof(ext);

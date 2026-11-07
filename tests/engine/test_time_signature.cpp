@@ -69,7 +69,13 @@ int main() {
             if (mr.style.sections[i].type == uasf::SectionType::Fill1) fillAA = static_cast<int>(i);
         }
         p.start(mainA);
-        auto runTo = [&](int64_t tick) { while (clk.getPosition() < tick) { clk.advance(48); p.tick(); sch.advanceTo(clk.getPosition()); } };
+        // Bounded: a stopped clock never advances, so a failed start must fail the
+        // test instead of spinning forever.
+        auto runTo = [&](int64_t tick) {
+            for (int guard = 0; clk.getPosition() < tick && guard < 1'000'000; ++guard) {
+                clk.advance(48); p.tick(); sch.advanceTo(clk.getPosition());
+            }
+        };
         runTo(5760 + 10);                 // inside bar 1
         p.fill();                         // commits at bar 2 (tick 11520)
         runTo(2 * 5760 + 10);

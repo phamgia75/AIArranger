@@ -136,6 +136,28 @@ int main() {
              sink.events[1].action == ControlAction::Sustain);
     }
 
+    // ── More than 64 messages in one packet (CoreMidiIn::readProc used a fixed msgs[64]) ──
+    {
+        std::vector<uint8_t> big;   // 70 Note Offs on ch 4, explicit status (as the Pa5X sends)
+        for (int k = 0; k < 70; ++k) { big.push_back(0x83); big.push_back(static_cast<uint8_t>(30 + k)); big.push_back(0x40); }
+        std::vector<MidiInputMessage> got;
+        const size_t n = forEachMidiInput(big.data(), big.size(), [&](const MidiInputMessage& m) { got.push_back(m); });
+        bool all = n == 70 && got.size() == 70;
+        for (size_t k = 0; all && k < got.size(); ++k)
+            all = got[k].type == MidiInMsgType::NoteOff && got[k].channel == 3 && got[k].data1 == 30 + k;
+        TEST("forEachMidiInput: 70 messages in one packet, none lost, in order", all);
+        MidiInputMessage cap[64];
+        TEST("parseMidiInput keeps its maxOut contract (64 of 70)", parseMidiInput(big.data(), big.size(), cap, 64) == 64);
+        CaptureSink sink;
+        TEST("routeMidiBytes routes all 70", routeMidiBytes(big.data(), big.size(), sink) == 70 && sink.events.size() == 70);
+        // The same parse as before for running status, realtime inside a message, and a partial tail.
+        const uint8_t rs[] = {0x93, 36, 50, 40, 51, 0xFE, 43, 52, 0x83, 36};
+        std::vector<MidiInputMessage> r;
+        forEachMidiInput(rs, sizeof rs, [&](const MidiInputMessage& m) { r.push_back(m); });
+        TEST("forEachMidiInput: running status + FE kept, partial tail dropped",
+             r.size() == 3 && r[0].data1 == 36 && r[1].data1 == 40 && r[2].data1 == 43 && r[2].type == MidiInMsgType::NoteOn);
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }

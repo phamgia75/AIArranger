@@ -49,12 +49,19 @@ enum class NttMode : uint8_t {
     Dorian,
 };
 
+// Register limits (CASM High Key / Note Limit). Defaults change nothing.
+struct RegisterLimits {
+    uint8_t highKey  = 11;    // RootTransposition: a root pitch class above it shifts down an octave
+    uint8_t noteLow  = 0;     // after transposition, fold up by octaves into [noteLow, noteHigh]
+    uint8_t noteHigh = 127;   // (only when the range spans >= 12 notes)
+};
+
 // Transpose one recorded note into `target`. `srcRootMidi` is the MIDI root of
 // the style's source reference chord (60 = C by convention). Returns a clamped
 // MIDI note (0..127).
 uint8_t transpose(uint8_t note, Chord target,
                   NtrRule ntr, NttMode ntt,
-                  uint8_t srcRootMidi = 60) noexcept;
+                  uint8_t srcRootMidi = 60, RegisterLimits limits = {}) noexcept;
 
 // Default (NTR, NTT) pair for a track role, used when a track carries no
 // explicit CASM transposition metadata. Vendor-agnostic mapping.

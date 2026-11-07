@@ -38,3 +38,17 @@ target_link_libraries(aiarranger-macos PRIVATE
     juce::juce_gui_extra
     juce::juce_audio_basics
     juce::juce_audio_devices)
+
+# ── P2.5 UI smoke test: the real LiveHostComponent, headless-safe ───────
+# Same sources as the app minus Main.cpp. Runs only in BUILD_MACOS_APP builds.
+juce_add_console_app(aiarranger-app-smoke PRODUCT_NAME "aiarranger-app-smoke")
+set(MACOS_APP_LIB_SRC ${MACOS_APP_SRC})
+list(FILTER MACOS_APP_LIB_SRC EXCLUDE REGEX "Main\\.cpp$")
+target_sources(aiarranger-app-smoke PRIVATE Tests/app_smoke.cpp ${MACOS_APP_LIB_SRC})
+target_compile_definitions(aiarranger-app-smoke PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(aiarranger-app-smoke PRIVATE
+    platform-apple importer-sff1
+    juce::juce_gui_extra juce::juce_audio_basics juce::juce_audio_devices)
+add_test(NAME test_app_smoke COMMAND aiarranger-app-smoke)
+set_tests_properties(test_app_smoke PROPERTIES ENVIRONMENT "AIARR_MIDI_HW_TX=0" RUN_SERIAL TRUE)

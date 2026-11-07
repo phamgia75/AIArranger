@@ -29,13 +29,26 @@ RealtimeClock::RealtimeClock() {
     recalcDerived();
 }
 
+void RealtimeClock::rebase() noexcept {
+    ensureCache();
+    const int64_t samples = sample_position_.load(std::memory_order_acquire);
+    const double tps = ticks_per_sample_.load(std::memory_order_acquire);
+    const double base = tick_base_.load(std::memory_order_relaxed);
+    if (tps > 0.0)
+        tick_base_.store(base + static_cast<double>(samples - sample_base_.load(std::memory_order_relaxed)) * tps,
+                         std::memory_order_relaxed);
+    sample_base_.store(samples, std::memory_order_release);
+}
+
 void RealtimeClock::setSampleRate(uint32_t sampleRate) noexcept {
+    rebase();
     sample_rate_.store(sampleRate, std::memory_order_relaxed);
     config_generation_.fetch_add(1, std::memory_order_release);
     recalcDerived();
 }
 
 void RealtimeClock::setTempo(uint32_t bpm) noexcept {
+    rebase();
     tempo_bpm_.store(bpm, std::memory_order_relaxed);
     config_generation_.fetch_add(1, std::memory_order_release);
     recalcDerived();
@@ -56,6 +69,8 @@ void RealtimeClock::setTimeSignature(uint32_t beatsPerBar, uint32_t beatNote) no
 
 void RealtimeClock::reset() noexcept {
     sample_position_.store(0, std::memory_order_release);
+    tick_base_.store(0.0, std::memory_order_relaxed);
+    sample_base_.store(0, std::memory_order_release);
     last_mach_time_.store(0, std::memory_order_release);
     cache_generation_.store(0, std::memory_order_release);
 }
@@ -90,9 +105,11 @@ void RealtimeClock::start() noexcept {
 int64_t RealtimeClock::getPosition() const noexcept {
     ensureCache();
     double tps = ticks_per_sample_.load(std::memory_order_acquire);
-    if (tps <= 0.0) return 0;
-    int64_t samples = sample_position_.load(std::memory_order_acquire);
-    return static_cast<int64_t>(static_cast<double>(samples) * tps);
+    const double base = tick_base_.load(std::memory_order_relaxed);
+    if (tps <= 0.0) return static_cast<int64_t>(base);
+    const int64_t samples = sample_position_.load(std::memory_order_acquire) -
+                            sample_base_.load(std::memory_order_acquire);
+    return static_cast<int64_t>(base + static_cast<double>(samples) * tps);
 }
 
 int64_t RealtimeClock::getSamplePosition() const noexcept {

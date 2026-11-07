@@ -25,8 +25,8 @@ namespace ai_arranger::session {
 // Bumped only when the public contract changes. MAJOR breaks ABI/behaviour (never
 // silently); MINOR appends enumerators/fields with defaults; PATCH is docs/impl.
 inline constexpr uint32_t kEngineContractVersionMajor = 1;
-inline constexpr uint32_t kEngineContractVersionMinor = 0;
-inline constexpr uint32_t kEngineContractVersionPatch = 3;  // 1.0.3: hasSuspendResume reports a callable API (#19)
+inline constexpr uint32_t kEngineContractVersionMinor = 1;  // 1.1.0: style load, chord mode, host MIDI ports (P2.4)
+inline constexpr uint32_t kEngineContractVersionPatch = 0;  // (1.0.3: hasSuspendResume reports a callable API, #19)
 inline constexpr uint32_t kEngineContractVersion =
     (kEngineContractVersionMajor << 16) |
     (kEngineContractVersionMinor << 8)  |
