@@ -233,6 +233,13 @@ target_compile_options(test_bridge_c_consumer PRIVATE
 target_link_libraries(test_bridge_c_consumer arranger-bridge arranger-engine Threads::Threads)
 add_test(NAME test_bridge_c_consumer COMMAND test_bridge_c_consumer)
 
+# KST test-dataset input samples (docs/research/KST_TEST_DATASET_SPEC.md): generator self-test.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_make_kst_test_samples
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_kst_test_samples.py --self-test)
+endif()
+
 # The Apple-only tests talk to the system CoreMIDI server. Under a full
 # parallel ctest run, client creation occasionally fails (MIDIClientCreate
 # OSStatus -304) and keeps failing in that process for over a second, while the

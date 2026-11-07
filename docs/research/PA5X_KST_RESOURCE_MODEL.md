@@ -187,13 +187,18 @@ Only documented behaviour is used, with no PA Manager code and no decoding of pr
        std::vector<Edge> usersOf(NodeId) const;                        // reverse lookup ("Search Where used")
        std::vector<Edge> usesOf(NodeId) const;                         // forward
        uint32_t refCount(NodeId) const;                                // 0 = unused / "No Ref"
-       std::vector<NodeId> closure(NodeId) const;                      // everything a Style needs (merge plan, memory)
+       struct ClosureOptions {                                          // mirrors PA Manager Copy Options (audit §3i)
+           uint8_t styleTracks = 0xFF;                                  // BASS, DK, PERC, ACC1-5
+           bool keyboardSets = false, pads = false;                     // STS1-4, PAD1-4 (off by default)
+           bool skipMuted = true, skipZeroVolume = false, skipEmptyTrack = false;
+       };
+       std::vector<NodeId> closure(NodeId, ClosureOptions = {}) const;  // everything a Style needs (merge plan, memory)
    };
    Graph load(const std::filesystem::path& kstCopy);                   // never writes; nodes only until P1.10
    }
    ```
 
-   Rules: no mutating calls; every edge carries its `Source`; `closure()` feeds a future memory estimate over **unique** samples and a future merge *plan* (no writes). Implementation waits for P1.10; writing this code now would only produce an empty graph.
+   Rules: no mutating calls; every edge carries its `Source`; `closure()` defaults to PA Manager's observed Copy Options defaults; dedup against a target (PA Manager's "reMap to an existing Sound if a Duplicate is found") is a separate, later merge-*plan* step, not part of the graph; `closure()` feeds a future memory estimate over **unique** samples and a future merge *plan* (no writes). Implementation waits for P1.10; writing this code now would only produce an empty graph.
 4. **Write / merge:** not planned. If it ever is, it must reproduce the §4 semantics (grid positions, Replace All vs merge, the User Sample deletion rule).
 
 Parser feasibility plan, gates and oracle: `KST_PARSER_FEASIBILITY.md`.

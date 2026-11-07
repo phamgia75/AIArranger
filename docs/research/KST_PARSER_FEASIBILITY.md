@@ -59,7 +59,7 @@ Order of attack, cheapest validation first: (1) Multisample → Sample (one cont
 4. Implement it in a bounds-checked reader (the `sf2-check` pattern: every offset validated, every prefix of a file must fail cleanly; ASan/UBSan job).
 5. Tag the resulting edges `DecodedValidated`; anything else stays out of the graph.
 
-Controlled-change analysis (save a Sound on the Pa5X with one parameter changed, then diff) would be faster but needs the hardware workstream and the owner's explicit approval to save data on the instrument.
+Controlled-change analysis would be faster: the original dataset and its one-change variants are specified in `KST_TEST_DATASET_SPEC.md`. Creating them needs the hardware workstream and the owner's explicit approval to save data on the instrument.
 
 ## 6. Exit criteria
 

@@ -1,0 +1,61 @@
+# Pa5X MIDI hardware validation sequence (prepared 2026-11-07, NOT RUN)
+
+**Status: nothing in this sequence has been sent.** Every step that transmits needs the owner's explicit authorization *for that step*, given in the session, plus `--confirm-send` on the command line. Results go to a dated file next to this one; a step is PASS only with direct evidence (tool output) and, where marked, the operator's audible confirmation. Software tests passing says nothing about these results.
+
+Bench: Mac mini over SSH (key-only, strict host key). Tools built from `fa780a2` in the separate worktree `~/developer/AIArranger-pa5x-doctor` (`build/pa5x-doctor`, `build/pa5x-probe`). Below, `P=~/developer/AIArranger-pa5x-doctor/build`.
+
+## 0. Pre-flight (read-only, done 2026-11-07 ~10:00 unless marked)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Device availability | **OK**: `Pa5X KEYBOARD` uid 534315493 and `Pa5X SOUND` uid 1907663670 online; FLOW 8 also attached | `pa5x-doctor`, `2026-11-07-pa5x-redetection.md` |
+| Only one destination named exactly `Pa5X SOUND` | **OK** (the probe refuses otherwise) | doctor listing |
+| Send guard | **OK**: `pa5x-probe alloff --dest "Pa5X SOUND"` without `--confirm-send` refused, nothing sent | bench output |
+| Competing MIDI processes | **ATTENTION**: no DAW or AIArranger tool running, but **MusicAIApp** (links CoreMIDI, running since 11-05), **Music** and **Moises** are open; Audio MIDI Setup is open | `ps`, `otool -L` |
+| MIDI channel configuration | **Owner check.** Last recorded (11-06 photos, preset "Hieu"): MIDI OUT ch1 = Upper 1; MIDI IN ch1 = Upper 3, ch9-16 = Player 1 Style tracks; Chord 1/2 Off; Clock Send Off; Local On. Not re-verified today | `2026-11-06-pa5x-gate1-raw.md` |
+| Safe volume and monitoring | **Owner check**: Pa5X master volume low (about 1/4), monitoring on the Pa5X speakers or headphones only, FLOW 8 faders for the Pa5X channel down | operator |
+| Panic / recovery | **Ready**: `pa5x-probe alloff` sends All Sound Off (CC120) + All Notes Off (CC123) on all 16 channels; `note` ends with All Sound Off automatically. Manual fallback: the Pa5X STOP button, then reselect the Sound | tool header |
+
+**Owner actions before step 1:** quit MusicAIApp (or confirm it has no MIDI output to the Pa5X), pause Music and Moises, set the volume and monitoring above, photograph Settings > MIDI (IN, OUT, General) so channels are verified rather than remembered.
+
+## Tests (each needs its own authorization)
+
+Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5x-probe alloff --dest "Pa5X SOUND" --confirm-send` (itself a send; pre-authorized as recovery once step 1 is authorized), record, stop.
+
+### 1. Basic Note On / Off (transmit)
+- Command: `$P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send`
+- Expected: one C4 on the part that MIDI IN ch1 drives (Upper 3 in preset "Hieu"), 0.4 s, then silence.
+- Evidence: tool output (`MIDISend` / bytes) + **operator: heard one note, it stopped**.
+- Then: `alloff` once, operator confirms nothing changed (silence stays silence).
+
+### 2. Keyboard reception and chord recognition (receive only)
+- Command: `$P/pa5x-probe listen --seconds 30 --channel 1 --split 60 --mode fingered`
+- Operator plays below the split: C, Am, F/C, G7/B, C/E, C/G (inversions are P0.1), one each, 2 s apart.
+- Expected: each Note On/Off printed; detector names match what was played.
+- Evidence: listen output. No transmission, so it can run before step 1 is authorized.
+- Note: the Pa5X's own chord recognition from MIDI needs Chord 1/2 channels set; with them Off this step tests **AIArranger's** detector only.
+
+### 3. NTT low-register regression (transmit; P1.5)
+- Purpose: the bass / pad register stays in range across all 12 roots (the last hardware bug was in NTT).
+- **Tool gap:** no bounded, non-interactive command plays a converted style through the engine with a 12-root chord cycle on the Pa5X style-track channels. `korg-playback` is interactive, sends on the style's own channels (not ch9-16) and cycles 6 chords. Needs engineering first (see "Gaps").
+- Evidence when run: an event log of notes per channel per root + **operator: no octave jump or out-of-register bass**.
+
+### 4. Style-track routing (transmit; P0.4)
+- Command, per channel 9..16: `$P/pa5x-probe note --dest "Pa5X SOUND" --channel N --note 48 --ms 500 --confirm-send`
+- Expected (Default-preset mapping, manual p.585-588; preset "Hieu" lists ch9-16 = Player 1 Style tracks): ch9-16 → the 8 Style tracks in order. Operator names the track that sounds for each.
+- Evidence: 8 tool outputs + operator's track name per channel. This decides whether the engine's `genosStyleTrackMap` matches the owner's preset.
+
+### 5. Style playback (transmit)
+- 5a, Pa5X's own arranger via Control channel (P0.5): `$P/pa5x-probe control --dest "Pa5X SOUND" --channel C --cmd variation1 --confirm-send` and `playstop1`. **Blocked**: preset "Hieu" has no Control channel recorded; the owner must set one (a Pa5X settings change, separate approval) or confirm an existing one.
+- 5b, AIArranger engine playback to the Pa5X tracks: same tool gap as step 3.
+
+### 6. MIDI Clock, Start, Stop (transmit; P0.6)
+- Owner sets Pa5X Clock Source = External (USB) (resets to Internal at power-on, manual p.594; a settings change, separate approval).
+- Command: `$P/pa5x-probe clock --dest "Pa5X SOUND" --bpm 100 --beats 8 --confirm-send`, then `--bpm 140`.
+- Expected: Pa5X tempo display follows (100, then 140); with a Style selected, Start starts and Stop stops it.
+- Evidence: tool output + operator photo of the tempo display + **operator: started and stopped on cue**.
+
+## Gaps before steps 3 and 5b
+
+1. A bounded `pa5x-probe play` (or equivalent): load a UASF, map tracks onto ch9-16 with the same map as P0.4, cycle 12 roots at a fixed tempo for N bars, end with All Sound Off, log every sent event. Fail-closed like the other commands.
+2. Confirmation of the owner's MIDI preset (step 0) so the map is chosen from evidence.
