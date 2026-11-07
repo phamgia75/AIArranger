@@ -43,6 +43,22 @@ int main() {
          static_cast<int>(*probe::commandFromName("variation2")) == 84);
     TEST("unknown command refused", !probe::commandFromName("Variation1") && !probe::commandFromName("reset"));
 
+    // clockPlan: Start, 24 clocks per beat, Stop; exact per-tick offsets.
+    const auto cp = probe::clockPlan(120, 2);   // 120 BPM: 1 beat = 500 ms, 1 tick = 20.833 ms
+    bool order = cp.size() == 50 && cp.front().status == 0xFA && cp.back().status == 0xFC;
+    for (size_t i = 1; order && i + 1 < cp.size(); ++i) order = cp[i].status == 0xF8;
+    TEST("clock plan: Start, 48 clocks, Stop, in that order", order);
+    bool mono = true;
+    for (size_t i = 1; i < cp.size(); ++i) mono = mono && cp[i].ns >= cp[i - 1].ns;
+    TEST("clock plan: offsets never go back", mono);
+    TEST("clock plan: first clock with Start, clock 24 at exactly 500 ms, Stop at 1 s",
+         cp[1].ns == 0 && cp[25].ns == 500000000ull && cp.back().ns == 1000000000ull);
+    TEST("clock plan: 97 BPM, tick 72 computed from the start (no cumulative rounding)",
+         probe::clockPlan(97, 4)[1 + 72].ns == 72ull * 60000000000ull / (97 * 24));
+    TEST("clock plan: out-of-range tempo or length is refused",
+         probe::clockPlan(19, 1).empty() && probe::clockPlan(301, 1).empty() &&
+         probe::clockPlan(120, 0).empty() && probe::clockPlan(120, 257).empty() && !probe::clockPlan(300, 256).empty());
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

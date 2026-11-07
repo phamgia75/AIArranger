@@ -14,6 +14,9 @@
 //   pa5x-probe note    --dest "Pa5X SOUND" --channel N --note 60 [--vel 64] [--ms 400] --confirm-send
 //   pa5x-probe alloff  --dest "Pa5X SOUND" --confirm-send
 //   pa5x-probe control --dest "Pa5X SOUND" --channel N --cmd variation1 --confirm-send
+//   pa5x-probe clock   --dest "Pa5X SOUND" [--bpm 120] [--beats 8] --confirm-send
+//       MIDI Start, 24 clocks per beat for --beats beats, Stop. Realtime bytes only:
+//       no notes, no silence messages. Needs Pa5X Clock Source = External (USB).
 //
 // Sending is fail-closed: an exact destination name (one match only) AND
 // --confirm-send are required. The flag records the operator's approval; it
@@ -28,6 +31,7 @@
 #include "midi/pa5x_probe.h"
 #include "midi/pa5x_profile.h"
 #include <CoreMIDI/CoreMIDI.h>
+#include <mach/mach_time.h>
 #include <cstdlib>
 #include <array>
 #include <atomic>
@@ -253,11 +257,62 @@ int sendProgramChangeOnly(const std::string& dest, uint8_t ch, uint8_t program) 
     return st == noErr ? 0 : 1;
 }
 
+// Start / clocks / Stop with CoreMIDI timestamps, through the same guards as
+// sendProgramChangeOnly (env switch, one exact destination match).
+int sendClock(const std::string& dest, int bpm, int beats) {
+    if (const char* g = std::getenv("AIARR_MIDI_HW_TX"); g && std::string(g) == "0") {
+        std::fprintf(stderr, "refused: AIARR_MIDI_HW_TX=0 is set\n"); return 2;
+    }
+    const auto plan = probe::clockPlan(bpm, beats);
+    if (plan.empty()) { std::fprintf(stderr, "--bpm 20-300 and --beats 1-256\n"); return 2; }
+    MIDIClientRef client = 0;
+    MIDIPortRef port = 0;
+    if (MIDIClientCreate(CFSTR("pa5x-probe"), nullptr, nullptr, &client) != noErr ||
+        MIDIOutputPortCreate(client, CFSTR("pa5x-probe out"), &port) != noErr) {
+        std::fprintf(stderr, "CoreMIDI unavailable\n"); return 1;
+    }
+    MIDIEndpointRef ep = 0;
+    int matches = 0;
+    for (ItemCount i = 0; i < MIDIGetNumberOfDestinations(); ++i)
+        if (endpointName(MIDIGetDestination(i)) == dest) { ep = MIDIGetDestination(i); ++matches; }
+    if (matches != 1) {
+        std::fprintf(stderr, "refused: %d destinations named exactly \"%s\"\n", matches, dest.c_str());
+        MIDIClientDispose(client); return 3;
+    }
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    const uint64_t t0 = mach_absolute_time() + 100000000ull * tb.denom / tb.numer;   // start 100 ms from now
+    std::printf("send: Start, %d clocks (%d beats at %d BPM), Stop: %zu realtime bytes, nothing else\n",
+                beats * 24, beats, bpm, plan.size());
+    std::vector<Byte> buf(plan.size() * 16 + 64);
+    auto* list = reinterpret_cast<MIDIPacketList*>(buf.data());
+    MIDIPacket* pkt = MIDIPacketListInit(list);
+    for (const auto& b : plan) {
+        const Byte msg = b.status;
+        pkt = MIDIPacketListAdd(list, buf.size(), pkt, t0 + b.ns * tb.denom / tb.numer, 1, &msg);
+        if (!pkt) { std::fprintf(stderr, "packet list overflow\n"); MIDIClientDispose(client); return 1; }
+    }
+    const OSStatus st = MIDISend(port, ep, list);
+    // Keep the client alive until every scheduled byte is due: disposing it may drop pending packets.
+    std::this_thread::sleep_for(std::chrono::nanoseconds(100000000ull + plan.back().ns + 300000000ull));
+    MIDIClientDispose(client);
+    std::printf("MIDISend status %d (0 = handed to CoreMIDI)\n", static_cast<int>(st));
+    return st == noErr ? 0 : 1;
+}
+
 int send(const std::string& cmd, const std::map<std::string, std::string>& f) {
     if (!f.count("--confirm-send")) { std::fprintf(stderr, "refused: sending needs --confirm-send (operator approval)\n"); return 2; }
     if (!f.count("--dest")) { std::fprintf(stderr, "refused: --dest \"<exact destination name>\" is required\n"); return 2; }
     bool ok = true;
     std::optional<uint8_t> ch;
+    if (cmd == "clock") {
+        const int bpm = intFlag(f, "--bpm", 120, 20, 300, ok);
+        const int beats = intFlag(f, "--beats", 8, 1, 256, ok);
+        if (!ok) return 2;
+        const int r = sendClock(f.at("--dest"), bpm, beats);
+        if (r == 0) std::printf("done. Observe the Pa5X tempo display and record the result.\n");
+        return r;
+    }
     if (cmd != "alloff") {
         ch = f.count("--channel") ? probe::parseChannel(f.at("--channel")) : std::nullopt;
         if (!ch) { std::fprintf(stderr, "--channel 1-16 is required\n"); ok = false; }
@@ -307,7 +362,7 @@ int send(const std::string& cmd, const std::map<std::string, std::string>& f) {
 }
 
 void help() {
-    std::puts("usage: pa5x-probe listen|note|alloff|control [flags]   (see the header of tools/pa5x_probe.cpp)\n"
+    std::puts("usage: pa5x-probe listen|note|alloff|control|clock [flags]   (see the header of tools/pa5x_probe.cpp)\n"
               "control --cmd: variation1-4 fill1-4 break intro1 intro2 ending1-3 playstop1 playstop2");
 }
 
@@ -319,7 +374,7 @@ int main(int argc, char** argv) {
     const auto f = parseFlags(argc, argv, 2);
     if (f.count("!bad")) { std::fprintf(stderr, "bad argument: %s\n", f.at("!bad").c_str()); return 2; }
     if (cmd == "listen") return listen(f);
-    if (cmd == "note" || cmd == "alloff" || cmd == "control") return send(cmd, f);
+    if (cmd == "note" || cmd == "alloff" || cmd == "control" || cmd == "clock") return send(cmd, f);
     help();
     return 2;
 }

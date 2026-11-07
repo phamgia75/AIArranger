@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ai_arranger::midi::pa5x::probe {
 
@@ -75,6 +76,25 @@ inline std::optional<Command> commandFromName(const std::string& s) noexcept {
     };
     for (const auto& e : table) if (s == e.name) return e.cmd;
     return std::nullopt;
+}
+
+/// One scheduled MIDI realtime byte, offset from the start of the run.
+struct TimedByte { uint64_t ns; uint8_t status; };
+
+/// MIDI clock run for `pa5x-probe clock`: Start (0xFA) at 0, then 24 clocks (0xF8) per
+/// beat for `beats` beats, the first at 0, then Stop (0xFC) one tick after the last clock.
+/// Offsets are computed per tick from the start (no accumulated rounding drift).
+/// Empty if bpm is outside 20..300 or beats outside 1..256.
+inline std::vector<TimedByte> clockPlan(int bpm, int beats) {
+    std::vector<TimedByte> v;
+    if (bpm < 20 || bpm > 300 || beats < 1 || beats > 256) return v;
+    const uint64_t ticks = uint64_t(beats) * 24, perMinute = uint64_t(bpm) * 24;
+    auto at = [&](uint64_t k) { return k * 60000000000ull / perMinute; };
+    v.reserve(ticks + 2);
+    v.push_back({0, 0xFA});
+    for (uint64_t k = 0; k < ticks; ++k) v.push_back({at(k), 0xF8});
+    v.push_back({at(ticks), 0xFC});
+    return v;
 }
 
 } // namespace ai_arranger::midi::pa5x::probe
