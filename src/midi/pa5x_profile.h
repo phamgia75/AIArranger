@@ -69,6 +69,18 @@ inline control::OutputChannelMap genosStyleTrackMap() noexcept {
     return m;
 }
 
+// The built-in demo style (buildDemoStyle: Drums index 9, Bass index 1, Chord index 2) onto
+// the Pa5X Style-track receive channels of the "Ai Arranger" preset (photos 2026-11-07:
+// ch 9 STY Bass, ch 10 STY Drum, ch 12 STY Acc1). With the identity map the demo bass
+// (ch 2) and chord (ch 3) land on channels that preset has Off. Everything else is dropped.
+inline control::OutputChannelMap demoStyleTrackMap() noexcept {
+    control::OutputChannelMap m;
+    for (auto& d : m.dst) d = control::OutputChannelMap::kDrop;
+    m.dst[1] = 8;  m.dst[9] = 9;  m.dst[2] = 11;
+    m.dropVoiceSelect = true;
+    return m;
+}
+
 } // namespace ai_arranger::midi::pa5x
 
 #endif // AI_ARRANGER_MIDI_PA5X_PROFILE_H

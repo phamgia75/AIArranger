@@ -23,7 +23,7 @@ static int failures = 0, passes = 0;
 
 namespace {
 
-// Demo style: Bass track on channel 1 plays C3 (48) on beat 1 and G3 (55) on beat 3.
+// Demo style: Bass track on wire channel index 1 (MIDI ch 2) plays C3 (48) on beat 1 and G3 (55) on beat 3.
 constexpr uint8_t kBassChannel = 1;
 
 struct Rig {
