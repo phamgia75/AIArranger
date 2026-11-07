@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cinttypes>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -155,6 +157,17 @@ inline Inventory scan(const std::filesystem::path& root) {
 // PA Manager v5.2 "[4 GB] | PA5X" memory profile: Total Size 4 294 967 296 bytes (audit §3f).
 // An application observation, not an independently verified Pa5X hardware specification.
 constexpr uintmax_t kPaManagerPa5xBudgetBytes = 4294967296ull;
+
+// Parses a --budget-bytes value: decimal digits only, > 0, no overflow. Returns false otherwise.
+inline bool parseBudgetBytes(const char* s, uintmax_t& out) {
+    if (!s || *s < '0' || *s > '9') return false;  // rejects "", "-1", "+1", " 1"
+    errno = 0;
+    char* end = nullptr;
+    const uintmax_t v = std::strtoumax(s, &end, 10);
+    if (*end || errno == ERANGE || v == 0) return false;
+    out = v;
+    return true;
+}
 
 // P2.3: sample-data DISK size (.PCM Sample + .KMP Multisample files) against a budget.
 // shortcut: disk bytes only; replace with a RAM model once Pa5X allocation is measured on hardware.

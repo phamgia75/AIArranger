@@ -33,6 +33,7 @@ Complexity: S (≤1 day), M (≤1 week), L (multi-week), XL (research + build, o
 | P1.8 | Chord input MIDI channel filter | All channels feed detector (split by pitch only) | Honour Pa5X Global/Chord 1/Chord 2 channel roles | S | P0.3 | Depends on user's MIDI preset | Router unit tests | Pa5X Master Kbd preset | **Done `f63dc85`** (opt-in `defaultPresetKeyboardRoles`) · HW pending |
 | P1.9 | KST inventory (report-only) | None | Scan a KST folder: file types, counts, byte-identical duplicates; never writes | S | – | Files are opaque; only names/hashes | Fixture trees | Compare with Pa5X Media listing | Done (SW); HW compare pending |
 | P1.10 | Native `.STG`/`.KSC`/`.PCG` read/write | None | – | XL | Owner files + RE approval + legal review | Undocumented, OS-version-dependent | – | – | **Blocked** |
+| P1.11 | Read-only KST dependency graph API | Design only (`research/PA5X_KST_RESOURCE_MODEL.md` §6.3): Style/KS/Pad → Sound → OSC High/Low → Multisample → zone → Sample; reverse lookup, ref counts, closure; every edge tagged with its source | Typed nodes + edges, no writes | M | P1.10 (edges) | Without decoded and validated references the graph has no edges; never name-guessed | Unit on synthetic graphs | Compare with PA Manager "Search Where used" on the research copy | **Designed** · implementation blocked on P1.10 |
 
 ## P2 — Sound Factory and macOS / iPadOS integration
 

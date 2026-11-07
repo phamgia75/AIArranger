@@ -193,11 +193,14 @@ Path C reads state only: it never clicks. Navigation (opening KST Manager on the
 ### 5.8 Operating procedure (as used 2026-11-07)
 
 1. Bring the session window back (device **Open**) after any focus change; confirm it is ≥ 1000 px wide.
+   If **Open** does not bring it back (window in another Space), use Windows App's **Window** menu → the session's name.
 2. Before a click into PA Manager or a paste into PowerShell: bring that window forward from the Windows taskbar and check a fresh screenshot.
 3. Commands: Mac clipboard → Finder/Windows App focus toggle → right-click paste into Windows Terminal → screenshot check → Return.
+   Prefer no clipboard at all: re-run a verified command from PowerShell history (**Up**, check the recalled text on a screenshot, then **Return**).
    The Mac clipboard is shared with other sessions: compare `pbpaste` with the intended command **immediately before** the paste, and cancel any Windows Terminal multi-line-paste warning (our commands are one line).
 4. Context menus are read and dismissed with Escape; report windows are closed with **Close**, never **Save Report**.
-5. After each research block: manifest re-check of the copy (path | size | mtime) against the pre-load manifest.
+5. If the Windows desktop shows windows or dialogs this agent did not open, stop GUI work, run only the integrity check, and ask the owner.
+6. After each research block: manifest re-check of the copy (path | size | mtime) against the pre-load manifest.
 
 ## 6. RDP, locking and display limitations
 

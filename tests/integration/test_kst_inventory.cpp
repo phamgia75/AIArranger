@@ -119,6 +119,14 @@ int main() {
     TEST("default budget is PA Manager's 4 GiB profile, labelled as an application figure",
          format(i2, "x").find("of budget 4294967296 bytes (PA Manager") != std::string::npos);
     TEST("no sample files: zero, no crash", formatMemoryEstimate(inv, 1).find("Disk total 0 bytes = 0.0%") != std::string::npos);
+    // --budget-bytes parsing (regression: overflow used to be accepted as UINTMAX_MAX).
+    uintmax_t b = 7;
+    bool allRejected = true;
+    for (const char* bad : {"", "0", "-1", "+1", " 1", "1x", "1.5", "0x10", "99999999999999999999999", "18446744073709551616"})
+        allRejected = allRejected && !parseBudgetBytes(bad, b);
+    TEST("malformed, zero, negative and overflowing budgets are rejected and leave the value unchanged", allRejected && b == 7 && !parseBudgetBytes(nullptr, b));
+    TEST("valid budgets parse, including the maximum",
+         parseBudgetBytes("1000", b) && b == 1000 && parseBudgetBytes("18446744073709551615", b) && b == UINTMAX_MAX);
     fs::remove_all(k2 / "pcm");
     put(k2 / "SOUND/PCM.PCG", "p");                     // a FILE named PCM.* is not a PCM folder
     TEST("a file named PCM is not the PCM folder", !scan(k2).has_pcm_folder);

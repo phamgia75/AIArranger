@@ -3,17 +3,12 @@
 // Run it on a COPY of the data. Exit 0 = report printed, 1 = usage/scan error.
 #include "media/kst_inventory.h"
 #include <cstdio>
-#include <cerrno>
-#include <cinttypes>
-#include <cstdlib>
 #include <cstring>
 
 int main(int argc, char** argv) {
     uintmax_t budget = ai_arranger::media::kPaManagerPa5xBudgetBytes;
-    char* end = nullptr;
-    if (argc == 4 && !std::strcmp(argv[2], "--budget-bytes") && argv[3][0] >= '0' && argv[3][0] <= '9')
-        errno = 0, budget = std::strtoumax(argv[3], &end, 10);
-    if (!(argc == 2 || (argc == 4 && end && !*end && errno != ERANGE && budget > 0))) {
+    if (!(argc == 2 || (argc == 4 && !std::strcmp(argv[2], "--budget-bytes") &&
+                        ai_arranger::media::parseBudgetBytes(argv[3], budget)))) {
         std::fprintf(stderr, "usage: kst-inventory <folder> [--budget-bytes N]\n");
         return 1;
     }

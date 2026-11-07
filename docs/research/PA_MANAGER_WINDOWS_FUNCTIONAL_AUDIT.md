@@ -210,6 +210,10 @@ Same research copy. Nothing was saved, applied, remapped, copied, compressed, ex
 
 **Procedure incident:** one paste into Windows Terminal showed a multi-line-paste warning whose preview was **unrelated text from the shared Mac clipboard** (another session had replaced it). Cancelled; nothing was pasted or run. Since then the clipboard is compared to the intended command immediately before each paste (`WINDOWS_RESEARCH_AGENT.md` §5.8).
 
+## 3g. Session 2026-11-07 (3): stopped on an unexplained window
+
+On reconnecting at 08:41 the session showed a **File Explorer window open on the research copy's `MULTISMP` folder** that this agent did not open (between 07:54 and 08:41 someone, or something else, used the PC). The integrity check run immediately afterwards (command recalled from PowerShell history, no clipboard) showed the copy unchanged: 719 entries, 0 differences. GUI research was **stopped** until the owner confirms who else is using the PC. Not yet observed, therefore: Copy Options dialog, Compress Options / Threads submenus, PreLoad semantics, RE-MAP MODE tile behaviour, and what "Automatically Copy Related USER Sounds" copies. The last two can only be seen by performing a remap or a copy, which needs separate authorization even on the copy.
+
 ## 3. Feature inventory
 
 | Area | Status | What is known |
