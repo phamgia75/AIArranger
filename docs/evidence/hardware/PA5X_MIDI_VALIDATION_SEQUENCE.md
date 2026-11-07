@@ -71,6 +71,9 @@ $P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 -
 Evidence to record: tool output (bytes sent) + operator: which sound played, that exactly one note sounded and that it stopped. Recovery if anything hangs: `$P/pa5x-probe alloff --dest "Pa5X SOUND" --confirm-send` (covered by the same authorization), or the Pa5X STOP button.
 
 ### 1. Basic Note On / Off (transmit)
+
+**Result 2026-11-07 18:25:25: HEARD** (organ, Upper 3 = Gospel Organ at 62); software side success; one note / stop to confirm. Evidence: `2026-11-07-pa5x-phaseB-retest.md`. The 17:30 attempt was silent (`2026-11-07-pa5x-phaseB-note.md`).
+
 - Command: `$P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send`
 - Expected: one C4 on the part that MIDI IN ch1 drives (Upper 3 in preset "Hieu"), 0.4 s, then silence.
 - Evidence: tool output (`MIDISend` / bytes) + **operator: heard one note, it stopped**.
