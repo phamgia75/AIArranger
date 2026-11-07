@@ -106,4 +106,22 @@ No dropout.
 | FE Active Sensing | 704 in 180 s (3.91/s), continuous |
 | Raw packets / parsed events | 43 / 60; first chord at 15.6 s, last release at 66.6 s |
 
-Run 3 (after normal use of the Pa5X screen, no setting change) still to do.
+
+## Repeatability 2b, run 3 of 3: 12:46:35-12:49:35 (180 s), after normal use of the Pa5X screen — PASS
+
+| Check | Result |
+|---|---|
+| Upper part first | ch 1 notes from 23.7 s (A4, C5, ... 72 Note Ons, B3-C6, a played line): upper = ch 1 confirmed |
+| C2-E2-G2 presses | 10; complete chords received (raw `93 24` / `93 28` / `93 2B`) 10 / 10 / 10 |
+| Detected | `Cmaj (bass C)` 9; once B1 (`93 23`) was also held -> `Cmaj7 (bass C)`, correct for the four notes held |
+| FE Active Sensing | 649 in 180 s (3.6/s); lower rate is expected with 195 packets of other traffic (Active Sensing fills idle gaps), no gap observed |
+
+## Repeatability summary
+
+| Run | Condition | Chords received complete on ch 4 | Correctly named for the notes held |
+|---|---|---|---|
+| 1 | immediately | 14/14 | 14/14 |
+| 2 | after ~12 min idle | 10/10 | 10/10 |
+| 3 | after normal screen use | 10/10 | 10/10 (9 Cmaj, 1 Cmaj7 with an extra B1) |
+
+**34/34 chords, no lost note, ch 4 stable.** The 11:36 zero-note run was **not reproduced**; it stays recorded as an unresolved intermittent. The one possibly missed upper note (run 2 C5 control) is unconfirmed: the owner has not said whether it was played.

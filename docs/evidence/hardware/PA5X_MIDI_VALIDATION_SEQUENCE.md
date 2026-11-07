@@ -64,6 +64,7 @@ Purpose: show ch 4 reception is stable, or catch the dropout with timestamps.
 1. Start both listeners and note the start time: `$P/pa5x-probe listen --seconds 180 --channel 4 --split 60 --mode fingered` and `$P/pa5x-probe listen --raw --seconds 180` (line-buffered since `addd4bc`, so events show live).
 2. The operator plays **C2-E2-G2 ten times**, ~2 s held, ~2 s apart, then **one C5 alone** (upper-part control), and says the time they started and stopped.
 3. PASS: 10 lines ending `-> CMajor` on ch 4 in the parsed log, the C5 on ch 1 in the raw log, and FE at ~4/s for the whole run. FAIL (intermittent reproduced): fewer than 10 with FE still arriving; record which repetitions are missing and their times. Run it **three times** (immediately, after 10 min idle, after the Pa5X screen has been changed by normal use). Nothing is transmitted and no setting is changed.
+4. **Result 2026-11-07: PASS, 34/34 chords on ch 4 over the three runs** (evidence file, "Repeatability summary"). The earlier dropout was not reproduced.
 
 ### 3. NTT low-register regression (transmit; P1.5)
 - Purpose: the bass / pad register stays in range across all 12 roots (the last hardware bug was in NTT).
