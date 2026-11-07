@@ -30,6 +30,32 @@ Abort rule for every step: any unexpected sound, stuck note or error → `$P/pa5
 4. **Bounded command ready:** step 1 below; `note` sends one Note On, waits `--ms` (20-5000), sends Note Off, then All Sound Off. Since this change it ignores SIGHUP/SIGINT/SIGTERM/SIGPIPE during that window, so a dropped SSH session or Ctrl-C cannot leave the note hanging (verified by reading the code; not exercised, because exercising it means sending). Only SIGKILL or a power loss can interrupt it: then `alloff`, or the Pa5X STOP button.
 5. **Explicit owner authorization** for step 1, in the session.
 
+### Phase B gate status (2026-11-07): PREPARED, NOT SENT
+
+| Gate | Status |
+|---|---|
+| 1. Photos of Settings > MIDI: MIDI IN, MIDI OUT, General | waiting for owner |
+| 2. MusicAIApp, Music, Moises stopped | waiting for owner (last check: all three running) |
+| 3. Pa5X master low, FLOW 8 Pa5X faders down | waiting for owner |
+| 4. Separate explicit authorization of the exact command below | waiting for owner |
+
+**Immediately before sending** (Claude, read-only, same session, after gates 1-4):
+
+```
+$P/pa5x-doctor                                   # exactly one "Pa5X SOUND", uid 1907663670, online
+ps -axo pid,comm | grep -Ei "MusicAI|Music.app/Contents/MacOS/Music$|Moises|pa5x|korg|aiarr"   # expect: nothing
+```
+
+Stop without sending if: the SOUND uid differs, a second destination matches, FLOW 8 is the only match, any listed process is running, or the photographed MIDI IN ch 1 assignment differs from what the owner expects to hear. The probe itself also refuses anything but one exact name match and requires `--confirm-send`.
+
+**The only command in scope** (one C4, velocity 64, 400 ms, then Note Off and All Sound Off; survives SSH drop):
+
+```
+$P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send
+```
+
+Evidence to record: tool output (bytes sent) + operator: which sound played, that exactly one note sounded and that it stopped. Recovery if anything hangs: `$P/pa5x-probe alloff --dest "Pa5X SOUND" --confirm-send` (covered by the same authorization), or the Pa5X STOP button.
+
 ### 1. Basic Note On / Off (transmit)
 - Command: `$P/pa5x-probe note --dest "Pa5X SOUND" --channel 1 --note 60 --vel 64 --ms 400 --confirm-send`
 - Expected: one C4 on the part that MIDI IN ch1 drives (Upper 3 in preset "Hieu"), 0.4 s, then silence.

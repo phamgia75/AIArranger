@@ -102,7 +102,7 @@ No dropout.
 | C2-E2-G2 presses | 10 |
 | Complete chords received (raw `93 24` / `93 28` / `93 2B`) | 10 / 10 / 10 |
 | Detected on the full chord | `Cmaj (bass C)` 10/10 (transitions: C2+E2 NoChord 9, C2+G2 power chord 1) |
-| Upper control note (C5 on ch 1) | **none received** (no ch 1 event in raw). Not determined whether it was played; does not affect the ch 4 result |
+| Upper control note (C5 on ch 1) | **none received** (no ch 1 event in raw). Operator's playing action: **UNCONFIRMED** until the owner explicitly verifies it; does not affect the ch 4 result |
 | FE Active Sensing | 704 in 180 s (3.91/s), continuous |
 | Raw packets / parsed events | 43 / 60; first chord at 15.6 s, last release at 66.6 s |
 
@@ -124,4 +124,6 @@ No dropout.
 | 2 | after ~12 min idle | 10/10 | 10/10 |
 | 3 | after normal screen use | 10/10 | 10/10 (9 Cmaj, 1 Cmaj7 with an extra B1) |
 
-**34/34 chords, no lost note, ch 4 stable.** The 11:36 zero-note run was **not reproduced**; it stays recorded as an unresolved intermittent. The one possibly missed upper note (run 2 C5 control) is unconfirmed: the owner has not said whether it was played.
+**34/34 chords, no lost note, ch 4 stable.** The 11:36 zero-note run was **not reproduced**; it stays recorded as an unresolved intermittent. Run 2 C5 control: none received; whether it was played is **UNCONFIRMED**.
+
+**Owner acceptance (2026-11-07):** the three runs are accepted as hardware evidence: 34/34 complete chords on ch 4, upper reception on ch 1. The 11:36 no-note incident remains **unresolved; not fixed**.
