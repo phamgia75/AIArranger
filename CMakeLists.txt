@@ -98,7 +98,7 @@ endif()
 set(AIARR_GENOS_CORPUS_DIR "${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1" CACHE PATH
     "Directory holding the Genos .sty acceptance corpus")
 
-set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety test_coremidi_in_reconnect)
+set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety test_coremidi_in_reconnect test_coremidi_in_packet)
 
 # ── Importer library (vendor SFF1/SFF2 isolation) ─────────────────────
 file(GLOB_RECURSE IMPORTER_SFF1_SRC
