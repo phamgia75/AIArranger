@@ -7,8 +7,8 @@
 // builds the S1 model: one zone per sampled root, 1 or 2 velocity layers, leading silence trimmed,
 // one gain for the whole instrument (keeps the plugin's own level differences), a short fade-out,
 // and a per-sample pitch measurement so a detuned or unpitched result is reported, not hidden.
-// shortcut: samples are one-shots (no loop search); fine up to 1 048 576 frames (21.8 s at 48 kHz),
-// add loop detection when sustained sounds must hold longer than the rendered note.
+// One-shot by default; with loopHoldSec the held part is looped (loopSustain) so sustained sounds
+// (organ, strings, pads) hold for as long as the key is down.
 
 #include "media/sound/instrument.h"
 #include <algorithm>
@@ -25,12 +25,13 @@ struct RenderSpec {
     uint8_t velocitySwitch = 90;             // with 2 layers
     uint32_t rate = 48000;
     double silenceDb = -60;                  // trim threshold relative to the instrument's peak
+    double loopHoldSec = 0;                  // > 0: the renderer releases the note at this time; loop the held part
 };
 
 using RenderFn = std::function<std::vector<float>(uint8_t note, uint8_t velocity)>;
 
 struct RenderReport {
-    struct Row { uint8_t note, velocity; size_t frames; double cents; };
+    struct Row { uint8_t note, velocity; size_t frames; double cents; double loopMatch; };   // loopMatch NaN = one-shot
     std::vector<Row> rows;
     std::vector<std::string> warnings;       // empty spec, silent render, detuned/unpitched samples
     double gain = 0;
@@ -43,11 +44,13 @@ struct RenderReport {
 inline double measurePitch(const int16_t* x, size_t n, uint32_t rate, double expectHz) {
     if (n < 2048) return 0;
     const double kPi = 3.14159265358979323846;
+    std::vector<double> xw(n);
+    for (size_t i = 0; i < n; ++i) xw[i] = x[i] * (0.5 - 0.5 * std::cos(2 * kPi * i / (n - 1)));
     auto mag = [&](double f) {
         const double w = 2 * kPi * f / rate, c = std::cos(w), s = std::sin(w);
         double re = 0, im = 0, cr = 1, ci = 0;
         for (size_t i = 0; i < n; ++i) {
-            const double a = x[i] * (0.5 - 0.5 * std::cos(2 * kPi * i / (n - 1)));
+            const double a = xw[i];
             re += a * cr; im -= a * ci;
             const double t = cr * c - ci * s; ci = ci * c + cr * s; cr = t;
         }
@@ -64,6 +67,43 @@ inline double measurePitch(const int16_t* x, size_t n, uint32_t rate, double exp
         if (mag(m1) > mag(m2)) hi = m2; else lo = m1;
     }
     return (lo + hi) / 2;
+}
+
+// Sustain loop for a held note. The loop ends 50 ms before note-off; its start is the position in
+// [0.3 s, end - 0.25 s] whose neighbourhood (2 x 256 frames) best matches the end's, by normalised
+// correlation. The C frames before the end are crossfaded into the C frames before the start, so the
+// jump end -> start continues the waveform exactly. The sample is cut after the loop (plus 64 frames
+// copied from the loop start, for interpolation); the release then comes from the player's envelope.
+// Returns the correlation (1 = identical neighbourhoods), or -1 when the held part is too short.
+inline double loopSustain(Sample& s, size_t noteOff) {
+    const size_t R = s.rate, W = 256, minLen = R / 4, startMin = R * 3 / 10;
+    noteOff = std::min(noteOff, s.pcm.size());
+    if (noteOff < R / 20 + startMin + minLen + W) return -1;
+    const size_t e = noteOff - R / 20;
+    auto corr = [&](size_t p) {
+        double xy = 0, xx = 0, yy = 0;
+        for (size_t k = 0; k < 2 * W; ++k) {
+            const double u = s.pcm[p - W + k], v = s.pcm[e - W + k];
+            xy += u * v; xx += u * u; yy += v * v;
+        }
+        return xx > 0 && yy > 0 ? xy / std::sqrt(xx * yy) : -1.0;
+    };
+    size_t best = startMin;
+    double bc = -2;
+    for (size_t p = startMin; p + minLen <= e; p += 4)
+        if (const double c = corr(p); c > bc) { bc = c; best = p; }
+    for (size_t p = best > startMin + 4 ? best - 4 : startMin; p <= best + 4 && p + minLen <= e; ++p)
+        if (const double c = corr(p); c > bc) { bc = c; best = p; }
+    const size_t C = std::min<size_t>((e - best) / 4, 2048);
+    for (size_t k = 0; k < C; ++k) {
+        const double w = double(k + 1) / C;   // the last frame before the end becomes the one before the start
+        const size_t i = e - C + k, j = best - C + k;
+        s.pcm[i] = static_cast<int16_t>(std::lround(s.pcm[i] * (1 - w) + s.pcm[j] * w));
+    }
+    s.pcm.resize(e + 64);
+    for (size_t k = 0; k < 64; ++k) s.pcm[e + k] = s.pcm[best + k];
+    s.looped = true; s.loopStart = static_cast<uint32_t>(best); s.loopEnd = static_cast<uint32_t>(e);
+    return bc;
 }
 
 inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& render, RenderReport* report = nullptr) {
@@ -123,7 +163,18 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
             const size_t from = std::min<size_t>(n, spec.rate / 5), len = std::min<size_t>(n - from, spec.rate);
             const double f = measurePitch(s.pcm.data() + from, len, spec.rate, 440.0 * std::pow(2.0, (r - 69) / 12.0));
             const double cents = f > 0 ? 1200 * std::log2(f / (440.0 * std::pow(2.0, (r - 69) / 12.0))) : NAN;
-            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], n, cents});
+            double match = NAN;
+            if (spec.loopHoldSec > 0) {
+                const size_t off = static_cast<size_t>(spec.loopHoldSec * spec.rate);
+                match = off > a ? loopSustain(s, off - a) : -1;
+                if (!(match >= 0.9)) {
+                    char w[112];
+                    std::snprintf(w, sizeof w, "%s: %s", s.name.c_str(), match < 0 ? "held part too short to loop (one-shot kept)"
+                                  : "loop seam match below 0.9 (noisy or evolving sound; listen before use)");
+                    rep.warnings.push_back(w);
+                }
+            }
+            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.pcm.size(), cents, match});
             if (!(std::fabs(cents) <= 10)) {
                 char w[96];
                 std::snprintf(w, sizeof w, "%s: pitch %+.1f cents from %s%d (detuned, unpitched or too short)",

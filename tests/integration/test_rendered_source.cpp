@@ -109,6 +109,44 @@ int main() {
         const double c = 1200 * std::log2(measurePitch(x.data(), x.size(), 48000, f0) / f0);
         TEST("regression: measurePitch finds the strongest of two close lines (-35 cents, not the +10 side line)", std::fabs(c + 35) < 0.5);
     }
+    {   // sustain loop (loopHoldSec): the synth releases at 1.6 s render time (0.1 s silence + 1.5 s hold)
+        RenderSpec ls = spec;
+        ls.loopHoldSec = 1.6;
+        ls.step = 12;   // 5 roots x 2 layers: the loop search is the slow part under sanitizers
+        RenderReport r;
+        const Instrument li = buildFromRenders(ls, synth(3.0), &r);
+        bool looped = validate(li).empty() && r.warnings.empty(), seam = true, inHold = true, match = true;
+        for (size_t k = 0; k < li.samples.size(); ++k) {
+            const Sample& s = li.samples[k];
+            looped &= s.looped && s.loopEnd - s.loopStart >= 48000 / 4;
+            inHold &= s.loopStart >= 0.3 * 48000 && s.loopEnd + 64 == s.pcm.size() && s.loopEnd <= (1.6 - 0.1) * 48000 + 96;
+            int maxStep = 0;
+            for (uint32_t i = s.loopStart; i + 1 < s.loopEnd; ++i) maxStep = std::max(maxStep, std::abs(s.pcm[i + 1] - s.pcm[i]));
+            seam &= s.pcm[s.loopEnd - 1] == s.pcm[s.loopStart - 1] && std::abs(s.pcm[s.loopStart] - s.pcm[s.loopEnd - 1]) <= maxStep &&
+                    s.pcm[s.loopEnd] == s.pcm[s.loopStart];
+            match &= r.rows[k].loopMatch > 0.99 && std::fabs(r.rows[k].cents - 3.0) < 0.2;
+        }
+        TEST("loop: every sample looped (>= 0.25 s), valid, no warnings", looped);
+        TEST("loop: inside the held part (after 0.3 s, before note-off), cut after the loop + 64 frames", inHold);
+        TEST("loop: seam continues the waveform (frame before end == frame before start; jump <= largest in-loop step; tail = loop start)", seam);
+        TEST("loop: seam match > 0.99 on a tonal source; pitch report unchanged", match);
+        const auto chk = sf2::check(writeSf2(li));
+        TEST("looped instrument writes a readable SF2", chk.ok && chk.samples.size() == 10);
+        RenderSpec shortHold = ls; shortHold.loopHoldSec = 0.5;
+        RenderReport r2;
+        const Instrument sh = buildFromRenders(shortHold, synth(0), &r2);
+        TEST("a hold too short to loop keeps one-shots and warns per sample", !sh.samples.empty() && !sh.samples[0].looped && r2.warnings.size() == 10);
+        uint32_t seed = 1;
+        RenderReport r3;
+        const Instrument noise = buildFromRenders(ls, [&](uint8_t, uint8_t) {
+            std::vector<float> x(static_cast<size_t>(2.1 * 48000), 0.f);
+            for (size_t n = 4800; n < static_cast<size_t>(1.9 * 48000); ++n) { seed = seed * 1664525u + 1013904223u; x[n] = (seed >> 8) / 16777216.f - 0.5f; }
+            return x;
+        }, &r3);
+        size_t seamWarn = 0;
+        for (const auto& w : r3.warnings) seamWarn += w.find("loop seam") != std::string::npos;
+        TEST("white noise: the poor seam match is reported per sample", validate(noise).empty() && seamWarn == 10);
+    }
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

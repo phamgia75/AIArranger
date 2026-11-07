@@ -6,7 +6,8 @@
 //   aiarranger-plugin-sampler list
 //   aiarranger-plugin-sampler render --plugin NAME --name "Sound Name" --out DIR
 //        [--program N] [--low 36] [--high 96] [--step 3] [--vel 100 | --vel 64,120] [--switch 90]
-//        [--hold 2.0] [--release 1.0]
+//        [--hold 2.0] [--release 1.0] [--loop on]
+// --loop on: loop the held part of each note (sustained sounds hold while the key is down).
 // Exit 0 = done, 1 = usage/plugin/package error.
 
 #include "media/sound/package_writer.h"
@@ -45,7 +46,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: aiarranger-plugin-sampler list\n"
                              "       aiarranger-plugin-sampler render --plugin NAME --name \"Sound Name\" --out DIR\n"
                              "            [--program N] [--low 36] [--high 96] [--step 3] [--vel 100|64,120] [--switch 90]\n"
-                             "            [--hold 2.0] [--release 1.0]\n");
+                             "            [--hold 2.0] [--release 1.0] [--loop on]\n");
         return 1;
     }
     auto num = [&](const char* k, double d) { return a.count(k) ? std::atof(a[k].c_str()) : d; };
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
     for (const auto& v : juce::StringArray::fromTokens(a.count("--vel") ? a["--vel"] : "100", ",", ""))
         spec.velocities.push_back(static_cast<uint8_t>(juce::jlimit(1, 127, v.getIntValue())));
     const double hold = num("--hold", 2.0), release = num("--release", 1.0);
+    if (a.count("--loop") && a["--loop"] == "on") spec.loopHoldSec = hold;
     if (hold <= 0 || release < 0 || hold + release > 21) { std::fprintf(stderr, "hold + release must be 0-21 s\n"); return 1; }
 
     std::unique_ptr<juce::PluginDescription> desc;
@@ -115,12 +117,14 @@ int main(int argc, char** argv) {
     for (const auto& w : rep.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
     if (in.samples.empty()) return 1;
     std::string notes = "Source: " + desc->name.toStdString() + " (" + desc->manufacturerName.toStdString() + ", " +
-                        desc->pluginFormatName.toStdString() + ") rendered offline at 48 kHz, mono sum, one-shot samples.\n"
+                        desc->pluginFormatName.toStdString() + ") rendered offline at 48 kHz, mono sum, " +
+                        (spec.loopHoldSec > 0 ? "held part looped" : "one-shot samples") + ".\n"
                         "Rights: the user must hold a licence that permits sampling this instrument.\n"
-                        "Measured pitch per sample (cents from equal temperament):\n";
+                        "Measured pitch per sample (cents from equal temperament), loop seam match (1 = identical):\n";
     for (const auto& r : rep.rows) {
-        char l[80];
-        std::snprintf(l, sizeof l, "  note %3u vel %3u  %+7.2f  %zu frames\n", r.note, r.velocity, r.cents, r.frames);
+        char l[96];
+        std::snprintf(l, sizeof l, "  note %3u vel %3u  %+7.2f  %7zu frames  loop %s\n", r.note, r.velocity, r.cents, r.frames,
+                      std::isnan(r.loopMatch) ? "-" : std::to_string(r.loopMatch).substr(0, 5).c_str());
         notes += l;
     }
     for (const auto& w : rep.warnings) notes += "WARNING: " + w + "\n";
