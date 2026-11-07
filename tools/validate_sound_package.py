@@ -23,6 +23,17 @@ def check(cond, msg):
     ok &= bool(cond)
     print(("  ok    " if cond else "  FAIL  ") + msg)
 
+def smpl(path):
+    """(unity note, [(start, end inclusive), ...]) from a WAV 'smpl' chunk, or None."""
+    b = open(path, "rb").read(); o = 12
+    while o + 8 <= len(b):
+        cid, size = b[o:o + 4], struct.unpack("<I", b[o + 4:o + 8])[0]
+        if cid == b"smpl" and size >= 36:
+            note, n = struct.unpack("<I", b[o + 20:o + 24])[0], struct.unpack("<I", b[o + 36:o + 40])[0]
+            return note, [struct.unpack("<II", b[o + 52 + 24 * i:o + 60 + 24 * i]) for i in range(n)]
+        o += 8 + size + (size & 1)
+    return None
+
 def txprog(root):
     tx = [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(root, "tx")) for f in fs if f.endswith(".txprog")]
     check(len(tx) == 1, f"one .txprog in tx/ ({len(tx)})")
@@ -45,9 +56,14 @@ def txprog(root):
                 good = r.getnchannels() == 1 and r.getsampwidth() == 2 and 11025 <= rate <= 48000 and frames <= 1048576
         loops = w.findall("tx:loop", ns)
         lp_ok = all(0 <= int(A(l, "start")) < int(A(l, "end")) <= frames for l in loops)
+        if exists:   # the WAV's own 'smpl' chunk must say the same as the .txprog (either may be what the Pa5X reads)
+            sm = smpl(f)
+            want_loop = [(int(A(l, "start")), int(A(l, "end")) - 1) for l in loops if A(l, "mode") == "Forward"]
+            lp_ok &= sm is not None and sm[0] == key(A(w, "root")) and sm[1] == want_loop
         waves[A(w, "id")] = (exists and good and lp_ok, key(A(w, "root")))
     check(waves and all(v[0] for v in waves.values()),
-          f"{len(waves)} waves: file exists next to the .txprog, mono 16-bit 11025-48000 Hz, <= 1048576 frames, loop inside")
+          f"{len(waves)} waves: file exists next to the .txprog, mono 16-bit 11025-48000 Hz, <= 1048576 frames, loop inside, "
+          "WAV smpl root/loop == .txprog root/loop")
     groups = prog.findall("tx:group", ns)
     tiles = True; vel = []
     for g in groups:
