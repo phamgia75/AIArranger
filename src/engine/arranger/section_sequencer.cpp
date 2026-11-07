@@ -152,9 +152,11 @@ void SectionSequencer::activateSection(int index) noexcept {
 }
 
 void SectionSequencer::setCurrentChord(const Chord& chord) noexcept {
+    // The bass travels too: the on-bass detector / manual bass set it, and the Bass NTT plays it.
     current_chord_.store(
         (static_cast<uint32_t>(chord.type) & 0xFF) |
-        ((static_cast<uint32_t>(chord.root) & 0xFF) << 8),
+        ((static_cast<uint32_t>(chord.root) & 0xFF) << 8) |
+        ((static_cast<uint32_t>(chord.bass) & 0xFF) << 16),
         std::memory_order_release
     );
 }
@@ -164,7 +166,7 @@ Chord SectionSequencer::getCurrentChord() const noexcept {
     Chord c;
     c.type = static_cast<ChordType>(data & 0xFF);
     c.root = static_cast<uint8_t>((data >> 8) & 0xFF);
-    c.bass = 0;
+    c.bass = static_cast<uint8_t>((data >> 16) & 0xFF);
     c.octave = 0;
     return c;
 }

@@ -28,7 +28,7 @@ juce::String formatChord(const session::EngineSnapshot& s) {
         return "--";
     juce::String name = kNoteNames[s.chordRoot % 12];
     name << chordTypeName(static_cast<arranger::ChordType>(s.chordType));
-    if (s.chordBass != 0 && s.chordBass != s.chordRoot)
+    if (s.chordBass != 0 && s.chordBass % 12 != s.chordRoot % 12)   // pitch classes: C2 bass under a C4 root is not a slash
         name << "/" << kNoteNames[s.chordBass % 12];
     return name;
 }

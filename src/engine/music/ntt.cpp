@@ -130,6 +130,16 @@ uint8_t transpose(uint8_t note, Chord target,
         dstRel = nearestRepresentative(dstRel, ct);
     }
 
+    // Slash chord (spec §6.3 bass: "if there is a bassNote, the lowest bass note prefers the
+    // bassNote"): in Bass mode the source root plays the chord's bass pitch class, by the smaller
+    // move (C/E: up a third; C/G: down a fourth). Root position (bass == root) and bass 0 (no
+    // slash information) are unchanged. The bassNote may be foreign to the chord (C/D).
+    if (ntt == NttMode::Bass && degree == 0 && target.bass != 0) {
+        int b = (static_cast<int>(target.bass) - static_cast<int>(target.root)) % 12;
+        if (b < 0) b += 12;
+        if (b != 0) dstRel = b > 6 ? b - 12 : b;
+    }
+
     // ── NTR root handling ────────────────────────────────────────────
     // Only the root's pitch class transposes (up 0..11 from the source root): the
     // detectors report the lowest played note, so F2 and F4 are the same chord

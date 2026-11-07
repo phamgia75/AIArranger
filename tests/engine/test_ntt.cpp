@@ -141,6 +141,45 @@ int main() {
     defaultRuleForRole(uasf::TrackRole::Phrase1, ntr, ntt);
     TEST("Phrase role -> Melody NTT", ntt == NttMode::Melody);
 
+    // ── Slash chords (spec §6.3 bass; on-bass detector / manual bass set Chord::bass) ──
+    {
+        auto slash = [](ChordType t, uint8_t root, uint8_t bass) { return Chord{t, root, bass, 0}; };
+        const uint8_t c2 = 36, g2 = 43, e2 = 40;
+        TEST("C/E (E1 bass from the Pa5X capture): bass root C2 -> E2",
+             transpose(c2, slash(ChordType::Major, 36, 28), NtrRule::RootTransposition, NttMode::Bass) == 40);
+        TEST("C/G: bass root C2 -> G1 (smaller move, down a fourth)",
+             transpose(c2, slash(ChordType::Major, 36, 43), NtrRule::RootTransposition, NttMode::Bass) == 31);
+        TEST("C/D (foreign bass): bass root C2 -> D2, not snapped to a chord tone",
+             transpose(c2, slash(ChordType::Major, 36, 38), NtrRule::RootTransposition, NttMode::Bass) == 38);
+        TEST("F/A: bass root C2 -> A2 (root F, bass A)",
+             transpose(c2, slash(ChordType::Major, 41, 45), NtrRule::RootTransposition, NttMode::Bass) == 45);
+        TEST("Am7/G: bass root C2 -> G2",
+             transpose(c2, slash(ChordType::Min7, 45, 43), NtrRule::RootTransposition, NttMode::Bass) == 43);
+        TEST("root position via on-bass (bass == root): unchanged",
+             transpose(c2, slash(ChordType::Major, 36, 36), NtrRule::RootTransposition, NttMode::Bass) == 36 &&
+             transpose(c2, slash(ChordType::Major, 41, 29), NtrRule::RootTransposition, NttMode::Bass) == 41);
+        TEST("bass 0 (Fingered: no slash information): unchanged",
+             transpose(c2, slash(ChordType::Major, 36, 0), NtrRule::RootTransposition, NttMode::Bass) == 36);
+        TEST("C/E: the bass line's fifth and third are not moved",
+             transpose(g2, slash(ChordType::Major, 36, 28), NtrRule::RootTransposition, NttMode::Bass) == g2 &&
+             transpose(e2, slash(ChordType::Major, 36, 28), NtrRule::RootTransposition, NttMode::Bass) == e2);
+        TEST("Chord / Melody tracks ignore the slash bass",
+             transpose(60, slash(ChordType::Major, 36, 28), NtrRule::RootTransposition, NttMode::Chord) == 60 &&
+             transpose(60, slash(ChordType::Major, 36, 28), NtrRule::RootTransposition, NttMode::Melody) == 60);
+        RegisterLimits bassRange; bassRange.noteLow = 28; bassRange.noteHigh = 55;
+        TEST("C/G with bass Note Limit 28-55 stays in range (G1 = 31)",
+             transpose(c2, slash(ChordType::Major, 36, 43), NtrRule::RootTransposition, NttMode::Bass, 60, bassRange) == 31);
+        bool every = true;   // every root x every bass pitch class: bass line root lands on the bass pc
+        for (int r = 0; r < 12; ++r)
+            for (int b = 0; b < 12; ++b) {
+                const uint8_t out = transpose(c2, slash(ChordType::Major, uint8_t(48 + r), uint8_t(36 + b)),
+                                              NtrRule::RootTransposition, NttMode::Bass);
+                const int move = int(out) - int(c2) - r;   // movement beyond the root shift
+                if (out % 12 != b || move < -6 - 12 || move > 6) every = false;
+            }
+        TEST("all 12 roots x 12 bass notes: bass root plays the bass pitch class", every);
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }

@@ -57,9 +57,9 @@ int main() {
         r.adapter.setManualBass(true);
         // C major triad (36,48,52,55 -> C/E/G) all in the lower zone.
         r.adapter.noteOn(36); r.adapter.noteOn(48); r.adapter.noteOn(52); r.adapter.noteOn(55);
-        // The sequencer only persists chord type+root, so assert the bass on the
-        // adapter's routed chord (where the split router applies manual bass).
+        // The split router applies manual bass on the adapter's chord; the sequencer keeps it too.
         TEST("manual bass = lowest lower note (36)", r.adapter.lastChord().bass == 36);
+        TEST("manual bass reaches the player chord", r.player.getCurrentChord().bass == 36);
 
         // off -> bass not forced (0 = root)
         Rig r2;
