@@ -191,18 +191,16 @@ void CoreMidiIn::readProc(const MIDIPacketList* pktList, void* readRefCon, void*
         if (self->accepting_.load(std::memory_order_acquire) && self->sink_) {
             const MIDIPacket* pkt = &pktList->packet[0];
             for (UInt32 i = 0; i < pktList->numPackets; ++i) {
-                MidiInputMessage msgs[64];
-                const size_t n = parseMidiInput(pkt->data, pkt->length, msgs, 64);
-                for (size_t j = 0; j < n; ++j) {
+                // No fixed message buffer: a packet with more than 64 messages used to lose the rest.
+                const size_t n = forEachMidiInput(pkt->data, pkt->length, [self](const MidiInputMessage& m) {
                     // Trace point (1): CoreMIDI input received a NoteOn. Compiled
                     // out entirely when AIARR_LATENCY_TRACE is off; when on it is a
                     // wait-free ring push, adding no work to the sink path itself.
-                    if (msgs[j].type == MidiInMsgType::NoteOn) {
-                        AIARR_TRACE_INPUT_NOTEON(msgs[j].channel, msgs[j].data1,
-                                                 msgs[j].data2);
+                    if (m.type == MidiInMsgType::NoteOn) {
+                        AIARR_TRACE_INPUT_NOTEON(m.channel, m.data1, m.data2);
                     }
-                    self->sink_(msgs[j]);
-                }
+                    self->sink_(m);
+                });
                 self->received_.fetch_add(n, std::memory_order_relaxed);
                 pkt = MIDIPacketNext(pkt);
             }

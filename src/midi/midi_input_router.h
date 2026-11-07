@@ -68,10 +68,7 @@ inline void routeMidiInput(const MidiInputMessage& m, Sink& sink,
 template <class Sink>
 inline size_t routeMidiBytes(const uint8_t* bytes, size_t len, Sink& sink,
                              const ChannelRoles& roles = {}) {
-    MidiInputMessage buf[64];
-    const size_t n = parseMidiInput(bytes, len, buf, 64);
-    for (size_t i = 0; i < n; ++i) routeMidiInput(buf[i], sink, roles);
-    return n;
+    return forEachMidiInput(bytes, len, [&](const MidiInputMessage& m) { routeMidiInput(m, sink, roles); });
 }
 
 } // namespace ai_arranger::midi

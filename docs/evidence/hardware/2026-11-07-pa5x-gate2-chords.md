@@ -79,6 +79,32 @@ What remains open (not tested, no fix applied):
 
 The next step is the repeatability test in `PA5X_MIDI_VALIDATION_SEQUENCE.md` §2b, not a code or setting change.
 
+### Code review of the receive path (Phase C, 2026-11-07, read-only; status stays OPEN)
+
+- **The raw listener is independent of the engine's input path.** `pa5x-probe listen --raw` creates its own
+  CoreMIDI client and port (`tools/pa5x_probe.cpp`, `listenRaw`) and counts every byte of every packet
+  itself: bytes >= `F8` go to the realtime counters, every other byte makes the packet count as non-realtime.
+  It does not use `CoreMidiIn`, `parseMidiInput`, the sink, the queues or the chord code. In 11:36-11:46 the
+  same per-byte loop counted 2381 `FE` in the same callback, so the callback ran and read bytes for the
+  whole window. **Any non-realtime byte delivered to the process would have been counted.** No defect in
+  AIArranger's parser, sink, queue or threading can produce that 0: the note bytes did not reach our CoreMIDI client.
+- **No code difference between a good and a bad run:** 11:31 (20 packets) and 11:36 (0) used the same build
+  (`fa780a2`) and the same flags. 12:07 differs only by stdout line buffering and the parsed channel filter,
+  neither of which touches the raw byte count.
+- **Host-side evidence cannot separate the remaining causes:** keys not played in the window, the Pa5X not
+  sending note data while it kept sending Active Sensing, or a transient fault between the Pa5X and CoreMIDI.
+  No fix is applied; the status stays OPEN.
+- **Unrelated latent issue found (engine path only, not observed):** `CoreMidiIn::readProc` parses each
+  packet into a fixed `msgs[64]`. A packet carrying more than 64 messages (for example a controller burst)
+  would lose the rest, Note Offs included, and `receivedCount()` would not count them. No capture shows such a
+  packet, and the raw listener does not use this path, so it does not explain 11:36. Fixed the same day (execution log row 73): the parser hands every message to the sink, no cap.
+
+Proposed next receive-only check (R5 in `PA5X_MIDI_ROUTING_MATRIX.md`; nothing is sent, but it needs the owner
+at the keyboard): `pa5x-probe listen --raw --seconds 180` and `listen --channel 4 --split 60` in parallel on
+`Pa5X KEYBOARD`, the owner writing down the clock time of each chord played, so a zero can be matched against
+"played at hh:mm:ss". Optional on the Mac mini: `/usr/bin/log stream --predicate 'subsystem CONTAINS "usb"'`
+for the same window.
+
 ## Repeatability 2b, run 1 of 3: 12:24:20-12:27:20 (180 s), probe `c425c6f` — PASS
 
 Listeners: parsed `--channel 4 --split 60 --mode fingered`, raw all channels. Operator started ~12:25 (owner's time).
