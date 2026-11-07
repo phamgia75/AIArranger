@@ -93,4 +93,17 @@ Listeners: parsed `--channel 4 --split 60 --mode fingered`, raw all channels. Op
 | FE Active Sensing | 694 in 180 s (3.86/s), continuous |
 | Raw packets / parsed events | 64 / 84 |
 
-No dropout. Runs 2 (after 10 min idle) and 3 (after normal use of the Pa5X screen) still to do.
+No dropout.
+
+## Repeatability 2b, run 2 of 3: 12:39:38-12:42:38 (180 s), after ~12 min idle — PASS (chords); upper control not received
+
+| Check | Result |
+|---|---|
+| C2-E2-G2 presses | 10 |
+| Complete chords received (raw `93 24` / `93 28` / `93 2B`) | 10 / 10 / 10 |
+| Detected on the full chord | `Cmaj (bass C)` 10/10 (transitions: C2+E2 NoChord 9, C2+G2 power chord 1) |
+| Upper control note (C5 on ch 1) | **none received** (no ch 1 event in raw). Not determined whether it was played; does not affect the ch 4 result |
+| FE Active Sensing | 704 in 180 s (3.91/s), continuous |
+| Raw packets / parsed events | 43 / 60; first chord at 15.6 s, last release at 66.6 s |
+
+Run 3 (after normal use of the Pa5X screen, no setting change) still to do.
