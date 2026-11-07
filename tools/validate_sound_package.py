@@ -5,7 +5,8 @@ Uses code that is not AIArranger's: Python's XML and wave readers for the .txpro
 FluidSynth (third-party SF2 implementation) to render the .sf2 and measure pitch and velocity layer.
 SOFTWARE + INDEPENDENT TOOL evidence only; a Pa5X import is the hardware proof (roadmap S6).
 
-    python3 -I tools/validate_sound_package.py DIR      # needs `fluidsynth` on PATH
+    python3 -I tools/validate_sound_package.py DIR [--pitch-only]   # needs `fluidsynth` on PATH
+--pitch-only: for instruments other than the demo organ (skips the organ's Soft/Bright layer check).
 Exit 0 = all checks pass.
 """
 import math, os, struct, subprocess, sys, tempfile, wave
@@ -64,7 +65,7 @@ def txprog(root):
           all(flat[i][1] + 1 == flat[i + 1][0] for i in range(len(flat) - 1)),
           f"velocity zones per group {flat} tile 0-127")
 
-def render(sf2):
+def render(sf2, layers=True):
     tests = [(24, 60), (25, 60), (36, 60), (48, 110), (57, 60), (60, 60), (60, 110), (61, 110), (69, 60),
              (72, 110), (84, 60), (96, 110), (100, 60), (60, 89), (60, 90)]
     HOLD, GAP, RATE, tpq = 3.0, 0.5, 48000, 480
@@ -94,23 +95,28 @@ def render(sf2):
     for n, v in tests:
         a = int((t + 0.5) * RATE); N = int(1.5 * RATE); seg = x[a:a + N]; t += HOLD + GAP  # 0.5-2.0 s: several loop passes
         win = [0.5 - 0.5 * math.cos(2 * math.pi * i / (N - 1)) for i in range(N)]
-        f0 = 440 * 2 ** ((n - 69) / 12); lo, hi = f0 * 2 ** (-30 / 1200), f0 * 2 ** (30 / 1200); g = (math.sqrt(5) - 1) / 2
-        for _ in range(28):
+        f0 = 440 * 2 ** ((n - 69) / 12); g = (math.sqrt(5) - 1) / 2
+        # 1-cent grid first: real instruments have close double peaks a plain golden search can lock onto
+        c0 = max(range(-30, 31), key=lambda c: dtft(seg, f0 * 2 ** (c / 1200), win))
+        lo, hi = f0 * 2 ** ((c0 - 1) / 1200), f0 * 2 ** ((c0 + 1) / 1200)
+        for _ in range(16):
             m1 = hi - g * (hi - lo); m2 = lo + g * (hi - lo)
             if dtft(seg, m1, win) > dtft(seg, m2, win): hi = m2
             else: lo = m1
         f = (lo + hi) / 2; cents = 1200 * math.log2(f / f0); worst = max(worst, abs(cents))
         a1 = dtft(seg, f, win); a5 = dtft(seg, 5 * f, win) if 5 * f < RATE / 2 else 0
         layer = "Bright" if a1 and a5 / a1 > 0.1 else "Soft"
-        allgood &= abs(cents) < 1.0 and layer == ("Bright" if v >= 90 else "Soft") and a1 > 0
+        allgood &= abs(cents) < (1.0 if layers else 5.0) and a1 > 0 and (not layers or layer == ("Bright" if v >= 90 else "Soft"))
         print(f"        note {n:3d} vel {v:3d}: {f:9.3f} Hz ({cents:+.3f} cents) layer {layer}")
-    check(allgood, f"FluidSynth render: {len(tests)} notes within 1 cent (worst {worst:.3f}), velocity 89/90 switch layers")
+    check(allgood, f"FluidSynth render: {len(tests)} notes within {'1 cent' if layers else '5 cents'} (worst {worst:.3f})"
+          + (", velocity 89/90 switch layers" if layers else ""))
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2: sys.exit("usage: validate_sound_package.py DIR")
-    d = sys.argv[1]
+    args = [a for a in sys.argv[1:] if a != "--pitch-only"]
+    if len(args) != 1: sys.exit("usage: validate_sound_package.py DIR [--pitch-only]")
+    d = args[0]
     print("TXPROG package (Python XML/wave readers):"); txprog(d)
     sf2 = [f for f in os.listdir(d) if f.endswith(".sf2")]
     check(len(sf2) == 1, "one .sf2")
-    if sf2: print("SF2 (FluidSynth):"); render(os.path.join(d, sf2[0]))
+    if sf2: print("SF2 (FluidSynth):"); render(os.path.join(d, sf2[0]), "--pitch-only" not in sys.argv)
     print("PASS" if ok else "FAIL"); sys.exit(0 if ok else 1)

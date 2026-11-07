@@ -8,6 +8,8 @@
 #include "media/sound/sf2_writer.h"
 #include "media/sound/wav_writer.h"
 #include "media/sound/txprog_writer.h"
+#include "media/sound/package_writer.h"
+#include <chrono>
 #include "media/sf2_check.h"
 #include <cmath>
 #include <cstdio>
@@ -171,6 +173,28 @@ int main() {
         TEST("names are XML-escaped and file-safe",
              qx.find("tx:name=\"A&lt;&amp;&quot;B\"") != std::string::npos && qx.find("tx:name=\"x&apos;y\"") != std::string::npos &&
              qp[0].path == "A___B/A___B.txprog");
+    }
+
+    // ── S4/S8 package folder ──
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() /
+            ("aiarr_pkg_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::string err;
+        const std::string rep = writePackage(org, dir, "", &err);
+        size_t files = 0;
+        if (fs::is_directory(dir)) for (const auto& e : fs::recursive_directory_iterator(dir)) files += e.is_regular_file();
+        TEST("package: .sf2 + .txprog + 38 tx WAVs + 38 wav/ + REPORT = 79 files; report lists 4 GB use",
+             !rep.empty() && files == 79 && fs::exists(dir / "AIA_Demo_Organ.sf2") &&
+             fs::exists(dir / "wav" / "AIA_Organ_Soft_024_000_025.wav") && rep.find("of the 4 GB") != std::string::npos);
+        std::string err2;
+        TEST("package refuses an existing folder and writes nothing", writePackage(org, dir, "", &err2).empty() &&
+             err2.find("already exists") != std::string::npos);
+        Instrument bad = org; bad.layers.clear();
+        TEST("package refuses an invalid instrument before creating anything",
+             writePackage(bad, dir / "x", "", &err2).empty() && !fs::exists(dir / "x"));
+        std::error_code ec;
+        fs::remove_all(dir, ec);   // our own unique temp folder
     }
 
     // ── WAV ──

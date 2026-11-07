@@ -5,7 +5,7 @@ Status 2026-11-07. Owner's priority order (supersedes the Pa5X-First roadmap's o
 | | Priority | Today |
 |---|---|---|
 | P0 | Reverse-engineering research and the Pa5X Sound engine model | Strong documentary model, PA Manager observations; no byte-level decoding (gated) |
-| P1 | Sound conversion Kronos / VST → Pa5X | S1-S5 built (SOFTWARE + INDEPENDENT TOOL); nothing imported on a Pa5X yet |
+| P1 | Sound conversion Kronos / VST → Pa5X | S1-S5, S7 built (SOFTWARE + INDEPENDENT TOOL); nothing imported on a Pa5X yet |
 | P2 | KST management | Read-only inventory and budget; dependency graph designed, edges blocked |
 | P3 | macOS / iOS / iPadOS apps | macOS JUCE performance app; iPadOS build shell; no Sound/KST UI |
 | P4 | AI Style creator from MP3/WAV | Earlier prototype `~/dev/ai-style-maker` (Python, separate repo); not audited here |
@@ -87,7 +87,9 @@ Sources, in legal order: (a) original samples synthesized by AIArranger; (b) VST
 | S3 | Done | `sf2_writer.h`: re-read by `sf2::check` (0 overlaps), shdr/RIFF checks, truncation refusal. **Independent**: FluidSynth 2.6.2 renders 15 probe notes within 0.004 cent and switches layer at velocity 89/90 (`tools/validate_sound_package.py`) |
 | S4 | Done | `aiarranger-sound demo --out DIR`: `.sf2`, `tx/` TXPROG package, `wav/`, `REPORT.txt`; two runs byte-identical; refuses an existing DIR |
 | S5 | Writer done; owner/Pa5X re-read open | `txprog_writer.h`, format facts with sources in `docs/research/TXPROG_FORMAT_NOTES.md`; package re-read by Python's XML/wave readers (keys and velocities tile, files exist, loops inside) |
-| S6 | Procedure in `REPORT.txt`; **not executed** | Needs owner approval (§5.1) |
+| S6 | Procedure written; **not executed** | `docs/evidence/hardware/PA5X_SOUND_IMPORT_PROCEDURE.md`; needs owner approval (§5.1) |
+| S7 | Done (one-shot samples, mono) | `media/sound/rendered_source.h` (zones, trim, one gain, per-sample pitch report; `test_rendered_source` 16/16) + macOS `aiarranger-plugin-sampler` (AU/VST3, offline, no audio device, no MIDI port). Local functional run on Apple's DLSMusicDevice (host test only, output not kept): 18 samples, sf2-check 0 overlaps, FluidSynth pitch worst 3.2 cents (piano stretch). Limits: no loop search, stereo summed to mono |
+| S8 | Partial | `media/sound/package_writer.h`: one folder per instrument (.sf2, tx/, wav/, REPORT with % of 4 GB); refuses existing folders. Budget across several instruments not built |
 
 ## 5. Owner decisions and blockers
 

@@ -40,7 +40,7 @@ jobs:
       - name: Configure (fetches JUCE 8.0.4)
         run: cmake -S . -B build-app -DBUILD_MACOS_APP=ON
       - name: Build app + smoke test
-        run: cmake --build build-app -j4 --target aiarranger-macos aiarranger-app-smoke
+        run: cmake --build build-app -j4 --target aiarranger-macos aiarranger-app-smoke aiarranger-plugin-sampler
       - name: App UI smoke test
         run: ctest --test-dir build-app -R '^test_app_smoke$' --output-on-failure --timeout 300
 

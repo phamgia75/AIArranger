@@ -1,0 +1,114 @@
+// Sound conversion S7 core: multisampling rendered notes (media/sound/rendered_source.h) with a
+// synthetic renderer standing in for a plugin: known detune, leading silence, velocity-dependent
+// level. SOFTWARE evidence; the plugin host itself is macOS-only (apps/macos).
+
+#include "media/sound/rendered_source.h"
+#include "media/sound/sf2_writer.h"
+#include "media/sf2_check.h"
+#include <cmath>
+#include <cstdio>
+
+using namespace ai_arranger::media;
+using namespace ai_arranger::media::sound;
+
+static int failures = 0, passes = 0;
+#define TEST(name, expr) do { \
+    if (!(expr)) { std::fprintf(stderr, "  FAIL: %s\n", name); failures++; } \
+    else { std::printf("  PASS: %s\n", name); passes++; } } while (0)
+
+// 0.1 s silence, 1.5 s tone (3 harmonics) at the note +detune cents, 0.3 s release, 0.2 s silence.
+static RenderFn synth(double detuneCents, int* calls = nullptr) {
+    return [=](uint8_t note, uint8_t vel) {
+        if (calls) ++*calls;
+        const double f = 440.0 * std::pow(2.0, (note - 69) / 12.0 + detuneCents / 1200.0), kPi = 3.14159265358979323846;
+        std::vector<float> x(static_cast<size_t>(2.1 * 48000), 0.f);
+        for (size_t n = 4800; n < static_cast<size_t>(1.9 * 48000); ++n) {
+            const double t = (n - 4800) / 48000.0;
+            const double env = std::min(1.0, t / 0.005) * (t < 1.5 ? 1.0 : std::exp(-(t - 1.5) * 20));
+            x[n] = static_cast<float>(vel / 127.0 * 0.5 * env *
+                   (std::sin(2 * kPi * f * t) + 0.5 * std::sin(4 * kPi * f * t) + 0.25 * std::sin(6 * kPi * f * t)));
+        }
+        return x;
+    };
+}
+
+int main() {
+    std::printf("Test: rendered-note multisampling (S7 core)\n");
+    RenderSpec spec;
+    spec.name = "Test Plugin";
+    spec.lowRoot = 36; spec.highRoot = 84; spec.step = 6;
+    spec.velocities = {64, 120};
+    spec.velocitySwitch = 96;
+    int calls = 0;
+    RenderReport rep;
+    const Instrument in = buildFromRenders(spec, synth(3.0, &calls), &rep);
+
+    TEST("valid against the Pa5X limits; 9 roots x 2 layers rendered once each", validate(in).empty() && calls == 18 && in.samples.size() == 18);
+    bool tiles = in.layers.size() == 2;
+    for (const auto& L : in.layers) {
+        int next = 0;
+        for (const auto& z : L.zones) { tiles &= z.lo == next && z.lo <= z.root && z.root <= z.hi; next = z.hi + 1; }
+        tiles &= next == 128;
+    }
+    TEST("zones tile 0-127, each root inside its zone", tiles);
+    TEST("zone split halfway: root 36 -> 0-38, root 42 -> 39-44", in.layers[0].zones[0].hi == 38 && in.layers[0].zones[1].lo == 39 && in.layers[0].zones[1].hi == 44);
+    bool pitch = rep.rows.size() == 18;
+    for (const auto& r : rep.rows) pitch &= std::fabs(r.cents - 3.0) < 0.2;
+    TEST("measured pitch = the renderer's +3 cents detune on every sample (within 0.2)", pitch);
+    TEST("no warnings for a pitched, in-tune-enough source", rep.warnings.empty());
+    {
+        const Sample& s = in.samples[0];
+        TEST("leading silence trimmed to the 2 ms pre-roll; release kept; tail silence dropped",
+             s.pcm.size() > 1.5 * 48000 && s.pcm.size() < 1.9 * 48000 && std::abs(s.pcm[0]) < 200 && std::abs(s.pcm[200]) > 100);
+        TEST("fade-out ends at zero", s.pcm.back() == 0);
+    }
+    {
+        int16_t pLo = 0, pHi = 0;
+        for (int16_t v : in.samples[4].pcm) pLo = std::max<int16_t>(pLo, static_cast<int16_t>(std::abs(v)));
+        for (int16_t v : in.samples[13].pcm) pHi = std::max<int16_t>(pHi, static_cast<int16_t>(std::abs(v)));
+        TEST("one gain for the instrument: the soft layer stays quieter (64/120) and the loudest sample peaks at 0.9 FS",
+             std::fabs(double(pLo) / pHi - 64.0 / 120.0) < 0.02 && pHi > 0.88 * 32767 && pHi < 0.91 * 32767);
+    }
+    TEST("names fit 20 chars: 'Test Plugin C2 L', layers 'Test Plugin Lo/Hi'",
+         in.samples[0].name == "Test Plugin C2 L" && in.layers[1].name == "Test Plugin Hi" && in.samples[17].name == "Test Plugin C6 H");
+    const auto sf2 = writeSf2(in);
+    const auto chk = sf2::check(sf2);
+    TEST("SF2 written and re-read: 2 instruments, 18 samples, 0 overlaps", chk.ok && chk.instruments.size() == 2 && chk.samples.size() == 18 && chk.overlapping() == 0);
+    {
+        RenderReport r2;
+        TEST("deterministic", writeSf2(buildFromRenders(spec, synth(3.0), &r2)) == sf2);
+    }
+    {
+        RenderReport r;
+        const Instrument d = buildFromRenders(spec, synth(25.0), &r);
+        TEST("a detuned source (+25 cents) is reported per sample, still built", validate(d).empty() && r.warnings.size() == 18);
+        const Instrument q = buildFromRenders(spec, [](uint8_t, uint8_t) { return std::vector<float>(48000, 0.f); }, &r);
+        TEST("silence is refused with a warning", q.samples.empty() && r.warnings.size() == 1);
+        RenderSpec bad = spec; bad.velocities = {10, 20, 30};
+        TEST("3 velocities are refused", buildFromRenders(bad, synth(0), &r).samples.empty() && !r.warnings.empty());
+        // regression: a note still loud when the render stops (e.g. a piano cut at hold + release)
+        // must still end at exactly 0 (the fade used to stop at x/(fade+1), a step up to ~136 LSB).
+        const Instrument cut = buildFromRenders(spec, [](uint8_t, uint8_t) {
+            std::vector<float> x(48000);
+            for (size_t n = 0; n < x.size(); ++n) x[n] = 0.8f * static_cast<float>(std::sin(n * 0.05));
+            return x;
+        }, &r);
+        bool zeroEnd = !cut.samples.empty();
+        for (const auto& s : cut.samples) zeroEnd &= s.pcm.back() == 0 && std::abs(s.pcm[s.pcm.size() - 2]) < 200;
+        TEST("regression: a sample cut while loud fades to exactly 0", zeroEnd);
+        const Instrument nan = buildFromRenders(spec, [](uint8_t, uint8_t) { return std::vector<float>(4800, NAN); }, &r);
+        TEST("non-finite audio is refused", nan.samples.empty());
+    }
+    {   // regression: two close lines (detuned unison strings). The true fundamental is the strongest,
+        // at -35 cents; a weaker line at +10 cents drew the earlier golden-only search off to it.
+        const double kPi = 3.14159265358979323846, f0 = 440.0;
+        std::vector<int16_t> x(48000);
+        for (size_t n = 0; n < x.size(); ++n)
+            x[n] = static_cast<int16_t>(12000 * std::sin(2 * kPi * f0 * std::pow(2.0, -35 / 1200.0) * n / 48000) +
+                                        7000 * std::sin(2 * kPi * f0 * std::pow(2.0, 10 / 1200.0) * n / 48000));
+        const double c = 1200 * std::log2(measurePitch(x.data(), x.size(), 48000, f0) / f0);
+        TEST("regression: measurePitch finds the strongest of two close lines (-35 cents, not the +10 side line)", std::fabs(c + 35) < 0.5);
+    }
+    std::printf("\nResults: %d passed, %d failed\n", passes, failures);
+    return failures ? 1 : 0;
+}

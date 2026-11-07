@@ -52,3 +52,11 @@ target_link_libraries(aiarranger-app-smoke PRIVATE
     juce::juce_gui_extra juce::juce_audio_basics juce::juce_audio_devices)
 add_test(NAME test_app_smoke COMMAND aiarranger-app-smoke)
 set_tests_properties(test_app_smoke PROPERTIES ENVIRONMENT "AIARR_MIDI_HW_TX=0" RUN_SERIAL TRUE)
+
+# ── Sound conversion S7: offline AU/VST3 instrument sampler (no audio device, no MIDI port) ──
+juce_add_console_app(aiarranger-plugin-sampler PRODUCT_NAME "aiarranger-plugin-sampler")
+target_sources(aiarranger-plugin-sampler PRIVATE Tools/plugin_sampler.cpp)
+target_include_directories(aiarranger-plugin-sampler PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_definitions(aiarranger-plugin-sampler PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_PLUGINHOST_AU=1 JUCE_PLUGINHOST_VST3=1)
+target_link_libraries(aiarranger-plugin-sampler PRIVATE juce::juce_audio_processors "-framework CoreAudioKit")   # AU hosting (AUGenericView)
