@@ -36,6 +36,22 @@ inline size_t encodeMidiEvent(const uasf::MidiEvent& ev, uint8_t* out) noexcept 
     }
 }
 
+// Cleanup messages for the channels whose bit is set in `mask` (bit n = channel n), ascending:
+// All Notes Off (CC 123) then All Sound Off (CC 120) per channel. A mask of 0 is treated as all
+// 16 channels (cleanup is never silently disabled). `out` holds up to 32 messages.
+// Returns the message count.
+inline size_t encodeCleanup(uint16_t mask, uint8_t (*out)[3]) noexcept {
+    if (mask == 0) mask = 0xFFFF;
+    size_t n = 0;
+    for (uint8_t ch = 0; ch < 16; ++ch) {
+        if (!(mask >> ch & 1)) continue;
+        for (uint8_t cc : {uint8_t{123}, uint8_t{120}}) {
+            out[n][0] = static_cast<uint8_t>(0xB0 | ch); out[n][1] = cc; out[n][2] = 0; ++n;
+        }
+    }
+    return n;
+}
+
 } // namespace ai_arranger::midi
 
 #endif

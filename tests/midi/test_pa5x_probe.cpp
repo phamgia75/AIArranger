@@ -93,9 +93,35 @@ int main() {
          probe::sentSummary(2).find("2 MIDI messages") != std::string::npos &&
          probe::sentSummary(2).find("bytes") == std::string::npos &&
          probe::sentSummary(1).find("1 MIDI message ") != std::string::npos);
-    TEST("send summary says host-side only and that All Sound Off follows",
+    TEST("send summary says host-side only and that cleanup follows",
          probe::sentSummary(2).find("not proof the device sounded") != std::string::npos &&
-         probe::sentSummary(2).find("All Sound Off follows") != std::string::npos);
+         probe::sentSummary(2).find("cleanup follows") != std::string::npos);
+
+    // Narrowed cleanup (after Phase B 17:30, where `note` silenced all 16 channels).
+    {
+        uint8_t m[32][3];
+        const size_t n = encodeCleanup(probe::noteCleanupMask(0), m);
+        TEST("note --channel 1 cleanup is exactly B0 7B 00, B0 78 00",
+             probe::noteCleanupMask(0) == 0x0001 && n == 2 &&
+             m[0][0] == 0xB0 && m[0][1] == 123 && m[0][2] == 0 && m[1][0] == 0xB0 && m[1][1] == 120 && m[1][2] == 0);
+        const size_t n16 = encodeCleanup(probe::noteCleanupMask(15), m);
+        TEST("note --channel 16 cleanup is exactly BF 7B 00, BF 78 00",
+             n16 == 2 && m[0][0] == 0xBF && m[0][1] == 123 && m[1][0] == 0xBF && m[1][1] == 120);
+        const size_t all = encodeCleanup(0xFFFF, m);
+        bool order = all == 32;
+        for (size_t i = 0; order && i < 32; ++i)
+            order = m[i][0] == (0xB0 | i / 2) && m[i][1] == (i % 2 ? 120 : 123) && m[i][2] == 0;
+        TEST("PANIC (alloff) is CC 123 then CC 120 on channels 1..16, 32 messages", order);
+        TEST("an empty mask never disables cleanup (treated as all 16)", encodeCleanup(0, m) == 32);
+    }
+    {
+        bool hup = false, intr = false, term = false, pipe = false, kill = false;
+        for (int s : probe::kNoteHoldIgnoredSignals) {
+            hup |= s == SIGHUP; intr |= s == SIGINT; term |= s == SIGTERM; pipe |= s == SIGPIPE; kill |= s == SIGKILL;
+        }
+        TEST("note hold ignores SSH drop (HUP, PIPE), Ctrl-C and TERM; does not claim SIGKILL",
+             hup && intr && term && pipe && !kill);
+    }
 
     // Phase B 17:30 command `note --channel 1 --note 60 --vel 64`: CLI channel 1 is wire channel 0.
     {

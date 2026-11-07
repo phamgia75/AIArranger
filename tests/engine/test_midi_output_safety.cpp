@@ -202,6 +202,33 @@ int main() {
         TEST("sink and decoy received nothing", sink.count() == 0 && decoy.count() == 0);
     }
 
+    // 4. Cleanup scope (pa5x-probe `note`): narrowed to one channel it is exactly 2 CCs on
+    //    shutdown and on deselect; the default stays 32; re-initialize restores 32. Guarded:
+    //    blocked counts stand in for messages, nothing is transmitted.
+    {
+        CoreMidiOut out;
+        out.initialize("AIARR safety 4");
+        TEST("cleanup scope defaults to all 16 channels", out.cleanupChannels() == 0xFFFF);
+        out.setCleanupChannels(0x0001);
+        out.selectDestinationByName(uniq);
+        out.send(ev(MidiEventType::NoteOn, 60, 64));        // no Note Off: the abnormal case
+        waitFor([&] { return out.blockedCount() >= 1; });
+        out.shutdown();
+        TEST("narrowed shutdown cleanup: Note On + exactly 2 CCs", out.blockedCount() == 1 + 2);
+        out.initialize("AIARR safety 4b");
+        TEST("re-initialize restores the full cleanup scope", out.cleanupChannels() == 0xFFFF);
+        out.setCleanupChannels(0x0001);
+        out.selectDestinationByName(uniq);
+        const uint64_t before = out.blockedCount();
+        out.selectDestination(-1);                           // disconnect path
+        TEST("narrowed deselect cleanup: exactly 2 CCs", out.blockedCount() == before + 2);
+        out.setCleanupChannels(0);
+        TEST("mask 0 cannot disable cleanup (all 16)", out.cleanupChannels() == 0xFFFF);
+        out.shutdown();
+        settle();
+        TEST("sink received nothing in the scope tests", sink.count() == 0);
+    }
+
     MIDIEndpointDispose(decoyEp);
     MIDIEndpointDispose(sinkEp);
     MIDIClientDispose(client);

@@ -107,13 +107,18 @@ public:
     using DispatchTap = std::function<void(const uasf::MidiEvent&)>;
     void setDispatchTap(DispatchTap tap) noexcept; // call before initialize()
 
-    [[nodiscard]] uint64_t sentCount() const noexcept;     // bytes actually MIDISent
+    [[nodiscard]] uint64_t sentCount() const noexcept;     // messages MIDISend accepted (noErr), not bytes
     [[nodiscard]] uint64_t dispatchedCount() const noexcept; // events popped
     [[nodiscard]] uint64_t droppedCount() const noexcept;  // dropped (queue full)
     [[nodiscard]] uint64_t reconnectCount() const noexcept;
     // Messages a selected destination did NOT receive because the hardware-
     // transmission guard (AIARR_MIDI_HW_TX=0) is active.
     [[nodiscard]] uint64_t blockedCount() const noexcept;
+    // Channels silenced by the automatic cleanup (destination switch, disconnect, shutdown):
+    // bit n = channel n, default all 16; 0 means all 16. Narrowing it is for a bounded test that
+    // used one channel; a full panic keeps the default. Non-realtime; set before sending. initialize() resets it to all 16.
+    void setCleanupChannels(uint16_t mask) noexcept { cleanup_mask_.store(mask ? mask : 0xFFFF, std::memory_order_release); }
+    [[nodiscard]] uint16_t cleanupChannels() const noexcept { return cleanup_mask_.load(std::memory_order_acquire); }
     // False when the guard read at initialize() blocks all transmission.
     [[nodiscard]] bool hardwareTransmitAllowed() const noexcept { return hw_tx_allowed_; }
 
@@ -121,7 +126,7 @@ private:
     bool selectEndpoint(MIDIEndpointRef ep, int index) noexcept;
     void dispatchLoop() noexcept;          // consumer thread body
     void dispatchOne(const uasf::MidiEvent& ev) noexcept; // send one event now
-    // Directly send All-Notes-Off (CC123) + All-Sound-Off (CC120) on every channel
+    // Directly send All-Notes-Off (CC123) + All-Sound-Off (CC120) on the cleanup channels
     // to `ep` (non-realtime, calling thread). Used to silence the outgoing device
     // before a destination switch/disconnect.
     void sendAllSoundOff(MIDIEndpointRef ep) noexcept;
@@ -152,6 +157,7 @@ private:
     std::atomic<uint64_t> dropped_count_{0};
     std::atomic<uint64_t> reconnect_count_{0};
     std::atomic<uint64_t> blocked_count_{0};
+    std::atomic<uint16_t> cleanup_mask_{0xFFFF};
     // Written only in initialize() before the dispatch thread starts.
     bool hw_tx_allowed_{false};
 };

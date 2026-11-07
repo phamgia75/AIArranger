@@ -20,8 +20,9 @@
 //
 // Sending is fail-closed: an exact destination name (one match only) AND
 // --confirm-send are required. The flag records the operator's approval; it
-// does not replace it. `note` and `alloff` end with All Sound Off on the
-// destination; `control` sends one Program Change and nothing else (no silence,
+// does not replace it. `note` ends with All Notes Off + All Sound Off on its own
+// channel only (2 messages); `alloff` is the PANIC: the same two on all 16 channels
+// (32 messages), a separate command needing its own authorization; `control` sends one Program Change and nothing else (no silence,
 // so a playing style keeps sounding).
 #include "engine/chord/fingered_detector.h"
 #include "engine/chord/fingered_on_bass_detector.h"
@@ -347,17 +348,18 @@ int send(const std::string& cmd, const std::map<std::string, std::string>& f) {
     };
     using T = uasf::MidiEventType;
     if (cmd == "note") {
-        // The hold is bounded (--ms <= 5000): a dropped SSH session (SIGHUP/SIGPIPE) or Ctrl-C must
-        // not kill us between Note On and the Note Off + All Sound Off below. SIGKILL: run `alloff`.
-        for (int sig : {SIGHUP, SIGINT, SIGTERM, SIGPIPE}) std::signal(sig, SIG_IGN);
-        std::printf("send: Note On ch %d note %d vel %d, %d ms, Note Off, then All Sound Off\n", *ch + 1, note, vel, ms);
+        // The hold is bounded (--ms <= 5000): a dropped SSH session or Ctrl-C must not kill us
+        // between Note On and the Note Off + cleanup below. SIGKILL cannot be caught: then `alloff`.
+        for (int sig : probe::kNoteHoldIgnoredSignals) std::signal(sig, SIG_IGN);
+        out.setCleanupChannels(probe::noteCleanupMask(*ch));
+        std::printf("send: Note On ch %d note %d vel %d, %d ms, Note Off, then All Notes Off + All Sound Off on ch %d only\n", *ch + 1, note, vel, ms, *ch + 1);
         out.send({T::NoteOn, *ch, static_cast<uint8_t>(note), static_cast<uint8_t>(vel), 0});
         waitDispatched(1);
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         out.send({T::NoteOff, *ch, static_cast<uint8_t>(note), 0, 0});
         waitDispatched(2);
     } else {
-        std::printf("send: All Sound Off (CC 120) + All Notes Off (CC 123) on all 16 channels\n");
+        std::printf("send: PANIC: All Notes Off (CC 123) + All Sound Off (CC 120) on all 16 channels\n");
     }
     std::printf("%s\n", probe::sentSummary(out.sentCount()).c_str());
     out.shutdown();   // All Sound Off on the still-selected destination

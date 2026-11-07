@@ -7,6 +7,7 @@
 #include "midi/midi_input_parser.h"
 #include "midi/pa5x_control.h"
 #include <array>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
@@ -97,13 +98,22 @@ inline std::vector<TimedByte> clockPlan(int bpm, int beats) {
     return v;
 }
 
+/// Signals `note` ignores between Note On and its cleanup, so a dropped SSH session (HUP, PIPE),
+/// Ctrl-C (INT) or a polite kill (TERM) cannot leave the note sounding. SIGKILL cannot be caught.
+inline constexpr std::array<int, 4> kNoteHoldIgnoredSignals{SIGHUP, SIGINT, SIGTERM, SIGPIPE};
+
+/// Cleanup scope for `note`: only the channel it played (0-based). `alloff` keeps all 16.
+inline constexpr uint16_t noteCleanupMask(uint8_t channel) noexcept {
+    return static_cast<uint16_t>(1u << (channel & 0x0F));
+}
+
 /// What `note` / `alloff` report after sending. CoreMidiOut::sentCount() counts MIDI *messages*
 /// whose MIDISend returned noErr (not bytes), and shutdown's All Sound Off is not in it. Host-side
 /// acceptance only: it says nothing about whether the instrument received or sounded anything.
 inline std::string sentSummary(uint64_t messagesAccepted) {
     return "CoreMIDI accepted " + std::to_string(messagesAccepted) + " MIDI message" +
            (messagesAccepted == 1 ? "" : "s") +
-           " (MIDISend noErr; host side only, not proof the device sounded); All Sound Off follows at shutdown";
+           " (MIDISend noErr; host side only, not proof the device sounded); cleanup follows at shutdown";
 }
 
 } // namespace ai_arranger::midi::pa5x::probe
