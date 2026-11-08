@@ -94,6 +94,22 @@ int main() {
     refuses("missing smpl refused (root unknown)", "Pad_060_000_127.wav", w, "no smpl");
     w = writeWav(m); w[w.size() - 24 + 4] = 1;   // loop type ping-pong
     refuses("non-forward loop refused", "Pad_060_000_127.wav", w, "forward loops");
+    // regressions from the independent (Codex) review
+    w = writeWav(m); w[22] = 1; w[23] = 1;   // 257 channels: narrowed to 1 by the old code
+    refuses("257 channels refused (not narrowed to mono)", "Pad_060_000_127.wav", w, "mono or stereo");
+    w = writeWav(m); w[w.size() - 24 - 8] = 2;   // numSampleLoops = 2
+    refuses("two loops refused", "Pad_060_000_127.wav", w, "one loop");
+    w = writeWav(m); w[w.size() - 4] = 1;   // play count 1
+    refuses("finite play count refused", "Pad_060_000_127.wav", w, "play count");
+    w = writeWav(m); w[w.size() - 8] = 1;   // fraction
+    refuses("fractional loop refused", "Pad_060_000_127.wav", w, "fractional");
+    {   // a 65-byte mono data chunk (+ pad byte) before a valid smpl chunk
+        Sample o = m; o.looped = false; o.pcm.resize(33);
+        auto v = writeWav(o);
+        const size_t d = 12 + 8 + 16;   // 'data' header offset
+        v[d + 4] = 65;                  // declare 65 bytes; byte 66 becomes the RIFF pad
+        refuses("odd-sized data chunk refused", "Pad_060_000_127.wav", v, "whole 16-bit frames");
+    }
     {
         Instrument x;
         TEST("two prefixes without a layer order refused",

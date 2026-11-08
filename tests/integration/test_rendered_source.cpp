@@ -91,6 +91,26 @@ int main() {
         TEST("refused: descending velocities, a split outside its two renders, 25 layers",
              buildFromRenders(bad, synth(0), &r).samples.empty() && buildFromRenders(badSplit, synth(0), &r).samples.empty() &&
              buildFromRenders(tooMany, synth(0), &r).samples.empty());
+        // release measurement: exp(-10 t) after note-off reaches -60 dB at ln(1000)/10 = 0.691 s
+        {
+            std::vector<float> y(48000 * 3, 0.f);
+            for (size_t n = 0; n < y.size(); ++n) {
+                const double t = n / 48000.0, env = t < 1.0 ? 1.0 : std::exp(-(t - 1.0) * 10);
+                y[n] = float(0.5 * env * std::sin(2 * 3.14159265358979 * 220 * t));
+            }
+            const double rs = measureRelease(y, 1, 48000, 48000);
+            std::vector<float> cut(y.begin(), y.begin() + 48000 + 24000);   // render stops at 0.5 s
+            TEST("release time measured to -60 dB (0.69 s +- 20 ms); NaN when the render ends first",
+                 std::fabs(rs - 0.691) < 0.02 && std::isnan(measureRelease(cut, 1, 48000, 48000)) &&
+                 std::isnan(measureRelease(std::vector<float>(96000, 0.f), 1, 48000, 48000)));
+        }
+        // regression (Codex review): "V10".."V24" pushed a 20-char name's layer names past 20 characters
+        RenderSpec many = spec; many.name = "Twenty Char Name XYZ"; many.velocities.clear(); many.splits.clear();
+        many.lowRoot = many.highRoot = 60;
+        for (int v = 1; v <= 24; ++v) many.velocities.push_back(uint8_t(v * 5));
+        const Instrument m24 = buildFromRenders(many, synth(0), &r);
+        TEST("24 layers with a 20-character name validate (layer names <= 20 chars)",
+             m24.layers.size() == 24 && validate(m24).empty() && m24.layers[23].name == "Twenty Char Name V24");
         // regression: a note still loud when the render stops (e.g. a piano cut at hold + release)
         // must still end at exactly 0 (the fade used to stop at x/(fade+1), a step up to ~136 LSB).
         const Instrument cut = buildFromRenders(spec, [](uint8_t, uint8_t) {

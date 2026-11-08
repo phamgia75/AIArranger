@@ -33,7 +33,8 @@ struct RenderSpec {
 using RenderFn = std::function<std::vector<float>(uint8_t note, uint8_t velocity)>;   // interleaved when stereo
 
 struct RenderReport {
-    struct Row { uint8_t note, velocity; size_t frames; double cents; double loopMatch; };   // loopMatch NaN = one-shot
+    struct Row { uint8_t note, velocity; size_t frames; double cents; double loopMatch;   // loopMatch NaN = one-shot
+                 double releaseSec; };   // note-off to -60 dB (measureRelease); NaN = not looped or not reached
     std::vector<Row> rows;
     std::vector<std::string> warnings;       // empty spec, silent render, detuned/unpitched samples
     double gain = 0;
@@ -110,6 +111,21 @@ inline double loopSustain(Sample& s, size_t noteOff) {
     return bc;
 }
 
+// Release time of a render (interleaved, ch channels): seconds from note-off frame `off` until the
+// 10 ms RMS falls 60 dB below the 10 ms before note-off. Looping cuts the release away and the Pa5X
+// does not import envelopes (TX16Wx guide p.85), so this is reported for setting the Amp EG by hand.
+// NaN when there is no level before note-off or the render ends first.
+inline double measureRelease(const std::vector<float>& x, size_t ch, uint32_t rate, size_t off) {
+    const size_t W = rate / 100, total = x.size() / ch;
+    auto rms = [&](size_t f) { double e = 0; for (size_t k = f * ch; k < (f + W) * ch; ++k) e += double(x[k]) * x[k]; return std::sqrt(e / (W * ch)); };
+    if (off < W || off > total) return NAN;
+    const double thr = rms(off - W) * 1e-3;
+    if (!(thr > 0)) return NAN;
+    for (size_t f = off; f + W <= total; f += W)
+        if (rms(f) < thr) return double(f - off) / rate;
+    return NAN;
+}
+
 inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& render, RenderReport* report = nullptr) {
     RenderReport local;
     RenderReport& rep = report ? *report : local;
@@ -154,7 +170,7 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
         Layer layer;
         // 2 layers keep the Lo/Hi names; more are numbered from the softest
         const std::string tag = N == 1 ? "" : N == 2 ? (l == 0 ? "Lo" : "Hi") : "V" + std::to_string(l + 1);
-        layer.name = spec.name.substr(0, 17) + (tag.empty() ? "" : " " + tag);
+        layer.name = tag.empty() ? spec.name : spec.name.substr(0, 19 - tag.size()) + " " + tag;   // <= 20 chars
         layer.velLo = static_cast<uint8_t>(l == 0 ? 0 : in.layers.back().velHi + 1);
         layer.velHi = static_cast<uint8_t>(l + 1 == N ? 127
                       : spec.splits.empty() ? (spec.velocities[l] + spec.velocities[l + 1]) / 2 : spec.splits[l] - 1);
@@ -188,9 +204,10 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
             const size_t from = std::min<size_t>(n, spec.rate / 5), len = std::min<size_t>(n - from, spec.rate);
             const double f = measurePitch(mono.data() + from, len, spec.rate, 440.0 * std::pow(2.0, (r - 69) / 12.0));
             const double cents = f > 0 ? 1200 * std::log2(f / (440.0 * std::pow(2.0, (r - 69) / 12.0))) : NAN;
-            double match = NAN;
+            double match = NAN, release = NAN;
             if (spec.loopHoldSec > 0) {
                 const size_t off = static_cast<size_t>(spec.loopHoldSec * spec.rate);
+                release = measureRelease(x, ch, spec.rate, off);
                 match = off > a ? loopSustain(s, off - a) : -1;
                 if (!(match >= 0.9)) {
                     char w[112];
@@ -199,7 +216,7 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
                     rep.warnings.push_back(w);
                 }
             }
-            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.frames(), cents, match});
+            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.frames(), cents, match, release});
             if (!(std::fabs(cents) <= 10)) {
                 char w[96];
                 std::snprintf(w, sizeof w, "%s: pitch %+.1f cents from %s%d (detuned, unpitched or too short)",

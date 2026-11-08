@@ -31,10 +31,10 @@ inline std::string readWav(const std::vector<uint8_t>& b, Sample* s) {
         if (!std::memcmp(&b[o], "fmt ", 4)) {
             if (len < 16) return "fmt chunk too short";
             if (u16(body) != 1) return "only uncompressed PCM is supported";
+            if (u16(body + 2) != 1 && u16(body + 2) != 2) return "only mono or stereo is supported";   // check before narrowing
             s->channels = static_cast<uint8_t>(u16(body + 2));
             s->rate = u32(body + 4);
             if (u16(body + 14) != 16) return "only 16-bit samples are supported";
-            if (s->channels != 1 && s->channels != 2) return "only mono or stereo is supported";
             fmt = true;
         } else if (!std::memcmp(&b[o], "data", 4)) {
             dataAt = body; dataLen = len; data = true;
@@ -44,9 +44,12 @@ inline std::string readWav(const std::vector<uint8_t>& b, Sample* s) {
             s->root = static_cast<uint8_t>(u32(body + 12));
             haveRoot = true;
             const uint32_t loops = u32(body + 28);
+            if (loops > 1) return "only one loop per sample is supported";
             if (loops) {
                 if (len < 36 + 24) return "smpl loop record missing";
                 if (u32(body + 36 + 4) != 0) return "only forward loops are supported";
+                if (u32(body + 36 + 16) != 0) return "fractional loop points are not supported";
+                if (u32(body + 36 + 20) != 0) return "only endless loops (play count 0) are supported";
                 s->loopStart = u32(body + 36 + 8);
                 s->loopEnd = u32(body + 36 + 12) + 1;   // inclusive in 'smpl'
                 s->looped = true;
@@ -56,6 +59,7 @@ inline std::string readWav(const std::vector<uint8_t>& b, Sample* s) {
     }
     if (!fmt || !data) return "missing fmt or data chunk";
     if (!haveRoot) return "no smpl chunk (root note unknown)";
+    if (dataLen % (2u * s->channels)) return "data chunk does not hold whole 16-bit frames";
     s->pcm.resize(dataLen / 2);
     for (size_t i = 0; i < s->pcm.size(); ++i) s->pcm[i] = static_cast<int16_t>(u16(dataAt + 2 * i));
     return "";

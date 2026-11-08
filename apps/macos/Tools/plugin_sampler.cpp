@@ -127,12 +127,26 @@ int main(int argc, char** argv) {
                         desc->pluginFormatName.toStdString() + ") rendered offline at 48 kHz, " + (spec.channels == 2 ? "stereo" : "mono sum") + ", " +
                         (spec.loopHoldSec > 0 ? "held part looped" : "one-shot samples") + ".\n"
                         "Rights: the user must hold a licence that permits sampling this instrument.\n"
-                        "Measured pitch per sample (cents from equal temperament), loop seam match (1 = identical):\n";
+                        "Measured pitch per sample (cents from equal temperament), loop seam match (1 = identical),\n"
+                        "release (note-off to -60 dB, from the render):\n";
+    std::vector<double> rel;
     for (const auto& r : rep.rows) {
-        char l[96];
-        std::snprintf(l, sizeof l, "  note %3u vel %3u  %+7.2f  %7zu frames  loop %s\n", r.note, r.velocity, r.cents, r.frames,
-                      std::isnan(r.loopMatch) ? "-" : std::to_string(r.loopMatch).substr(0, 5).c_str());
+        char l[128];
+        std::snprintf(l, sizeof l, "  note %3u vel %3u  %+7.2f  %7zu frames  loop %s  release %s\n", r.note, r.velocity, r.cents, r.frames,
+                      std::isnan(r.loopMatch) ? "-" : std::to_string(r.loopMatch).substr(0, 5).c_str(),
+                      std::isnan(r.releaseSec) ? "-" : (std::to_string(r.releaseSec).substr(0, 4) + " s").c_str());
         notes += l;
+        if (!std::isnan(r.releaseSec)) rel.push_back(r.releaseSec);
+    }
+    if (!rel.empty()) {
+        std::sort(rel.begin(), rel.end());
+        char l[320];
+        std::snprintf(l, sizeof l, "Release: median %.2f s (range %.2f-%.2f s). The loop cuts the recorded release and the Pa5X does\n"
+                      "not import envelopes (TX16Wx guide p.85): set Sound Edit > Amp > Envelope Generator release by hand\n"
+                      "(manual p.1130) to approximate it.\n", rel[rel.size() / 2], rel.front(), rel.back());
+        notes += l;
+    } else if (spec.loopHoldSec > 0) {
+        notes += "Release: not measured (render ended before -60 dB; raise --release).\n";
     }
     for (const auto& w : rep.warnings) notes += "WARNING: " + w + "\n";
     std::string perr;
