@@ -131,6 +131,7 @@ if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if a != "--pitch-only"]
     if len(args) != 1: sys.exit("usage: validate_sound_package.py DIR [--pitch-only]")
     d = args[0]
+    if not os.path.isdir(d): sys.exit("FAIL: not a folder: %s" % d)
     print("TXPROG package (Python XML/wave readers):"); txprog(d)
     sf2 = [f for f in os.listdir(d) if f.endswith(".sf2")]
     check(len(sf2) == 1, "one .sf2")

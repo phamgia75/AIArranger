@@ -56,6 +56,10 @@ def main():
     r = run(src)
     print(("  PASS" if r.returncode == 0 else "  FAIL") + ": untouched package passes")
     fails += r.returncode != 0
+    r = run(os.path.join(src, "no-such-folder"))
+    good = r.returncode == 1 and "not a folder" in r.stderr and "Traceback" not in r.stderr
+    print(("  PASS" if good else "  FAIL") + ": missing folder is a clear FAIL")
+    fails += not good
     for name, mut in MUTATIONS.items():
         with tempfile.TemporaryDirectory() as t:
             d = os.path.join(t, "pkg"); shutil.copytree(src, d)

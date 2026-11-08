@@ -194,6 +194,7 @@ def kit(d, reference):
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if a != "--reference"]
     if len(args) != 1: sys.exit("usage: validate_drumkit_package.py DIR [--reference]")
+    if not os.path.isdir(args[0]): sys.exit("FAIL: not a folder: %s" % args[0])
     print("TX16Wx Drum Kit package (Python XML/wave readers):")
     try:
         kit(args[0], "--reference" in sys.argv)
