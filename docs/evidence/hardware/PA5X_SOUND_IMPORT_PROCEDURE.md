@@ -20,6 +20,7 @@ Page numbers: **MAN** = Pa5X User Manual v1.4 (printed); **GUIDE** = Korg's *Mak
 | P3 | Independent validation | `tools/validate_sound_package.py`: PASS (FluidSynth pitch worst 0.004 cent; Python XML/WAV re-read; each WAV's `smpl` root/loop equals the `.txprog` root/loop). A deliberately altered copy FAILs |
 | P4 | Package structure | Follows GUIDE pp.9, 16, 31, 44-45 (table below) |
 | P6 | Structure vs Korg's example | Our `.txprog` has the same element paths, attribute names and top-level order (wave, bounds, soundshape, group) as Korg's example Sound `Acoustic Piano.txprog`. Including `tx:created-by="30601"`, the format stamp carried by every Korg example and also written by the open-source ConvertWithMoss TX16Wx writer. No structural difference remains. Compared locally; Korg's file is not in the repo |
+| P7 | Stage matches the current generator | 2026-11-08: `build/kst-diff` of the staged folder against a fresh `aiarranger-sound demo` build at `434e207`: 39 identical, 0 changed/added/removed |
 | P5 | Staged USB content | Mac folder `~/orca/workspaces/AIArranger/pa5x-import-stage/USB_ROOT/`, copied with `tools/kst_copy.py` and verified (`--verify`) |
 
 Staged content (this is the **whole** stick content, nothing else):
