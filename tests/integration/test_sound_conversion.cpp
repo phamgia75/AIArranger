@@ -44,6 +44,13 @@ int main() {
 
     // ── S1 model ──
     TEST("demo organ is valid against the Pa5X limits", validate(org).empty());
+    {   // regression (Codex review, drum kit round): the same unescaped-control-character gap existed for Sounds
+        Instrument c = org; c.name = "Org\x02";
+        Instrument d = org; d.layers[0].name = "Soft\x1F";
+        Instrument f = org; f.samples[0].name = "S\x80";
+        TEST("control/non-ASCII characters in instrument, layer or sample names refused (XML-safe)",
+             !validate(c).empty() && !validate(d).empty() && !validate(f).empty() && writeTxProg(c).empty());
+    }
     TEST("2 velocity layers x 19 zones (C1..C7 every 4 semitones), 38 samples",
          org.layers.size() == 2 && org.layers[0].zones.size() == 19 && org.layers[1].zones.size() == 19 && org.samples.size() == 38);
     bool cover = true;

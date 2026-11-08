@@ -15,13 +15,58 @@ chunk whose root/loop match the matrix. --reference: also accepts what Korg's ow
 import os, re, struct, sys, wave
 import xml.etree.ElementTree as ET
 
+# Every element path and attribute in Korg's "Real-Drums DrumKit" example; anything else is refused
+# (the writer must stay inside the example's format).
+ALLOWED = {
+    "performance": {"/performance": {"created-by", "name", "schemaLocation"},
+                    "/performance/slot": {"channel", "color", "name", "output", "program"},
+                    "/performance/slot/detune": {"value"}, "/performance/slot/pan": {"value"}, "/performance/slot/send": set(),
+                    "/performance/slot/send/level": {"value"}, "/performance/slot/transpose": {"value"},
+                    "/performance/slot/velocity-curve": {"shape", "smooth"}, "/performance/slot/volume": {"value"}},
+    "program": {"/program": {"created-by", "name", "quality", "schemaLocation"},
+                "/program/bounds": {"high-key", "high-vel", "low-key", "low-vel"},
+                "/program/group": {"choke-group", "coarse", "color", "fine", "name", "noteprio", "output", "pan", "playback",
+                                   "playmode", "polymode", "quality", "scale", "soundshape", "volume"},
+                "/program/group/region": {"attenuation", "fine", "loop", "matrix", "mode", "pan", "release", "root", "shift", "tune"},
+                "/program/group/region/bounds": {"high-key", "high-vel", "low-key", "low-vel"},
+                "/program/soundshape": {"glide-mode", "id", "name", "pan", "pwm", "unison", "unison-cyclic-spread", "unison-depth",
+                                        "unison-pan", "unison-spread", "unison-start", "volume"},
+                "/program/soundshape/aeg": {"attack", "attack-shape", "decay1", "decay1-shape", "decay2", "decay2-shape", "level1",
+                                            "level2", "release", "release-shape", "sustain"},
+                "/program/soundshape/modulation": set(), "/program/soundshape/send": {"level"}, "/program/wavematrix": {"id", "path"}},
+    "wavematrix": {"/wavematrix": {"created-by", "name", "schemaLocation"}, "/wavematrix/row": {"value"},
+                   "/wavematrix/row/cell": {"attenuation", "fine", "mode", "pan", "root", "wave"},
+                   "/wavematrix/wave": {"id", "path", "root"}, "/wavematrix/wave/loop": {"end", "mode", "name", "start"},
+                   "/wavematrix/xaxis": {"source"}, "/wavematrix/xaxis/curve": {"shape", "smooth"},
+                   "/wavematrix/yaxis": {"source"}, "/wavematrix/yaxis/curve": {"shape", "smooth"}},
+}
+
+def unknown(root, kind):
+    """Element paths / attributes not in Korg's example."""
+    out = []
+    def walk(e, path):
+        p = path + "/" + e.tag.split("}")[-1]
+        if p not in ALLOWED[kind]: out.append("element " + p); return
+        out.extend("attribute %s@%s" % (p, a.split("}")[-1]) for a in e.attrib if a.split("}")[-1] not in ALLOWED[kind][p])
+        for c in e: walk(c, p)
+    walk(root, "")
+    return out
+
 NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 FAMILIES = set("BSHTCLEX")
 NS = "http://www.tx16wx.com/3.0/"
 
-def key(name):  # C-1 = 0 ... G9 = 127
+def key(name):  # C-1 = 0 ... G9 = 127; anything else (including G#9 = 128) raises ValueError
     p = name[:-2] if name.endswith("-1") else name.rstrip("0123456789")
-    return NOTES.index(p) + 12 * (int(name[len(p):]) + 1)
+    k = NOTES.index(p) + 12 * (int(name[len(p):]) + 1)
+    if not 0 <= k <= 127: raise ValueError("key %s outside 0-127" % name)
+    return k
+
+def level(s):
+    """Cell level such as '-2.5 dB'; ValueError unless a finite number followed by ' dB'."""
+    m = re.fullmatch(r"(-?\d+(?:\.\d+)?) dB", s or "")
+    if not m: raise ValueError("bad level %r" % s)
+    return float(m.group(1))
 
 ok = True
 def check(cond, msg):
@@ -54,7 +99,7 @@ def smpl(path):
 
 def matrix(path, reference):
     bom, m, A, ns = load(path, "wavematrix")
-    base = os.path.dirname(path); errs = []
+    base = os.path.dirname(path); errs = unknown(m, "wavematrix")
     if m.tag != "{%swavematrix}wavematrix" % NS: errs.append("not a wavematrix")
     name = A(m, "name") or ""
     if re.match(r"^[A-Z]_", name) and name[0] not in FAMILIES: errs.append("unknown family prefix " + name[:2])
@@ -67,6 +112,8 @@ def matrix(path, reference):
         if f is None or not os.path.isfile(f): errs.append("wave path missing or outside the package: %s" % A(w, "path")); continue
         with wave.open(f) as r:
             ch, bits, rate, frames = r.getnchannels(), 8 * r.getsampwidth(), r.getframerate(), r.getnframes()
+            if len(r.readframes(frames)) != frames * ch * r.getsampwidth():   # declared length vs actual audio bytes
+                errs.append(os.path.basename(f) + ": data chunk shorter than its declared length")
         if ch not in (1, 2) or not 11025 <= rate <= 48000 or frames > 1048576 or bits not in ((16, 24) if reference else (16,)):
             errs.append("%s: %d ch %d bit %d Hz %d frames" % (os.path.basename(f), ch, bits, rate, frames))
         loops = [(int(A(l, "start")), int(A(l, "end"))) for l in w.findall("tx:loop", ns) if A(l, "mode") == "Forward"]
@@ -77,6 +124,7 @@ def matrix(path, reference):
         if sm is not None and not reference:
             if A(w, "root") is None or sm[0] != key(A(w, "root")): errs.append(os.path.basename(f) + ": smpl root != matrix root")
             if sm[1] != [(s, e - 1) for s, e in real]: errs.append(os.path.basename(f) + ": smpl loop != matrix loop")
+        if A(w, "id") in waves: errs.append("wave id %s declared twice" % A(w, "id"))
         waves[A(w, "id")] = f
     rows = m.findall("tx:row", ns)
     vals = [int(A(r, "value")) for r in rows]
@@ -88,7 +136,7 @@ def matrix(path, reference):
         if len(cells) != 1: errs.append("row %s has %d cells (one column)" % (A(r, "value"), len(cells))); continue
         if A(cells[0], "wave") not in waves: errs.append("cell refers to a missing wave")
         att = A(cells[0], "attenuation") or "0 dB"
-        if float(att.split()[0]) > 6.0: errs.append("cell level %s above +6 dB" % att)
+        if level(att) > 6.0: errs.append("cell level %s above +6 dB" % att)
     return bom, name, len(rows), errs
 
 def kit(d, reference):
@@ -97,6 +145,7 @@ def kit(d, reference):
     bom, perf, A, ns = load(perfs[0], "performance")
     base = os.path.dirname(perfs[0])
     check(bom, "UTF-8 BOM like Korg's examples")
+    check(not unknown(perf, "performance"), "only elements/attributes present in Korg's example (.txperf) %s" % unknown(perf, "performance"))
     check(perf.tag == "{%sperformance}performance" % NS, "root element tx:performance in the 3.0 namespace")
     slots = perf.findall("tx:slot", ns)
     if not check(len(slots) == 1, "one slot = Standard Drum Kit (%d; Ambience kits have two)" % len(slots)): return
@@ -104,12 +153,15 @@ def kit(d, reference):
     if not check(pp is not None and os.path.isfile(pp), "slot program %s exists inside the package" % A(slots[0], "program")): return
     _, prog, P, pns = load(pp, "program")
     check(prog.tag == "{%sprogram}program" % NS and P(prog, "name") == A(perf, "name"), "Program name == Performance name")
-    mats = {}
+    check(not unknown(prog, "program"), "only elements/attributes present in Korg's example (.txprog) %s" % unknown(prog, "program"))
+    mats, dup = {}, False
     for wm in prog.findall("tx:wavematrix", pns):
         f = inside(base, P(wm, "path"))
+        dup |= P(wm, "id") in mats
         mats[P(wm, "id")] = f if f and os.path.isfile(f) else None
-    check(mats and all(mats.values()) and len(set(mats.values())) == len(mats),
-          "%d matrices: every path exists inside the package, no duplicates" % len(mats))
+    lower = [m.lower() for m in mats.values() if m]
+    check(mats and not dup and all(mats.values()) and len(set(lower)) == len(mats),
+          "%d matrices: unique ids, every path exists inside the package, no duplicates (case-insensitive)" % len(mats))
     keys, errs, layers, used = {}, [], 0, set()
     for g in prog.findall("tx:group", pns):
         ch = int(P(g, "choke-group") or 0)
@@ -143,5 +195,8 @@ if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if a != "--reference"]
     if len(args) != 1: sys.exit("usage: validate_drumkit_package.py DIR [--reference]")
     print("TX16Wx Drum Kit package (Python XML/wave readers):")
-    kit(args[0], "--reference" in sys.argv)
+    try:
+        kit(args[0], "--reference" in sys.argv)
+    except (ValueError, ET.ParseError, wave.Error, EOFError, TypeError, AttributeError, struct.error) as e:
+        check(False, "malformed package: %s: %s" % (type(e).__name__, e))
     print("PASS" if ok else "FAIL"); sys.exit(0 if ok else 1)

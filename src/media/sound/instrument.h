@@ -46,6 +46,14 @@ struct Instrument {
 
 constexpr size_t kMaxLayers = 24;     // multisamples (oscillators) per Pa5X Sound, TX16Wx guide p.14
 
+// Names go into XML attributes, file names and SF2 fields: 1-20 printable ASCII characters. Control
+// characters are invalid in XML 1.0 and bytes >= 0x80 may not be valid UTF-8, so both are refused.
+inline bool nameOk(const std::string& s, size_t max = 20) {
+    if (s.empty() || s.size() > max) return false;
+    for (unsigned char c : s) if (c < 0x20 || c > 0x7E) return false;
+    return true;
+}
+
 // Pa5X per-sample limits (manual v1.4 p.1155), shared by Sounds and Drum Kits. Appends one message per violation.
 inline void validateSample(const Sample& s, size_t i, std::vector<std::string>& e) {
     auto err = [&](std::string m) { e.push_back(std::move(m)); };
@@ -55,7 +63,7 @@ inline void validateSample(const Sample& s, size_t i, std::vector<std::string>& 
     else if (s.pcm.size() % s.channels) err(n + ": stereo audio must hold whole L/R frames");
     if (s.pcm.empty()) err(n + ": no audio");
     if (s.frames() > 1048576) err(n + ": longer than 1 048 576 frames (the Pa5X truncates)");
-    if (s.name.empty() || s.name.size() > 20) err(n + ": name must be 1-20 characters");
+    if (!nameOk(s.name)) err(n + ": name must be 1-20 printable ASCII characters");
     if (s.root > 127) err(n + ": root outside 0-127");
     if (s.looped && !(s.loopStart < s.loopEnd && s.loopEnd <= s.frames())) err(n + ": loop outside the sample");
     if (s.looped && s.loopEnd - s.loopStart < 32) err(n + ": loop shorter than 32 frames");
@@ -68,7 +76,7 @@ inline void validateSample(const Sample& s, size_t i, std::vector<std::string>& 
 inline std::vector<std::string> validate(const Instrument& in) {
     std::vector<std::string> e;
     auto err = [&](std::string m) { e.push_back(std::move(m)); };
-    if (in.name.empty() || in.name.size() > 20) err("instrument name must be 1-20 characters (SF2 preset name; package folder name)");
+    if (!nameOk(in.name)) err("instrument name must be 1-20 printable ASCII characters (SF2 preset name; package folder name)");
     if (in.layers.empty() || in.layers.size() > kMaxLayers) err("an instrument needs 1-24 velocity layers (Pa5X Sound: up to 24 multisamples)");
     for (size_t l = 0; l < in.layers.size(); ++l) {
         const Layer& L = in.layers[l];
@@ -81,7 +89,7 @@ inline std::vector<std::string> validate(const Instrument& in) {
         const Layer& L = in.layers[l];
         const std::string n = "layer " + std::to_string(l) + " (" + L.name + ")";
         if (L.zones.empty()) err(n + ": no zones");
-        if (L.name.empty() || L.name.size() > 20) err(n + ": name must be 1-20 characters");
+        if (!nameOk(L.name)) err(n + ": name must be 1-20 printable ASCII characters");
         for (size_t a = 0; a < L.zones.size(); ++a) {
             const Zone& z = L.zones[a];
             if (z.lo > z.hi || z.hi > 127) err(n + ": zone " + std::to_string(a) + " key range invalid");

@@ -60,7 +60,7 @@ inline std::string matrixName(const DrumKey& k) { return k.family ? std::string(
 inline std::vector<std::string> validate(const DrumKit& kit) {
     std::vector<std::string> e;
     auto err = [&](std::string m) { e.push_back(std::move(m)); };
-    if (kit.name.empty() || kit.name.size() > 20) err("kit name must be 1-20 characters");
+    if (!nameOk(kit.name)) err("kit name must be 1-20 printable ASCII characters");
     if (kit.instruments.empty()) err("a kit needs at least one drum instrument");
     for (size_t i = 0; i < kit.samples.size(); ++i) validateSample(kit.samples[i], i, e);
     std::set<int> keys, used;
@@ -68,14 +68,14 @@ inline std::vector<std::string> validate(const DrumKit& kit) {
     for (size_t g = 0; g < kit.instruments.size(); ++g) {
         const DrumInstrument& I = kit.instruments[g];
         const std::string gn = "instrument " + std::to_string(g) + " (" + I.name + ")";
-        if (I.name.empty() || I.name.size() > 20) err(gn + ": name must be 1-20 characters");
+        if (!nameOk(I.name)) err(gn + ": name must be 1-20 printable ASCII characters");
         if (I.choke > kMaxChoke) err(gn + ": exclusive group must be 0-8");
         if (I.keys.empty()) err(gn + ": no keys");
         for (const DrumKey& k : I.keys) {
             const std::string kn = gn + " key " + std::to_string(k.key) + " (" + k.name + ")";
             if (k.key > 127) err(kn + ": key outside 0-127");
             if (!keys.insert(k.key).second) err(kn + ": key already assigned (one drum instrument per key)");
-            if (k.name.empty() || matrixName(k).size() > 20) err(kn + ": name (with family prefix) must be 1-20 characters");
+            if (k.name.empty() || !nameOk(matrixName(k))) err(kn + ": name (with family prefix) must be 1-20 printable ASCII characters");
             if (k.family && !drumFamilyName(k.family)) err(kn + ": unknown drum family prefix");
             if (!matrices.insert(matrixName(k)).second) err(kn + ": matrix name used twice");
             if (k.panPct < -100 || k.panPct > 100) err(kn + ": pan outside -100..100%");

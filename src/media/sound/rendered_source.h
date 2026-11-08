@@ -34,7 +34,8 @@ using RenderFn = std::function<std::vector<float>(uint8_t note, uint8_t velocity
 
 struct RenderReport {
     struct Row { uint8_t note, velocity; size_t frames; double cents; double loopMatch;   // loopMatch NaN = one-shot
-                 double releaseSec; };   // note-off to -60 dB (measureRelease); NaN = not looped or not reached
+                 double releaseSec;      // note-off to -60 dB (measureRelease); NaN = not looped or not reached
+                 double levelDb; };      // RMS of the first 200 ms of the sample, dBFS after the common gain
     std::vector<Row> rows;
     std::vector<std::string> warnings;       // empty spec, silent render, detuned/unpitched samples
     double gain = 0;
@@ -204,6 +205,10 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
             const size_t from = std::min<size_t>(n, spec.rate / 5), len = std::min<size_t>(n - from, spec.rate);
             const double f = measurePitch(mono.data() + from, len, spec.rate, 440.0 * std::pow(2.0, (r - 69) / 12.0));
             const double cents = f > 0 ? 1200 * std::log2(f / (440.0 * std::pow(2.0, (r - 69) / 12.0))) : NAN;
+            double e2 = 0;   // level after the shared gain, so layers stay comparable
+            const size_t lv = std::min<size_t>(n, spec.rate / 5);
+            for (size_t k = 0; k < lv * ch; ++k) e2 += double(s.pcm[k]) * s.pcm[k];
+            const double level = lv ? 20 * std::log10(std::sqrt(e2 / (lv * ch)) / 32767 + 1e-12) : -240;
             double match = NAN, release = NAN;
             if (spec.loopHoldSec > 0) {
                 const size_t off = static_cast<size_t>(spec.loopHoldSec * spec.rate);
@@ -216,7 +221,7 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
                     rep.warnings.push_back(w);
                 }
             }
-            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.frames(), cents, match, release});
+            rep.rows.push_back({static_cast<uint8_t>(r), spec.velocities[l], s.frames(), cents, match, release, level});
             if (!(std::fabs(cents) <= 10)) {
                 char w[96];
                 std::snprintf(w, sizeof w, "%s: pitch %+.1f cents from %s%d (detuned, unpitched or too short)",

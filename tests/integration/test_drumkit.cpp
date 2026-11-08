@@ -103,6 +103,10 @@ int main() {
     { DrumKit k = kit; k.instruments[0].keys[0].panPct = 101; TEST("pan beyond 100% refused", rejects(k, "pan")); }
     { DrumKit k = kit; k.instruments[0].keys[0].family = 'Z'; TEST("unknown family refused", rejects(k, "family")); }
     { DrumKit k = kit; k.instruments[0].keys[0].name = "Nineteen chars long"; TEST("name over 20 with prefix refused", rejects(k, "1-20")); }
+    // regression (Codex review): control characters passed validation and were written into the XML
+    { DrumKit k = kit; k.name = "Kit\x01"; TEST("control character in the kit name refused", rejects(k, "printable ASCII")); }
+    { DrumKit k = kit; k.instruments[0].name = "Kick\x7F"; TEST("DEL in an instrument name refused", rejects(k, "printable ASCII")); }
+    { DrumKit k = kit; k.instruments[0].keys[0].name = "Kick\xC3"; TEST("non-ASCII byte in a key name refused", rejects(k, "printable ASCII")); }
     { DrumKit k = kit; k.samples.push_back(k.samples[0]); k.samples.back().name = "Orphan"; TEST("unused sample refused", rejects(k, "orphan")); }
     { DrumKit k = kit; k.instruments[0].keys[0].layers[0].sample = 99; TEST("missing sample refused", rejects(k, "no sample")); }
     { DrumKit k = kit; k.instruments.clear(); k.samples.clear(); TEST("empty kit refused", rejects(k, "at least one")); }

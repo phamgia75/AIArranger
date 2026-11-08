@@ -94,4 +94,6 @@ So **filters, envelopes, LFOs, pitch modulation and effects cannot enter the Pa5
 | G5 | Velocity response within a layer | UNK | Hardware check after S6 (soft/hard play test) |
 | G6 | Loop of evolving sounds | CODE (loop match) | Possible: longer loop search window or crossfade length option; measure on real plugins first |
 
+**Sound Recipe (S13):** `src/media/sound/sound_recipe.h` carries the non-transferred parameters with their provenance (measured / estimated / extracted / not available) into the package REPORT as a post-import checklist.
+
 Not pursued: guessing Pa5X Sound Edit parameters into TXPROG fields. They are documented as ignored.

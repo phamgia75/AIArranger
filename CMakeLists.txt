@@ -299,6 +299,9 @@ if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit 
     add_test(NAME test_drumkit_package_independent
              COMMAND sh -c "rm -rf drumkit-pkg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-pkg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_drumkit_package.py drumkit-pkg"
              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME test_validate_drumkit_negative   # every mutation of a valid package must FAIL
+             COMMAND sh -c "rm -rf drumkit-neg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-neg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/tools/test_validate_drumkit.py drumkit-neg"
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 endif()
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────

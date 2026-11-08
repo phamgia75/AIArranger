@@ -12,6 +12,7 @@
 // Exit 0 = done, 1 = usage/plugin/package error.
 
 #include "media/sound/package_writer.h"
+#include "media/sound/sound_recipe.h"
 #include "media/sound/rendered_source.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <cstdio>
@@ -118,6 +119,12 @@ int main(int argc, char** argv) {
         return x;
     };
 
+    // Raw plugin parameters for the Sound Recipe (EXTRACTED, unmapped).
+    // shortcut: first 64 parameters only; large synths expose thousands, add a filter if owners need more.
+    std::vector<std::pair<std::string, std::string>> params;
+    const auto& all = plugin->getParameters();
+    for (int i = 0; i < all.size() && i < 64; ++i)
+        params.push_back({all[i]->getName(40).toStdString(), all[i]->getCurrentValueAsText().toStdString()});
     RenderReport rep;
     const Instrument in = buildFromRenders(spec, render, &rep);
     plugin->releaseResources();
@@ -149,6 +156,10 @@ int main(int argc, char** argv) {
         notes += "Release: not measured (render ended before -60 dB; raise --release).\n";
     }
     for (const auto& w : rep.warnings) notes += "WARNING: " + w + "\n";
+    const SoundRecipe recipe = recipeFromRender(spec, rep, params);
+    if (!validate(recipe).empty()) { std::fprintf(stderr, "internal: recipe breaks its provenance rules\n"); return 1; }
+    notes += "\n" + formatRecipe(recipe);
+    if (all.size() > 64) notes += "      (" + std::to_string(all.size() - 64) + " more plugin parameters not listed)\n";
     std::string perr;
     const std::string out = writePackage(in, a["--out"], notes, &perr);
     if (out.empty()) { std::fprintf(stderr, "%s\n", perr.c_str()); return 1; }
