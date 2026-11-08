@@ -10,6 +10,7 @@
 
 #include "media/sound/sf2_writer.h"
 #include "media/sound/txprog_writer.h"
+#include "media/sound/txperf_writer.h"
 #include "media/sound/wav_writer.h"
 #include <filesystem>
 #include <fstream>
@@ -75,6 +76,64 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
            "     in Sound Edit assign each to its own oscillator with the velocity zone above and save to an\n"
            "     empty User Sound.\n";
     save(out / "REPORT.txt", std::vector<uint8_t>(rep.begin(), rep.end()));
+    if (!ok) return fail("write failed under " + out.string());
+    return rep;
+}
+
+// Drum Kit package: tx/<name>/ (.txperf, .txprog, .txmatrix, samples) + REPORT.txt. No SF2: an SF2
+// import yields multisamples, not a Drum Kit (manual p.1206). Never writes into an existing folder.
+inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::path& out, const std::string& notes,
+                                    std::string* error) {
+    namespace fs = std::filesystem;
+    auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
+    std::error_code ec;
+    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists");
+    if (const auto e = validate(kit); !e.empty()) return fail("invalid: " + e.front());
+    const auto tx = writeTxPerf(kit);
+    if (tx.empty()) return fail("the writer refused the kit (two samples or keys map to the same file name)");
+    if (!fs::create_directories(out, ec)) return fail("cannot create " + out.string());
+    bool ok = true;
+    for (const auto& f : tx) {
+        const fs::path p = out / "tx" / f.path;
+        ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
+        std::ofstream o(p, std::ios::binary);
+        o.write(reinterpret_cast<const char*>(f.bytes.data()), static_cast<std::streamsize>(f.bytes.size()));
+        ok &= static_cast<bool>(o);
+    }
+    uint64_t bytes = 0;
+    size_t stereo = 0;
+    for (const auto& s : kit.samples) { bytes += s.pcm.size() * 2ull; stereo += s.channels == 2; }
+    std::string rep = "AIArranger Drum Kit package (SOFTWARE evidence only until imported on a Pa5X)\n\n";
+    char line[512];
+    std::snprintf(line, sizeof line, "Drum Kit: %s\nTXPERF: tx/%s (copy the whole folder, structure unchanged)\n"
+                  "Samples: %zu (%zu stereo), 16-bit, %.2f MB (%.4f%% of the 4 GB User Sample memory)\n\n",
+                  kit.name.c_str(), tx[0].path.c_str(), kit.samples.size(), stereo, bytes / 1e6, 100.0 * bytes / 4e9);
+    rep += line;
+    rep += "Imported by the Pa5X from the TX16Wx files (GUIDE pp.24-25):\n"
+           "  key  name                   family        excl  pan   trans tune  layers (lowest velocity: sample, level)\n";
+    for (const auto& I : kit.instruments)
+        for (const auto& k : I.keys) {
+            const char* fam = k.family ? drumFamilyName(k.family) : "-";
+            std::snprintf(line, sizeof line, "  %-4s %-22s %-13s %-5s %+4d%% %+4d  %+4d  ", txw::noteName(k.key).c_str(),
+                          matrixName(k).c_str(), fam, I.choke ? std::to_string(I.choke).c_str() : "-", k.panPct, k.transpose, k.tuneCents);
+            rep += line;
+            for (const auto& c : k.layers) {
+                std::snprintf(line, sizeof line, "[%u: %s %+.1f dB] ", c.velLo, kit.samples[static_cast<size_t>(c.sample)].name.c_str(), c.gainDb10 / 10.0);
+                rep += line;
+            }
+            rep += "\n";
+        }
+    rep += "\nNOT imported; set by hand in Sound Edit if needed (GUIDE p.85: TX16Wx Sounds parameters are not imported):\n"
+           "  amplitude/pitch envelopes, filters, decay; Drum Kit EQ; Voice Mixer settings other than pan and exclusive\n"
+           "  group; kit effects. Ambience layers and round-robins are not produced by AIArranger (GUIDE pp.21-23).\n"
+           "  Velocity switch points can be refined in Sound Edit > Drum Kit > Drum Sample Levels (GUIDE p.83).\n\n";
+    if (!notes.empty()) rep += notes + "\n";
+    rep += "Pa5X import (owner, requires approval):\n"
+           "  Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX DrumKit (TXPERF), select\n"
+           "  tx/.../<name>.txperf, choose an empty User Drum Kit location (manual p.1210).\n";
+    std::ofstream r(out / "REPORT.txt", std::ios::binary);
+    r << rep;
+    ok &= static_cast<bool>(r);
     if (!ok) return fail("write failed under " + out.string());
     return rep;
 }

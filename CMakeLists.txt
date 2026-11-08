@@ -295,6 +295,11 @@ add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
 target_include_directories(sf2-check PRIVATE src)
 add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder
 target_include_directories(aiarranger-sound PRIVATE src)
+if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit package (docs/research/TXPERF_DRUMKIT_NOTES.md)
+    add_test(NAME test_drumkit_package_independent
+             COMMAND sh -c "rm -rf drumkit-pkg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-pkg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_drumkit_package.py drumkit-pkg"
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────
 if(APPLE)

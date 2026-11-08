@@ -1,11 +1,13 @@
 // aiarranger-sound (roadmap S4): writes the USB-ready package folder (media/sound/package_writer.h:
 // .sf2, tx/ TXPROG, wav/, REPORT.txt). Refuses to write into an existing DIR.
 //   demo --out DIR                                    the original demo organ
+//   drums --out DIR                                   the original demo Drum Kit (.txperf)
 //   wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR
 //       a folder of <layer>_<OrgKey>_<LowKey>_<HighKey>.wav (route C, media/sound/wav_folder_source.h);
 //       SRC is only read.
 // Exit 0 = written, 1 = usage/IO/validation error.
 #include "media/sound/additive_source.h"
+#include "media/sound/drum_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/wav_folder_source.h"
 #include <cstdio>
@@ -17,6 +19,7 @@ using namespace ai_arranger::media::sound;
 
 static int usage() {
     std::fprintf(stderr, "usage: aiarranger-sound demo --out DIR\n"
+                         "       aiarranger-sound drums --out DIR\n"
                          "       aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
                          "       (DIR must not exist)\n");
     return 1;
@@ -30,6 +33,13 @@ int main(int argc, char** argv) {
     if (!opt.count("--out")) return usage();
     Instrument in;
     std::string notes;
+    if (cmd == "drums" && opt.size() == 1) {
+        std::string err;
+        const std::string rep = writeDrumPackage(buildDemoKit(), opt["--out"], "Source: original synthesized drums (no recorded audio)\n", &err);
+        if (rep.empty()) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        std::fputs(rep.c_str(), stdout);
+        return 0;
+    }
     if (cmd == "demo" && opt.size() == 1) {
         double worst = 0;
         in = buildDemoOrgan(&worst);
