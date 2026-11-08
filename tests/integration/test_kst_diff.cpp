@@ -74,6 +74,43 @@ int main() {
         const KstDiff m = diff(root / "E", root / "F");
         TEST("each added file pairs with one removed file only", m.moved.size() == 1 && m.removed.size() == 1 && m.added.empty());
     }
+    // ── merge plan (load SRC onto DST) ──
+    {
+        const fs::path dst = root / "dst", src = root / "src";
+        put(dst / "STYLE/BANK01/Pop.STY", "pop-v1");
+        put(dst / "STYLE/BANK01/Rock.STY", "rock");
+        put(dst / "SOUND/BANK01/Piano.PCG", "piano");
+        put(dst / "STYLE/BANK01/Jazz.STY", "jazz");
+        put(src / "STYLE/BANK01/Pop.STY", "pop-v2");         // replace
+        put(src / "STYLE/BANK01/Rock.STY", "rock");          // unchanged
+        put(src / "STYLE/BANK02/Latin.STY", "latin");        // add
+        put(src / "SOUND/BANK02/Piano2.PCG", "piano");       // duplicate of DST Piano.PCG
+        put(src / "STYLE/BANK01/JAZZ.STY", "jazz-x");        // case-only name difference
+        const std::string sd = snapshot(dst), ss = snapshot(src);
+        const KstDiff md = diff(dst, src);
+        const std::string plan = formatMergePlan(md, "src", "dst", hasPcmFolder(src));
+        TEST("merge plan: 1 replace, 1 add, 1 unchanged, 1 duplicate, 1 case-only",
+             plan.find("REPLACE    STYLE/BANK01/Pop.STY") != std::string::npos && plan.find("add        STYLE/BANK02/Latin.STY") != std::string::npos &&
+             plan.find("unchanged (same name, same bytes): 1") != std::string::npos &&
+             plan.find("duplicate  SOUND/BANK02/Piano2.PCG (same bytes as DST SOUND/BANK01/Piano.PCG)") != std::string::npos &&
+             plan.find("CASE?      STYLE/BANK01/JAZZ.STY  vs existing STYLE/BANK01/Jazz.STY") != std::string::npos);
+        TEST("merge plan: DST-only files counted as kept on Merge (case-only match not double-counted)",
+             plan.find("deleted by Replace All of that type (DST only, p.734): 0") != std::string::npos);
+        TEST("merge plan: replacement means a warning result, no PCM warning without a PCM folder",
+             plan.find("RESULT: existing User data would be replaced") != std::string::npos && plan.find("WARNING") == std::string::npos);
+        // regression guard: PCM files identical in both folders must still warn (loading the KST deletes all User Samples)
+        put(dst / "PCM/RAM01.PCM", "samples");
+        put(src / "PCM/RAM01.PCM", "samples");
+        const std::string sd2 = snapshot(dst), ss2 = snapshot(src);
+        const std::string p2 = formatMergePlan(diff(dst, src), "src", "dst", hasPcmFolder(src));
+        TEST("PCM folder in SRC warns even when its files are identical to DST (manual p.736)",
+             p2.find("deletes ALL User Samples") != std::string::npos);
+        const fs::path clean = root / "clean";
+        put(clean / "STYLE/BANK09/New.STY", "new");
+        TEST("only new names: no existing data replaced",
+             formatMergePlan(diff(dst, clean), "clean", "dst", hasPcmFolder(clean)).find("RESULT: no existing User data would be replaced") != std::string::npos);
+        TEST("merge plan leaves both folders untouched (names, sizes, mtimes)", snapshot(dst) == sd2 && snapshot(src) == ss2 && !sd.empty() && !ss.empty());
+    }
     TEST("missing folder is an error", !diff(root / "nope", b).ok && !diff(a, root / "nope").ok);
     TEST("both trees untouched", snapshot(a) == sa && snapshot(b) == sb);
     fs::remove_all(root);

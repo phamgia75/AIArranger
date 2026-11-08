@@ -87,6 +87,56 @@ inline std::string format(const KstDiff& d, const std::string& a, const std::str
     return o.str();
 }
 
+// Merge plan (read-only): what loading folder SRC onto the User data saved in folder DST would do,
+// file by file, under the Pa5X's documented load rules (manual v1.4): Merge replaces only files with
+// the same name and keeps the rest; Replace All deletes every existing User file of that type
+// (p.734); a whole KST holding a PCM folder deletes ALL User Samples in memory (p.736).
+// The same relative path is taken as "same name"; how the Pa5X compares case is UNKNOWN, so names
+// differing only in case are flagged separately. Nothing is copied or loaded.
+// True when the folder holds a directory named PCM (any case, any depth, symlinks not followed):
+// the manual's test for "this KST contains User Samples" (p.736).
+inline bool hasPcmFolder(const std::filesystem::path& root) {
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_directory(ec) || it->is_symlink(ec)) continue;
+        std::string n = it->path().filename().string();
+        std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::toupper(c); });
+        if (n == "PCM") return true;
+    }
+    return false;
+}
+
+inline std::string formatMergePlan(const KstDiff& d, const std::string& src, const std::string& dst, bool srcHasPcm) {
+    if (!d.ok) return "error: " + d.error + "\n";
+    auto lower = [](std::string x) { std::transform(x.begin(), x.end(), x.begin(), [](unsigned char c) { return std::tolower(c); }); return x; };
+    std::map<std::string, std::string> dstLower;   // dst-only paths by lower case
+    for (const auto& p : d.removed) dstLower[lower(p)] = p;
+    const bool pcm = srcHasPcm;
+    std::vector<std::string> add, caseOnly;
+    for (const auto& p : d.added) {
+        if (dstLower.count(lower(p))) caseOnly.push_back(p + "  vs existing " + dstLower[lower(p)]); else add.push_back(p);
+    }
+    std::ostringstream o;
+    o << "Merge plan (read-only; nothing is loaded): SRC " << src << " onto the User data saved in DST " << dst << "\n"
+      << "  replace (same name, different content; the existing file is deleted, p.734-735): " << d.changed.size() << "\n"
+      << "  add (new name): " << add.size() << "\n"
+      << "  unchanged (same name, same bytes): " << d.identical << "\n"
+      << "  duplicate (SRC file already in DST under another name; would be stored twice): " << d.moved.size() << "\n"
+      << "  name differs only in case (Pa5X behaviour UNKNOWN; treat as a possible replace): " << caseOnly.size() << "\n"
+      << "  kept on Merge, deleted by Replace All of that type (DST only, p.734): " << (d.removed.size() - caseOnly.size()) << "\n";
+    for (const auto& p : d.changed) o << "  REPLACE    " << p << "\n";
+    for (const auto& p : caseOnly) o << "  CASE?      " << p << "\n";
+    for (const auto& p : add) o << "  add        " << p << "\n";
+    for (const auto& [x, y] : d.moved) o << "  duplicate  " << y << " (same bytes as DST " << x << ")\n";
+    for (const auto& p : d.skipped) o << "  skipped    " << p << "\n";
+    if (pcm) o << "WARNING: SRC has User Sample data (PCM folder). Loading the whole KST deletes ALL User Samples in memory\n"
+                  "         (manual p.736). Load individual Sounds instead to keep existing samples.\n";
+    o << (d.changed.empty() && caseOnly.empty() && !pcm ? "RESULT: no existing User data would be replaced\n"
+                                                        : "RESULT: existing User data would be replaced or deleted; back up first (manual p.7)\n");
+    return o.str();
+}
+
 }  // namespace ai_arranger::media
 
 #endif  // AI_ARRANGER_MEDIA_KST_DIFF_H
