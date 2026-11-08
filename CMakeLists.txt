@@ -293,6 +293,7 @@ add_executable(kst-diff tools/kst_diff.cpp)   # read-only folder comparison (P2)
 target_include_directories(kst-diff PRIVATE src)
 add_executable(kst-merge-plan tools/kst_merge_plan.cpp)   # read-only load/merge prediction (P2)
 target_include_directories(kst-merge-plan PRIVATE src)
+add_test(NAME test_kst_cli_exit COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_kst_cli_exit.sh ${CMAKE_BINARY_DIR})
 add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
 target_include_directories(sf2-check PRIVATE src)
 add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder

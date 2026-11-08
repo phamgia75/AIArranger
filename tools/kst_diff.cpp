@@ -1,6 +1,7 @@
-// kst-diff A B: read-only comparison of two KST folders (or any folders): identical, changed, added,
-// removed and moved files, by byte equality. Use it to check a backup against its source or to see
-// what changed between two saves. Exit 0 = same content, 1 = different, 2 = usage/scan error.
+// kst-diff A B: read-only, byte-level comparison of two KST folders (or any folders): identical,
+// changed, added, removed and moved files. File contents are not interpreted. Use it to check a
+// backup against its source or to see what changed between two saves.
+// Exit 0 = same content, 1 = different (or skipped entries not compared), 2 = usage/scan/read error.
 #include "media/kst_diff.h"
 #include <cstdio>
 
