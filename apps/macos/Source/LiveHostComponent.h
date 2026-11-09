@@ -40,10 +40,12 @@ private:
                      startBtn_{"Start"}, stopBtn_{"Stop"}, syncBtn_{"Sync Start"},
                      introBtn_{"Intro"}, varA_{"A"}, varB_{"B"}, varC_{"C"},
                      varD_{"D"}, fillBtn_{"Fill"}, breakBtn_{"Break"},
-                     endingBtn_{"Ending"}, panicBtn_{"PANIC"};
+                     endingBtn_{"Ending"}, panicBtn_{"PANIC"},
+                     resourcesBtn_{"Resources..."};   // read-only Resources window
     juce::ToggleButton autoFillBtn_{"Auto Fill"};   // spec §5.3
 
     std::unique_ptr<juce::FileChooser> chooser_;
+    std::unique_ptr<juce::DocumentWindow> resourcesWindow_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LiveHostComponent)
 };

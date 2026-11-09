@@ -1,4 +1,5 @@
 #include "LiveHostComponent.h"
+#include "ResourcesComponent.h"
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/chord_input.h"
@@ -80,10 +81,26 @@ LiveHostComponent::LiveHostComponent() {
     addAndMakeVisible(autoFillBtn_);
     refreshBtn_.onClick = [this] { driver_.retryMidi(); refreshDevices(); };   // #23
     loadBtn_.onClick    = [this] { loadStyleDialog(); };
+    resourcesBtn_.onClick = [this] {
+        if (!resourcesWindow_) {
+            struct Window : juce::DocumentWindow {
+                Window() : DocumentWindow("AI Arranger - Resources", juce::Colours::black, DocumentWindow::allButtons) {
+                    setUsingNativeTitleBar(true);
+                    setContentOwned(new ResourcesComponent(), true);
+                    setResizable(true, true);
+                    centreWithSize(getWidth(), getHeight());
+                }
+                void closeButtonPressed() override { setVisible(false); }
+            };
+            resourcesWindow_ = std::make_unique<Window>();
+        }
+        resourcesWindow_->setVisible(true);
+        resourcesWindow_->toFront(true);
+    };
 
     panicBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
 
-    for (auto* b : {&refreshBtn_, &loadBtn_, &startBtn_, &stopBtn_, &syncBtn_,
+    for (auto* b : {&refreshBtn_, &loadBtn_, &resourcesBtn_, &startBtn_, &stopBtn_, &syncBtn_,
                     &introBtn_, &varA_, &varB_, &varC_, &varD_, &fillBtn_,
                     &breakBtn_, &endingBtn_, &panicBtn_})
         addAndMakeVisible(*b);
@@ -207,7 +224,9 @@ void LiveHostComponent::resized() {
     loadBtn_.setBounds(styleRow.removeFromLeft(120));
     styleRow.removeFromLeft(8);
     refreshBtn_.setBounds(styleRow.removeFromLeft(90));
-    styleRow.removeFromLeft(12);
+    styleRow.removeFromLeft(8);
+    resourcesBtn_.setBounds(styleRow.removeFromRight(110));
+    styleRow.removeFromLeft(4);
     styleLabel_.setBounds(styleRow);
     area.removeFromTop(10);
 

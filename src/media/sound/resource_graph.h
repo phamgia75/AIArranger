@@ -35,6 +35,7 @@ enum class Via {
     ProgramChange,    // Program Change inside a Style sequence or a MIDI Song -> Sound (MAN p.391)
 };
 enum class Source { Package, PaManagerReport };   // where an edge came from; PaManagerReport needs owner authorization (Q18)
+enum class Confidence { Confirmed, Inferred };     // an Inferred reference is never treated as a confirmed fact
 
 inline const char* kindName(Kind k) {
     static const char* n[] = {"Sound", "DrumKit", "Oscillator", "Multisample", "Sample", "DrumSample",
@@ -108,6 +109,8 @@ struct Edge {
     Via via = Via::Zone;
     std::string detail;              // "zone 3", "key 36 layer 1", ...
     Source source = Source::Package;
+    Confidence confidence = Confidence::Confirmed;
+    std::string provenance;          // evidence source label ("" = the package itself)
     auto operator<=>(const Edge&) const = default;
 };
 
@@ -282,8 +285,12 @@ public:
         DeleteCheck d;
         d.users = whereUsed(id);
         if (!d.users.empty()) {
-            d.verdict = DeleteVerdict::InUse;
-            d.reasons.push_back(std::to_string(d.users.size()) + " known reference(s)");
+            size_t inferred = 0;
+            for (const Edge& e : d.users) inferred += e.confidence == Confidence::Inferred;
+            // Inferred-only users neither prove use nor prove absence: Unprovable, never InUse or Unreferenced.
+            d.verdict = inferred == d.users.size() ? DeleteVerdict::Unprovable : DeleteVerdict::InUse;
+            d.reasons.push_back(std::to_string(d.users.size() - inferred) + " confirmed reference(s)" +
+                                (inferred ? ", " + std::to_string(inferred) + " inferred (not proven)" : ""));
             return d;
         }
         const auto vias = referrerVias(id.kind);

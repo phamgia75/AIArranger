@@ -6,6 +6,11 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "../Source/LiveHostComponent.h"
+#include "../Source/ResourcesComponent.h"
+#include "media/sound/additive_source.h"
+#include "media/sound/drum_source.h"
+#include "media/sound/package_writer.h"
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 
@@ -99,6 +104,61 @@ int main() {
         cycles &= h->getWidth() == 720;
     }
     TEST("5 create/start/destroy cycles", cycles);
+
+    // ── Resources window (read-only): what a musician reaches from "Resources..." ──
+    {
+        namespace fs = std::filesystem;
+        using namespace ai_arranger;
+        auto host = std::make_unique<app::LiveHostComponent>();
+        TEST("button present: Resources...", find<juce::Button>(*host, "Resources...") != nullptr);
+        const fs::path root = fs::temp_directory_path() / ("aia-smoke-res-" + std::to_string(::getpid()));
+        fs::remove_all(root);
+        std::string err;
+        media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ", "", &err);
+        media::sound::writeDrumPackage(media::sound::buildDemoKit(), root / "drums", "", &err);
+        app::ResourcesComponent rc;
+        rc.setSize(980, 640);
+        TEST("three tabs", rc.tabs().getNumTabs() == 3 && rc.tabs().getTabNames()[1] == "KST Library");
+        TEST("empty: tells the user what to open", rc.detailsText().contains("Open Package"));
+        rc.openPackage(juce::File(root.string() + "/organ"));
+        rc.compareMemory();
+        TEST("Memory Check: the untouched template compares without an error", rc.memoryText().contains("OBSERVATION ONLY") &&
+             rc.memoryText().contains("Samples: not compared"));
+        rc.model().clear();
+        TEST("open two packages", rc.openPackage(juce::File(root.string() + "/organ")) && rc.openPackage(juce::File(root.string() + "/drums")));
+        TEST("same package twice refused with a reason", !rc.openPackage(juce::File(root.string() + "/organ")) && rc.detailsText().contains("already open"));
+        auto* top = rc.tree().getRootItem();
+        TEST("tree: Sound + Drum Kit at the top", top && top->getNumSubItems() == 2);
+        juce::TreeViewItem* sound = nullptr;
+        for (int i = 0; top && i < top->getNumSubItems(); ++i)
+            if (top->getSubItem(i)->getUniqueName().contains("/Sound/")) sound = top->getSubItem(i);
+        if (sound) sound->setOpen(true);
+        TEST("expand Sound -> 2 oscillators", sound && sound->getNumSubItems() == 2);
+        auto* osc = sound && sound->getNumSubItems() ? sound->getSubItem(0) : nullptr;
+        if (osc) osc->setOpen(true);
+        auto* ms = osc && osc->getNumSubItems() ? osc->getSubItem(0) : nullptr;
+        if (ms) ms->setOpen(true);
+        TEST("expand oscillator -> multisample -> samples", ms && ms->getNumSubItems() > 0);
+        if (ms && ms->getNumSubItems()) ms->getSubItem(0)->setSelected(true, true);
+        pump(50);
+        TEST("select a sample: exact bytes, where used, delete verdict, provisional identity",
+             rc.detailsText().contains("uncompressed PCM:") && rc.detailsText().contains("Where used: 1") &&
+             rc.detailsText().contains("Delete safety: IN USE") && rc.detailsText().contains("provisional: not a Pa5X slot"));
+        TEST("summary: budget and unresolved dependencies", rc.summaryText().contains("Open: 2 package(s)") &&
+             rc.summaryText().contains("Unresolved dependencies: 0"));
+        fs::create_directories(root / "kst/STYLE");
+        std::ofstream(root / "kst/STYLE/BANK01.STY") << "x";
+        rc.runKst(ui::ResourceBrowserModel::KstAction::Inventory, juce::String(root.string() + "/kst"));
+        for (int i = 0; i < 50 && rc.kstText().startsWith("Working"); ++i) pump(50);
+        TEST("KST inventory runs in the background and says semantic merge is unavailable",
+             rc.kstText().contains("UNAVAILABLE") && rc.kstText().contains("STY"));
+        rc.memoryBefore().setText("aiarranger-memory-info\t1\nsamples\t3\n");
+        rc.memoryAfter().setText("aiarranger-memory-info\t1\nsamples\t50\n");
+        rc.compareMemory();
+        TEST("Memory Check: compares with the open packages (47 samples)", rc.memoryText().contains("predicted +47  MATCH") &&
+             rc.memoryText().contains("does not validate"));
+        fs::remove_all(root);
+    }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

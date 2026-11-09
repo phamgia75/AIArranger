@@ -175,4 +175,8 @@ Track A stops at a validated, advisory Sound-level load plan, which is capabilit
 | Writers | `writePackage` (Sound, also used by the WAV-folder source and the AU sampler), `writeDrumPackage` | Full. The Sound Recipe holds no resources; it stays in REPORT.txt |
 | KST tools | `kst-inventory` via `aiarranger-resources budget --kst` (file-level, separate section). `kst-diff` / `kst-merge-plan` are unchanged | No edges from KSTs (track B gate) |
 
-CLI: `aiarranger-resources budget|check|where-used|delete-check|remap`. Exit 0 = ok, 3 = not ok (no fit, in use or unprovable, conflicts), 1 = input error.
+| Evidence sources (2026-11-09) | `evidence_import.h`: owner-authorized `aiarranger-evidence 1` files; `Edge.confidence` (Confirmed/Inferred) and `Edge.provenance`; inferred-only users give Unprovable | Synthetic tests only; no owner report accessed (Q18). Design: `PA5X_RESOURCE_EVIDENCE_IMPORT.md` |
+| Memory validation (2026-11-09) | `memory_check.h`: transcribed Memory Info readings vs raw PCM, size as a rounding x unit range | Waits for S6 readings (Q6) |
+| macOS UI (2026-11-09) | `apps/macos/Source/ResourcesComponent.*` over `ui/resources/resource_browser_model.h`: Resource Graph, KST Library, Memory Check tabs | App smoke test drives all three tabs |
+
+CLI: `aiarranger-resources budget|check|where-used|delete-check|remap|memory-compare`, plus `--evidence FILE` on every command. Exit 0 = ok, 3 = not ok (no fit, in use or unprovable, conflicts), 1 = input error.

@@ -20,6 +20,15 @@ ok sh -c "'$B/aiarranger-resources' budget --json '$T/organ' '$T/drums' | '$PY' 
 mkdir -p "$T/kst/PCM"; printf abcd > "$T/kst/PCM/S1.PCM"
 ok sh -c "'$B/aiarranger-resources' budget --json --kst '$T/kst' '$T/organ' | '$PY' -I -c 'import json,sys; d=json.load(sys.stdin); assert d[\"undecodedKst\"]==dict(inGraph=False,pcmFiles=1,pcmDiskBytes=4,pcmFolder=True) and d[\"uniqueSamples\"]==38'"
 expect 1 "$B/aiarranger-resources" budget --kst "$T/nokst" "$T/organ"
+printf 'aiarranger-evidence\t1\nsource\tR\towner ok\tpa-manager-report\nnode\tpa5x:USR/Style/1\tBallad\nref\tpa5x:USR/Style/1\tStyleTrack\tpa5x:USR/Sound/5\tconfirmed\tVar1\nend\t4\n' > "$T/ev.txt"
+expect 3 "$B/aiarranger-resources" delete-check --evidence "$T/ev.txt" "pa5x:USR/Sound/5" "$T/organ"    # confirmed by evidence: in use
+ok sh -c "'$B/aiarranger-resources' delete-check --evidence '$T/ev.txt' pa5x:USR/Sound/6 '$T/organ' | grep -q 'not scanned: SongBookSound'"
+printf 'aiarranger-evidence\t1\nsource\tR\towner ok\tpa-manager-report\nscanned\tProgramChange\tall\nend\t3\n' > "$T/bad.txt"
+expect 1 "$B/aiarranger-resources" check --evidence "$T/bad.txt" "$T/organ"     # Q19: refused
+printf 'aiarranger-memory-info\t1\nsamples\t10\n' > "$T/before.txt"; printf 'aiarranger-memory-info\t1\nsamples\t48\n' > "$T/after.txt"
+ok sh -c "'$B/aiarranger-resources' memory-compare '$T/before.txt' '$T/after.txt' '$T/organ' | grep -q 'predicted +38  MATCH'"
+expect 1 "$B/aiarranger-resources" memory-compare "$T/before.txt" "$T/organ"   # too few arguments
+expect 1 "$B/aiarranger-resources" check --json "$T/organ"                     # --json is budget-only
 printf 'garbage\n' > "$T/organ/RESOURCES.tsv"
 expect 1 "$B/aiarranger-resources" budget "$T/organ"
 rm -rf "$T"
