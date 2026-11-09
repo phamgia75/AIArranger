@@ -173,7 +173,9 @@ inline bool parseManifest(const std::string& textIn, graph::Graph& out, std::str
         std::string e;
         if (f[0] == "node" && f.size() == 3) {
             if (!ownId(f[1], id)) return fail(i + 1, "identity must be provisional and inside package " + pkg + ": " + f[1]);
-            if (id.kind == Kind::Sample || !text(f[2])) return fail(i + 1, "bad node record");
+            // only the kinds a package produces; in particular no Style/KBD Set/Pad/SongBook/MIDI Song that could refer to a Sound
+            if (id.kind == Kind::Sample || !(id.kind == Kind::Sound || id.kind == Kind::DrumKit || id.kind == Kind::Oscillator ||
+                id.kind == Kind::Multisample || id.kind == Kind::DrumSample) || !text(f[2])) return fail(i + 1, "bad node record");
             if (!g.addNode({id, f[2], {}}, &e)) return fail(i + 1, e);
         } else if (f[0] == "sample" && f.size() == 10) {
             uint64_t ch, rate, bits, frames, loop;
@@ -197,7 +199,6 @@ inline bool parseManifest(const std::string& textIn, graph::Graph& out, std::str
         if (!g.find(r.to)) return fail(0, "package is not self-contained: " + r.to.str() + " is referenced but not described");
     }
     if (!g.find({true, pkg, top, 0})) return fail(0, std::string("no ") + graph::kindName(top) + " resource");
-    g.declarePackageComplete(pkg);   // the end record proves every record of the package was read
     out = std::move(g);
     return true;
 }
@@ -285,6 +286,9 @@ inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::
     }
     for (const auto& w : txWavs)
         if (!manifestWavs.count(w)) { if (err) *err = dir.string() + ": TX files use " + w + ", which RESOURCES.tsv does not describe"; return false; }
+    // Only sample referrers are verified against the TX files. References into oscillators, multisamples
+    // and drum samples come from the manifest alone, so their deletes stay Unprovable for loaded packages.
+    tmp.declareComplete(pkg, graph::Kind::Sample);
     g = std::move(tmp);
     return true;
 }

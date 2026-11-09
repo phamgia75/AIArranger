@@ -162,10 +162,16 @@ Track A stops at a validated, advisory Sound-level load plan, which is capabilit
 | Edge types (§2) | `edgeAllowed`: the 11 references of §2, every other combination refused | Full for the API |
 | Non-owning references, dangling kept | `addRef` keeps references to absent targets; `dangling()`, `issues()` (silent oscillator, multisample or drum sample) | Full |
 | Where used | `whereUsed`, `usedByRoots`, `closure` | Inside the loaded graph only; the CLI states that Pa5X-side referrers are invisible |
-| Deletion safety (§4) | `deleteCheck`: InUse / Unprovable / Unreferenced. A Pa5X resource is Unreferenced only when every referrer kind in `referrerVias` was declared scanned. A Sound needs StyleTrack, KeyboardSetPart, PadTrack, SongBookSound **and** ProgramChange. A provisional resource can only be referenced from its own package | Full rule; nothing in the code base declares a scan yet |
+| Deletion safety (§4) | `deleteCheck`: InUse / Unprovable / Unreferenced. A Pa5X resource is Unreferenced only when every referrer kind in `referrerVias` was declared scanned. A Sound needs StyleTrack, KeyboardSetPart, PadTrack, SongBookSound **and** ProgramChange. A provisional resource can only be referenced from its own package. A provisional Sound/Drum Kit is Unreferenced (not imported, and no package kind can refer to it). Inner provisional resources are Unreferenced only where references into their kind are verified complete: graphs built from an Instrument/DrumKit in memory are complete. In a package *loaded from disk*, only sample referrers are verified (against the TX files), so its oscillators, multisamples and drum samples stay Unprovable | Full rule; nothing in the code base declares a Pa5X scan yet |
 | Copy / remap impact (§3) | `remapImpact`, `Graph::copyImpact` (closure, overwritten positions, destination users affected, unresolved references, provisional resources needing a slot) | Advisory; the Pa5X renumbering itself is UNK |
 | Memory (§5) | `budget`, `formatBudget`, `budgetJson`: per unique identity; byte-identical audio under distinct identities is counted and reported; both readings of "4 GB"; 8 GB compressed-equivalent; the compressed figure is an estimate; count against PA Manager's 53 130 | Exact for PCM bytes of package samples. Overhead, Preload and compressibility are not modelled |
-| Package boundary | `package_graph.h`: every package writes `RESOURCES.tsv`. The strict parser accepts only provisional identities of that package and self-contained references; the loader re-checks every WAV (format, frames, loop, fingerprint). `--kst` summarises an undecoded KST outside the graph | Full |
+| Package boundary | `package_graph.h`: every package writes `RESOURCES.tsv`. The strict parser accepts only provisional identities of that package, only the six package kinds, and self-contained references. The loader:
+- re-checks every WAV (bit depth, format, frames, loop, fingerprint);
+- cross-checks the manifest's samples against the WAVs named by the package's own `.txprog`/`.txmatrix`, in both directions;
+- refuses symlinks, non-regular files and files over 16 MiB;
+- enforces slot cardinality (one High and one Low multisample per oscillator, one Sound per oscillator).
+
+ `--kst` summarises an undecoded KST outside the graph | Full |
 | Writers | `writePackage` (Sound, also used by the WAV-folder source and the AU sampler), `writeDrumPackage` | Full. The Sound Recipe holds no resources; it stays in REPORT.txt |
 | KST tools | `kst-inventory` via `aiarranger-resources budget --kst` (file-level, separate section). `kst-diff` / `kst-merge-plan` are unchanged | No edges from KSTs (track B gate) |
 

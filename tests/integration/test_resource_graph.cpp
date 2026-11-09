@@ -266,6 +266,14 @@ int main() {
         sl2.addNode({P(Kind::Sound, 2, "User1"), "B", {}}, &err); sl2.addNode({P(Kind::Oscillator, 1, "User1"), "O", {}}, &err);
         sl2.addRef({P(Kind::Sound, 2, "User1"), P(Kind::Oscillator, 1, "User1"), Via::OscillatorOf, "1"}, &err);
         const size_t before = sl.edges().size();
+        // round 3 #2: remap impact applies the one-Sound-per-oscillator rule
+        Graph rm;
+        rm.addNode({V("pk", Kind::Sound, 0), "A", {}}, &err); rm.addNode({V("pk", Kind::Sound, 1), "B", {}}, &err);
+        rm.addNode({V("pk", Kind::Oscillator, 1), "O1", {}}, &err); rm.addNode({V("pk", Kind::Oscillator, 2), "O2", {}}, &err);
+        rm.addRef({V("pk", Kind::Sound, 0), V("pk", Kind::Oscillator, 1), Via::OscillatorOf, "1"}, &err);
+        rm.addRef({V("pk", Kind::Sound, 1), V("pk", Kind::Oscillator, 2), Via::OscillatorOf, "1"}, &err);
+        TEST("remap of an oscillator onto another Sound's oscillator is a conflict",
+             has(rm.remapImpact(V("pk", Kind::Oscillator, 1), V("pk", Kind::Oscillator, 2)).conflicts, "already belongs to"));
         TEST("merge applies the same checks and is all-or-nothing", !sl.merge(sl2, &err) && sl.edges().size() == before);
         TEST("60 000 samples: budget and delete checks well under 10 s (was O(nodes x edges))", bb.samples == 60000 && unsafe.size() == 60001 && secs < 10);
     }
@@ -354,6 +362,27 @@ int main() {
             spit(root / "noref/RESOURCES.tsv", m2);
             TEST("dropped references: manifest still parses, but the package load is refused",
                  dropped > 0 && parses(m2) && !loadPackage(root / "noref", x, p, &err) && err.find("no reference in RESOURCES.tsv") != std::string::npos);
+        }
+        // round 3 #1: a dropped DrumKeyLayer cannot make a drum sample look unreferenced in a loaded package
+        {
+            const std::string dm = slurp(root / "drums/RESOURCES.tsv");
+            std::string m3; size_t kept = 0; bool dropped = false;
+            std::stringstream in(dm);
+            for (std::string l; std::getline(in, l);) {
+                if (l.rfind("end\t", 0) == 0) continue;
+                if (!dropped && l.find("\tDrumKeyLayer\t") != std::string::npos) { dropped = true; continue; }
+                m3 += l + "\n"; ++kept;
+            }
+            m3 += "end\t" + std::to_string(kept) + "\n";
+            fs::copy(root / "drums", root / "nolayer", fs::copy_options::recursive);
+            spit(root / "nolayer/RESOURCES.tsv", m3);
+            Graph y; std::string py;
+            bool anyUnreferenced = false;
+            const bool loaded = loadPackage(root / "nolayer", y, py, &err);
+            for (const auto& [id, n] : y.nodes()) anyUnreferenced |= id.kind != Kind::DrumKit && y.deleteCheck(id).verdict == DeleteVerdict::Unreferenced;
+            TEST("loaded package: no inner resource is ever Unreferenced (DrumKeyLayer dropped)", loaded && !anyUnreferenced);
+            TEST("loaded package: the top-level Drum Kit is still provably unreferenced", y.deleteCheck(V(py, Kind::DrumKit, 0)).verdict == DeleteVerdict::Unreferenced);
+            TEST("manifest declaring a Style node refused", !parses(replaceOnce(man, "/Oscillator/1\tOSC 1", "/Style/1\tOSC 1")));
         }
         // round 2 #3: FIFO and oversized files are input errors, not hangs
         {

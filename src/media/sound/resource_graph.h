@@ -195,7 +195,11 @@ public:
     }
     // Declare that every resource of a package (provisional scope) and every reference among them is
     // in the graph. Only then can a provisional resource with no users be called Unreferenced.
-    void declarePackageComplete(const std::string& scope) { complete_.insert(scope); }
+    void declarePackageComplete(const std::string& scope) {
+        for (int k = 0; k <= static_cast<int>(Kind::MidiSong); ++k) complete_.insert({scope, Kind(k)});
+    }
+    // Narrower: only references INTO resources of kind k inside the package are known complete.
+    void declareComplete(const std::string& scope, Kind k) { complete_.insert({scope, k}); }
     // Declare that every reference of kind `v` into Pa5X-identified resources is present (e.g. from a
     // complete, authorized PA Manager report). Without it, a Pa5X resource's delete is unprovable.
     void declareScanned(Via v, const std::string& evidence) { scanned_[v] = evidence; }
@@ -287,11 +291,16 @@ public:
         if (id.provisional) {
             // Generated, never imported: only its own package can refer to it. Provable only when the
             // whole package is known to be in the graph.
-            if (complete_.count(id.scope)) {
+            if (id.kind == Kind::Sound || id.kind == Kind::DrumKit) {
+                // Not imported: no Pa5X data can refer to it, and no package resource kind can (edgeAllowed).
                 d.verdict = DeleteVerdict::Unreferenced;
-                d.reasons.push_back("provisional (package-generated), package complete in this graph, and nothing in it refers to this resource");
+                d.reasons.push_back("provisional top-level resource: not imported, and nothing in a package can refer to a Sound or Drum Kit");
+            } else if (complete_.count({id.scope, id.kind})) {
+                d.verdict = DeleteVerdict::Unreferenced;
+                d.reasons.push_back("provisional (package-generated), references into its kind are complete in this graph, and none points here");
             } else {
-                d.reasons.push_back("provisional, but package " + id.scope + " is not declared complete: its referrers may be missing");
+                d.reasons.push_back(std::string("provisional, but references into ") + kindName(id.kind) + " resources of package " + id.scope +
+                                    " are not verified complete: its referrers may be missing");
             }
             return d;
         }
@@ -317,9 +326,14 @@ public:
         if (!nodes_.count(to)) m.conflicts.push_back("target " + to.str() + " is not in the graph: every remapped reference would dangle");
         if (!nodes_.count(from)) m.warnings.push_back("source " + from.str() + " is not in the graph (only references to it are known)");
         m.rewritten = whereUsed(from);
-        for (const Edge& e : m.rewritten)
+        for (const Edge& e : m.rewritten) {
             if (to.provisional && (!e.from.provisional || e.from.scope != to.scope))
                 m.conflicts.push_back(e.from.str() + " cannot refer to another package's provisional resource " + to.str());
+            if (e.via == Via::OscillatorOf)   // same slot rule as addRef: one Sound per oscillator
+                for (const Edge& x : whereUsed(to))
+                    if (x.via == Via::OscillatorOf && x.from != e.from)
+                        m.conflicts.push_back(to.str() + " already belongs to " + x.from.str() + "; " + e.from.str() + " cannot share it");
+        }
         if (!from.provisional)
             for (Via v : referrerVias(from.kind))
                 if (!scanned_.count(v)) m.warnings.push_back(std::string("not scanned: ") + viaName(v) + " references to " + from.str() + " would keep pointing at it");
@@ -356,7 +370,7 @@ private:
     std::set<Edge> edges_;
     std::map<ResourceId, std::set<Edge>> out_, in_;   // adjacency indexes: queries are O(log n + degree)
     std::map<Via, std::string> scanned_;
-    std::set<std::string> complete_;
+    std::set<std::pair<std::string, Kind>> complete_;
 };
 
 // ── memory budget (spec §5) ──
