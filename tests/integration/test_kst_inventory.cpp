@@ -131,6 +131,27 @@ int main() {
     put(k2 / "SOUND/PCM.PCG", "p");                     // a FILE named PCM.* is not a PCM folder
     TEST("a file named PCM is not the PCM folder", !scan(k2).has_pcm_folder);
 
+    {   // regression: an unreadable folder was skipped silently (skip_permission_denied) and an unreadable
+        // file left the scan "ok", so the duplicate count looked complete while it was not
+        const bool canTest = ::geteuid() != 0;   // root ignores permissions
+        const fs::path k3 = root / "K3";
+        put(k3 / "A.PCM", "same");
+        put(k3 / "LOCKED/B.PCM", "same");               // duplicate hidden behind an unreadable folder
+        fs::permissions(k3 / "LOCKED", fs::perms::none);
+        const Inventory d = scan(k3);
+        TEST("unreadable folder fails the scan (no silent partial duplicate count)",
+             !canTest || (!d.ok && d.error.find("cannot read") != std::string::npos));
+        fs::permissions(k3 / "LOCKED", fs::perms::owner_all);
+        put(k3 / "C.PCM", "same");
+        fs::permissions(k3 / "C.PCM", fs::perms::none);  // same size as A and B: must be read to count duplicates
+        const Inventory f = scan(k3);
+        TEST("unreadable same-size file fails the scan", !canTest || (!f.ok && f.error.find("cannot read") != std::string::npos));
+        TEST("failed scan reports the error, not duplicates",
+             !canTest || (format(f, "x").find("ERROR") != std::string::npos && format(f, "x").find("duplicates") == std::string::npos));
+        fs::permissions(k3 / "C.PCM", fs::perms::owner_all);
+        TEST("readable again: A, B, C are one duplicate group", scan(k3).ok && scan(k3).duplicates.size() == 1 && scan(k3).duplicates[0].size() == 3);
+    }
+
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

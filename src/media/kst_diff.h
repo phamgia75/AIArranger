@@ -17,55 +17,6 @@
 namespace ai_arranger::media {
 
 namespace detail {
-struct Entry { std::filesystem::path abs; uintmax_t size; };
-struct Listing {
-    std::map<std::string, Entry> files;   // relative path -> entry
-    std::vector<std::string> skipped;     // symlinks and special files (not followed, not compared)
-    bool pcm = false;                     // a directory named PCM exists (manual p.736: the KST holds User Samples)
-};
-
-// Full recursive listing. Returns false (with error) on any permission, iteration or metadata error.
-inline bool listFiles(const std::filesystem::path& root, Listing& out, std::string& error) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (!fs::is_directory(fs::symlink_status(root, ec))) { error = "not a directory (symlinks are not followed): " + root.string(); return false; }
-    fs::recursive_directory_iterator it(root, ec), end;   // no skip_permission_denied: an unreadable folder is an error
-    for (;;) {
-        if (ec) { error = "cannot read " + root.string() + ": " + ec.message(); return false; }
-        if (it == end) break;
-        const auto st = it->symlink_status(ec);
-        if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
-        const std::string rel = it->path().lexically_relative(root).generic_string();
-        if (fs::is_directory(st)) {
-            std::string n = it->path().filename().string();
-            std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::toupper(c); });
-            out.pcm |= n == "PCM";
-        } else if (fs::is_regular_file(st)) {
-            const uintmax_t size = it->file_size(ec);
-            if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
-            out.files[rel] = {it->path(), size};
-        } else {
-            out.skipped.push_back(rel);   // symlink or special file; recursive_directory_iterator does not follow symlinks by default
-        }
-        it.increment(ec);
-    }
-    return true;
-}
-
-// 1 = same bytes, 0 = different, -1 = a file could not be read completely.
-inline int compareFiles(const std::filesystem::path& a, const std::filesystem::path& b) {
-    std::ifstream x(a, std::ios::binary), y(b, std::ios::binary);
-    if (!x || !y) return -1;
-    static thread_local char bx[65536], by[65536];
-    for (;;) {
-        x.read(bx, sizeof bx);
-        y.read(by, sizeof by);
-        if (x.bad() || y.bad()) return -1;
-        if (x.gcount() != y.gcount() || !std::equal(bx, bx + x.gcount(), by)) return 0;
-        if (x.gcount() == 0) return x.eof() && y.eof() ? 1 : -1;
-    }
-}
-
 // Byte-identical lookup into a pool of files: same size, then same FNV-1a hash (each file hashed at
 // most once), then compareFiles. Cost is O(total bytes), not O(pairs x bytes).
 class ContentIndex {

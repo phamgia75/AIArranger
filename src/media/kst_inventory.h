@@ -29,7 +29,7 @@ struct Inventory {
     std::map<std::string, ExtStats> by_folder;   // first path component, "." = root
     std::map<std::string, ExtStats> by_bank;     // "TYPE/BANK" for files at depth >= 3 (manual p.731-732: type -> bank -> file)
     std::vector<std::vector<std::string>> duplicates;  // byte-identical groups (relative paths, sorted)
-    std::vector<std::string> skipped;            // symlinks, special files, unreadable entries
+    std::vector<std::string> skipped;            // symlinks and special files (not followed); unreadable entries fail the scan
     std::map<std::string, ExtStats> by_type;     // documented Pa5X file type (manual v1.4 p.721-722)
     bool has_pcm_folder = false;                 // a folder named PCM: the KST holds User Samples (p.736)
 };
@@ -63,88 +63,110 @@ inline bool hashFile(const std::filesystem::path& p, uint64_t& h) {
     }
     return in.eof();
 }
-inline bool sameBytes(const std::filesystem::path& a, const std::filesystem::path& b) {
-    std::ifstream x(a, std::ios::binary), y(b, std::ios::binary);
-    if (!x || !y) return false;
-    char bx[65536], by[65536];
-    for (;;) {
-        x.read(bx, sizeof bx);
-        y.read(by, sizeof by);
-        if (x.gcount() != y.gcount() || !std::equal(bx, bx + x.gcount(), by)) return false;
-        if (x.gcount() == 0 || !x) return x.eof() && y.eof();
-    }
-}
-}  // namespace detail
+struct Entry { std::filesystem::path abs; uintmax_t size; };
+struct Listing {
+    std::map<std::string, Entry> files;   // relative path -> entry
+    std::vector<std::string> skipped;     // symlinks and special files (not followed, not compared)
+    bool pcm = false;                     // a directory named PCM exists (manual p.736: the KST holds User Samples)
+};
 
-inline Inventory scan(const std::filesystem::path& root) {
+// Full recursive listing. Returns false (with error) on any permission, iteration or metadata error.
+inline bool listFiles(const std::filesystem::path& root, Listing& out, std::string& error) {
     namespace fs = std::filesystem;
-    Inventory inv;
     std::error_code ec;
-    if (!fs::is_directory(fs::symlink_status(root, ec))) {
-        inv.error = "not a directory (symlinks are not followed): " + root.string();
-        return inv;
-    }
-    struct F { fs::path abs; std::string rel; uintmax_t size; };
-    std::vector<F> all;
-    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
-    if (ec) { inv.error = "cannot open: " + ec.message(); return inv; }
-    for (; it != end; it.increment(ec)) {
-        if (ec) { inv.skipped.push_back("(iteration error) " + ec.message()); ec.clear(); continue; }
+    if (!fs::is_directory(fs::symlink_status(root, ec))) { error = "not a directory (symlinks are not followed): " + root.string(); return false; }
+    fs::recursive_directory_iterator it(root, ec), end;   // no skip_permission_denied: an unreadable folder is an error
+    for (;;) {
+        if (ec) { error = "cannot read " + root.string() + ": " + ec.message(); return false; }
+        if (it == end) break;
         const auto st = it->symlink_status(ec);
-        const std::string rel = it->path().lexically_relative(root).generic_string();  // not fs::relative: it resolves symlinks
+        if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
+        const std::string rel = it->path().lexically_relative(root).generic_string();
         if (fs::is_directory(st)) {
             std::string n = it->path().filename().string();
             std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::toupper(c); });
-            if (n == "PCM") inv.has_pcm_folder = true;
-            continue;
+            out.pcm |= n == "PCM";
+        } else if (fs::is_regular_file(st)) {
+            const uintmax_t size = it->file_size(ec);
+            if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
+            out.files[rel] = {it->path(), size};
+        } else {
+            out.skipped.push_back(rel);   // symlink or special file; recursive_directory_iterator does not follow symlinks by default
         }
-        if (!fs::is_regular_file(st)) { inv.skipped.push_back(rel); continue; }  // symlink, fifo, ...
-        const uintmax_t size = it->file_size(ec);
-        if (ec) { inv.skipped.push_back(rel); ec.clear(); continue; }
-        all.push_back({it->path(), rel, size});
+        it.increment(ec);
     }
-    std::sort(all.begin(), all.end(), [](const F& a, const F& b) { return a.rel < b.rel; });
+    return true;
+}
 
-    std::map<std::pair<uintmax_t, uint64_t>, std::vector<const F*>> candidates;
-    std::map<uintmax_t, std::vector<const F*>> bySize;
-    for (const auto& f : all) {
+// 1 = same bytes, 0 = different, -1 = a file could not be read completely.
+inline int compareFiles(const std::filesystem::path& a, const std::filesystem::path& b) {
+    std::ifstream x(a, std::ios::binary), y(b, std::ios::binary);
+    if (!x || !y) return -1;
+    static thread_local char bx[65536], by[65536];
+    for (;;) {
+        x.read(bx, sizeof bx);
+        y.read(by, sizeof by);
+        if (x.bad() || y.bad()) return -1;
+        if (x.gcount() != y.gcount() || !std::equal(bx, bx + x.gcount(), by)) return 0;
+        if (x.gcount() == 0) return x.eof() && y.eof() ? 1 : -1;
+    }
+}
+
+}  // namespace detail
+
+// Strict: any permission, iteration, metadata or read error fails the whole scan (ok = false), so a
+// partial scan can never print file totals or duplicate groups that look complete. Symlinks and
+// special files are listed as skipped, never followed.
+inline Inventory scan(const std::filesystem::path& root) {
+    Inventory inv;
+    detail::Listing l;
+    if (!detail::listFiles(root, l, inv.error)) return inv;
+    inv.skipped = l.skipped;
+    inv.has_pcm_folder = l.pcm;
+    std::map<uintmax_t, std::vector<const std::string*>> bySize;
+    for (const auto& [rel, e] : l.files) {
         ++inv.files;
-        inv.bytes += f.size;
-        std::string ext = fs::path(f.rel).extension().string();
+        inv.bytes += e.size;
+        std::string ext = std::filesystem::path(rel).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::toupper(c); });
-        auto& e = inv.by_ext[ext.empty() ? "(none)" : ext];
-        ++e.files; e.bytes += f.size;
+        auto& x = inv.by_ext[ext.empty() ? "(none)" : ext];
+        ++x.files; x.bytes += e.size;
         auto& ty = inv.by_type[documentedType(ext)];
-        ++ty.files; ty.bytes += f.size;
-        const auto slash = f.rel.find('/');
-        auto& d = inv.by_folder[slash == std::string::npos ? "." : f.rel.substr(0, slash)];
-        ++d.files; d.bytes += f.size;
+        ++ty.files; ty.bytes += e.size;
+        const auto slash = rel.find('/');
+        auto& dir = inv.by_folder[slash == std::string::npos ? "." : rel.substr(0, slash)];
+        ++dir.files; dir.bytes += e.size;
         if (slash != std::string::npos) {
-            const auto slash2 = f.rel.find('/', slash + 1);
+            const auto slash2 = rel.find('/', slash + 1);
             if (slash2 != std::string::npos) {
-                auto& b = inv.by_bank[f.rel.substr(0, slash2)];
-                ++b.files; b.bytes += f.size;
+                auto& bk = inv.by_bank[rel.substr(0, slash2)];
+                ++bk.files; bk.bytes += e.size;
             }
         }
-        bySize[f.size].push_back(&f);
+        bySize[e.size].push_back(&rel);
     }
     // Hash only files that share a size, then confirm every match byte by byte.
     for (const auto& [size, group] : bySize) {
         if (group.size() < 2) continue;
-        std::map<uint64_t, std::vector<std::vector<const F*>>> byHash;
-        for (const F* f : group) {
+        std::map<uint64_t, std::vector<std::vector<const std::string*>>> byHash;
+        for (const std::string* rel : group) {
+            const auto& abs = l.files.at(*rel).abs;
             uint64_t h = 0;
-            if (!detail::hashFile(f->abs, h)) { inv.skipped.push_back(f->rel); continue; }
+            if (!detail::hashFile(abs, h)) { inv.error = "cannot read " + abs.string(); return inv; }
             auto& sets = byHash[h];
-            auto s = std::find_if(sets.begin(), sets.end(),
-                                  [&](const auto& set) { return detail::sameBytes(set.front()->abs, f->abs); });
-            if (s == sets.end()) sets.push_back({f}); else s->push_back(f);
+            auto it = sets.begin();
+            for (; it != sets.end(); ++it) {
+                const int c = detail::compareFiles(l.files.at(*it->front()).abs, abs);
+                if (c < 0) { inv.error = "cannot read " + abs.string() + " or " + l.files.at(*it->front()).abs.string(); return inv; }
+                if (c == 1) break;
+            }
+            if (it == sets.end()) sets.push_back({rel}); else it->push_back(rel);
         }
         for (const auto& [h, sets] : byHash)
             for (const auto& set : sets)
                 if (set.size() > 1) {
                     std::vector<std::string> g;
-                    for (const F* f : set) g.push_back(f->rel);
+                    for (const std::string* r : set) g.push_back(*r);
                     inv.duplicates.push_back(g);
                 }
     }
@@ -210,7 +232,7 @@ inline std::string format(const Inventory& inv, const std::string& label, uintma
         for (const auto& p : g) o << " " << p;
         o << "\n";
     }
-    o << "\nSkipped (not regular files or unreadable): " << inv.skipped.size() << "\n";
+    o << "\nSkipped (symlinks and special files, not followed): " << inv.skipped.size() << "\n";
     for (const auto& s : inv.skipped) o << "  " << s << "\n";
     o << formatMemoryEstimate(inv, budget);
     o << "\nFile contents were not interpreted. Compare against the Pa5X Media listing "
