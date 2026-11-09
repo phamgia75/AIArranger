@@ -125,6 +125,9 @@ inline Inventory scan(const std::filesystem::path& root) {
     inv.has_pcm_folder = l.pcm;
     std::map<uintmax_t, std::vector<const std::string*>> bySize;
     for (const auto& [rel, e] : l.files) {
+        // Every file must at least open: a file nobody can read is an error even when its size is unique
+        // (a full read happens below only where a duplicate is possible).
+        if (!std::ifstream(e.abs, std::ios::binary)) { inv.error = "cannot read " + e.abs.string(); return inv; }
         ++inv.files;
         inv.bytes += e.size;
         std::string ext = std::filesystem::path(rel).extension().string();

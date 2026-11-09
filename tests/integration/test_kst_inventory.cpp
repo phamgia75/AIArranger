@@ -149,6 +149,10 @@ int main() {
         TEST("failed scan reports the error, not duplicates",
              !canTest || (format(f, "x").find("ERROR") != std::string::npos && format(f, "x").find("duplicates") == std::string::npos));
         fs::permissions(k3 / "C.PCM", fs::perms::owner_all);
+        put(k3 / "UNIQUE.PCM", "a size no other file has");
+        fs::permissions(k3 / "UNIQUE.PCM", fs::perms::none);  // regression (Codex review of 890d0fd): unique size skipped every read
+        TEST("unreadable unique-size file fails the scan", !canTest || (!scan(k3).ok && scan(k3).error.find("UNIQUE.PCM") != std::string::npos));
+        fs::permissions(k3 / "UNIQUE.PCM", fs::perms::owner_all);
         TEST("readable again: A, B, C are one duplicate group", scan(k3).ok && scan(k3).duplicates.size() == 1 && scan(k3).duplicates[0].size() == 3);
     }
 
