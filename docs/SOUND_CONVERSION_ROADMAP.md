@@ -46,7 +46,7 @@ Labels: **DOC** Pa5X User Manual v1.4 (printed pages) · **OBS** seen in PA Mana
 | Import a **folder of WAV/AIFF** samples (optionally into drum families by name prefix `B_`, `S_`, …) | DOC | p.1211 |
 | Triton **PCG** Programs import (no Drum Kits); **Kronos PCG is not listed** | DOC | p.1206, p.1208 |
 | Sample limits: 8/16-bit, 11 025-48 000 Hz, mono/stereo, max 1 048 576 frames (longer is truncated) | DOC | p.1155 |
-| User Sample memory 4 GB (8 GB compressed); import goes to that memory and survives power-off | DOC | p.1156, p.1207 |
+| User Sample memory 4 GB (8 GB compressed); import goes to that memory and survives power-off | DOC | MAN pp.1174, 1176, 1936 (memory); p.1207 (import procedure) |
 | A Sound oscillator has High/Low layers split by one velocity switch; key zones live in the Multisample | DOC p.1076-1077 + OBS zone editor | resource model §3a |
 | After an SF2 multisample import, the Sound is built in Sound Edit (assign multisample to an oscillator, save to a User location) | DOC (procedure for imported multisamples, p.1207) | |
 | Export a multisample as TXPROG + WAV, or WAV with `_OrgKey_LowKey_HighKey` names: a lawful **round-trip oracle** | DOC | p.1212-1215 |
@@ -68,7 +68,7 @@ Sources, in legal order: (a) original samples synthesized by AIArranger; (b) VST
 
 | # | Deliverable | Acceptance (measurable) | Evidence label |
 |---|---|---|---|
-| S1 | Sample/multisample model (portable C++): samples (16-bit, rate, root, loop), zones (key range, root, tune, level), up to 2 velocity layers | Validation refuses anything outside the DOC limits (rate, frames, bits, overlapping zones, > 2 layers); unit tests | SOFTWARE |
+| S1 | Sample/multisample model (portable C++): samples (16-bit, rate, root, loop), zones (key range, root, tune, level), up to 2 velocity layers (raised to 1-24 by S9) | Validation refuses anything outside the DOC limits (rate, frames, bits, overlapping zones, > 2 layers at the time; now > 24); unit tests | SOFTWARE |
 | S2 | Original synthesized instrument source, loop-ready | Each sample's loop is an exact number of periods; seam discontinuity below a stated bound; pitch of each zone root within ±1 cent (measured on the rendered buffer) | SOFTWARE |
 | S3 | SF2 writer (SoundFont 2.04) | Round trip through `sf2-check` (0 overlapping zones); **independent** reader (FluidSynth or another third-party SF2 implementation) loads it and renders the expected pitch per zone; all bounds-checked; fuzzed prefixes refuse cleanly | SOFTWARE + INDEPENDENT TOOL |
 | S4 | CLI `aiarranger-sound`: build the demo instrument → `.sf2` + WAV set + a human-readable report (zones, loops, memory use vs 4 GB) | One command produces the USB-ready folder; deterministic bytes (same input → same hash) | SOFTWARE |

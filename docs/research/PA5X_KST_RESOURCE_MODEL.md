@@ -212,6 +212,6 @@ Parser feasibility plan, gates and oracle: `KST_PARSER_FEASIBILITY.md`.
 - What PreLoad marks and how the 420 MB preload buffer is filled (audit §3h).
 - Where any reference is stored inside `.STG` / `.KSC` / `.PDC` / `.PCG` / `.KMP` (P1.10, blocked).
 - PA Manager's export menu and formats.
-- The Pa5X sample-memory size **in the manual**. PA Manager v5.2 budgets 4 GB for its "PA5X" model (OBSERVED, audit §3d); the manual's specifications list a 1 GB internal drive, which is storage, not sample memory.
+- ~~The Pa5X sample-memory size in the manual~~: found, 4 GB uncompressed User Sample memory, up to 8 GB of samples when compressed (DOC, MAN pp.1174, 1176, 1936); matches PA Manager's 4 GB "PA5X" budget (OBSERVED, audit §3d). Correction from `PA_MANAGER_PA5X_CONSOLIDATED_RESEARCH.md` X1.
 
 Windows access was blocked by the Mac console lock on 2026-11-06. On 2026-11-07 the research copy's folder structure was listed (OBSERVED rows above; audit §3c); it was then opened read-only in KST Manager with no file changes (audit §3d).

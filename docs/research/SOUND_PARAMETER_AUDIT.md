@@ -18,7 +18,7 @@ Nothing here is Pa5X hardware-verified. S6 is still BLOCKED.
 | Oscillators | 1-24 per Sound (Oscillators Count). Polyphony falls as the count rises (160 with 1 oscillator) | MAN p.1070 |
 | Multisamples | Each oscillator plays a **High** and optionally a **Low** stereo multisample, switched at Vel SW L→H. Offset, Reverse, Stereo/Mono mode and Level per multisample | MAN pp.1076-1077 |
 | Oscillator zones | Velocity Zone top/bottom, Keyboard Range top/bottom, Scaled Velocity top/bottom | MAN p.1082 |
-| Key zones | Inside the multisample: From/To key, Original Note, Level, Pitch, one Sample per zone; no velocity per zone | OBS, MAN p.1190 |
+| Key zones | Inside the multisample: From/To key, Original Note, Level, Pitch, one Sample per zone; no velocity per zone | OBS, MAN pp.1183-1188 |
 | Pitch | Pitch Slope, Pitch Mod, Pitch EG, LFO modulation | MAN pp.1102-1107 |
 | Filter | 2 filter types per oscillator (LP Resonance; LP+HP), filter mod, filter LFO mod | MAN pp.1111-1118 |
 | Amp | Level/Pan, Amp mod, Amp LFO, **Amp EG** (levels and times) | MAN pp.1124-1130 |

@@ -79,7 +79,7 @@ Unlike the matrix above (vendor claims), every PA Manager cell here was **seen**
 2. Whether CC0/CC32+PC on the Control channel still selects Styles.
 3. Start/Stop acceptance while Clock Source = Internal; Song Position ignored.
 4. SysEx Inquiry reply bytes.
-5. User Sound / Drum Kit slot counts on the current OS (manual p.1935 says 1,536/768; web specs 768/384).
+5. User Sound / Drum Kit slot counts on the current OS (manual p.1935 says 1,536/768, and PA Manager agrees; an earlier web-spec figure of 768/384 is superseded).
 6. Whether a Kronos/Nautilus PCG loads at all.
 7. Which Sound parameters survive a TXPROG import.
 8. Whether our marker SMF (now incl. `i3/f3/f4/e3`) imports cleanly; the exact Break marker.
