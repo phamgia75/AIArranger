@@ -116,17 +116,30 @@ int main() {
         std::string err;
         media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ", "", &err);
         media::sound::writeDrumPackage(media::sound::buildDemoKit(), root / "drums", "", &err);
+        {   // a load still running when the window goes away must not touch it (Codex P1/P2 round 1)
+            auto gone = std::make_unique<app::ResourcesComponent>();
+            gone->openPackage(juce::File(root.string() + "/organ"));
+            gone.reset();
+            pump(400);
+            TEST("window destroyed during an async package load: no crash", true);
+        }
         app::ResourcesComponent rc;
+        auto open = [&](const char* sub) {
+            rc.openPackage(juce::File(root.string() + sub));
+            TEST("package load runs off the message thread (busy while loading)", rc.loading());
+            for (int i = 0; i < 100 && rc.loading(); ++i) pump(20);
+            return !rc.loading() && rc.detailsText().startsWith("Opened");
+        };
         rc.setSize(980, 640);
         TEST("three tabs", rc.tabs().getNumTabs() == 3 && rc.tabs().getTabNames()[1] == "KST Library");
         TEST("empty: tells the user what to open", rc.detailsText().contains("Open Package"));
-        rc.openPackage(juce::File(root.string() + "/organ"));
+        open("/organ");
         rc.compareMemory();
         TEST("Memory Check: the untouched template compares without an error", rc.memoryText().contains("OBSERVATION ONLY") &&
              rc.memoryText().contains("Samples: not compared"));
         rc.model().clear();
-        TEST("open two packages", rc.openPackage(juce::File(root.string() + "/organ")) && rc.openPackage(juce::File(root.string() + "/drums")));
-        TEST("same package twice refused with a reason", !rc.openPackage(juce::File(root.string() + "/organ")) && rc.detailsText().contains("already open"));
+        TEST("open two packages", open("/organ") && open("/drums"));
+        TEST("same package twice refused with a reason", !open("/organ") && rc.detailsText().contains("already open"));
         auto* top = rc.tree().getRootItem();
         TEST("tree: Sound + Drum Kit at the top", top && top->getNumSubItems() == 2);
         juce::TreeViewItem* sound = nullptr;

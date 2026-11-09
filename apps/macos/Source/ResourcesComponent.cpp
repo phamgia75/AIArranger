@@ -72,8 +72,8 @@ ResourcesComponent::ResourcesComponent() {
             "Open an aiarranger-evidence file only if the owner authorized the report it was transcribed from. "
             "It is kept as a separate evidence source; inferred references are never treated as confirmed.",
             "Choose File...", "Cancel", nullptr,
-            juce::ModalCallbackFunction::create([this](int r) {
-                if (r == 1) chooseFile("Open an aiarranger-evidence file", [this](juce::File f) { openEvidence(f); });
+            juce::ModalCallbackFunction::create([this, alive = std::weak_ptr<bool>(alive_)](int r) {
+                if (r == 1 && !alive.expired()) chooseFile("Open an aiarranger-evidence file", [this](juce::File f) { openEvidence(f); });
             }));
     };
     clearBtn_.onClick = [this] { model_.clear(); details_.clear(); rebuildTree(); };
@@ -142,21 +142,37 @@ void ResourcesComponent::chooseFolder(const juce::String& title, std::function<v
     chooser_ = std::make_shared<juce::FileChooser>(title);
     auto c = chooser_;
     c->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
-                   [c, then](const juce::FileChooser& fc) { if (fc.getResult() != juce::File()) then(fc.getResult()); });
+                   [c, then, alive = std::weak_ptr<bool>(alive_)](const juce::FileChooser& fc) {
+                       if (!alive.expired() && fc.getResult() != juce::File()) then(fc.getResult());   // the window may be gone
+                   });
 }
 void ResourcesComponent::chooseFile(const juce::String& title, std::function<void(juce::File)> then) {
     chooser_ = std::make_shared<juce::FileChooser>(title, juce::File(), "*.txt;*.tsv");
     auto c = chooser_;
     c->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                   [c, then](const juce::FileChooser& fc) { if (fc.getResult() != juce::File()) then(fc.getResult()); });
+                   [c, then, alive = std::weak_ptr<bool>(alive_)](const juce::FileChooser& fc) {
+                       if (!alive.expired() && fc.getResult() != juce::File()) then(fc.getResult());
+                   });
 }
 
-bool ResourcesComponent::openPackage(const juce::File& dir) {
-    std::string err;
-    const bool ok = model_.addPackage(dir.getFullPathName().toStdString(), &err);
-    rebuildTree();
-    if (!ok) details_.setText("Could not open package:\n" + juce::String(err), false);
-    return ok;
+void ResourcesComponent::openPackage(const juce::File& dir) {
+    // Loading reads and fingerprints every WAV: do it off the message thread, adopt the result on it.
+    ++loads_;
+    details_.setText("Loading " + dir.getFullPathName() + " (read-only)...", false);
+    std::weak_ptr<bool> alive = alive_;
+    std::thread([this, alive, d = dir.getFullPathName().toStdString()] {
+        auto one = std::make_shared<media::graph::Graph>();
+        std::string pkg, err;
+        const bool loaded = media::sound::loadPackage(d, *one, pkg, &err);
+        juce::MessageManager::callAsync([this, alive, one, pkg, err, loaded, d] {
+            if (alive.expired()) return;
+            std::string e = err;
+            const bool ok = loaded && model_.adoptPackage(std::move(*one), pkg, d, &e);
+            --loads_;
+            rebuildTree();
+            details_.setText(ok ? juce::String("Opened ") + d : "Could not open package:\n" + juce::String(e), false);
+        });
+    }).detach();
 }
 
 bool ResourcesComponent::openEvidence(const juce::File& file) {
@@ -186,7 +202,7 @@ void ResourcesComponent::runKst(Action a, const juce::String& first, const juce:
     std::thread([this, alive, a, f = first.toStdString(), s = second.toStdString()] {
         auto text = ui::ResourceBrowserModel::kst(a, f, s);
         juce::MessageManager::callAsync([this, alive, text = std::move(text)] {
-            if (alive.expired() || !*alive.lock()) return;
+            if (alive.expired()) return;
             if (--kstJobs_ == 0) kstOut_.setText(text, false);
         });
     }).detach();

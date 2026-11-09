@@ -154,6 +154,21 @@ int main() {
         std::string t = evidence("node\tpa5x:USR/Sound/5\tCold Pad\n");
         t.replace(t.find("Report A"), 8, "Report B");
         TEST("two sources naming one identity differently: refused, first kept", !imports(t, g, &err) && contains(err, "named") && g.find(P(Kind::Sound, 5))->name == "Warm Pad");
+        {   // slot cardinality across sources (Codex P2): inferred never blocks; agreement corroborates; confirmed disagreement conflicts
+            const std::string osc = "node\tpa5x:USR/Oscillator/1\tO\n";
+            auto src = [&](const std::string& label, const std::string& conf, const std::string& to) {
+                std::string t = evidence(osc + "ref\tpa5x:USR/Oscillator/1\tOscHigh\tpa5x:USR/Multisample/" + to + "\t" + conf + "\tH\n");
+                return t.replace(t.find("Report A"), 8, label);
+            };
+            Graph s;
+            TEST("inferred slot claim, then a confirmed one from another source: both kept",
+                 imports(src("R1", "inferred", "1"), s) && imports(src("R2", "confirmed", "2"), s, &err) && s.uses(P(Kind::Oscillator, 1)).size() == 2);
+            TEST("a second source agreeing on the same target corroborates", imports(src("R3", "confirmed", "2"), s, &err));
+            TEST("two confirmed sources disagreeing: refused", !imports(src("R4", "confirmed", "3"), s, &err) && contains(err, "slot already holds"));
+            TEST("one source claiming two multisamples in one slot: refused", !imports(evidence(osc +
+                 "ref\tpa5x:USR/Oscillator/1\tOscHigh\tpa5x:USR/Multisample/1\tinferred\tH\n"
+                 "ref\tpa5x:USR/Oscillator/1\tOscHigh\tpa5x:USR/Multisample/2\tinferred\tH\n"), s, &err));
+        }
         Graph o;
         TEST("owner transcription may declare SongBook/Program Change scanned; then all five scanned -> Unreferenced",
              imports(evidence("scanned\tStyleTrack\ta\nscanned\tKeyboardSetPart\ta\nscanned\tPadTrack\ta\nscanned\tSongBookSound\ta\nscanned\tProgramChange\ta\n"
@@ -176,6 +191,11 @@ int main() {
         TEST("details show the evidence source and INFERRED", contains(e.details(P(Kind::Sound, 5)), "INFERRED, not proven") &&
              contains(e.details(P(Kind::Sound, 5)), "[evidence: Report A]"));
         TEST("unresolved dependency listed", contains(e.issuesText(), "Unresolved dependencies: 1") && contains(e.issuesText(), "pa5x:USR/Sound/5"));
+        { std::string t = evidence("node\tpa5x:USR/Multisample/3\tStrings\n"); spit(root / "ev-noref.txt", t.replace(t.find("Report A"), 8, "Report N")); }
+        TEST("evidence without references opens once; the same source again is refused (Codex P2)",
+             e.addEvidence(root / "ev-noref.txt", &err) && !e.addEvidence(root / "ev-noref.txt", &err) && contains(err, "already open") && e.evidence().size() == 2);
+        TEST("Pa5X resources from evidence do not inflate the import prediction (Codex P2)",
+             predict(e.graph()).multisamples == 1 && predict(e.graph()).samples == 1);
         fs::create_directory(root / "evdir");
         TEST("evidence: a folder is refused", !e.addEvidence(root / "evdir", &err));
     }

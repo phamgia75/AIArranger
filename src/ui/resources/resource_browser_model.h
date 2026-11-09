@@ -26,6 +26,11 @@ public:
         rg::Graph one;
         std::string pkg, e;
         if (!media::sound::loadPackage(dir, one, pkg, &e)) return fail(err, e);
+        return adoptPackage(std::move(one), pkg, dir, err);
+    }
+    // Second half of addPackage, for a package loaded elsewhere (the UI loads off the message thread).
+    bool adoptPackage(rg::Graph one, const std::string& pkg, const std::filesystem::path& dir, std::string* err) {
+        std::string e;
         for (const auto& p : packages_)
             if (p.id == pkg) return fail(err, "package " + pkg + " is already open (" + p.dir + "): one import or two? Not counted twice.");
         if (!g_.merge(one, &e)) return fail(err, e);
@@ -39,6 +44,9 @@ public:
         std::ifstream f(file, std::ios::binary);
         const std::string t((std::istreambuf_iterator<char>(f)), {});
         std::string label, e;
+        rg::Graph probe;   // read the source label first: one source is opened once, references or not
+        if (!media::sound::importEvidence(t, probe, &label, &e)) return fail(err, file.string() + ": " + e);
+        for (const auto& x : evidence_) if (x == label) return fail(err, "evidence source '" + label + "' is already open");
         if (!media::sound::importEvidence(t, g_, &label, &e)) return fail(err, file.string() + ": " + e);
         evidence_.push_back(label);
         return true;

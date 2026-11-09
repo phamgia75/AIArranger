@@ -83,9 +83,9 @@ struct PredictedImport { uint64_t samples = 0, multisamples = 0, drumSamples = 0
 
 inline PredictedImport predict(const graph::Graph& g) {
     PredictedImport p;
-    for (const auto& [id, n] : g.nodes()) {
-        p.multisamples += id.kind == graph::Kind::Multisample;
-        p.drumSamples += id.kind == graph::Kind::DrumSample;
+    for (const auto& [id, n] : g.nodes()) {   // package resources only: evidence describes what is already on the Pa5X
+        p.multisamples += id.provisional && id.kind == graph::Kind::Multisample;
+        p.drumSamples += id.provisional && id.kind == graph::Kind::DrumSample;
     }
     const auto b = graph::budget(g);
     p.samples = b.samples;

@@ -41,7 +41,8 @@ end	<number of lines before this one>
 | Package-level vias (Zone, OscHigh, ...) cannot be declared scanned | Those come from packages, not reports |
 | Edge types, slot rules and reference sources are checked by `Graph::addRef` | Same validation as packages |
 | Two sources giving one identity different names are refused, and the first one is kept | Identity is never re-interpreted silently |
-| The same file imported twice is refused | No double counting |
+| Slot rules (one High/Low multisample per oscillator, one Sound per oscillator) are absolute within one source. Across sources, an inferred claim never blocks, agreeing claims corroborate, and only two confirmed claims that disagree are refused | Import order never lets weaker evidence displace stronger evidence |
+| One source label is opened once (UI and CLI) | No double counting of a source, even one without references |
 | Strict and all-or-nothing: any bad line, a wrong `end` count or a missing final newline leaves the graph unchanged | Truncation is detectable |
 
 ### Where it is used

@@ -17,7 +17,8 @@ public:
     void paint(juce::Graphics& g) override;
 
     // Used by the buttons and by the UI smoke test.
-    bool openPackage(const juce::File& dir);
+    void openPackage(const juce::File& dir);   // asynchronous; loading() is true until it lands
+    bool loading() const { return loads_ > 0; }
     bool openEvidence(const juce::File& file);
     void showDetails(const media::graph::ResourceId& id);
     void runKst(ui::ResourceBrowserModel::KstAction a, const juce::String& first, const juce::String& second = {});
@@ -56,6 +57,7 @@ private:
     juce::Label kstNote_;
     juce::TextEditor kstOut_;
     std::atomic<int> kstJobs_{0};
+    int loads_ = 0;   // message thread only
 
     // Memory Check
     juce::Label memNote_, beforeLbl_{{}, "Before import (Memory Info)"}, afterLbl_{{}, "After import (Memory Info)"};

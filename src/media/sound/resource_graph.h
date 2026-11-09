@@ -186,11 +186,18 @@ public:
         if (e.to.provisional && (!e.from.provisional || e.to.scope != e.from.scope))
             return fail(err, "a provisional resource can only be referenced inside its own package: " + e.to.str());
         // Slot cardinality (spec §2): one High and one Low multisample per oscillator; an oscillator belongs to one Sound.
+        // Within one source this is absolute. Across evidence sources, agreeing claims corroborate, an inferred claim
+        // never blocks another, and only two confirmed claims that disagree conflict.
+        auto clash = [&](const Edge& x, bool differ) {
+            return x.provenance == e.provenance || (differ && x.confidence == Confidence::Confirmed && e.confidence == Confidence::Confirmed);
+        };
         if (e.via == Via::OscHigh || e.via == Via::OscLow)
-            for (const Edge& x : outSet(e.from)) if (x.via == e.via) return fail(err, e.from.str() + ": " + viaName(e.via) + " slot already holds " + x.to.str());
+            for (const Edge& x : outSet(e.from))
+                if (x.via == e.via && clash(x, x.to != e.to)) return fail(err, e.from.str() + ": " + viaName(e.via) + " slot already holds " + x.to.str());
         if (e.via == Via::OscillatorOf)
             if (const auto it = in_.find(e.to); it != in_.end())
-                for (const Edge& x : it->second) if (x.via == Via::OscillatorOf) return fail(err, e.to.str() + " already belongs to " + x.from.str());
+                for (const Edge& x : it->second)
+                    if (x.via == Via::OscillatorOf && clash(x, x.from != e.from)) return fail(err, e.to.str() + " already belongs to " + x.from.str());
         if (!edges_.insert(e).second) return fail(err, "duplicate reference " + e.from.str() + " -> " + e.to.str());
         out_[e.from].insert(e);
         in_[e.to].insert(e);

@@ -83,10 +83,12 @@ int main(int argc, char** argv) {
         out.assign(std::istreambuf_iterator<char>(in), {});
         return !in.bad();
     };
+    std::set<std::string> labels;
     for (const auto& f : evidence) {
         std::string t, label, err;
         if (!slurp(f, t)) { std::fprintf(stderr, "ERROR: cannot read evidence %s (regular file, at most 16 MiB)\n", f.c_str()); return 1; }
         if (!importEvidence(t, g, &label, &err)) { std::fprintf(stderr, "ERROR: %s: %s\n", f.c_str(), err.c_str()); return 1; }
+        if (!labels.insert(label).second) { std::fprintf(stderr, "ERROR: evidence source '%s' given twice\n", label.c_str()); return 1; }
     }
     if (cmd == "memory-compare") {
         std::string bt, at, err;
