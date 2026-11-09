@@ -123,7 +123,7 @@ inline SoundRecipe recipeFromSamples(const Instrument& in) {
     SoundRecipe r;
     r.sound = in.name;
     auto add = [&](RecipeParam p) { r.params.push_back(std::move(p)); };
-    std::vector<double> med;   // per layer: median over its zones of the first-200 ms RMS (dBFS); NaN = silent, nothing to measure
+    std::vector<double> med;   // per layer: median over ALL its zones of the first-200 ms RMS (dBFS); NaN = the median zone is silent
     for (const Layer& L : in.layers) {
         std::vector<double> xs;
         for (const Zone& z : L.zones) {
@@ -131,21 +131,21 @@ inline SoundRecipe recipeFromSamples(const Instrument& in) {
             const size_t n = std::min(s.frames(), static_cast<size_t>(s.rate / 5)) * s.channels;
             double e = 0;
             for (size_t i = 0; i < n; ++i) e += double(s.pcm[i]) * s.pcm[i];
-            if (n && e > 0) xs.push_back(20 * std::log10(std::sqrt(e / n) / 32768.0));
+            xs.push_back(n && e > 0 ? 20 * std::log10(std::sqrt(e / n) / 32768.0) : -HUGE_VAL);   // silent zones count too
         }
         std::sort(xs.begin(), xs.end());
-        med.push_back(xs.empty() ? std::nan("") : xs[xs.size() / 2]);
+        med.push_back(xs.empty() || std::isinf(xs[xs.size() / 2]) ? std::nan("") : xs[xs.size() / 2]);
     }
     const size_t measured = static_cast<size_t>(std::count_if(med.begin(), med.end(), [](double x) { return !std::isnan(x); }));
     if (in.layers.size() >= 2 && measured < 2) {
-        add({"Velocity", "Level per layer", "", Provenance::NotAvailable, "fewer than two layers hold any audio in their first 200 ms", ""});
+        add({"Velocity", "Level per layer", "", Provenance::NotAvailable, "fewer than two layers have an audible median zone (first 200 ms)", ""});
     } else if (in.layers.size() >= 2) {
         double top = -1e300;
         for (double x : med) if (!std::isnan(x)) top = std::max(top, x);
         std::string v;
         char b[96];
         for (size_t l = 0; l < in.layers.size(); ++l) {
-            if (std::isnan(med[l])) std::snprintf(b, sizeof b, "%s%s (vel %u-%u): silent", v.empty() ? "" : ", ", in.layers[l].name.c_str(), in.layers[l].velLo, in.layers[l].velHi);
+            if (std::isnan(med[l])) std::snprintf(b, sizeof b, "%s%s (vel %u-%u): silent (median zone)", v.empty() ? "" : ", ", in.layers[l].name.c_str(), in.layers[l].velLo, in.layers[l].velHi);
             else std::snprintf(b, sizeof b, "%s%s (vel %u-%u): %+.1f dB", v.empty() ? "" : ", ", in.layers[l].name.c_str(), in.layers[l].velLo, in.layers[l].velHi, med[l] - top);
             v += b;
         }

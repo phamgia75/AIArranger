@@ -12,6 +12,7 @@
 #include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
 #include <map>
+#include <memory>
 #include <sstream>
 
 namespace ai_arranger::ui {
@@ -58,7 +59,9 @@ public:
         return true;
     }
     // build() in two halves for the UI: decode() reads the WAVs (slow, any thread), adopt() keeps the result.
-    void adopt(snd::Instrument in) { in_ = std::move(in); built_ = true; }
+    void adopt(snd::Instrument in) { in_ = std::make_shared<const snd::Instrument>(std::move(in)); built_ = true; }
+    // Immutable decoded Sound, shared with background writers without copying its audio.
+    std::shared_ptr<const snd::Instrument> snapshot() const { return in_; }
     void invalidate() { built_ = false; }   // a setting changed: the preview no longer describes what would be written
     const std::filesystem::path& folder() const { return dir_; }
     static bool decode(const std::filesystem::path& dir, const std::string& name, const std::string& orderCsv, const std::string& splitsCsv,
@@ -77,12 +80,12 @@ public:
         return true;
     }
     bool built() const { return built_; }
-    const snd::Instrument& instrument() const { return in_; }
+    const snd::Instrument& instrument() const { static const snd::Instrument none; return in_ ? *in_ : none; }
 
     // Step 3: what the musician should look at before writing. Blocking problems were refused by build().
-    std::vector<std::string> checks() const { return built_ ? checksOf(in_) : std::vector<std::string>{}; }
-    std::string preview() const { return built_ ? previewOf(in_) : ""; }
-    std::string recipeText() const { return built_ ? snd::formatRecipe(snd::recipeFromSamples(in_)) : ""; }
+    std::vector<std::string> checks() const { return built_ ? checksOf(*in_) : std::vector<std::string>{}; }
+    std::string preview() const { return built_ ? previewOf(*in_) : ""; }
+    std::string recipeText() const { return built_ ? snd::formatRecipe(snd::recipeFromSamples(*in_)) : ""; }
 
     // Static forms, so the UI can compute them off the message thread before adopt().
     static std::vector<std::string> checksOf(const snd::Instrument& in_) {
@@ -186,7 +189,7 @@ private:
 
     std::filesystem::path dir_;
     std::vector<LayerInfo> layers_;
-    snd::Instrument in_;
+    std::shared_ptr<const snd::Instrument> in_;
     bool built_ = false;
 };
 

@@ -165,7 +165,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     ++jobs_;
     generateBtn_.setEnabled(false);
     status_.setText("Writing " + outDir.getFullPathName() + "...", juce::dontSendNotification);
-    auto in = std::make_shared<media::sound::Instrument>(model_.instrument());
+    auto in = model_.snapshot();   // shared, immutable: no audio copy on the message thread
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
     std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder()] {

@@ -77,14 +77,29 @@ int main() {
         Instrument q = m.instrument();
         for (auto& s : q.samples) std::fill(s.pcm.begin(), s.pcm.end(), int16_t(0));
         const std::string all = formatRecipe(recipeFromSamples(q));
-        TEST("all layers silent: level per layer NOT AVAILABLE, no dB value", contains(all, "fewer than two layers hold any audio") && !contains(all, " dB,") && validate(recipeFromSamples(q)).empty());
+        TEST("all layers silent: level per layer NOT AVAILABLE, no dB value", contains(all, "fewer than two layers have an audible median zone") && !contains(all, " dB,") && validate(recipeFromSamples(q)).empty());
         for (const auto& z : q.layers[1].zones) { auto& s = q.samples[size_t(z.sample)]; for (size_t i = 0; i < s.pcm.size(); ++i) s.pcm[i] = int16_t(i % 2 ? 3000 : -3000); }
         Instrument q3 = q;
         q3.layers.push_back(q.layers[1]);   // a third, audible layer so two are measured
         q3.layers[1].velHi = 90; q3.layers[2].velLo = 91;
         const std::string one = formatRecipe(recipeFromSamples(q3));
-        TEST("one silent layer is named silent, the others measured", contains(one, "Soft (vel 0-69): silent") && contains(one, "+0.0 dB") && !contains(one, "e+"));
+        TEST("one silent layer is named silent, the others measured", contains(one, "Soft (vel 0-69): silent (median zone)") && contains(one, "+0.0 dB") && !contains(one, "e+"));
     }
+    {   // Codex round 2: silent zones count in the median (2 of 3 silent -> the layer's median is silent)
+        Instrument q;
+        q.name = "Med";
+        for (int i = 0; i < 6; ++i) { Sample s; s.root = uint8_t(48 + 12 * (i % 3)); s.pcm.assign(9600, int16_t(i == 0 || i >= 3 ? 3000 : 0)); s.name = "S" + std::to_string(i); q.samples.push_back(s); }
+        for (int l = 0; l < 2; ++l) {
+            Layer L; L.name = l ? "Hard" : "Soft"; L.velLo = l ? 64 : 0; L.velHi = l ? 127 : 63;
+            for (int z = 0; z < 3; ++z) L.zones.push_back({uint8_t(48 + 12 * z), uint8_t(59 + 12 * z), l * 3 + z, uint8_t(48 + 12 * z), 0, 0});
+            q.layers.push_back(L);
+        }
+        const std::string t = formatRecipe(recipeFromSamples(q));
+        TEST("partly silent layer: median zone silent is reported, not +0.0 dB (Codex round 2)",
+             contains(t, "fewer than two layers have an audible median zone") && !contains(t, "Soft (vel 0-63): +0.0 dB"));
+    }
+    TEST("Generate shares the decoded Sound instead of copying its audio (Codex round 2)",
+         m.snapshot() && m.snapshot().get() == &m.instrument());
     m.invalidate();
     TEST("invalidate: a changed setting means nothing is built", !m.built());
     TEST("rebuild", m.build("Test Piano", "Soft, Hard", " 70", &err));
