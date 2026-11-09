@@ -225,6 +225,7 @@ public:
         for (const Edge& x : o.edges_)
             if (!t.edges_.count(x) && !t.addRef(x, err)) return false;
         for (const auto& [v, ev] : o.scanned_) t.scanned_.emplace(v, ev);
+        t.structured_.insert(o.structured_.begin(), o.structured_.end());
         t.complete_.insert(o.complete_.begin(), o.complete_.end());
         *this = std::move(t);
         return true;
@@ -243,17 +244,28 @@ public:
         return it == out_.end() ? std::vector<Edge>{} : std::vector<Edge>(it->second.begin(), it->second.end());
     }
     // Top-level users (Sounds, Drum Kits and anything above them) that reach `id` through any path.
-    std::set<ResourceId> usedByRoots(const ResourceId& id) const {
+    // confirmedOnly: follow confirmed references only (a root missing from that set is reached only
+    // through an inferred reference, i.e. possibly).
+    std::set<ResourceId> usedByRoots(const ResourceId& id, bool confirmedOnly = false) const {
         std::set<ResourceId> seen, roots;
         std::vector<ResourceId> todo{id};
         while (!todo.empty()) {
             const ResourceId c = todo.back(); todo.pop_back();
-            const auto users = whereUsed(c);
-            if (users.empty() && c != id) roots.insert(c);
-            for (const Edge& e : users) if (seen.insert(e.from).second) todo.push_back(e.from);
+            size_t followed = 0;
+            for (const Edge& e : whereUsed(c)) {
+                if (confirmedOnly && e.confidence == Confidence::Inferred) continue;
+                ++followed;
+                if (seen.insert(e.from).second) todo.push_back(e.from);
+            }
+            if (!followed && c != id) roots.insert(c);
         }
         return roots;
     }
+    // Whether a resource's own outgoing structure is fully described. Package resources: yes, by
+    // construction. Pa5X resources: only for a scope declared so; evidence usually names a Sound
+    // without its oscillators or samples, which is unknown, not empty.
+    bool structureKnown(const ResourceId& id) const { return id.provisional || structured_.count(id.scope); }
+    void declareStructureKnown(const std::string& scope) { structured_.insert(scope); }
     // Forward closure: the roots and everything they reference (present or dangling).
     std::set<ResourceId> closure(const std::vector<ResourceId>& roots) const {
         std::set<ResourceId> seen(roots.begin(), roots.end());
@@ -274,6 +286,7 @@ public:
         std::vector<std::string> r;
         for (const Edge& e : dangling()) r.push_back("dangling: " + e.from.str() + " -" + viaName(e.via) + "-> " + e.to.str() + " (" + e.detail + ") is not in the graph");
         for (const auto& [id, n] : nodes_) {
+            if (!structureKnown(id)) continue;   // undescribed structure is unknown, not missing
             const auto out = uses(id);
             auto need = [&](const char* what) { if (out.empty()) r.push_back("missing: " + id.str() + " (" + n.name + ") has no " + what); };
             switch (id.kind) {
@@ -385,6 +398,7 @@ private:
     std::map<ResourceId, std::set<Edge>> out_, in_;   // adjacency indexes: queries are O(log n + degree)
     std::map<Via, std::string> scanned_;
     std::set<std::pair<std::string, Kind>> complete_;
+    std::set<std::string> structured_;
 };
 
 // ── memory budget (spec §5) ──

@@ -135,9 +135,10 @@ int main(int argc, char** argv) {
         const auto users = g.whereUsed(ids[0]);
         std::printf("%s%s\nDirect users: %zu\n", ids[0].str().c_str(), g.find(ids[0]) ? "" : "  (NOT in the graph)", users.size());
         for (const auto& e : users) std::printf("  %s\n", edgeText(e).c_str());
-        const auto roots = g.usedByRoots(ids[0]);
+        const auto roots = g.usedByRoots(ids[0]), sure = g.usedByRoots(ids[0], true);
         std::printf("Reached from: %zu\n", roots.size());
-        for (const auto& r : roots) std::printf("  %s (%s)\n", r.str().c_str(), g.find(r) ? g.find(r)->name.c_str() : "?");
+        for (const auto& r : roots)
+            std::printf("  %s (%s)%s\n", r.str().c_str(), g.find(r) ? g.find(r)->name.c_str() : "?", sure.count(r) ? "" : "  POSSIBLY: only through an inferred reference");
         std::printf(evidence.empty() ? "Scope: AIArranger packages only. Styles, Keyboard Sets, Pads, SongBook Entries and Program Change messages on a Pa5X are not visible here.\n"
                                      : "Scope: AIArranger packages and the evidence given. References outside it, and SongBook/Program Change unless genuinely scanned, are not visible.\n");
         return 0;

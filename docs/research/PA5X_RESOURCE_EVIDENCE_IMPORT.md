@@ -43,6 +43,8 @@ end	<number of lines before this one>
 | Two sources giving one identity different names are refused, and the first one is kept | Identity is never re-interpreted silently |
 | Slot rules (one High/Low multisample per oscillator, one Sound per oscillator) are absolute within one source. Across sources, an inferred claim never blocks, agreeing claims corroborate, and only two confirmed claims that disagree are refused | Import order never lets weaker evidence displace stronger evidence |
 | One source label is opened once (UI and CLI) | No double counting of a source, even one without references |
+| A Pa5X resource's own structure (oscillators, samples) is UNKNOWN unless declared known; it is never reported as missing or as needing 0 samples | Undescribed is not empty |
+| "Reached from" through an inferred reference is marked POSSIBLY | Inference is never elevated transitively either |
 | Strict and all-or-nothing: any bad line, a wrong `end` count or a missing final newline leaves the graph unchanged | Truncation is detectable |
 
 ### Where it is used

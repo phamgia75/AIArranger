@@ -214,6 +214,21 @@ int main() {
             s.clear();
             TEST("Close All changes the epoch (pending package loads are dropped)", s.epoch() != ep);
         }
+        {   // Codex round 3: evidence-only structure is unknown; inferred paths stay qualified when transitive
+            ResourceBrowserModel x;
+            std::string t = evidence("node\tpa5x:USR/Style/2\tPop\nnode\tpa5x:USR/Sound/5\tWarm Pad\nnode\tpa5x:USR/Oscillator/1\tO\n"
+                                     "ref\tpa5x:USR/Style/2\tStyleTrack\tpa5x:USR/Sound/5\tinferred\tVar1\n"
+                                     "ref\tpa5x:USR/Sound/5\tOscillatorOf\tpa5x:USR/Oscillator/1\tconfirmed\tosc 1\n");
+            spit(root / "ev-path.txt", t);
+            TEST("evidence with an inferred Style -> Sound and a confirmed Sound -> Oscillator", x.addEvidence(root / "ev-path.txt", &err));
+            const std::string d = x.details(P(Kind::Oscillator, 1));
+            TEST("transitive root reached only through an inferred reference is marked POSSIBLY",
+                 contains(d, "Style 'Pop'") && contains(d, "POSSIBLY: only through an inferred reference"));
+            const std::string sd = x.details(P(Kind::Sound, 5));
+            TEST("evidence-only Sound: samples needed UNKNOWN, not an exact zero",
+                 contains(sd, "Samples needed: UNKNOWN") && !contains(sd, "0 unique"));
+            TEST("evidence-only resources are not reported missing structure", !contains(x.issuesText(), "has no"));
+        }
         fs::create_directory(root / "evdir");
         TEST("evidence: a folder is refused", !e.addEvidence(root / "evdir", &err));
     }

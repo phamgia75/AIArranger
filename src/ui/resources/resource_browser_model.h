@@ -110,7 +110,9 @@ public:
                  "-bit, " + std::to_string(x.frames) + " frames" + (x.loopFrames ? ", loop " + std::to_string(x.loopFrames) + " frames" : "") +
                  "\n  uncompressed PCM: " + bytes(x.bytes()) + " (exact)\n  file: " + x.file + "\n";
         }
-        if (id.kind == rg::Kind::Sound || id.kind == rg::Kind::DrumKit) {
+        if ((id.kind == rg::Kind::Sound || id.kind == rg::Kind::DrumKit) && !g_.structureKnown(id)) {
+            o += "Samples needed: UNKNOWN (the evidence does not describe this resource's oscillators or samples)\n";
+        } else if (id.kind == rg::Kind::Sound || id.kind == rg::Kind::DrumKit) {
             uint64_t sum = 0, count = 0, missing = 0;
             for (const auto& c : g_.closure({id}))
                 if (c.kind == rg::Kind::Sample) {
@@ -122,10 +124,11 @@ public:
         const auto users = g_.whereUsed(id);
         o += "Where used: " + std::to_string(users.size()) + " direct reference(s)" + (users.size() > 1 ? " (shared resource)" : "") + "\n";
         for (const auto& e : users) o += "  " + edgeText(e) + "\n";
-        const auto roots = g_.usedByRoots(id);
+        const auto roots = g_.usedByRoots(id), sure = g_.usedByRoots(id, true);
         if (!roots.empty()) {
             o += "Reached from:\n";
-            for (const auto& r : roots) o += "  " + rowLabel(r) + "  (" + r.str() + ")\n";
+            for (const auto& r : roots)
+                o += "  " + rowLabel(r) + "  (" + r.str() + ")" + (sure.count(r) ? "" : "  POSSIBLY: only through an inferred reference") + "\n";
         }
         const auto d = g_.deleteCheck(id);
         static const char* verdict[] = {"IN USE: do not delete", "CANNOT BE PROVEN SAFE to delete", "No known references"};

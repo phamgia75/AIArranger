@@ -111,6 +111,8 @@ int main() {
         TEST("budget: dangling sample has unknown size, not counted, with a warning",
              b.samples == 1 && b.unknownSizeSamples == 1 && has(b.warnings, "size is unknown and NOT counted"));
         g.addNode({P(Kind::Oscillator, 1), "OSC", {}}, &err);
+        TEST("Pa5X oscillator of undescribed structure: unknown, not reported missing", !has(g.issues(), "pa5x:USR/Oscillator/1 (OSC) has no"));
+        g.declareStructureKnown("USR");
         TEST("oscillator with no multisample reported as missing (plays silent)", has(g.issues(), "pa5x:USR/Oscillator/1 (OSC) has no multisample"));
         TEST("reference from an unknown resource refused", !g.addRef({P(Kind::Multisample, 9), P(Kind::Sample, 1), Via::Zone, "z"}, &err));
         TEST("edge type outside the spec refused (Sound -Zone-> Sample)",
