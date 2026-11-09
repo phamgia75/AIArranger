@@ -171,7 +171,7 @@ public:
         if (!ResourceId::validScope(n.id.scope)) return fail(err, "invalid scope in " + n.id.str());
         if (n.sample.has_value() != (n.id.kind == Kind::Sample)) return fail(err, n.id.str() + ": sample facts belong to Sample nodes only");
         if (n.sample && (n.sample->channels < 1 || n.sample->channels > 2 || (n.sample->bits != 8 && n.sample->bits != 16) ||
-                         n.sample->rate == 0 || n.sample->frames == 0 || n.sample->loopFrames > n.sample->frames))
+                         n.sample->rate == 0 || n.sample->frames == 0 || n.sample->frames > kMaxFrames || n.sample->loopFrames > n.sample->frames))
             return fail(err, n.id.str() + ": inconsistent sample facts");
         if (!nodes_.emplace(n.id, n).second) return fail(err, "duplicate identity " + n.id.str());
         return true;
@@ -183,8 +183,13 @@ public:
         if (e.to.provisional && (!e.from.provisional || e.to.scope != e.from.scope))
             return fail(err, "a provisional resource can only be referenced inside its own package: " + e.to.str());
         if (!edges_.insert(e).second) return fail(err, "duplicate reference " + e.from.str() + " -> " + e.to.str());
+        out_[e.from].insert(e);
+        in_[e.to].insert(e);
         return true;
     }
+    // Declare that every resource of a package (provisional scope) and every reference among them is
+    // in the graph. Only then can a provisional resource with no users be called Unreferenced.
+    void declarePackageComplete(const std::string& scope) { complete_.insert(scope); }
     // Declare that every reference of kind `v` into Pa5X-identified resources is present (e.g. from a
     // complete, authorized PA Manager report). Without it, a Pa5X resource's delete is unprovable.
     void declareScanned(Via v, const std::string& evidence) { scanned_[v] = evidence; }
@@ -193,11 +198,13 @@ public:
     // identical; otherwise it is a conflict. Content is never used to merge.
     bool merge(const Graph& o, std::string* err) {
         for (const auto& [id, n] : o.nodes_)
-            if (const auto it = nodes_.find(id); it != nodes_.end() && !(it->second == n))
+            if (const auto it = nodes_.find(id); it != nodes_.end() && (!(it->second == n) || outSet(id) != o.outSet(id)))
                 return fail(err, "identity " + id.str() + " names two different resources");
         for (const auto& [id, n] : o.nodes_) nodes_.emplace(id, n);
-        edges_.insert(o.edges_.begin(), o.edges_.end());
+        for (const Edge& x : o.edges_)
+            if (edges_.insert(x).second) { out_[x.from].insert(x); in_[x.to].insert(x); }
         for (const auto& [v, ev] : o.scanned_) scanned_.emplace(v, ev);
+        complete_.insert(o.complete_.begin(), o.complete_.end());
         return true;
     }
 
@@ -206,14 +213,12 @@ public:
     const Node* find(const ResourceId& id) const { const auto it = nodes_.find(id); return it == nodes_.end() ? nullptr : &it->second; }
 
     std::vector<Edge> whereUsed(const ResourceId& id) const {
-        std::vector<Edge> r;
-        for (const Edge& e : edges_) if (e.to == id) r.push_back(e);
-        return r;
+        const auto it = in_.find(id);
+        return it == in_.end() ? std::vector<Edge>{} : std::vector<Edge>(it->second.begin(), it->second.end());
     }
     std::vector<Edge> uses(const ResourceId& id) const {
-        std::vector<Edge> r;
-        for (const Edge& e : edges_) if (e.from == id) r.push_back(e);
-        return r;
+        const auto it = out_.find(id);
+        return it == out_.end() ? std::vector<Edge>{} : std::vector<Edge>(it->second.begin(), it->second.end());
     }
     // Top-level users (Sounds, Drum Kits and anything above them) that reach `id` through any path.
     std::set<ResourceId> usedByRoots(const ResourceId& id) const {
@@ -272,9 +277,14 @@ public:
         const auto vias = referrerVias(id.kind);
         if (vias.empty()) { d.reasons.push_back(std::string("referrers of a ") + kindName(id.kind) + " are not modelled"); return d; }
         if (id.provisional) {
-            // Generated, never imported: no Pa5X data can refer to it, so the graph holds every referrer.
-            d.verdict = DeleteVerdict::Unreferenced;
-            d.reasons.push_back("provisional (package-generated): only resources in this graph can refer to it, and none does");
+            // Generated, never imported: only its own package can refer to it. Provable only when the
+            // whole package is known to be in the graph.
+            if (complete_.count(id.scope)) {
+                d.verdict = DeleteVerdict::Unreferenced;
+                d.reasons.push_back("provisional (package-generated), package complete in this graph, and nothing in it refers to this resource");
+            } else {
+                d.reasons.push_back("provisional, but package " + id.scope + " is not declared complete: its referrers may be missing");
+            }
             return d;
         }
         for (Via v : vias)
@@ -321,7 +331,7 @@ public:
             if (id.provisional) c.needsSlot.push_back(id);
             if (const Node* d = dst.find(id)) {
                 c.overwrites.push_back(id);
-                if (!(*d == *s)) c.conflicts.push_back("position " + id.str() + " holds a different resource in the destination: loading overwrites it (MAN p.735)");
+                if (!(*d == *s) || dst.outSet(id) != src.outSet(id)) c.conflicts.push_back("position " + id.str() + " holds a different resource in the destination: loading overwrites it (MAN p.735)");
                 for (const Edge& e : dst.whereUsed(id)) if (!cl.count(e.from)) c.destinationUsersAffected.push_back(e);
             }
             for (const Edge& e : src.uses(id)) if (!src.find(e.to)) c.unresolved.push_back(e);
@@ -329,11 +339,16 @@ public:
         return c;
     }
 
+    static constexpr uint64_t kMaxFrames = 0xFFFFFFFFull;   // bounds bytes() and the budget sums (no uint64 overflow)
+
 private:
     static bool fail(std::string* err, std::string m) { if (err) *err = std::move(m); return false; }
+    std::set<Edge> outSet(const ResourceId& id) const { const auto it = out_.find(id); return it == out_.end() ? std::set<Edge>{} : it->second; }
     std::map<ResourceId, Node> nodes_;
     std::set<Edge> edges_;
+    std::map<ResourceId, std::set<Edge>> out_, in_;   // adjacency indexes: queries are O(log n + degree)
     std::map<Via, std::string> scanned_;
+    std::set<std::string> complete_;
 };
 
 // ── memory budget (spec §5) ──

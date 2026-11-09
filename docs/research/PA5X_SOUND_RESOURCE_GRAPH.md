@@ -152,3 +152,21 @@ AIArranger performs no deletes. This rule constrains reports such as "unused" or
 3. **B3** True Sound-aware merge, meaning writing a KST with rebound references: **not planned**. It would need Pa5X-side validation of renumbering (UNK, §3) and a KST writer, which is out of scope by design.
 
 Track A stops at a validated, advisory Sound-level load plan, which is capability level 3 for the data it has edges for. Level 4 (Sound-aware merge) is reachable only through B3, and B3 is not planned.
+
+## 9. Implementation status (2026-11-09, A1 + E4)
+
+| Spec element | Implemented in | Coverage |
+|---|---|---|
+| Identity separate from name and content | `resource_graph.h` `ResourceId` (`pa5x:<bank>/<Kind>/<n>`, `prov:<package>/<Kind>/<n>`); `SampleInfo.contentHash` is a fingerprint only | Full |
+| Kinds | Sound, DrumKit, Oscillator, Multisample, Sample, DrumSample, KeyboardSet, Style, Pad, SongBookEntry, MidiSong | Package graphs populate Sound/DrumKit/Oscillator/Multisample/Sample/DrumSample only. Style, Keyboard Set, Pad, SongBook and MIDI Song nodes exist in the API, but nothing fills them (no authorized source, Q18) |
+| Edge types (§2) | `edgeAllowed`: the 11 references of §2, every other combination refused | Full for the API |
+| Non-owning references, dangling kept | `addRef` keeps references to absent targets; `dangling()`, `issues()` (silent oscillator, multisample or drum sample) | Full |
+| Where used | `whereUsed`, `usedByRoots`, `closure` | Inside the loaded graph only; the CLI states that Pa5X-side referrers are invisible |
+| Deletion safety (§4) | `deleteCheck`: InUse / Unprovable / Unreferenced. A Pa5X resource is Unreferenced only when every referrer kind in `referrerVias` was declared scanned. A Sound needs StyleTrack, KeyboardSetPart, PadTrack, SongBookSound **and** ProgramChange. A provisional resource can only be referenced from its own package | Full rule; nothing in the code base declares a scan yet |
+| Copy / remap impact (§3) | `remapImpact`, `Graph::copyImpact` (closure, overwritten positions, destination users affected, unresolved references, provisional resources needing a slot) | Advisory; the Pa5X renumbering itself is UNK |
+| Memory (§5) | `budget`, `formatBudget`, `budgetJson`: per unique identity; byte-identical audio under distinct identities is counted and reported; both readings of "4 GB"; 8 GB compressed-equivalent; the compressed figure is an estimate; count against PA Manager's 53 130 | Exact for PCM bytes of package samples. Overhead, Preload and compressibility are not modelled |
+| Package boundary | `package_graph.h`: every package writes `RESOURCES.tsv`. The strict parser accepts only provisional identities of that package and self-contained references; the loader re-checks every WAV (format, frames, loop, fingerprint). `--kst` summarises an undecoded KST outside the graph | Full |
+| Writers | `writePackage` (Sound, also used by the WAV-folder source and the AU sampler), `writeDrumPackage` | Full. The Sound Recipe holds no resources; it stays in REPORT.txt |
+| KST tools | `kst-inventory` via `aiarranger-resources budget --kst` (file-level, separate section). `kst-diff` / `kst-merge-plan` are unchanged | No edges from KSTs (track B gate) |
+
+CLI: `aiarranger-resources budget|check|where-used|delete-check|remap`. Exit 0 = ok, 3 = not ok (no fit, in use or unprovable, conflicts), 1 = input error.

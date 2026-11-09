@@ -6,6 +6,7 @@
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
 #include "media/sound/package_writer.h"
+#include <chrono>
 #include <cstdio>
 #include <unistd.h>
 
@@ -214,6 +215,42 @@ int main() {
              sb.byFormat.at("16-bit 48000 Hz stereo").second == 4000);
     }
 
+    // ── regressions from the independent Codex review of 889eeff ──
+    {
+        Graph g;   // #5 byte arithmetic overflow through the API
+        TEST("frame count beyond 2^32 refused (bytes() cannot wrap)", !g.addNode(sampleNode(P(Kind::Sample, 1), 1ull << 62, 2), &err));
+        // #6 provisional resources added incrementally: no Unreferenced verdict before the package is declared complete
+        g.addNode(sampleNode(V("pkgI", Kind::Sample, 0), 100), &err);
+        TEST("provisional sample in an incomplete package: Unprovable", g.deleteCheck(V("pkgI", Kind::Sample, 0)).verdict == DeleteVerdict::Unprovable);
+        g.declarePackageComplete("pkgI");
+        TEST("after the package is declared complete: Unreferenced", g.deleteCheck(V("pkgI", Kind::Sample, 0)).verdict == DeleteVerdict::Unreferenced);
+        // #2 copy conflict when the node matches but its references differ
+        Graph src, dst;
+        for (Graph* x : {&src, &dst}) {
+            x->addNode({P(Kind::Multisample, 4), "MS", {}}, &err);
+            x->addNode(sampleNode(P(Kind::Sample, 1), 100), &err);
+            x->addNode(sampleNode(P(Kind::Sample, 2), 100, 1, "00000000000000bb"), &err);
+        }
+        src.addRef({P(Kind::Multisample, 4), P(Kind::Sample, 1), Via::Zone, "zone 0"}, &err);
+        dst.addRef({P(Kind::Multisample, 4), P(Kind::Sample, 2), Via::Zone, "zone 0"}, &err);
+        TEST("same multisample identity and name, different zone sample: copy conflict",
+             has(Graph::copyImpact(src, {P(Kind::Multisample, 4)}, dst).conflicts, "pa5x:USR/Multisample/4 holds a different resource"));
+        TEST("...and merging the two graphs is refused", !Graph(src).merge(dst, &err));
+        // #4 adjacency indexes: a graph at PA Manager's sample-count figure stays fast
+        Graph big;
+        big.addNode({P(Kind::Multisample, 0), "Big", {}}, &err);
+        for (uint32_t i = 0; i < 60000; ++i) {
+            big.addNode(sampleNode(P(Kind::Sample, i), 1000, 1, hex16(i)), &err);
+            big.addRef({P(Kind::Multisample, 0), P(Kind::Sample, i), Via::Zone, "zone " + std::to_string(i)}, &err);
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto bb = budget(big);
+        const auto unsafe = big.unsafeDeletes();
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("    60 000-sample graph: budget + unsafeDeletes %.3f s\n", secs);
+        TEST("60 000 samples: budget and delete checks well under 10 s (was O(nodes x edges))", bb.samples == 60000 && unsafe.size() == 60001 && secs < 10);
+    }
+
     // ── packages: writers emit RESOURCES.tsv; loader cross-checks WAVs; strict parser ──
     const fs::path root = fs::temp_directory_path() / ("aia-rgraph-" + std::to_string(::getpid()));
     fs::remove_all(root);
@@ -278,6 +315,17 @@ int main() {
         fs::remove(wav);
         TEST("missing WAV detected", !loadPackage(root / "bad", x, p, &err) && err.find("cannot read") != std::string::npos);
         TEST("missing manifest detected", !loadPackage(root / "organ/wav", x, p, &err));
+        // #1 manifest bit depth must match the WAV (8 instead of 16 would halve the budget)
+        fs::copy(root / "organ", root / "bits", fs::copy_options::recursive);
+        spit(root / "bits/RESOURCES.tsv", replaceOnce(man, "\t48000\t16\t", "\t48000\t8\t"));
+        TEST("bit depth differing from the WAV refused", !loadPackage(root / "bits", x, p, &err) && err.find("does not match") != std::string::npos);
+        // #3 a symlinked folder inside the package cannot lead the loader outside it
+        fs::copy(root / "organ", root / "outside", fs::copy_options::recursive);
+        fs::copy(root / "organ", root / "link", fs::copy_options::recursive);
+        fs::remove_all(root / "link/tx");
+        std::error_code lec;
+        fs::create_directory_symlink(root / "outside/tx", root / "link/tx", lec);
+        TEST("sample path through a symlinked folder refused", lec || (!loadPackage(root / "link", x, p, &err) && err.find("symlink") != std::string::npos));
     }
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);

@@ -81,6 +81,7 @@ inline bool addInstrument(graph::Graph& g, const Instrument& in, const std::stri
                            "zone " + std::to_string(z) + " keys " + std::to_string(Z.lo) + "-" + std::to_string(Z.hi) + " root " + std::to_string(Z.root)}, err);
         }
     }
+    if (ok) g.declarePackageComplete(pkg);
     return ok;
 }
 
@@ -100,6 +101,7 @@ inline bool addDrumKit(graph::Graph& g, const DrumKit& kit, const std::string& p
             for (size_t l = 0; ok && l < k.layers.size(); ++l)
                 ok = g.addRef({dk, pid(pkg, Kind::DrumSample, uint32_t(k.layers[l].sample)), Via::DrumKeyLayer,
                                "key " + std::to_string(k.key) + " layer " + std::to_string(l) + " vel " + std::to_string(k.layers[l].velLo)}, err);
+    if (ok) g.declarePackageComplete(pkg);
     return ok;
 }
 
@@ -195,6 +197,7 @@ inline bool parseManifest(const std::string& textIn, graph::Graph& out, std::str
         if (!g.find(r.to)) return fail(0, "package is not self-contained: " + r.to.str() + " is referenced but not described");
     }
     if (!g.find({true, pkg, top, 0})) return fail(0, std::string("no ") + graph::kindName(top) + " resource");
+    g.declarePackageComplete(pkg);   // the end record proves every record of the package was read
     out = std::move(g);
     return true;
 }
@@ -209,7 +212,21 @@ inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::
         b.assign(std::istreambuf_iterator<char>(f), {});
         return !f.bad();
     };
+    // Every path below the package folder must stay inside it: no symlinked component (lexical checks
+    // alone would let a symlinked folder lead outside the package).
+    auto contained = [&](const std::string& rel) {
+        fs::path p = dir;
+        std::error_code ec;
+        for (const auto& part : fs::path(rel)) {
+            p /= part;
+            const auto st = fs::symlink_status(p, ec);
+            if (fs::is_symlink(st)) return false;
+            if (!fs::exists(st)) break;   // missing: the read below reports it
+        }
+        return true;
+    };
     std::vector<uint8_t> m;
+    if (!contained("RESOURCES.tsv")) { if (err) *err = dir.string() + ": RESOURCES.tsv is a symlink"; return false; }
     if (!read(dir / "RESOURCES.tsv", m)) { if (err) *err = "cannot read " + (dir / "RESOURCES.tsv").string(); return false; }
     graph::Graph tmp;
     std::string e;
@@ -218,10 +235,11 @@ inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::
         if (!n.sample) continue;
         std::vector<uint8_t> b;
         Sample s;
+        if (!contained(n.sample->file)) { if (err) *err = dir.string() + ": " + n.sample->file + " leaves the package through a symlink"; return false; }
         if (!read(dir / n.sample->file, b)) { if (err) *err = dir.string() + ": cannot read " + n.sample->file; return false; }
         if (const auto we = readWav(b, &s); !we.empty()) { if (err) *err = dir.string() + ": " + n.sample->file + ": " + we; return false; }
         const auto& x = *n.sample;
-        if (s.channels != x.channels || s.rate != x.rate || s.frames() != x.frames ||
+        if (x.bits != 16 /* readWav decodes 16-bit PCM only */ || s.channels != x.channels || s.rate != x.rate || s.frames() != x.frames ||
             (s.looped ? uint64_t(s.loopEnd - s.loopStart) : 0) != x.loopFrames || contentHash(s) != x.contentHash) {
             if (err) *err = dir.string() + ": " + n.sample->file + " does not match RESOURCES.tsv (" + id.str() + ")";
             return false;
