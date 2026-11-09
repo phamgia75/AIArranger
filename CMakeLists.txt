@@ -296,6 +296,8 @@ target_include_directories(kst-merge-plan PRIVATE src)
 add_test(NAME test_kst_cli_exit COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_kst_cli_exit.sh ${CMAKE_BINARY_DIR})
 add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
 target_include_directories(sf2-check PRIVATE src)
+add_executable(aiarranger-resources tools/aiarranger_resources.cpp)   # resource graph + memory budget, read-only
+target_include_directories(aiarranger-resources PRIVATE src)
 add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder
 target_include_directories(aiarranger-sound PRIVATE src)
 if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit package (docs/research/TXPERF_DRUMKIT_NOTES.md)
@@ -305,6 +307,7 @@ if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit 
     add_test(NAME test_validate_drumkit_negative   # every mutation of a valid package must FAIL
              COMMAND sh -c "rm -rf drumkit-neg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-neg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/tools/test_validate_drumkit.py drumkit-neg"
              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME test_resources_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_resources_cli.sh ${CMAKE_BINARY_DIR} ${Python3_EXECUTABLE})
 endif()
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────

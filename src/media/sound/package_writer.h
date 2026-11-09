@@ -8,6 +8,7 @@
 //   REPORT.txt        zones, loops, memory use, import steps, caller notes
 // Never writes into an existing folder. Returns the report, or "" with *error set.
 
+#include "media/sound/package_graph.h"
 #include "media/sound/sf2_writer.h"
 #include "media/sound/txprog_writer.h"
 #include "media/sound/txperf_writer.h"
@@ -34,6 +35,11 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     const auto sf2 = writeSf2(in);
     const auto tx = writeTxProg(in);
     if (sf2.empty() || tx.empty()) return fail("a writer refused the instrument (see txprog_writer.h preconditions)");
+    const std::string pkg = packageId(in.name, tx);
+    graph::Graph rg;
+    std::string ge;
+    if (!addInstrument(rg, in, pkg, &ge)) return fail("resource graph: " + ge);
+    const std::string manifest = writeManifest(rg, pkg, graph::Kind::Sound);
     if (!fs::create_directories(out / "wav", ec)) return fail("cannot create " + out.string());
 
     bool ok = true;
@@ -76,6 +82,9 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
         rep += "\n";
     }
     if (!notes.empty()) rep += notes + "\n";
+    save(out / "RESOURCES.tsv", std::vector<uint8_t>(manifest.begin(), manifest.end()));
+    rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
+           "  Budget several packages together: aiarranger-resources budget DIR...\n\n";
     rep += kMemoryNote;
     rep += "Pa5X import (owner, requires approval; docs/evidence/hardware/PA5X_SOUND_IMPORT_PROCEDURE.md):\n"
            "  A) Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX Sound (TXPROG),\n"
@@ -99,6 +108,11 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     if (const auto e = validate(kit); !e.empty()) return fail("invalid: " + e.front());
     const auto tx = writeTxPerf(kit);
     if (tx.empty()) return fail("the writer refused the kit (two samples or keys map to the same file name)");
+    const std::string pkg = packageId(kit.name, tx);
+    graph::Graph rg;
+    std::string ge;
+    if (!addDrumKit(rg, kit, pkg, &ge)) return fail("resource graph: " + ge);
+    const std::string manifest = writeManifest(rg, pkg, graph::Kind::DrumKit);
     if (!fs::create_directories(out, ec)) return fail("cannot create " + out.string());
     bool ok = true;
     for (const auto& f : tx) {
@@ -136,6 +150,13 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
            "  group; kit effects. Ambience layers and round-robins are not produced by AIArranger (GUIDE pp.21-23).\n"
            "  Velocity switch points can be refined in Sound Edit > Drum Kit > Drum Sample Levels (GUIDE p.83).\n\n";
     if (!notes.empty()) rep += notes + "\n";
+    {
+        std::ofstream mf(out / "RESOURCES.tsv", std::ios::binary);
+        mf << manifest;
+        ok &= static_cast<bool>(mf);
+    }
+    rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
+           "  Budget several packages together: aiarranger-resources budget DIR...\n\n";
     rep += kMemoryNote;
     rep += "Pa5X import (owner, requires approval):\n"
            "  Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX DrumKit (TXPERF), select\n"
