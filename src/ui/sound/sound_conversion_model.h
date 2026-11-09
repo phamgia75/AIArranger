@@ -11,6 +11,7 @@
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
+#include <cctype>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -18,6 +19,27 @@
 namespace ai_arranger::ui {
 
 namespace snd = media::sound;
+
+// Soft-wraps lines longer than cols at a space (hard break when there is none); continuation lines
+// keep the line's indent plus two. For prose panes; tables must not be wrapped.
+inline std::string wrapLines(const std::string& text, size_t cols) {
+    std::string out, line;
+    std::istringstream is(text);
+    for (bool first = true; std::getline(is, line); first = false) {
+        if (!first) out += '\n';
+        const size_t ind = std::min(line.find_first_not_of(' '), line.size());
+        const std::string pad(std::min(ind + 2, cols / 2), ' ');
+        while (line.size() > cols) {
+            const size_t body = std::min(line.find_first_not_of(' '), line.size());
+            size_t cut = line.rfind(' ', cols);
+            if (cut == std::string::npos || cut <= body) cut = cols;
+            out += line.substr(0, cut) + '\n';
+            line = pad + line.substr(cut + (line[cut] == ' '));
+        }
+        out += line;
+    }
+    return out;
+}
 
 class SoundConversionModel {
 public:
@@ -38,10 +60,25 @@ public:
         return true;
     }
     const std::vector<LayerInfo>& layers() const { return layers_; }
-    std::string proposedOrder() const {   // alphabetical: the musician must confirm softest first
+    // Softest first when every layer name is a dynamic (ppp..fff, soft/medium/hard) or ends in a
+    // number (v1, vel2); otherwise alphabetical. The musician confirms either way.
+    std::string proposedOrder() const {
+        std::vector<std::pair<long, std::string>> r;
+        bool ranked = true;
+        for (const auto& l : layers_) { const long k = loudness(l.prefix); ranked &= k >= 0; r.push_back({k, l.prefix}); }
+        if (ranked) std::stable_sort(r.begin(), r.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         std::string o;
-        for (const auto& l : layers_) o += (o.empty() ? "" : ",") + l.prefix;
+        for (const auto& p : r) o += (o.empty() ? "" : ",") + p.second;
         return o;
+    }
+    static long loudness(std::string s) {
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        static const std::map<std::string, long> dyn{{"ppp", 1}, {"pp", 2}, {"p", 3}, {"mp", 4}, {"mf", 5}, {"f", 6}, {"ff", 7}, {"fff", 8},
+                                                    {"soft", 2}, {"medium", 5}, {"med", 5}, {"mid", 5}, {"hard", 7}, {"loud", 7}};
+        if (const auto it = dyn.find(s); it != dyn.end()) return it->second;
+        size_t d = s.size();
+        while (d && std::isdigit(static_cast<unsigned char>(s[d - 1]))) --d;
+        return d < s.size() && s.size() - d < 9 ? 100 + std::stol(s.substr(d)) : -1;
     }
     std::string proposedSplits() const {   // lowest velocity of layers 2..N, evenly spaced
         std::string o;

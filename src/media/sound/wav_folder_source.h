@@ -3,7 +3,8 @@
 
 // Route C of docs/research/KRONOS_KMP_KSF_IMPORT.md: an Instrument from a folder of WAVs named
 // <layer>_<OrgKey>_<LowKey>_<HighKey>.wav, the naming the Pa5X itself exports (manual v1.4 p.1212)
-// and package_writer.h writes to wav/. Root and forward loop come from the 'smpl' chunk.
+// and package_writer.h writes to wav/. Root and forward loop come from the 'smpl' chunk; a WAV without
+// one (most DAW and library exports) takes its root from the file name and plays as a one-shot.
 // No proprietary format is parsed. Reads only; the source folder is never modified.
 // Untrusted input: every chunk read is bounds-checked; anything unsupported is refused, never guessed.
 
@@ -17,7 +18,8 @@
 namespace ai_arranger::media::sound {
 
 // 16-bit PCM, 1-2 channels. Returns "" on success or the reason it was refused.
-inline std::string readWav(const std::vector<uint8_t>& b, Sample* s) {
+// noSmpl == nullptr: a missing 'smpl' chunk is an error. Otherwise it is reported there and s->root is left as is.
+inline std::string readWav(const std::vector<uint8_t>& b, Sample* s, bool* noSmpl = nullptr) {
     auto u16 = [&](size_t o) { return uint32_t(b[o] | b[o + 1] << 8); };
     auto u32 = [&](size_t o) { return u16(o) | u16(o + 2) << 16; };
     if (b.size() < 12 || std::memcmp(b.data(), "RIFF", 4) || std::memcmp(&b[8], "WAVE", 4)) return "not a RIFF/WAVE file";
@@ -58,7 +60,8 @@ inline std::string readWav(const std::vector<uint8_t>& b, Sample* s) {
         o = body + len + (len & 1);
     }
     if (!fmt || !data) return "missing fmt or data chunk";
-    if (!haveRoot) return "no smpl chunk (root note unknown)";
+    if (noSmpl) *noSmpl = !haveRoot;
+    else if (!haveRoot) return "no smpl chunk (root note unknown)";
     if (dataLen % (2u * s->channels)) return "data chunk does not hold whole 16-bit frames";
     s->pcm.resize(dataLen / 2);
     for (size_t i = 0; i < s->pcm.size(); ++i) s->pcm[i] = static_cast<int16_t>(u16(dataAt + 2 * i));
@@ -127,8 +130,10 @@ inline std::string buildFromWavFolder(const std::filesystem::path& dir, const st
             std::ifstream is(f.p, std::ios::binary);
             const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(is)), std::istreambuf_iterator<char>());
             Sample s;
-            if (const auto e = readWav(bytes, &s); !e.empty()) return f.p.filename().string() + ": " + e;
-            if (s.root != f.org) return f.p.filename().string() + ": smpl root " + std::to_string(s.root) + " differs from the file name";
+            bool noSmpl = false;
+            if (const auto e = readWav(bytes, &s, &noSmpl); !e.empty()) return f.p.filename().string() + ": " + e;
+            if (noSmpl) s.root = f.org;   // the file name states the root; no loop without 'smpl'
+            else if (s.root != f.org) return f.p.filename().string() + ": smpl root " + std::to_string(s.root) + " differs from the file name";
             s.name = L.name.substr(0, 16) + " " + std::to_string(f.org);
             L.zones.push_back({f.lo, f.hi, static_cast<int>(in.samples.size()), f.org, 0, 0});
             in.samples.push_back(std::move(s));

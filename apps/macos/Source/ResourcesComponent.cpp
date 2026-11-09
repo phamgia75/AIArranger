@@ -25,11 +25,16 @@ public:
             for (const auto& e : owner_.model().children(id_)) addSubItem(new ResourceItem(owner_, e.to, e));
     }
     void itemSelectionChanged(bool selected) override { if (selected) owner_.showDetails(id_); }
+    const char* tag() const {
+        return missing_ ? "MISSING" : verdict_ == rg::DeleteVerdict::InUse ? "IN USE"
+             : verdict_ == rg::DeleteVerdict::Unprovable ? "UNPROVEN" : "NO REFS";
+    }
+    // Screen readers announce the row, not JUCE's default "Level n row m" (GUI validation 2026-11-09).
+    juce::String getAccessibilityName() override { return text_ + ", " + tag(); }
     void paintItem(juce::Graphics& g, int w, int h) override {
         if (isSelected()) g.fillAll(juce::Colour(0xff2f4f6f));
         // Delete-safety tag on the right, coloured, so a verdict is visible without opening details.
-        const char* tag = missing_ ? "MISSING" : verdict_ == rg::DeleteVerdict::InUse ? "IN USE"
-                        : verdict_ == rg::DeleteVerdict::Unprovable ? "UNPROVEN" : "NO REFS";
+        const char* tag = this->tag();
         const auto colour = missing_ ? juce::Colour(0xffe05050) : verdict_ == rg::DeleteVerdict::InUse ? juce::Colour(0xff6fbf73)
                           : verdict_ == rg::DeleteVerdict::Unprovable ? juce::Colour(0xffe0b040) : juce::Colour(0xff9090a0);
         g.setFont(juce::FontOptions(13.0f));

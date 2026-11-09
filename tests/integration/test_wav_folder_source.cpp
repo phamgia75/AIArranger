@@ -91,7 +91,17 @@ int main() {
     refuses("truncated chunk refused", "Pad_060_000_127.wav", w, "overruns");
     Sample nl = m; nl.looped = false;
     w = writeWav(nl); w.resize(w.size() - 44);   // remove the smpl chunk entirely
-    refuses("missing smpl refused (root unknown)", "Pad_060_000_127.wav", w, "no smpl");
+    {   // no smpl (plain DAW export): root from the file name, one-shot; readWav alone stays strict
+        Sample x;
+        TEST("readWav without smpl is refused when the caller needs the root", readWav(w, &x).find("no smpl") != std::string::npos);
+        const auto d = fs::temp_directory_path() / ("aia-nosmpl-" + std::to_string(::getpid()));
+        fs::remove_all(d); fs::create_directories(d);
+        std::ofstream(d / "Pad_060_000_127.wav", std::ios::binary).write(reinterpret_cast<const char*>(w.data()), std::streamsize(w.size()));
+        Instrument in; const auto e = buildFromWavFolder(d.string(), "Pad", {}, {}, &in);
+        TEST("WAV without smpl: root from the file name, no loop (GUI validation 2026-11-09)",
+             e.empty() && in.samples.size() == 1 && in.samples[0].root == 60 && !in.samples[0].looped);
+        fs::remove_all(d);
+    }
     w = writeWav(m); w[w.size() - 24 + 4] = 1;   // loop type ping-pong
     refuses("non-forward loop refused", "Pad_060_000_127.wav", w, "forward loops");
     // regressions from the independent (Codex) review

@@ -64,6 +64,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
     }
     for (auto* t : {&preview_, &recipe_}) {
         t->setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
+        t->setWrap(t == &recipe_);
         addAndMakeVisible(*t);
     }
     addAndMakeVisible(map_);

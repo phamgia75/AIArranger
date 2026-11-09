@@ -162,6 +162,8 @@ int main() {
             if (top->getSubItem(i)->getUniqueName().contains("/Sound/")) sound = top->getSubItem(i);
         if (sound) sound->setOpen(true);
         TEST("expand Sound -> 2 oscillators", sound && sound->getNumSubItems() == 2);
+        TEST("tree rows are announced by name and tag, not 'Level n row m' (GUI validation)",
+             sound && sound->getAccessibilityName().startsWith("Sound '") && sound->getAccessibilityName().endsWith(", NO REFS"));
         auto* osc = sound && sound->getNumSubItems() ? sound->getSubItem(0) : nullptr;
         if (osc) osc->setOpen(true);
         auto* ms = osc && osc->getNumSubItems() ? osc->getSubItem(0) : nullptr;
@@ -215,7 +217,7 @@ int main() {
             auto& cv = rc.converter();
             TEST("Convert Sound: a folder of wrongly named files gets a clear message", !cv.inspectFolder(juce::File(root.string() + "/kst")));
             TEST("Convert Sound: inspect lists layers and proposes order and splits",
-                 cv.inspectFolder(juce::File(root.string() + "/big")) && cv.orderField().getText() == "Hard,Soft" && cv.splitsField().getText() == "64");
+                 cv.inspectFolder(juce::File(root.string() + "/big")) && cv.orderField().getText() == "Soft,Hard" && cv.splitsField().getText() == "64");
             cv.nameField().setText("Big Sine");
             cv.orderField().setText("Soft,Hard");
             pump(50);   // typed edits notify asynchronously
@@ -235,6 +237,14 @@ int main() {
                 TEST("key map: one-key zone keeps its zone colour (root drawn as a tick)", px.getBlue() > px.getRed());
             }
             TEST("checks name the limited key range", cv.previewText().contains("plays only C3-G5"));
+            {   // recipe prose wraps to the pane instead of scrolling sideways (GUI validation 2026-11-09)
+                cv.setSize(1000, 700);
+                const auto shown = cv.recipeShownText();
+                int longest = 0;
+                for (const auto& l : juce::StringArray::fromLines(shown)) longest = std::max(longest, l.length());
+                TEST("recipe wraps to the pane width, mapping table does not", shown.contains("POST-IMPORT") && longest < 60 &&
+                     cv.recipeText().removeCharacters(" \n") == shown.removeCharacters(" \n"));
+            }
             watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
             cv.generate(juce::File(root.string() + "/out/Big Sine"));
             for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);

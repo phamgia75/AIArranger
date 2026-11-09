@@ -47,7 +47,17 @@ int main() {
     TEST("inspect an empty folder: clear message", !m.inspect(root, &err) && contains(err, "no <layer>"));
     TEST("inspect reads names only: 2 layers", m.inspect(root / "src", &err) && m.layers().size() == 2 && m.layers()[0].prefix == "Hard" &&
          m.layers()[0].files == 2 && m.layers()[1].lo == 48 && m.layers()[1].hi == 95);
-    TEST("proposals: alphabetical order, even split", m.proposedOrder() == "Hard,Soft" && m.proposedSplits() == "64");
+    TEST("proposals: softest first from dynamic names, even split (GUI validation 2026-11-09)", m.proposedOrder() == "Soft,Hard" && m.proposedSplits() == "64");
+    {
+        const std::string w = ai_arranger::ui::wrapLines("  basis: RMS of the first 200 ms of each sample\nshort\n\nxxxxxxxxxxxxxxxxxxxxxxxxx", 20);
+        bool fits = true; std::istringstream is(w); std::string l; int n = 0;
+        while (std::getline(is, l)) { fits &= l.size() <= 20; ++n; }
+        TEST("wrapLines: every line fits, words kept, indent continued, blank line kept", fits && n >= 7 &&
+             w.find("  basis: RMS of the\n    first 200 ms of") == 0 && w.find("\nshort\n\n") != std::string::npos);
+    }
+    TEST("order: dynamics ranked, case-insensitive", SoundConversionModel::loudness("FF") > SoundConversionModel::loudness("mf") &&
+         SoundConversionModel::loudness("mf") > SoundConversionModel::loudness("pp") && SoundConversionModel::loudness("v10") > SoundConversionModel::loudness("v2") &&
+         SoundConversionModel::loudness("Bright") < 0);
     TEST("bad split refused", !m.build("Test", "Soft,Hard", "200", &err) && contains(err, "1 to 127") && !m.built());
     TEST("falling splits refused", !m.build("Test", "Soft,Hard", "64,30", &err) && contains(err, "must rise") && !m.built());
     TEST("unknown layer name refused by the engine", !m.build("Test", "Soft,Loud", "64", &err) && !m.built());

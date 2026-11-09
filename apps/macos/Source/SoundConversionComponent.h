@@ -17,12 +17,24 @@ namespace ai_arranger::app {
 class TextView : public juce::Component {
 public:
     TextView() { ed_.setReadOnly(true); ed_.setLineNumbersShown(false); addAndMakeVisible(ed_); }
-    void setText(const juce::String& t) { doc_.replaceAllContent(t); ed_.scrollToLine(0); }
-    juce::String getText() const { return doc_.getAllContent(); }
+    void setText(const juce::String& t) { raw_ = t; cols_ = -1; layout(); }
+    juce::String getText() const { return raw_; }
+    juce::String shownText() const { return doc_.getAllContent(); }
     void clear() { setText({}); }
     void setFont(const juce::Font& f) { ed_.setFont(f); }
-    void resized() override { ed_.setBounds(getLocalBounds()); }
+    void setWrap(bool w) { wrap_ = w; }   // prose: wrap to the width instead of scrolling sideways
+    void resized() override { ed_.setBounds(getLocalBounds()); layout(); }
 private:
+    void layout() {
+        const int cols = wrap_ ? std::max(20, int((getWidth() - 24) / std::max(1.0f, ed_.getCharWidth()))) : 0;
+        if (cols == cols_) return;
+        cols_ = cols;
+        doc_.replaceAllContent(cols ? juce::String(ui::wrapLines(raw_.toStdString(), size_t(cols))) : raw_);
+        ed_.scrollToLine(0);
+    }
+    juce::String raw_;
+    bool wrap_ = false;
+    int cols_ = -1;
     juce::CodeDocument doc_;
     juce::CodeEditorComponent ed_{doc_, nullptr};
 };
@@ -53,6 +65,7 @@ public:
     juce::TextEditor& splitsField() { return splits_; }
     juce::String previewText() const { return preview_.getText(); }
     juce::String recipeText() const { return recipe_.getText(); }
+    juce::String recipeShownText() const { return recipe_.shownText(); }
     juce::String statusText() const { return status_.getText(); }
 
 private:
