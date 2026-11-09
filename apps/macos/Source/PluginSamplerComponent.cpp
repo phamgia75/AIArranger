@@ -11,29 +11,67 @@ bool SamplerProcess::start(const juce::File& exe, const std::vector<std::string>
     juce::StringArray a;
     a.add(exe.getFullPathName());
     for (const auto& s : args) a.add(juce::String(s));
-    if (!exe.existsAsFile() || !proc_.start(a, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr)) return false;
-    running_ = true;
+    if (s_->started || !exe.existsAsFile() || !s_->proc.start(a, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr)) return false;
+    s_->started = true;
+    onDone_ = onDone;
     std::weak_ptr<bool> alive = alive_;
-    reader_ = std::thread([this, alive, onLine = std::move(onLine), onDone = std::move(onDone)] {
+    reader_ = std::thread([st = s_, alive, onLine = std::move(onLine), onDone = std::move(onDone)] {
         std::string buf;
         auto post = [&](std::string line) {
             juce::MessageManager::callAsync([alive, onLine, line = std::move(line)] { if (!alive.expired()) onLine(line); });
         };
         // One byte per call: JUCE reads with fread(), which blocks until the whole request is filled, so a
         // bigger buffer would hold progress lines back until the end (stdio still buffers underneath).
-        for (char c; proc_.readProcessOutput(&c, 1) == 1;) {
+        for (char c; st->proc.readProcessOutput(&c, 1) == 1;) {
             if (c != '\n') { buf += c; continue; }
             post(buf);
             buf.clear();
         }
         if (!buf.empty()) post(buf);
-        proc_.waitForProcessToFinish(10000);   // output closed: the process is exiting
-        const int code = static_cast<int>(proc_.getExitCode());
-        const bool cancelled = cancelled_;
-        running_ = false;
-        juce::MessageManager::callAsync([alive, onDone, code, cancelled] { if (!alive.expired()) onDone(code, cancelled); });
+        for (;;) {   // output closed: wait for the exit and reap it under the lock, so cancel() cannot signal a reused PID
+            {
+                std::lock_guard<std::mutex> g(st->m);
+                if (!st->proc.isRunning()) { st->reaped = true; break; }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        const int code = static_cast<int>(st->proc.getExitCode());
+        st->finished = true;
+        juce::MessageManager::callAsync([st, alive, onDone, code] {
+            if (!alive.expired() && !st->doneSent.exchange(true)) onDone(code, st->cancelled);
+        });
     });
     return true;
+}
+
+void SamplerProcess::reap(State& st) {   // collect a killed child whose reader is stuck, so no zombie is left
+    std::lock_guard<std::mutex> g(st.m);
+    if (!st.reaped && !st.proc.isRunning()) st.reaped = true;
+}
+
+bool SamplerProcess::cancel() {
+    if (!s_->started || s_->finished) return false;
+    s_->cancelled = true;
+    bool signalled = false;
+    {
+        std::lock_guard<std::mutex> g(s_->m);
+        if (!s_->reaped) signalled = s_->proc.kill();
+    }
+    std::weak_ptr<bool> alive = alive_;
+    juce::Timer::callAfterDelay(kCancelGraceMs, [st = s_, alive, onDone = onDone_] {
+        reap(*st);
+        if (!alive.expired() && !st->doneSent.exchange(true)) onDone(-1, true);   // the reader is stuck on a pipe a helper still holds
+    });
+    return signalled;
+}
+
+SamplerProcess::~SamplerProcess() {
+    cancel();
+    alive_.reset();   // no callback runs after this
+    if (!reader_.joinable()) return;
+    for (int i = 0; i < kCancelGraceMs / 10 && !s_->finished; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (s_->finished) reader_.join();
+    else { reap(*s_); reader_.detach(); }   // it owns State and ends when the pipe closes
 }
 
 juce::File PluginSamplerComponent::locateSampler() {
@@ -98,8 +136,9 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
 
 PluginSamplerComponent::~PluginSamplerComponent() {
     *alive_ = false;
-    proc_.reset();   // kills a running render and joins its reader; queued callbacks are then dropped
+    proc_.reset();   // kills a running render and stops its reader (bounded); queued callbacks are then dropped
     listProc_.reset();
+    if (copier_.joinable()) copier_.join();   // let Generate finish copying out of staging before it is deleted
     discardStaging();
 }
 
@@ -281,10 +320,16 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
     status_.setText("Writing " + outDir.getFullPathName() + "...", juce::dontSendNotification);
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
-    std::thread([this, alive, gen, out, from] {
+    if (copier_.joinable()) copier_.join();   // the previous copy has finished: busy() was false
+    copier_ = std::thread([this, alive, gen, from, chosen = out] {
         std::error_code ec;
         std::string sum, err;
-        if (!fs::create_directory(out, ec) || ec) err = "cannot create " + out.string() + (ec ? ": " + ec.message() : " (it exists)");
+        // Write to the resolved path and check it again here, so a symlink retargeted since the click cannot redirect the copy.
+        // shortcut: a parent folder swapped between this check and create_directory still races; needs openat()-anchored writes to close.
+        const fs::path out = fs::weakly_canonical(chosen, ec);
+        if (ec) err = "cannot resolve " + chosen.string() + ": " + ec.message();
+        else if (const auto r = media::sound::outputFolderRefusal(out); !r.empty()) err = r;
+        else if (!fs::create_directory(out, ec) || ec) err = "cannot create " + out.string() + (ec ? ": " + ec.message() : " (it exists)");
         else if (fs::copy(from, out, fs::copy_options::recursive, ec); ec) err = "copy failed: " + ec.message() + " (" + out.string() + " is incomplete)";
         else sum = SoundConversionModel::writtenSummary(out);
         juce::MessageManager::callAsync([this, alive, gen, out, sum, err] {
@@ -297,7 +342,7 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
             status_.setText("Package written to " + juce::String(out.string()) + ". Opened in Resource Graph.", juce::dontSendNotification);
             if (openInResources_) openInResources_(juce::File(out.string()));
         });
-    }).detach();
+    });
 }
 
 void PluginSamplerComponent::resized() {

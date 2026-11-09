@@ -10,24 +10,36 @@
 #include "SoundConversionComponent.h"
 #include "ui/sound/plugin_sampler_model.h"
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 namespace ai_arranger::app {
 
 // Runs the sampler once and streams its output lines. Owned by the message thread; the reader
-// thread posts lines back with callAsync. Destroying it kills the process and joins the thread.
+// thread posts lines back with callAsync and holds only the shared State, never `this`.
+// Cancel and destruction are bounded: a helper the plugin started can keep the output pipe open after
+// the sampler is killed, so if the reader has not finished kCancelGraceMs after cancel(), onDone(-1, true)
+// is delivered anyway and the destructor detaches the reader instead of joining it.
 class SamplerProcess {
 public:
     using LineFn = std::function<void(const std::string&)>;
     using DoneFn = std::function<void(int exitCode, bool cancelled)>;
-    ~SamplerProcess() { cancel(); if (reader_.joinable()) reader_.join(); }
+    static constexpr int kCancelGraceMs = 2000;
+    ~SamplerProcess();
     bool start(const juce::File& exe, const std::vector<std::string>& args, LineFn onLine, DoneFn onDone);
-    void cancel() { cancelled_ = true; proc_.kill(); }
-    bool running() const { return running_; }
+    bool cancel();   // true when a kill signal was sent; never signals a child that was already reaped (its PID may be reused)
+    bool running() const { return s_->started && !s_->finished && !s_->doneSent; }
 private:
-    juce::ChildProcess proc_;
+    struct State {
+        juce::ChildProcess proc;
+        std::mutex m;          // orders kill() against the reaping waitpid()
+        bool reaped = false;   // guarded by m
+        std::atomic<bool> started{false}, cancelled{false}, finished{false}, doneSent{false};
+    };
+    static void reap(State& st);
+    std::shared_ptr<State> s_ = std::make_shared<State>();
     std::thread reader_;
-    std::atomic<bool> cancelled_{false}, running_{false};
+    DoneFn onDone_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 
@@ -81,6 +93,7 @@ private:
     KeyMapView map_;
     TextView preview_, report_;
     std::shared_ptr<juce::FileChooser> chooser_;
+    std::thread copier_;   // Generate: joined before staging is deleted, so a package is never left half-copied
     std::unique_ptr<SamplerProcess> proc_, listProc_;   // destroyed first in ~PluginSamplerComponent: their callbacks capture this
     ui::SamplerProgress got_;
     ui::SamplerSettings renderedWith_;

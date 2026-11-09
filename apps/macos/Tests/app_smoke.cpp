@@ -361,6 +361,42 @@ int main() {
                 TEST("closing the window mid-render kills the tool quickly and removes staging", wasRunning && !pidAlive() && ms < 2000 && !cst.exists());
             }
 
+            {   // a helper started by the plugin keeps the output pipe open after the sampler is killed
+                const auto orphanPid = root / "orphan.pid";
+                const auto orphan = fake("orphan.sh", "sleep 60 &\necho $! > '" + orphanPid.string() + "'\necho $$ > '" + pidFile.string() +
+                                                          "'\nprintf 'progress\\t1\\t10\\n' >&2\nexec sleep 60\n");
+                auto killOrphan = [&] { std::ifstream f(orphanPid); int pid = 0; f >> pid; if (pid > 0) ::kill(pid, SIGKILL); fs::remove(orphanPid); };
+                form(ps, orphan, "Fake Synth", "Fake");
+                ps.startRender();
+                st = ps.stagingFolder();
+                for (int i = 0; i < 250 && ps.progress() <= 0; ++i) pump(20);
+                ps.cancelRender();
+                const auto t0 = std::chrono::steady_clock::now();
+                waitIdle(6000);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                TEST("cancel finishes even when a helper holds the output pipe open", ps.statusText().startsWith("Cancelled") && !ps.busy() &&
+                                                                                        !pidAlive() && !st.exists() && ms < 4000);
+                killOrphan();
+                fs::remove(pidFile);
+                auto c = std::make_unique<app::PluginSamplerComponent>(nullptr);
+                form(*c, orphan, "Fake Synth", "Fake");
+                c->startRender();
+                for (int i = 0; i < 250 && c->progress() <= 0; ++i) pump(20);
+                const auto t1 = std::chrono::steady_clock::now();
+                c.reset();
+                const double closeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+                TEST("closing the window is bounded even when a helper holds the output pipe open", closeMs < 3000 && !pidAlive());
+                killOrphan();
+                fs::remove(pidFile);
+            }
+            {   // a finished process is never signalled again: its PID may already belong to another program
+                app::SamplerProcess p;
+                bool done = false;
+                p.start(juce::File("/bin/echo"), {"hi"}, [](const std::string&) {}, [&](int, bool) { done = true; });
+                for (int i = 0; i < 250 && !done; ++i) pump(20);
+                TEST("cancel after the tool exited sends no signal", done && !p.running() && !p.cancel());
+            }
+
             // Real offline render with an instrument that ships with macOS (Apple DLSMusicDevice).
             const auto real = app::PluginSamplerComponent::locateSampler();
             if (!real.existsAsFile() || !form(ps, real, "DLSMusicDevice", "DLS Piano")) {
@@ -398,6 +434,17 @@ int main() {
                 TEST("generate copies the package and opens it in Resource Graph",
                      fs::exists(root / "plug-out/DLS Piano/RESOURCES.tsv") && fs::exists(root / "plug-out/DLS Piano/REPORT.txt") &&
                      rc.tabs().getCurrentTabIndex() == 0 && ps.statusText().startsWith("Package written"));
+                {   // closing the window while Generate copies: the copy completes before staging is deleted
+                    auto c = std::make_unique<app::PluginSamplerComponent>(nullptr);
+                    form(*c, real, "DLSMusicDevice", "DLS Piano");
+                    c->startRender();
+                    for (int i = 0; i < 6000 && c->busy(); ++i) pump(20);
+                    c->generate(juce::File((root / "plug-out" / "DLS Piano 2").string()));
+                    c.reset();
+                    auto count = [](const fs::path& d) { size_t n = 0; for (auto& e : fs::recursive_directory_iterator(d)) n += e.is_regular_file(); return n; };
+                    TEST("closing the window during Generate leaves a complete package",
+                         fs::exists(root / "plug-out/DLS Piano 2/RESOURCES.tsv") && count(root / "plug-out/DLS Piano 2") == count(root / "plug-out/DLS Piano"));
+                }
                 ps.field("Hold (s)").setText("1.5");
                 pump(50);
                 TEST("editing the form after a render asks for a new render", ps.statusText().contains("Settings changed since the render"));
