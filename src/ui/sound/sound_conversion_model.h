@@ -59,6 +59,7 @@ public:
     }
     // build() in two halves for the UI: decode() reads the WAVs (slow, any thread), adopt() keeps the result.
     void adopt(snd::Instrument in) { in_ = std::move(in); built_ = true; }
+    void invalidate() { built_ = false; }   // a setting changed: the preview no longer describes what would be written
     const std::filesystem::path& folder() const { return dir_; }
     static bool decode(const std::filesystem::path& dir, const std::string& name, const std::string& orderCsv, const std::string& splitsCsv,
                        snd::Instrument& out, std::string* err) {
@@ -141,7 +142,9 @@ public:
     // shortcut: writing straight onto a mounted volume is refused while hardware writes are not
     // authorized for this project phase; write locally and copy the folder to the USB stick by hand.
     static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err) {
-        if (out.string().rfind("/Volumes/", 0) == 0) {
+        std::error_code ec;
+        const auto real = std::filesystem::weakly_canonical(out, ec);   // follows symlinks in the existing part of the path
+        if (ec || real.string().rfind("/Volumes/", 0) == 0) {
             if (err) *err = "refusing to write onto a mounted volume (" + out.string() + "): write the package to a local folder, then copy it to the USB stick";
             return "";
         }

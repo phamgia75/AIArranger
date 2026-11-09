@@ -53,7 +53,15 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                     juce::dontSendNotification);
     pluginNote_.setText("AU/VST instruments: render with aiarranger-plugin-sampler (command line); not yet in this window.",
                         juce::dontSendNotification);
-    for (auto* t : {&name_, &order_, &splits_}) addAndMakeVisible(*t);
+    for (auto* t : {&name_, &order_, &splits_}) {
+        addAndMakeVisible(*t);
+        t->onTextChange = [this] {   // the preview no longer matches the settings: Generate must not write it
+            ++generation_;
+            model_.invalidate();
+            generateBtn_.setEnabled(false);
+            if (model_.instrument().layers.size()) status_.setText("Settings changed: press Preview again.", juce::dontSendNotification);
+        };
+    }
     for (auto* t : {&preview_, &recipe_}) {
         t->setMultiLine(true); t->setReadOnly(true); t->setScrollbarsShown(true);
         t->setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
@@ -98,9 +106,10 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
     for (const auto& l : model_.layers())
         s += juce::String(l.prefix) + " (" + juce::String(l.files) + " files, " + SoundConversionModel::key(l.lo) + "-" + SoundConversionModel::key(l.hi) + ")  ";
     folder_.setText(s, juce::dontSendNotification);
-    if (name_.isEmpty()) name_.setText(dir.getFileName().substring(0, 20));
-    order_.setText(model_.proposedOrder());
-    splits_.setText(model_.proposedSplits());
+    // Programmatic: no change notification (JUCE delivers it later and it would invalidate the next preview).
+    if (name_.isEmpty()) name_.setText(dir.getFileName().substring(0, 20), false);
+    order_.setText(model_.proposedOrder(), false);
+    splits_.setText(model_.proposedSplits(), false);
     status_.setText("Put the layers in order from softest to loudest, check the splits, then press Preview.", juce::dontSendNotification);
     return true;
 }
@@ -158,12 +167,14 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     status_.setText("Writing " + outDir.getFullPathName() + "...", juce::dontSendNotification);
     auto in = std::make_shared<media::sound::Instrument>(model_.instrument());
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, in, out = outDir.getFullPathName().toStdString(), src = model_.folder()] {
+    const auto gen = generation_;
+    std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder()] {
         std::string err;
         const std::string sum = SoundConversionModel::generate(*in, src, out, &err);
-        juce::MessageManager::callAsync([this, alive, sum, err, out] {
+        juce::MessageManager::callAsync([this, alive, gen, sum, err, out] {
             if (alive.expired()) return;
             --jobs_;
+            if (gen != generation_) return;   // the user moved on (new folder, settings or preview): keep their state
             generateBtn_.setEnabled(true);
             if (sum.empty()) { status_.setText("Not written: " + juce::String(err), juce::dontSendNotification); return; }
             preview_.setText(sum, false);

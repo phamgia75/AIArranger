@@ -68,6 +68,26 @@ int main() {
          validate(recipeFromSamples(m.instrument())).empty());
     TEST("generate onto a mounted volume is refused", SoundConversionModel::generate(m.instrument(), root / "src", "/Volumes/USB/x", &err).empty() &&
          contains(err, "copy it to the USB stick"));
+#ifdef __APPLE__
+    fs::create_directory_symlink("/Volumes", root / "looks-local");
+    TEST("a symlink leading onto /Volumes is refused too (Codex P1)",
+         SoundConversionModel::generate(m.instrument(), root / "src", root / "looks-local/USB/x", &err).empty() && contains(err, "mounted volume"));
+#endif
+    {   // silent layers: no fabricated measured level (Codex P2)
+        Instrument q = m.instrument();
+        for (auto& s : q.samples) std::fill(s.pcm.begin(), s.pcm.end(), int16_t(0));
+        const std::string all = formatRecipe(recipeFromSamples(q));
+        TEST("all layers silent: level per layer NOT AVAILABLE, no dB value", contains(all, "fewer than two layers hold any audio") && !contains(all, " dB,") && validate(recipeFromSamples(q)).empty());
+        for (const auto& z : q.layers[1].zones) { auto& s = q.samples[size_t(z.sample)]; for (size_t i = 0; i < s.pcm.size(); ++i) s.pcm[i] = int16_t(i % 2 ? 3000 : -3000); }
+        Instrument q3 = q;
+        q3.layers.push_back(q.layers[1]);   // a third, audible layer so two are measured
+        q3.layers[1].velHi = 90; q3.layers[2].velLo = 91;
+        const std::string one = formatRecipe(recipeFromSamples(q3));
+        TEST("one silent layer is named silent, the others measured", contains(one, "Soft (vel 0-69): silent") && contains(one, "+0.0 dB") && !contains(one, "e+"));
+    }
+    m.invalidate();
+    TEST("invalidate: a changed setting means nothing is built", !m.built());
+    TEST("rebuild", m.build("Test Piano", "Soft, Hard", " 70", &err));
     const std::string out = SoundConversionModel::generate(m.instrument(), root / "src", root / "out", &err);
     TEST("generate: package written, reloads, budget and recipe in the summary",
          contains(out, "Package written") && contains(out, "0 unresolved") && contains(out, "verdict: fits") &&

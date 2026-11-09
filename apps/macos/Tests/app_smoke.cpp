@@ -218,6 +218,7 @@ int main() {
                  cv.inspectFolder(juce::File(root.string() + "/big")) && cv.orderField().getText() == "Hard,Soft" && cv.splitsField().getText() == "64");
             cv.nameField().setText("Big Sine");
             cv.orderField().setText("Soft,Hard");
+            pump(50);   // typed edits notify asynchronously
             watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0; watch.startTimer(20);
             cv.buildPreview();
             TEST("preview decodes off the message thread", cv.busy());
@@ -249,6 +250,26 @@ int main() {
             std::printf("  info: longest UI stall: preview %.0f ms, generate %.0f ms, load %.0f ms\n", previewGap, generateGap, loadGap);
             TEST("UI stays responsive (no stall over 500 ms) while a 30 MB Sound is decoded, written and loaded",
                  previewGap < 500 && generateGap < 500 && loadGap < 500);
+            {   // Codex round 1 (conversion): edits invalidate the preview; a stale Generate result does not take over
+                cv.splitsField().setText("100");
+                pump(50);
+                TEST("editing a setting after Preview disables writing the old mapping", !cv.model().built());
+                cv.generate(juce::File(root.string() + "/out/Stale"));
+                for (int i = 0; i < 50 && cv.busy(); ++i) pump(20);
+                TEST("Generate with a stale preview writes nothing", !fs::exists(root / "out/Stale"));
+                cv.splitsField().setText("64");
+                pump(50);
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                rc.tabs().setCurrentTabIndex(3);
+                cv.generate(juce::File(root.string() + "/out/Older"));
+                cv.inspectFolder(juce::File(root.string() + "/big"));   // the user moves on while it writes
+                for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
+                TEST("an older Generate finishing does not replace newer state or switch tabs",
+                     fs::exists(root / "out/Older/RESOURCES.tsv") && !cv.statusText().startsWith("Package written") && rc.tabs().getCurrentTabIndex() == 3);
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+            }
             TEST("generate refuses an existing folder", [&] { cv.generate(juce::File(root.string() + "/out/Big Sine"));
                  for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
         }
