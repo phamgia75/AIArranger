@@ -51,7 +51,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
         { l->setColour(juce::Label::textColourId, juce::Colour(0xffb8b8c0)); addAndMakeVisible(*l); }
     folder_.setText("No folder chosen. Files must be named <layer>_<RootKey>_<LowKey>_<HighKey>.wav (the Pa5X export naming).",
                     juce::dontSendNotification);
-    pluginNote_.setText("AU/VST instruments: render with aiarranger-plugin-sampler (command line); not yet in this window.",
+    pluginNote_.setText("AU/VST instruments: use the Sample Plugin tab.",
                         juce::dontSendNotification);
     for (auto* t : {&name_, &order_, &splits_}) {
         addAndMakeVisible(*t);

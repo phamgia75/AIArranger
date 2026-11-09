@@ -1,6 +1,15 @@
 # AU/VST instruments in the Convert Sound tab: integration plan (2026-11-09)
 
-Status: **PLAN ONLY.** The GUI still points to the command-line `aiarranger-plugin-sampler`.
+Status: **IMPLEMENTED 2026-11-10** as the **Sample Plugin** tab (`apps/macos/Source/PluginSamplerComponent.*`,
+`src/ui/sound/plugin_sampler_model.h`). The gaps listed below are closed:
+- **Output guard.** `outputFolderRefusal` in `package_writer.h` is shared by WAV conversion, the CLI and the GUI.
+- **Progress.** The sampler prints `progress<TAB>i<TAB>N` before each note.
+- **Licence.** A note on the tab says the user must hold a licence that permits sampling.
+
+Two things go beyond the plan:
+- **Staging.** The render lands in a private staging folder and is previewed with the WAV engine before
+  Generate copies it.
+- **Memory.** The memory estimate and cap were measured (`estimateRender`).
 
 ## Decision: run the existing sampler as a child process
 

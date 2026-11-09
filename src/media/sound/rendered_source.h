@@ -127,24 +127,64 @@ inline double measureRelease(const std::vector<float>& x, size_t ch, uint32_t ra
     return NAN;
 }
 
+// The sampled roots: lowRoot, lowRoot+step, ... <= highRoot, within 0-127.
+inline std::vector<int> renderRoots(const RenderSpec& spec) {
+    std::vector<int> roots;
+    for (int r = spec.lowRoot; r <= spec.highRoot && r <= 127; r += std::max(1, spec.step))
+        if (r >= 0) roots.push_back(r);
+    return roots;
+}
+
+// True when buildFromRenders can render this spec: roots, 1-24 ascending velocities, splits between them.
+inline bool renderSpecValid(const RenderSpec& spec) {
+    const size_t N = spec.velocities.size(), ch = spec.channels;
+    bool ok = !renderRoots(spec).empty() && N >= 1 && N <= kMaxLayers && (ch == 1 || ch == 2) &&
+              (spec.splits.empty() || spec.splits.size() + 1 == N) && spec.velocities.front() >= 1 && spec.velocities.back() <= 127;
+    for (size_t l = 1; ok && l < N; ++l) {
+        ok &= spec.velocities[l - 1] < spec.velocities[l];
+        if (!spec.splits.empty())
+            ok &= spec.velocities[l - 1] < spec.splits[l - 1] && spec.splits[l - 1] <= spec.velocities[l] &&
+                  (l == 1 || spec.splits[l - 2] < spec.splits[l - 1]);
+    }
+    return ok;
+}
+
+// Note timing the sampler accepts (seconds held, then rendered after note-off).
+inline bool renderTimingValid(double holdSec, double releaseSec) {
+    return holdSec > 0 && releaseSec >= 0 && holdSec + releaseSec <= 21;
+}
+
+// What a render costs before it starts. pcmBytesMax is the 16-bit package audio before silence
+// trimming and loop cutting, so the package audio is at most this large. workingBytes is the peak
+// memory of the sampler process: every render is kept as float until the last one (all samples share
+// one gain), then the 16-bit samples and the SF2 and TX16Wx images are built in memory before writing.
+// Measured 2026-11-10 with DLSMusicDevice, stereo, 3 s per note: 63 notes peaked at 373 MB, 183 notes at
+// 1024 MB, a 56 MB baseline plus about 18 bytes per rendered frame and channel.
+inline constexpr double kRenderBytesPerFrameChannel = 18;
+inline constexpr uint64_t kRenderBaselineBytes = 64ull << 20;
+struct RenderEstimate { size_t roots = 0, samples = 0; double audioSec = 0; uint64_t workingBytes = 0, pcmBytesMax = 0; };
+inline RenderEstimate estimateRender(const RenderSpec& spec, double holdSec, double releaseSec) {
+    RenderEstimate e;
+    e.roots = renderRoots(spec).size();
+    e.samples = e.roots * spec.velocities.size();
+    e.audioSec = double(e.samples) * (holdSec + releaseSec);
+    const double frames = (holdSec + releaseSec) * spec.rate + 512;   // the renderer works in 512-frame blocks
+    e.workingBytes = kRenderBaselineBytes + uint64_t(double(e.samples) * frames * spec.channels * kRenderBytesPerFrameChannel);
+    e.pcmBytesMax = uint64_t(double(e.samples) * frames * spec.channels * sizeof(int16_t));
+    return e;
+}
+// shortcut: a fixed cap keeps the render process from exhausting memory (the plugin's own memory is
+// not counted); stream renders to disk and write the package incrementally if owners need bigger jobs.
+inline constexpr uint64_t kMaxRenderWorkingBytes = 3ull << 30;
+
 inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& render, RenderReport* report = nullptr) {
     RenderReport local;
     RenderReport& rep = report ? *report : local;
     rep = {};
     static const char* kNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-    std::vector<int> roots;
-    for (int r = spec.lowRoot; r <= spec.highRoot && r <= 127; r += std::max(1, spec.step))
-        if (r >= 0) roots.push_back(r);
+    const std::vector<int> roots = renderRoots(spec);
     const size_t N = spec.velocities.size(), ch = spec.channels;
-    bool ascending = N >= 1 && N <= kMaxLayers && (ch == 1 || ch == 2) && (spec.splits.empty() || spec.splits.size() + 1 == N) &&
-                     spec.velocities.front() >= 1 && spec.velocities.back() <= 127;
-    for (size_t l = 1; ascending && l < N; ++l) {
-        ascending &= spec.velocities[l - 1] < spec.velocities[l];
-        if (!spec.splits.empty())
-            ascending &= spec.velocities[l - 1] < spec.splits[l - 1] && spec.splits[l - 1] <= spec.velocities[l] &&
-                         (l == 1 || spec.splits[l - 2] < spec.splits[l - 1]);
-    }
-    if (roots.empty() || !ascending) {
+    if (!renderSpecValid(spec)) {
         rep.warnings.push_back("nothing to render: need roots in 0-127, 1-24 ascending velocities, splits between them, 1 or 2 channels");
         return {};
     }

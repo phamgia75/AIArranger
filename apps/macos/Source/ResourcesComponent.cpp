@@ -133,6 +133,7 @@ ResourcesComponent::ResourcesComponent() {
     tabs_.addTab("KST Library", bg, &kstPage_, false);
     tabs_.addTab("Memory Check", bg, &memPage_, false);
     tabs_.addTab("Convert Sound", bg, &convert_, false);
+    tabs_.addTab("Sample Plugin", bg, &sampler_, false);
     addAndMakeVisible(tabs_);
 
     rebuildTree();

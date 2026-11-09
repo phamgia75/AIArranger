@@ -12,6 +12,9 @@
 #include "media/sound/package_writer.h"
 #include "media/sound/wav_writer.h"
 #include <chrono>
+#include <csignal>
+#include <mach/mach.h>
+#include <fstream>
 #include <cmath>
 #include <unistd.h>
 #include <cstdio>
@@ -134,7 +137,7 @@ int main() {
             return !rc.loading() && rc.detailsText().startsWith("Opened");
         };
         rc.setSize(980, 640);
-        TEST("four tabs", rc.tabs().getNumTabs() == 4 && rc.tabs().getTabNames()[1] == "KST Library" && rc.tabs().getTabNames()[3] == "Convert Sound");
+        TEST("tabs in order", rc.tabs().getTabNames()[1] == "KST Library" && rc.tabs().getTabNames()[3] == "Convert Sound");
         TEST("empty: tells the user what to open", rc.detailsText().contains("Open Package"));
         open("/organ");
         rc.compareMemory();
@@ -287,6 +290,133 @@ int main() {
             }
             TEST("generate refuses an existing folder", [&] { cv.generate(juce::File(root.string() + "/out/Big Sine"));
                  for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
+        }
+
+        // ── Sample Plugin: AU/VST -> offline render in a separate process -> preview -> package ──
+        {
+            auto& ps = rc.sampler();
+            TEST("five tabs, the last is Sample Plugin", rc.tabs().getNumTabs() == 5 && rc.tabs().getTabNames()[4] == "Sample Plugin");
+            TEST("not ready until an instrument is chosen", ps.estimateText().startsWith("Not ready: choose an instrument"));
+            auto waitIdle = [&](int ms) { for (int i = 0; i < ms / 20 && ps.busy(); ++i) pump(20); };
+            const std::string lister = "if [ \"$1\" = list ]; then printf 'AudioUnit\\tFake Synth\\tTest\\tfake-id\\n'; exit 0; fi\n"
+                                       "while [ $# -gt 0 ]; do [ \"$1\" = --out ] && OUT=\"$2\"; shift; done\n";
+            auto fake = [&](const char* name, const std::string& body) {
+                const auto p = root / name;
+                std::ofstream(p) << "#!/bin/sh\n" << lister << body;
+                fs::permissions(p, fs::perms::owner_all);
+                return juce::File(p.string());
+            };
+            auto form = [&](app::PluginSamplerComponent& c, const juce::File& exe, const juce::String& instrument, const juce::String& name) {
+                c.setSamplerExecutable(exe);
+                c.findInstruments();
+                for (int i = 0; i < 1500 && c.instrumentNames().isEmpty(); ++i) pump(20);
+                const bool found = c.selectInstrument(instrument);
+                for (auto [k, v] : {std::pair<const char*, const char*>{"Lowest note", "48"}, {"Highest note", "72"}, {"Every (semitones)", "12"},
+                                    {"Velocities, softest first", "60,110"}, {"Hold (s)", "1.0"}, {"Release (s)", "0.5"}})
+                    c.field(k).setText(v);
+                c.field("Sound name").setText(name);
+                pump(50);
+                return found;
+            };
+            auto run = [&](const juce::File& exe) {
+                form(ps, exe, "Fake Synth", "Fake");
+                ps.startRender();
+                const auto staging = ps.stagingFolder();
+                waitIdle(10000);
+                return staging;
+            };
+            juce::File st = run(fake("fail.sh", "echo 'JUCE v8.0.4'\necho 'cannot load Fake Synth: the plugin refused to open' >&2\nexit 1\n"));
+            TEST("plugin load failure: the tool's message is shown, nothing kept",
+                 ps.statusText().contains("Render failed: cannot load Fake Synth: the plugin refused to open") && !st.exists() && !ps.rendered());
+            st = run(fake("nopkg.sh", "printf 'progress\\t1\\t1\\n' >&2\nexit 0\n"));
+            TEST("tool exits 0 without a package: reported as a failure", ps.statusText().contains("ended without a package") && !st.exists());
+            st = run(fake("badwav.sh", "mkdir -p \"$OUT/wav\"\necho junk > \"$OUT/wav/Fake_060_000_127.wav\"\n"
+                                       "printf 'layers\\tFake\\nsplits\\t\\npackage\\t%s\\n' \"$OUT\"\nexit 0\n"));
+            TEST("invalid plugin output (unreadable WAV) rejected, nothing kept",
+                 ps.statusText().contains("not a valid package") && !ps.rendered() && !st.exists());
+
+            const auto pidFile = root / "hang.pid";
+            const auto hang = fake("hang.sh", "echo $$ > '" + pidFile.string() + "'\nprintf 'progress\\t1\\t10\\n' >&2\nexec sleep 60\n");
+            auto pidAlive = [&] { std::ifstream f(pidFile); int pid = 0; f >> pid; return pid > 0 && ::kill(pid, 0) == 0; };
+            form(ps, hang, "Fake Synth", "Fake");
+            ps.startRender();
+            st = ps.stagingFolder();
+            for (int i = 0; i < 250 && ps.progress() <= 0; ++i) pump(20);
+            TEST("progress arrives while the tool runs", ps.progress() > 0.05 && ps.statusText().contains("note 1 of 10") && pidAlive());
+            ps.cancelRender();
+            waitIdle(5000);
+            TEST("cancel: the process is killed, staging removed, UI idle", ps.statusText().startsWith("Cancelled") && !pidAlive() && !st.exists() && !ps.busy());
+            fs::remove(pidFile);
+            {   // app shutdown during sampling
+                auto c = std::make_unique<app::PluginSamplerComponent>(nullptr);
+                form(*c, hang, "Fake Synth", "Fake");
+                c->startRender();
+                const auto cst = c->stagingFolder();
+                for (int i = 0; i < 250 && c->progress() <= 0; ++i) pump(20);
+                const bool wasRunning = pidAlive();
+                const auto t0 = std::chrono::steady_clock::now();
+                c.reset();
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                pump(100);
+                TEST("closing the window mid-render kills the tool quickly and removes staging", wasRunning && !pidAlive() && ms < 2000 && !cst.exists());
+            }
+
+            // Real offline render with an instrument that ships with macOS (Apple DLSMusicDevice).
+            const auto real = app::PluginSamplerComponent::locateSampler();
+            if (!real.existsAsFile() || !form(ps, real, "DLSMusicDevice", "DLS Piano")) {
+                std::printf("  SKIP: real plugin render (%s)\n", real.existsAsFile() ? "DLSMusicDevice not installed" : "sampler tool not built");
+            } else {
+                struct Watch : juce::Timer {
+                    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+                    double worstMs = 0;
+                    void timerCallback() override {
+                        const auto now = std::chrono::steady_clock::now();
+                        worstMs = std::max(worstMs, std::chrono::duration<double, std::milli>(now - last).count());
+                        last = now;
+                    }
+                } watch;
+                ps.loopToggle().setToggleState(true, juce::sendNotificationSync);
+                TEST("estimate before rendering", ps.estimateText().startsWith("6 samples (3 notes x 2 layers), 9 s of audio"));
+                watch.startTimer(20);
+                ps.startRender();
+                waitIdle(120000);
+                watch.stopTimer();
+                const auto* in = ps.instrument();
+                TEST("DLSMusicDevice rendered: 2 layers x 3 notes, previewed with the WAV engine",
+                     ps.rendered() && in && in->layers.size() == 2 && in->samples.size() == 6 && ps.progress() == 1.0 &&
+                     ps.previewText().contains("Layer 'DLS Piano Lo'") && ps.reportText().contains("Source: DLSMusicDevice"));
+                std::printf("  info: longest UI stall while sampling: %.0f ms\n", watch.worstMs);
+                TEST("UI stays responsive while the plugin renders (no stall over 500 ms)", watch.worstMs < 500);
+                ps.generate(juce::File("/Volumes/AIARR-NO-SUCH/DLS Piano"));
+                TEST("generate refuses a mounted volume", ps.statusText().contains("mounted volume"));
+                fs::create_directories(root / "plug-out");
+                ps.generate(juce::File((root / "plug-out").string()));
+                TEST("generate refuses an existing folder", ps.statusText().contains("already exists"));
+                ps.generate(juce::File((root / "plug-out" / "DLS Piano").string()));
+                waitIdle(10000);
+                for (int i = 0; i < 200 && rc.loading(); ++i) pump(20);
+                TEST("generate copies the package and opens it in Resource Graph",
+                     fs::exists(root / "plug-out/DLS Piano/RESOURCES.tsv") && fs::exists(root / "plug-out/DLS Piano/REPORT.txt") &&
+                     rc.tabs().getCurrentTabIndex() == 0 && ps.statusText().startsWith("Package written"));
+                ps.field("Hold (s)").setText("1.5");
+                pump(50);
+                TEST("editing the form after a render asks for a new render", ps.statusText().contains("Settings changed since the render"));
+                // Memory soak (opt-in, not in CI): AIARR_SMOKE_SOAK=N repeats the real render N times.
+                if (const char* n = std::getenv("AIARR_SMOKE_SOAK")) {
+                    auto rss = [] { mach_task_basic_info i{}; mach_msg_type_number_t c = MACH_TASK_BASIC_INFO_COUNT;
+                                    task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&i, &c); return double(i.resident_size) / 1e6; };
+                    std::vector<double> m;
+                    for (int k = 0; k < std::atoi(n); ++k) {
+                        ps.startRender();
+                        waitIdle(120000);
+                        pump(200);
+                        m.push_back(rss());
+                        std::printf("  info: soak render %d: rendered %d, app RSS %.1f MB\n", k + 1, int(ps.rendered()), m.back());
+                    }
+                    TEST("soak: app memory does not grow across renders (last vs second, < 20 MB)",
+                         m.size() < 3 || m.back() - m[1] < 20);
+                }
+            }
         }
         fs::remove_all(root);
     }

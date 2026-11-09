@@ -10,6 +10,10 @@
 // --vel: one velocity layer per rendered velocity (up to 24); --splits: lowest velocity of layers
 // 2..N (default: halfway). --loop on: loop the held part. --stereo on: keep L/R (default: mono sum).
 // Exit 0 = done, 1 = usage/plugin/package error.
+// Output for programs (the Sample Plugin tab reads it; human text may appear between these lines):
+//   list:    one line per instrument: FORMAT<TAB>NAME<TAB>MANUFACTURER<TAB>IDENTIFIER
+//   render:  stderr "progress<TAB>i<TAB>N" before each note; on success stdout ends with
+//            "layers<TAB>a,b,..." (WAV prefixes, softest first), "splits<TAB>v,..." and "package<TAB>DIR".
 
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
@@ -39,7 +43,8 @@ int main(int argc, char** argv) {
     const std::string cmd = argc > 1 ? argv[1] : "";
     if (cmd == "list") {
         for (auto* p : instruments(fm))
-            std::printf("%-6s  %-32s  %s\n", p->pluginFormatName.toRawUTF8(), p->name.toRawUTF8(), p->manufacturerName.toRawUTF8());
+            std::printf("%s\t%s\t%s\t%s\n", p->pluginFormatName.toRawUTF8(), p->name.toRawUTF8(), p->manufacturerName.toRawUTF8(),
+                        p->fileOrIdentifier.toRawUTF8());
         return 0;
     }
     std::map<std::string, std::string> a;
@@ -66,7 +71,8 @@ int main(int argc, char** argv) {
         spec.velocities.push_back(static_cast<uint8_t>(juce::jlimit(1, 127, v.getIntValue())));
     const double hold = num("--hold", 2.0), release = num("--release", 1.0);
     if (a.count("--loop") && a["--loop"] == "on") spec.loopHoldSec = hold;
-    if (hold <= 0 || release < 0 || hold + release > 21) { std::fprintf(stderr, "hold + release must be 0-21 s\n"); return 1; }
+    if (!renderTimingValid(hold, release)) { std::fprintf(stderr, "hold + release must be 0-21 s\n"); return 1; }
+    if (const auto r = outputFolderRefusal(a["--out"]); !r.empty()) { std::fprintf(stderr, "%s\n", r.c_str()); return 1; }
 
     std::unique_ptr<juce::PluginDescription> desc;
     for (auto* p : instruments(fm))
@@ -90,8 +96,18 @@ int main(int argc, char** argv) {
     if (outs < 1) { std::fprintf(stderr, "%s has no audio output\n", desc->name.toRawUTF8()); return 1; }
     spec.channels = stereo && outs >= 2 ? 2 : 1;
     if (stereo && outs < 2) std::fprintf(stderr, "warning: %s has %d output channel(s); writing mono\n", desc->name.toRawUTF8(), outs);
+    if (!renderSpecValid(spec)) { std::fprintf(stderr, "nothing to render: need roots in 0-127, 1-24 ascending velocities, splits between them\n"); return 1; }
+    const RenderEstimate est = estimateRender(spec, hold, release);
+    if (est.workingBytes > kMaxRenderWorkingBytes) {
+        std::fprintf(stderr, "job too large: %zu notes need %.1f GB of working memory (limit %.1f GB); sample fewer notes, layers or seconds\n",
+                     est.samples, est.workingBytes / 1e9, kMaxRenderWorkingBytes / 1e9);
+        return 1;
+    }
+    size_t rendered = 0;
 
     const RenderFn render = [&](uint8_t note, uint8_t vel) {
+        std::fprintf(stderr, "progress\t%zu\t%zu\n", ++rendered, est.samples);
+        std::fflush(stderr);
         plugin->reset();
         juce::AudioBuffer<float> buf(chans, block);
         juce::MidiBuffer none;
@@ -164,5 +180,11 @@ int main(int argc, char** argv) {
     const std::string out = writePackage(in, a["--out"], notes, &perr);
     if (out.empty()) { std::fprintf(stderr, "%s\n", perr.c_str()); return 1; }
     std::fputs(out.c_str(), stdout);
+    std::string layers, splits;
+    for (size_t l = 0; l < in.layers.size(); ++l) {
+        layers += (l ? "," : "") + wavPrefix(in.layers[l].name);
+        if (l) splits += (l > 1 ? "," : "") + std::to_string(in.layers[l].velLo);
+    }
+    std::printf("\nlayers\t%s\nsplits\t%s\npackage\t%s\n", layers.c_str(), splits.c_str(), a["--out"].c_str());
     return 0;
 }

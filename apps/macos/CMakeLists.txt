@@ -60,3 +60,6 @@ target_include_directories(aiarranger-plugin-sampler PRIVATE ${CMAKE_SOURCE_DIR}
 target_compile_definitions(aiarranger-plugin-sampler PRIVATE
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_PLUGINHOST_AU=1 JUCE_PLUGINHOST_VST3=1)
 target_link_libraries(aiarranger-plugin-sampler PRIVATE juce::juce_audio_processors "-framework CoreAudioKit")   # AU hosting (AUGenericView)
+# The Sample Plugin tab runs this tool as a child process (PluginSamplerComponent::locateSampler).
+add_dependencies(aiarranger-macos aiarranger-plugin-sampler)
+add_dependencies(aiarranger-app-smoke aiarranger-plugin-sampler)

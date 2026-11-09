@@ -7,6 +7,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "ui/resources/resource_browser_model.h"
 #include "SoundConversionComponent.h"
+#include "PluginSamplerComponent.h"
 
 namespace ai_arranger::app {
 
@@ -35,6 +36,7 @@ public:
     juce::TextEditor& memoryAfter() { return memAfter_; }
     juce::TabbedComponent& tabs() { return tabs_; }
     SoundConversionComponent& converter() { return convert_; }
+    PluginSamplerComponent& sampler() { return sampler_; }
 
 private:
     void rebuildTree();
@@ -68,6 +70,7 @@ private:
 
     // Convert Sound: a finished package opens in the Resource Graph tab.
     SoundConversionComponent convert_{[this](const juce::File& pkg) { tabs_.setCurrentTabIndex(0); openPackage(pkg); }};
+    PluginSamplerComponent sampler_{[this](const juce::File& pkg) { tabs_.setCurrentTabIndex(0); openPackage(pkg); }};
 
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);

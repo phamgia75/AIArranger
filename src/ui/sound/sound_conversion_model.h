@@ -188,15 +188,16 @@ public:
     // shortcut: writing straight onto a mounted volume is refused while hardware writes are not
     // authorized for this project phase; write locally and copy the folder to the USB stick by hand.
     static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err) {
-        std::error_code ec;
-        const auto real = std::filesystem::weakly_canonical(out, ec);   // follows symlinks in the existing part of the path
-        if (ec || real.string().rfind("/Volumes/", 0) == 0) {
-            if (err) *err = "refusing to write onto a mounted volume (" + out.string() + "): write the package to a local folder, then copy it to the USB stick";
-            return "";
-        }
+        if (const auto r = snd::outputFolderRefusal(out); !r.empty()) { if (err) *err = r; return ""; }
         const std::string notes = snd::wavFolderNotes(sourceDir.string(), in);
         const std::string rep = snd::writePackage(in, out, notes, err);
         if (rep.empty()) return "";
+        return writtenSummary(out) + rep;
+    }
+
+    // Reload check, resources and memory budget of a package just written to `out` (shared by the
+    // WAV conversion and the plugin sampler tab).
+    static std::string writtenSummary(const std::filesystem::path& out) {
         media::graph::Graph g;
         std::string pkg, e;
         std::string o = "Package written: " + out.string() + "\n";
@@ -209,7 +210,7 @@ public:
             o += media::graph::formatBudget(media::graph::budget(g));
         }
         o += "\nUSB: copy the whole folder to a USB stick unchanged; import is the owner's step (see REPORT.txt).\n\n";
-        return o + rep;
+        return o;
     }
 
     static std::string key(uint8_t k) {

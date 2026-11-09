@@ -25,6 +25,26 @@ inline constexpr const char* kMemoryNote =
     "keep this package as the uncompressed source. Import single Sounds/Drum Kits; loading a whole KST that\n"
     "contains a PCM folder deletes all User Samples in memory (MAN p.736).\n\n";
 
+// The <layer> part of the package's WAV names: <layer>_<OrgKey>_<LowKey>_<HighKey>.wav.
+inline std::string wavPrefix(const std::string& layerName) {
+    std::string s = txw::fileSafe(layerName);
+    for (char& c : s) if (c == ' ') c = '_';
+    return s;
+}
+
+// Why a new package may not be written to `out`, or "" when it may. A mounted volume (USB stick) is
+// refused, also when reached through a symlink, because hardware-side writes are not authorized in
+// this project phase: write locally and copy the folder by hand. An existing path is never reused.
+// Shared by every writer (WAV conversion, plugin sampler CLI and GUI) so the rule cannot drift.
+inline std::string outputFolderRefusal(const std::filesystem::path& out) {
+    std::error_code ec;
+    const auto real = std::filesystem::weakly_canonical(out, ec);   // follows symlinks in the existing part of the path
+    if (ec || real.string().rfind("/Volumes/", 0) == 0)
+        return "refusing to write onto a mounted volume (" + out.string() + "): write the package to a local folder, then copy it to the USB stick";
+    if (std::filesystem::exists(out, ec) || ec) return "refusing: " + out.string() + " already exists";
+    return "";
+}
+
 inline std::string writePackage(const Instrument& in, const std::filesystem::path& out, const std::string& notes,
                                 std::string* error) {
     namespace fs = std::filesystem;
@@ -76,7 +96,7 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
             std::snprintf(line, sizeof line, "  %3u-%-3u  %3u   %-20s  %7zu  %5u  %u   %s\n", z.lo, z.hi, z.root, s.name.c_str(),
                           s.frames(), s.rate, s.channels, s.looped ? (std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd)).c_str() : "one-shot");
             rep += line;
-            std::snprintf(line, sizeof line, "%s_%03u_%03u_%03u.wav", under(txw::fileSafe(L.name)).c_str(), z.root, z.lo, z.hi);
+            std::snprintf(line, sizeof line, "%s_%03u_%03u_%03u.wav", wavPrefix(L.name).c_str(), z.root, z.lo, z.hi);
             save(out / "wav" / line, writeWav(s));
         }
         rep += "\n";

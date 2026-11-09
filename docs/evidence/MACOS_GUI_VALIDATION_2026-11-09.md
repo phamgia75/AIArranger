@@ -1,5 +1,62 @@
 # macOS GUI validation, 2026-11-09 (SOFTWARE evidence; synthetic data only)
 
+## 00. Sample Plugin tab (2026-11-10)
+
+**The workflow.**
+1. Find Instruments runs `aiarranger-plugin-sampler list` in a child process.
+2. Choose an instrument and set the notes, step, velocities, splits, hold, release, loop and stereo.
+3. An estimate shows the samples, the audio seconds, the package size and the memory needed. The same
+   rules the sampler uses mark the job ready or not.
+4. Render Samples runs the sampler in a separate process, with a progress bar and Cancel.
+5. The rendered WAVs are previewed with the Convert Sound engine: key map, checks, mapping table and
+   the package REPORT.
+6. Generate Package... copies the staged package to a new local folder.
+7. The package opens in Resource Graph.
+
+**Tested in `test_app_smoke`** (CI `macos-app`). Fake sampler scripts covered:
+- a plugin load failure, where the tool's own message is shown
+- exit 0 without a package
+- an unreadable WAV in the output
+- progress, then Cancel: the process is killed and staging removed
+- closing the window during a render: the process is killed in under 2 s and staging removed
+
+A real offline render with Apple **DLSMusicDevice**, an instrument that ships with macOS (no
+third-party licence involved), covered:
+- 2 layers x 3 notes, previewed
+- a 30 ms longest UI stall while rendering
+- refusal of a `/Volumes` destination and of an existing folder
+- the package copied and opened in Resource Graph
+- a form edit after the render disabling Generate
+
+The `/Volumes`-through-symlink refusal is covered by `test_plugin_sampler_ui`.
+
+**Measured.**
+
+| Run | Result |
+|---|---|
+| Large job, sampler CLI | 183 stereo notes (C2-C7 every semitone x 3 velocities, 3 s): 67 s, 247 MB package, peak 1024 MB |
+| Medium job, sampler CLI | 63 notes: peak 373 MB |
+| Baseline, sampler CLI | 56 MB |
+| Soak, in the app (`AIARR_SMOKE_SOAK=10`) | 10 real renders in a row: app memory 242 MB, then 133 MB; no growth |
+
+**Defects found and fixed during this work, with regressions:**
+- Progress lines arrived only at the end. JUCE `ChildProcess::readProcessOutput` uses `fread`,
+  which blocks until a 4 KB buffer fills. Output is now read one byte at a time.
+- The first memory estimate counted only the float renders, about 4.5x too low against the measured
+  peak. It now uses the measured 18 bytes per frame and channel plus a baseline, checked against the
+  large job within 15%.
+- A re-scan kept the previous instrument list selectable until the new scan finished.
+
+**Not done hands-on.** The live click-through of this tab. The display was asleep and Orca's
+accessibility reads were blocked for every app, Finder included. It needs the owner to wake and
+unlock the Mac. VoiceOver could not be checked for the same reason.
+
+**KST Library hands-on, prepared.** `tools/make_synthetic_kst_library.py <dir>` writes two original
+synthetic folders, SYNTH_A.KST and SYNTH_B.KST. They use the documented Pa5X extensions and contain
+placeholder bytes, not Korg data. The planned differences are 4 identical, 2 changed, 2 only in A
+and 1 only in B, plus a duplicate inside A. Inventory, Compare and Merge Plan report exactly these
+on the command line. The self-test runs in CTest.
+
 ## 0. Update: hands-on GUI pass after the owner restored the permissions (same day)
 
 Both permissions were restored. Finder's accessibility tree read back, and its screenshot was
