@@ -17,6 +17,13 @@
 
 namespace ai_arranger::media::sound {
 
+// Pa5X sample-memory facts every package REPORT states (consolidated research R1-R3, R7).
+inline constexpr const char* kMemoryNote =
+    "Memory: the Pa5X holds 4 GB of uncompressed User Samples, or up to 8 GB of samples if compressed\n"
+    "(MAN pp.1174, 1176). Compression is offered at import and cannot be undone on the Pa5X (MAN p.1181):\n"
+    "keep this package as the uncompressed source. Import single Sounds/Drum Kits; loading a whole KST that\n"
+    "contains a PCM folder deletes all User Samples in memory (MAN p.736).\n\n";
+
 inline std::string writePackage(const Instrument& in, const std::filesystem::path& out, const std::string& notes,
                                 std::string* error) {
     namespace fs = std::filesystem;
@@ -69,6 +76,7 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
         rep += "\n";
     }
     if (!notes.empty()) rep += notes + "\n";
+    rep += kMemoryNote;
     rep += "Pa5X import (owner, requires approval; docs/evidence/hardware/PA5X_SOUND_IMPORT_PROCEDURE.md):\n"
            "  A) Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX Sound (TXPROG),\n"
            "     select tx/.../<name>.txprog, choose an empty User Sound location: one step (p.1210).\n"
@@ -128,6 +136,7 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
            "  group; kit effects. Ambience layers and round-robins are not produced by AIArranger (GUIDE pp.21-23).\n"
            "  Velocity switch points can be refined in Sound Edit > Drum Kit > Drum Sample Levels (GUIDE p.83).\n\n";
     if (!notes.empty()) rep += notes + "\n";
+    rep += kMemoryNote;
     rep += "Pa5X import (owner, requires approval):\n"
            "  Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX DrumKit (TXPERF), select\n"
            "  tx/.../<name>.txperf, choose an empty User Drum Kit location (manual p.1210).\n";

@@ -243,6 +243,7 @@ int main() {
         TEST("package: .sf2 + .txprog + 38 tx WAVs + 38 wav/ + REPORT = 79 files; report lists 4 GB use",
              !rep.empty() && files == 79 && fs::exists(dir / "AIA_Demo_Organ.sf2") &&
              fs::exists(dir / "wav" / "AIA_Organ_Soft_024_000_025.wav") && rep.find("of the 4 GB User Sample memory)\n\nLayer 0  velocity 0-89  AIA Organ Soft\n") != std::string::npos);
+        TEST("REPORT states the 4/8 GB budget and irreversible compression", rep.find("8 GB") != std::string::npos && rep.find("cannot be undone") != std::string::npos);
         std::string err2;
         TEST("package refuses an existing folder and writes nothing", writePackage(org, dir, "", &err2).empty() &&
              err2.find("already exists") != std::string::npos);
