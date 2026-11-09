@@ -237,6 +237,11 @@ int main() {
                 TEST("key map: one-key zone keeps its zone colour (root drawn as a tick)", px.getBlue() > px.getRed());
             }
             TEST("checks name the limited key range", cv.previewText().contains("plays only C3-G5"));
+            {   // Codex review of bfe83b5: replaced texts are not kept as undo history
+                app::TextView tv;
+                tv.setText("first"); tv.setText("second");
+                TEST("text view keeps no undo history of replaced texts", !tv.canUndo() && tv.shownText() == "second");
+            }
             {   // recipe prose wraps to the pane instead of scrolling sideways (GUI validation 2026-11-09)
                 cv.setSize(1000, 700);
                 const auto shown = cv.recipeShownText();

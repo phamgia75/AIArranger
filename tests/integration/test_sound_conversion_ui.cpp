@@ -108,6 +108,13 @@ int main() {
         TEST("partly silent layer: median zone silent is reported, not +0.0 dB (Codex round 2)",
              contains(t, "fewer than two layers have an audible median zone") && !contains(t, "Soft (vel 0-63): +0.0 dB"));
     }
+    {   // Codex review of bfe83b5: adopt hands the previous Sound to the caller as its only owner
+        const auto before = m.snapshot().get();
+        SoundConversionModel m2 = m;
+        auto old = m2.adopt(m.instrument());
+        TEST("adopt returns the previous Sound, no longer held by the model", old.get() == before && m2.snapshot().get() != before &&
+             old.use_count() == 2 /* m still holds it; m2 does not */);
+    }
     TEST("Generate shares the decoded Sound instead of copying its audio (Codex round 2)",
          m.snapshot() && m.snapshot().get() == &m.instrument());
     m.invalidate();

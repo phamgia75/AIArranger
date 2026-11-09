@@ -152,8 +152,8 @@ void SoundConversionComponent::showPreview(media::sound::Instrument* in, const s
         status_.setText("Cannot build: " + juce::String(err), juce::dontSendNotification);
         return;
     }
-    if (auto old = model_.snapshot()) std::thread([o = std::move(old)] {}).detach();   // free the previous Sound's audio off the message thread
-    model_.adopt(std::move(*in));
+    if (auto old = model_.adopt(std::move(*in)))   // the model no longer holds it: free its audio off the message thread
+        std::thread([o = std::move(old)] {}).detach();
     map_.setInstrument(&model_.instrument());
     preview_.setText(texts[0]);
     recipe_.setText(texts[1]);

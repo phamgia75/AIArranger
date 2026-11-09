@@ -96,7 +96,13 @@ public:
         return true;
     }
     // build() in two halves for the UI: decode() reads the WAVs (slow, any thread), adopt() keeps the result.
-    void adopt(snd::Instrument in) { in_ = std::make_shared<const snd::Instrument>(std::move(in)); built_ = true; }
+    // Returns the previous Sound, now owned only by the caller, so its audio can be freed off the UI thread.
+    std::shared_ptr<const snd::Instrument> adopt(snd::Instrument in) {
+        auto old = std::move(in_);
+        in_ = std::make_shared<const snd::Instrument>(std::move(in));
+        built_ = true;
+        return old;
+    }
     // Immutable decoded Sound, shared with background writers without copying its audio.
     std::shared_ptr<const snd::Instrument> snapshot() const { return in_; }
     void invalidate() { built_ = false; }   // a setting changed: the preview no longer describes what would be written

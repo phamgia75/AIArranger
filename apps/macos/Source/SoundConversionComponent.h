@@ -20,6 +20,7 @@ public:
     void setText(const juce::String& t) { raw_ = t; cols_ = -1; layout(); }
     juce::String getText() const { return raw_; }
     juce::String shownText() const { return doc_.getAllContent(); }
+    bool canUndo() { return doc_.getUndoManager().canUndo(); }
     void clear() { setText({}); }
     void setFont(const juce::Font& f) { ed_.setFont(f); }
     void setWrap(bool w) { wrap_ = w; }   // prose: wrap to the width instead of scrolling sideways
@@ -30,6 +31,7 @@ private:
         if (cols == cols_) return;
         cols_ = cols;
         doc_.replaceAllContent(cols ? juce::String(ui::wrapLines(raw_.toStdString(), size_t(cols))) : raw_);
+        doc_.clearUndoHistory();   // read-only view: no undo, and old texts must not pile up
         ed_.scrollToLine(0);
     }
     juce::String raw_;
