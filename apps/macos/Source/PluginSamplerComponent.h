@@ -19,12 +19,12 @@ namespace ai_arranger::app {
 // thread posts lines back with callAsync and holds only the shared State, never `this`.
 // Cancel and destruction are bounded: a helper the plugin started can keep the output pipe open after
 // the sampler is killed, so if the reader has not finished kCancelGraceMs after cancel(), onDone(-1, true)
-// is delivered anyway and the destructor detaches the reader instead of joining it.
+// is delivered anyway; the destructor waits at most kCloseGraceMs, then detaches the reader instead of joining it.
 class SamplerProcess {
 public:
     using LineFn = std::function<void(const std::string&)>;
     using DoneFn = std::function<void(int exitCode, bool cancelled)>;
-    static constexpr int kCancelGraceMs = 2000;
+    static constexpr int kCancelGraceMs = 2000, kCloseGraceMs = 500;
     ~SamplerProcess();
     bool start(const juce::File& exe, const std::vector<std::string>& args, LineFn onLine, DoneFn onDone);
     bool cancel();   // true when a kill signal was sent; never signals a child that was already reaped (its PID may be reused)

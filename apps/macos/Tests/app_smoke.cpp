@@ -385,7 +385,9 @@ int main() {
                 const auto t1 = std::chrono::steady_clock::now();
                 c.reset();
                 const double closeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
-                TEST("closing the window is bounded even when a helper holds the output pipe open", closeMs < 3000 && !pidAlive());
+                const bool alive = pidAlive();
+                std::printf("  info: close with a held pipe took %.0f ms, sampler alive %d\n", closeMs, int(alive));
+                TEST("closing the window is bounded even when a helper holds the output pipe open", closeMs < 1500 && !alive);
                 killOrphan();
                 fs::remove(pidFile);
             }

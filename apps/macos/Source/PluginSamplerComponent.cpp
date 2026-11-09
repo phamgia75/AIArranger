@@ -69,7 +69,9 @@ SamplerProcess::~SamplerProcess() {
     cancel();
     alive_.reset();   // no callback runs after this
     if (!reader_.joinable()) return;
-    for (int i = 0; i < kCancelGraceMs / 10 && !s_->finished; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // A killed sampler closes its pipe within milliseconds; only a helper holding it open makes the reader outlast this.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kCloseGraceMs);
+    while (!s_->finished && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     if (s_->finished) reader_.join();
     else { reap(*s_); reader_.detach(); }   // it owns State and ends when the pipe closes
 }
