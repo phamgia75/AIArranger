@@ -8,6 +8,8 @@
 #include "media/sound/package_writer.h"
 #include <chrono>
 #include <cstdio>
+#include <sstream>
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace ai_arranger::media::sound;
@@ -248,6 +250,23 @@ int main() {
         const auto unsafe = big.unsafeDeletes();
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("    60 000-sample graph: budget + unsafeDeletes %.3f s\n", secs);
+        // round 2: slot cardinality
+        Graph sl;
+        sl.addNode({P(Kind::Sound, 1, "User1"), "A", {}}, &err); sl.addNode({P(Kind::Sound, 2, "User1"), "B", {}}, &err);
+        sl.addNode({P(Kind::Oscillator, 1, "User1"), "O", {}}, &err);
+        sl.addNode({P(Kind::Multisample, 1), "M1", {}}, &err); sl.addNode({P(Kind::Multisample, 2), "M2", {}}, &err);
+        TEST("one High multisample per oscillator: a second High refused, Low accepted",
+             sl.addRef({P(Kind::Oscillator, 1, "User1"), P(Kind::Multisample, 1), Via::OscHigh, "High"}, &err) &&
+             !sl.addRef({P(Kind::Oscillator, 1, "User1"), P(Kind::Multisample, 2), Via::OscHigh, "High"}, &err) &&
+             sl.addRef({P(Kind::Oscillator, 1, "User1"), P(Kind::Multisample, 2), Via::OscLow, "Low"}, &err));
+        TEST("an oscillator belongs to one Sound",
+             sl.addRef({P(Kind::Sound, 1, "User1"), P(Kind::Oscillator, 1, "User1"), Via::OscillatorOf, "1"}, &err) &&
+             !sl.addRef({P(Kind::Sound, 2, "User1"), P(Kind::Oscillator, 1, "User1"), Via::OscillatorOf, "1"}, &err));
+        Graph sl2;
+        sl2.addNode({P(Kind::Sound, 2, "User1"), "B", {}}, &err); sl2.addNode({P(Kind::Oscillator, 1, "User1"), "O", {}}, &err);
+        sl2.addRef({P(Kind::Sound, 2, "User1"), P(Kind::Oscillator, 1, "User1"), Via::OscillatorOf, "1"}, &err);
+        const size_t before = sl.edges().size();
+        TEST("merge applies the same checks and is all-or-nothing", !sl.merge(sl2, &err) && sl.edges().size() == before);
         TEST("60 000 samples: budget and delete checks well under 10 s (was O(nodes x edges))", bb.samples == 60000 && unsafe.size() == 60001 && secs < 10);
     }
 
@@ -319,6 +338,34 @@ int main() {
         fs::copy(root / "organ", root / "bits", fs::copy_options::recursive);
         spit(root / "bits/RESOURCES.tsv", replaceOnce(man, "\t48000\t16\t", "\t48000\t8\t"));
         TEST("bit depth differing from the WAV refused", !loadPackage(root / "bits", x, p, &err) && err.find("does not match") != std::string::npos);
+        // round 2 #1: a manifest that drops a sample's references (end count adjusted) is caught by the TX cross-check
+        {
+            std::string m2;
+            size_t kept = 0, dropped = 0;
+            const std::string target = "\tZone\tprov:" + po + "/Sample/0\t";
+            std::stringstream in(man);
+            for (std::string l; std::getline(in, l);) {
+                if (l.rfind("end\t", 0) == 0) continue;
+                if (l.find(target) != std::string::npos) { ++dropped; continue; }
+                m2 += l + "\n"; ++kept;
+            }
+            m2 += "end\t" + std::to_string(kept) + "\n";
+            fs::copy(root / "organ", root / "noref", fs::copy_options::recursive);
+            spit(root / "noref/RESOURCES.tsv", m2);
+            TEST("dropped references: manifest still parses, but the package load is refused",
+                 dropped > 0 && parses(m2) && !loadPackage(root / "noref", x, p, &err) && err.find("no reference in RESOURCES.tsv") != std::string::npos);
+        }
+        // round 2 #3: FIFO and oversized files are input errors, not hangs
+        {
+            fs::copy(root / "organ", root / "fifo", fs::copy_options::recursive);
+            const fs::path w = root / "fifo/tx/AIA Demo Organ/AIA Demo Organ Samples" / (txw::fileSafe(organ.samples[0].name) + ".wav");
+            fs::remove(w);
+            const bool made = ::mkfifo(w.c_str(), 0600) == 0;
+            TEST("FIFO in place of a WAV refused without blocking", made && !loadPackage(root / "fifo", x, p, &err));
+            fs::remove(w);
+            { std::ofstream big(w, std::ios::binary); big.seekp((17 << 20) - 1); big.put(0); }
+            TEST("WAV over 16 MiB refused before reading", !loadPackage(root / "fifo", x, p, &err) && err.find("cannot read") != std::string::npos);
+        }
         // #3 a symlinked folder inside the package cannot lead the loader outside it
         fs::copy(root / "organ", root / "outside", fs::copy_options::recursive);
         fs::copy(root / "organ", root / "link", fs::copy_options::recursive);

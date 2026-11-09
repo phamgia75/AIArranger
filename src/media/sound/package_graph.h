@@ -206,7 +206,14 @@ inline bool parseManifest(const std::string& textIn, graph::Graph& out, std::str
 // (channels, rate, frames, loop length, audio fingerprint). Read-only.
 inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::string& pkg, std::string* err) {
     namespace fs = std::filesystem;
+    // Regular files of bounded size only: a FIFO or a huge file is an input error, not a hang.
+    // (Package WAVs are at most 1 048 576 stereo 16-bit frames = 4 MiB, MAN p.1155.)
     auto read = [](const fs::path& p, std::vector<uint8_t>& b) {
+        std::error_code ec;
+        const auto st = fs::symlink_status(p, ec);
+        if (ec || !fs::is_regular_file(st)) return false;
+        const auto size = fs::file_size(p, ec);
+        if (ec || size > (16u << 20)) return false;
         std::ifstream f(p, std::ios::binary);
         if (!f) return false;
         b.assign(std::istreambuf_iterator<char>(f), {});
@@ -245,6 +252,39 @@ inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::
             return false;
         }
     }
+    // Cross-check references against the package's own TX files (documented TX16Wx output written by
+    // AIArranger): every WAV a .txprog/.txmatrix names must be a manifest sample with at least one
+    // reference, and every manifest sample must be named by the TX files. A manifest that drops
+    // references therefore cannot make a used sample look unreferenced.
+    std::set<std::string> txWavs;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(dir / "tx", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string ext = it->path().extension().string();
+        if (ext != ".txprog" && ext != ".txmatrix") continue;
+        std::vector<uint8_t> b;
+        if (!read(it->path(), b)) { if (err) *err = dir.string() + ": cannot read " + it->path().string(); return false; }
+        const std::string x(b.begin(), b.end());
+        const std::string rel = it->path().parent_path().lexically_relative(dir).generic_string();
+        for (size_t at = 0; (at = x.find("tx:path=\"", at)) != std::string::npos;) {
+            at += 9;
+            const size_t q = x.find('"', at);
+            if (q == std::string::npos) break;
+            std::string v = x.substr(at, q - at);
+            for (const auto& [ent, ch] : std::vector<std::pair<std::string, std::string>>{{"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"}})
+                for (size_t i; (i = v.find(ent)) != std::string::npos;) v.replace(i, ent.size(), ch);
+            if (v.size() > 4 && v.compare(v.size() - 4, 4, ".wav") == 0) txWavs.insert(rel + "/" + v);
+        }
+    }
+    if (ec) { if (err) *err = dir.string() + ": cannot list tx/: " + ec.message(); return false; }
+    std::set<std::string> manifestWavs;
+    for (const auto& [id, n] : tmp.nodes()) {
+        if (!n.sample) continue;
+        manifestWavs.insert(n.sample->file);
+        if (!txWavs.count(n.sample->file)) { if (err) *err = dir.string() + ": " + id.str() + " (" + n.sample->file + ") is not used by the package's TX files"; return false; }
+        if (tmp.whereUsed(id).empty()) { if (err) *err = dir.string() + ": " + n.sample->file + " is used by the TX files but has no reference in RESOURCES.tsv"; return false; }
+    }
+    for (const auto& w : txWavs)
+        if (!manifestWavs.count(w)) { if (err) *err = dir.string() + ": TX files use " + w + ", which RESOURCES.tsv does not describe"; return false; }
     g = std::move(tmp);
     return true;
 }

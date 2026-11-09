@@ -182,6 +182,12 @@ public:
             return fail(err, std::string("edge not allowed: ") + kindName(e.from.kind) + " -" + viaName(e.via) + "-> " + kindName(e.to.kind));
         if (e.to.provisional && (!e.from.provisional || e.to.scope != e.from.scope))
             return fail(err, "a provisional resource can only be referenced inside its own package: " + e.to.str());
+        // Slot cardinality (spec §2): one High and one Low multisample per oscillator; an oscillator belongs to one Sound.
+        if (e.via == Via::OscHigh || e.via == Via::OscLow)
+            for (const Edge& x : outSet(e.from)) if (x.via == e.via) return fail(err, e.from.str() + ": " + viaName(e.via) + " slot already holds " + x.to.str());
+        if (e.via == Via::OscillatorOf)
+            if (const auto it = in_.find(e.to); it != in_.end())
+                for (const Edge& x : it->second) if (x.via == Via::OscillatorOf) return fail(err, e.to.str() + " already belongs to " + x.from.str());
         if (!edges_.insert(e).second) return fail(err, "duplicate reference " + e.from.str() + " -> " + e.to.str());
         out_[e.from].insert(e);
         in_[e.to].insert(e);
@@ -200,11 +206,13 @@ public:
         for (const auto& [id, n] : o.nodes_)
             if (const auto it = nodes_.find(id); it != nodes_.end() && (!(it->second == n) || outSet(id) != o.outSet(id)))
                 return fail(err, "identity " + id.str() + " names two different resources");
-        for (const auto& [id, n] : o.nodes_) nodes_.emplace(id, n);
+        Graph t = *this;   // all-or-nothing: every merged edge passes the same checks as addRef
+        for (const auto& [id, n] : o.nodes_) t.nodes_.emplace(id, n);
         for (const Edge& x : o.edges_)
-            if (edges_.insert(x).second) { out_[x.from].insert(x); in_[x.to].insert(x); }
-        for (const auto& [v, ev] : o.scanned_) scanned_.emplace(v, ev);
-        complete_.insert(o.complete_.begin(), o.complete_.end());
+            if (!t.edges_.count(x) && !t.addRef(x, err)) return false;
+        for (const auto& [v, ev] : o.scanned_) t.scanned_.emplace(v, ev);
+        t.complete_.insert(o.complete_.begin(), o.complete_.end());
+        *this = std::move(t);
         return true;
     }
 
