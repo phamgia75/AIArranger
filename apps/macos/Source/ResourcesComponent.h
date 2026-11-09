@@ -19,7 +19,7 @@ public:
     // Used by the buttons and by the UI smoke test.
     void openPackage(const juce::File& dir);   // asynchronous; loading() is true until it lands
     bool loading() const { return loads_ > 0; }
-    bool openEvidence(const juce::File& file);
+    void openEvidence(const juce::File& file);   // asynchronous, like openPackage
     void showDetails(const media::graph::ResourceId& id);
     void runKst(ui::ResourceBrowserModel::KstAction a, const juce::String& first, const juce::String& second = {});
     void compareMemory();

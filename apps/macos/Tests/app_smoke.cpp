@@ -140,6 +140,18 @@ int main() {
         rc.model().clear();
         TEST("open two packages", open("/organ") && open("/drums"));
         TEST("same package twice refused with a reason", !open("/organ") && rc.detailsText().contains("already open"));
+        {   // Close All while a load is pending: the load is dropped, not re-added (Codex round 2)
+            app::ResourcesComponent c2;
+            c2.openPackage(juce::File(root.string() + "/organ"));
+            c2.model().clear();
+            for (int i = 0; i < 100 && c2.loading(); ++i) pump(20);
+            TEST("Close All during a load: the load is dropped", c2.model().packages().empty());
+            std::ofstream(root / "ev.txt") << "aiarranger-evidence\t1\nsource\tR\towner ok\tpa-manager-report\nnode\tpa5x:USR/Style/1\tBallad\nend\t3\n";
+            c2.openEvidence(juce::File(root.string() + "/ev.txt"));
+            TEST("evidence loads off the message thread", c2.loading());
+            for (int i = 0; i < 100 && c2.loading(); ++i) pump(20);
+            TEST("evidence opened", c2.model().evidence().size() == 1 && c2.detailsText().contains("Opened evidence"));
+        }
         auto* top = rc.tree().getRootItem();
         TEST("tree: Sound + Drum Kit at the top", top && top->getNumSubItems() == 2);
         juce::TreeViewItem* sound = nullptr;

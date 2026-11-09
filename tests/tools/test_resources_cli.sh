@@ -23,6 +23,8 @@ expect 1 "$B/aiarranger-resources" budget --kst "$T/nokst" "$T/organ"
 printf 'aiarranger-evidence\t1\nsource\tR\towner ok\tpa-manager-report\nnode\tpa5x:USR/Style/1\tBallad\nref\tpa5x:USR/Style/1\tStyleTrack\tpa5x:USR/Sound/5\tconfirmed\tVar1\nend\t4\n' > "$T/ev.txt"
 expect 3 "$B/aiarranger-resources" delete-check --evidence "$T/ev.txt" "pa5x:USR/Sound/5" "$T/organ"    # confirmed by evidence: in use
 expect 1 "$B/aiarranger-resources" check --evidence "$T/ev.txt" --evidence "$T/ev.txt" "$T/organ"    # one source twice
+printf 'aiarranger-evidence\t1\nsource\tR2\towner ok\tpa-manager-report\nnode\tpa5x:USR/Pad/1\tP\nref\tpa5x:USR/Pad/1\tPadTrack\tpa5x:USR/Sound/5\tinferred\tname\nend\t4\n' > "$T/ev2.txt"
+ok sh -c "'$B/aiarranger-resources' where-used --evidence '$T/ev2.txt' pa5x:USR/Sound/5 '$T/organ' | grep -q 'INFERRED, not proven  \[evidence: R2\]'"
 ok sh -c "'$B/aiarranger-resources' delete-check --evidence '$T/ev.txt' pa5x:USR/Sound/6 '$T/organ' | grep -q 'not scanned: SongBookSound'"
 printf 'aiarranger-evidence\t1\nsource\tR\towner ok\tpa-manager-report\nscanned\tProgramChange\tall\nend\t3\n' > "$T/bad.txt"
 expect 1 "$B/aiarranger-resources" check --evidence "$T/bad.txt" "$T/organ"     # Q19: refused

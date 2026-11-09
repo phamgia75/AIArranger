@@ -160,27 +160,42 @@ void ResourcesComponent::openPackage(const juce::File& dir) {
     ++loads_;
     details_.setText("Loading " + dir.getFullPathName() + " (read-only)...", false);
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, d = dir.getFullPathName().toStdString()] {
+    const uint64_t epoch = model_.epoch();
+    std::thread([this, alive, epoch, d = dir.getFullPathName().toStdString()] {
         auto one = std::make_shared<media::graph::Graph>();
         std::string pkg, err;
         const bool loaded = media::sound::loadPackage(d, *one, pkg, &err);
-        juce::MessageManager::callAsync([this, alive, one, pkg, err, loaded, d] {
+        juce::MessageManager::callAsync([this, alive, epoch, one, pkg, err, loaded, d] {
             if (alive.expired()) return;
+            --loads_;
+            if (epoch != model_.epoch()) return;   // Close All was pressed meanwhile: drop the load
             std::string e = err;
             const bool ok = loaded && model_.adoptPackage(std::move(*one), pkg, d, &e);
-            --loads_;
             rebuildTree();
             details_.setText(ok ? juce::String("Opened ") + d : "Could not open package:\n" + juce::String(e), false);
         });
     }).detach();
 }
 
-bool ResourcesComponent::openEvidence(const juce::File& file) {
-    std::string err;
-    const bool ok = model_.addEvidence(file.getFullPathName().toStdString(), &err);
-    rebuildTree();
-    if (!ok) details_.setText("Evidence refused (nothing was added):\n" + juce::String(err), false);
-    return ok;
+void ResourcesComponent::openEvidence(const juce::File& file) {
+    // Parse off the message thread against a snapshot; adopt only if nothing changed meanwhile.
+    ++loads_;
+    details_.setText("Reading evidence " + file.getFullPathName() + " (read-only)...", false);
+    std::weak_ptr<bool> alive = alive_;
+    auto work = std::make_shared<media::graph::Graph>(model_.graph());
+    const uint64_t version = model_.version();
+    std::thread([this, alive, work, version, f = file.getFullPathName().toStdString()] {
+        std::string label, err;
+        const bool parsed = ui::ResourceBrowserModel::prepareEvidence(f, *work, label, &err);
+        juce::MessageManager::callAsync([this, alive, work, version, label, err, parsed] {
+            if (alive.expired()) return;
+            --loads_;
+            std::string e = err;
+            const bool ok = parsed && model_.adoptEvidence(std::move(*work), label, version, &e);
+            rebuildTree();
+            details_.setText(ok ? "Opened evidence source '" + juce::String(label) + "'" : "Evidence refused (nothing was added):\n" + juce::String(e), false);
+        });
+    }).detach();
 }
 
 void ResourcesComponent::rebuildTree() {

@@ -196,6 +196,24 @@ int main() {
              e.addEvidence(root / "ev-noref.txt", &err) && !e.addEvidence(root / "ev-noref.txt", &err) && contains(err, "already open") && e.evidence().size() == 2);
         TEST("Pa5X resources from evidence do not inflate the import prediction (Codex P2)",
              predict(e.graph()).multisamples == 1 && predict(e.graph()).samples == 1);
+        { std::string t = evidence("ref\tpa5x:USR/Style/1\tStyleTrack\tpa5x:USR/Sound/8\tconfirmed\tVar2\n");
+          spit(root / "ev-dep.txt", t.replace(t.find("Report A"), 8, "Report D")); }
+        TEST("evidence using another source's node opens (Codex round 2)", e.addEvidence(root / "ev-dep.txt", &err));
+        {
+            ResourceBrowserModel s;
+            {
+                ai_arranger::media::graph::Graph work = s.graph();
+                const auto v = s.version();
+                std::string label;
+                TEST("prepare against a snapshot", ResourceBrowserModel::prepareEvidence(root / "ev.txt", work, label, &err));
+                s.addPackage(root / "shared", &err);
+                TEST("adopt refused when the resources changed meanwhile (Codex round 2)",
+                     !s.adoptEvidence(work, label, v, &err) && contains(err, "changed") && s.evidence().empty());
+            }
+            const auto ep = s.epoch();
+            s.clear();
+            TEST("Close All changes the epoch (pending package loads are dropped)", s.epoch() != ep);
+        }
         fs::create_directory(root / "evdir");
         TEST("evidence: a folder is refused", !e.addEvidence(root / "evdir", &err));
     }

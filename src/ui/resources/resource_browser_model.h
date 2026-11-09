@@ -35,23 +35,37 @@ public:
             if (p.id == pkg) return fail(err, "package " + pkg + " is already open (" + p.dir + "): one import or two? Not counted twice.");
         if (!g_.merge(one, &e)) return fail(err, e);
         packages_.push_back({pkg, dir.string()});
+        ++version_;
         return true;
     }
     bool addEvidence(const std::filesystem::path& file, std::string* err) {
+        rg::Graph work = g_;
+        std::string label;
+        return prepareEvidence(file, work, label, err) && adoptEvidence(std::move(work), label, version_, err);
+    }
+    // Evidence in two halves so the UI can parse off the message thread: prepareEvidence imports into
+    // `work` (a copy of graph() taken at version()); adoptEvidence installs it only if nothing changed since.
+    static bool prepareEvidence(const std::filesystem::path& file, rg::Graph& work, std::string& label, std::string* err) {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(file, ec)) || std::filesystem::file_size(file, ec) > (16u << 20) || ec)
             return fail(err, file.string() + ": not a regular file of at most 16 MiB");
         std::ifstream f(file, std::ios::binary);
         const std::string t((std::istreambuf_iterator<char>(f)), {});
-        std::string label, e;
-        rg::Graph probe;   // read the source label first: one source is opened once, references or not
-        if (!media::sound::importEvidence(t, probe, &label, &e)) return fail(err, file.string() + ": " + e);
-        for (const auto& x : evidence_) if (x == label) return fail(err, "evidence source '" + label + "' is already open");
-        if (!media::sound::importEvidence(t, g_, &label, &e)) return fail(err, file.string() + ": " + e);
-        evidence_.push_back(label);
+        std::string e;
+        if (!media::sound::importEvidence(t, work, &label, &e)) return fail(err, file.string() + ": " + e);
         return true;
     }
-    void clear() { g_ = {}; packages_.clear(); evidence_.clear(); }
+    bool adoptEvidence(rg::Graph work, const std::string& label, uint64_t atVersion, std::string* err) {
+        if (atVersion != version_) return fail(err, "the open resources changed while the evidence was read; open it again");
+        for (const auto& x : evidence_) if (x == label) return fail(err, "evidence source '" + label + "' is already open");
+        g_ = std::move(work);
+        evidence_.push_back(label);
+        ++version_;
+        return true;
+    }
+    void clear() { g_ = {}; packages_.clear(); evidence_.clear(); ++version_; ++epoch_; }
+    uint64_t version() const { return version_; }   // changes on every change of the open resources
+    uint64_t epoch() const { return epoch_; }       // changes on Close All only
 
     const rg::Graph& graph() const { return g_; }
     const std::vector<Package>& packages() const { return packages_; }
@@ -197,6 +211,7 @@ private:
     rg::Graph g_;
     std::vector<Package> packages_;
     std::vector<std::string> evidence_;
+    uint64_t version_ = 0, epoch_ = 0;
 };
 
 } // namespace ai_arranger::ui

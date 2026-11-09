@@ -32,7 +32,11 @@ static int usage() {
                          "  any command: --evidence FILE (owner-authorized evidence, repeatable)\n");
     return 1;
 }
-static std::string edgeText(const graph::Edge& e) { return e.from.str() + " -" + graph::viaName(e.via) + "-> " + e.to.str() + "  (" + e.detail + ")"; }
+static std::string edgeText(const graph::Edge& e) {
+    return e.from.str() + " -" + graph::viaName(e.via) + "-> " + e.to.str() + "  (" + e.detail + ")" +
+           (e.confidence == graph::Confidence::Inferred ? "  INFERRED, not proven" : "") +
+           (e.source == graph::Source::PaManagerReport ? "  [evidence: " + e.provenance + "]" : "");
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
@@ -134,7 +138,8 @@ int main(int argc, char** argv) {
         const auto roots = g.usedByRoots(ids[0]);
         std::printf("Reached from: %zu\n", roots.size());
         for (const auto& r : roots) std::printf("  %s (%s)\n", r.str().c_str(), g.find(r) ? g.find(r)->name.c_str() : "?");
-        std::printf("Scope: AIArranger packages only. Styles, Keyboard Sets, Pads, SongBook Entries and Program Change messages on a Pa5X are not visible here.\n");
+        std::printf(evidence.empty() ? "Scope: AIArranger packages only. Styles, Keyboard Sets, Pads, SongBook Entries and Program Change messages on a Pa5X are not visible here.\n"
+                                     : "Scope: AIArranger packages and the evidence given. References outside it, and SongBook/Program Change unless genuinely scanned, are not visible.\n");
         return 0;
     }
     if (cmd == "delete-check") {
