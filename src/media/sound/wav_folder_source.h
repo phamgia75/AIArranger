@@ -65,13 +65,12 @@ inline std::string readWav(const std::vector<uint8_t>& b, Sample* s) {
     return "";
 }
 
-// layers: file prefixes in velocity order, softest first (empty = the folder must hold exactly one);
-// splits: lowest velocity of layers 2..N (as RenderSpec::splits).
-inline std::string buildFromWavFolder(const std::filesystem::path& dir, const std::string& name,
-                                      std::vector<std::string> layers, const std::vector<uint8_t>& splits, Instrument* out) {
+struct WavFile { std::filesystem::path p; uint8_t org, lo, hi; };
+
+// Groups a folder's WAVs by layer prefix from their names alone (no audio is read). "" on success.
+inline std::string scanWavFolder(const std::filesystem::path& dir, std::map<std::string, std::vector<WavFile>>& byPrefix) {
     namespace fs = std::filesystem;
-    struct File { fs::path p; uint8_t org, lo, hi; };
-    std::map<std::string, std::vector<File>> byPrefix;
+    byPrefix.clear();
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(dir, ec)) {
         std::string ext = e.path().extension().string();
@@ -92,6 +91,19 @@ inline std::string buildFromWavFolder(const std::filesystem::path& dir, const st
         byPrefix[stem.substr(0, cut)].push_back({e.path(), uint8_t(k[0]), uint8_t(k[1]), uint8_t(k[2])});
     }
     if (ec) return "cannot read " + dir.string();
+    if (byPrefix.empty()) return "no <layer>_<OrgKey>_<LowKey>_<HighKey>.wav files in " + dir.string();
+    return "";
+}
+
+// layers: file prefixes in velocity order, softest first (empty = the folder must hold exactly one);
+// splits: lowest velocity of layers 2..N (as RenderSpec::splits).
+inline std::string buildFromWavFolder(const std::filesystem::path& dir, const std::string& name,
+                                      std::vector<std::string> layers, const std::vector<uint8_t>& splits, Instrument* out) {
+    namespace fs = std::filesystem;
+    using File = WavFile;
+    std::map<std::string, std::vector<File>> byPrefix;
+    std::error_code ec;
+    if (const auto e = scanWavFolder(dir, byPrefix); !e.empty()) return e;
     if (layers.empty()) {
         if (byPrefix.size() != 1) return "folder holds " + std::to_string(byPrefix.size()) + " layer prefixes; name them in velocity order";
         layers.push_back(byPrefix.begin()->first);

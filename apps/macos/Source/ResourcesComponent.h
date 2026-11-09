@@ -6,6 +6,7 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "ui/resources/resource_browser_model.h"
+#include "SoundConversionComponent.h"
 
 namespace ai_arranger::app {
 
@@ -33,6 +34,7 @@ public:
     juce::TextEditor& memoryBefore() { return memBefore_; }
     juce::TextEditor& memoryAfter() { return memAfter_; }
     juce::TabbedComponent& tabs() { return tabs_; }
+    SoundConversionComponent& converter() { return convert_; }
 
 private:
     void rebuildTree();
@@ -63,6 +65,9 @@ private:
     juce::Label memNote_, beforeLbl_{{}, "Before import (Memory Info)"}, afterLbl_{{}, "After import (Memory Info)"};
     juce::TextEditor memBefore_, memAfter_, memOut_;
     juce::TextButton compareBtn_{"Compare"};
+
+    // Convert Sound: a finished package opens in the Resource Graph tab.
+    SoundConversionComponent convert_{[this](const juce::File& pkg) { tabs_.setCurrentTabIndex(0); openPackage(pkg); }};
 
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);

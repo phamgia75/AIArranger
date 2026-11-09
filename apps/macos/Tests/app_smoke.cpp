@@ -10,6 +10,9 @@
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
 #include "media/sound/package_writer.h"
+#include "media/sound/wav_writer.h"
+#include <chrono>
+#include <cmath>
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
@@ -110,7 +113,7 @@ int main() {
         namespace fs = std::filesystem;
         using namespace ai_arranger;
         auto host = std::make_unique<app::LiveHostComponent>();
-        TEST("button present: Resources...", find<juce::Button>(*host, "Resources...") != nullptr);
+        TEST("button present: Sound Tools...", find<juce::Button>(*host, "Sound Tools...") != nullptr);
         const fs::path root = fs::temp_directory_path() / ("aia-smoke-res-" + std::to_string(::getpid()));
         fs::remove_all(root);
         std::string err;
@@ -131,7 +134,7 @@ int main() {
             return !rc.loading() && rc.detailsText().startsWith("Opened");
         };
         rc.setSize(980, 640);
-        TEST("three tabs", rc.tabs().getNumTabs() == 3 && rc.tabs().getTabNames()[1] == "KST Library");
+        TEST("four tabs", rc.tabs().getNumTabs() == 4 && rc.tabs().getTabNames()[1] == "KST Library" && rc.tabs().getTabNames()[3] == "Convert Sound");
         TEST("empty: tells the user what to open", rc.detailsText().contains("Open Package"));
         open("/organ");
         rc.compareMemory();
@@ -182,6 +185,73 @@ int main() {
         rc.compareMemory();
         TEST("Memory Check: compares with the open packages (47 samples)", rc.memoryText().contains("predicted +47  MATCH") &&
              rc.memoryText().contains("does not validate"));
+
+        // ── Convert Sound: WAV folder -> preview -> package -> opens in Resource Graph; UI stays responsive ──
+        {
+            // Message-loop watchdog: the longest gap between 20 ms timer ticks while work runs.
+            struct Watch : juce::Timer {
+                std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+                double worstMs = 0;
+                void timerCallback() override {
+                    const auto now = std::chrono::steady_clock::now();
+                    worstMs = std::max(worstMs, std::chrono::duration<double, std::milli>(now - last).count());
+                    last = now;
+                }
+            } watch;
+            // 2 layers x 32 keys, stereo, 2.5 s each: ~30 MB of PCM (original synthetic sines).
+            fs::create_directories(root / "big");
+            for (const char* layer : {"Soft", "Hard"})
+                for (int k = 48; k < 80; ++k) {
+                    media::sound::Sample sm;
+                    sm.root = uint8_t(k); sm.rate = 48000; sm.channels = 2;
+                    const double f = 440 * std::pow(2.0, (k - 69) / 12.0);
+                    for (int i = 0; i < 120000; ++i) { const auto v = int16_t(8000 * std::sin(2 * M_PI * f * i / 48000)); sm.pcm.push_back(v); sm.pcm.push_back(v); }
+                    sm.looped = true; sm.loopStart = 60000; sm.loopEnd = 120000;
+                    const auto b = media::sound::writeWav(sm);
+                    std::ofstream(root / "big" / (std::string(layer) + "_" + std::to_string(k) + "_" + std::to_string(k) + "_" + std::to_string(k) + ".wav"),
+                                  std::ios::binary).write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+                }
+            rc.model().clear();
+            auto& cv = rc.converter();
+            TEST("Convert Sound: a folder of wrongly named files gets a clear message", !cv.inspectFolder(juce::File(root.string() + "/kst")));
+            TEST("Convert Sound: inspect lists layers and proposes order and splits",
+                 cv.inspectFolder(juce::File(root.string() + "/big")) && cv.orderField().getText() == "Hard,Soft" && cv.splitsField().getText() == "64");
+            cv.nameField().setText("Big Sine");
+            cv.orderField().setText("Soft,Hard");
+            watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0; watch.startTimer(20);
+            cv.buildPreview();
+            TEST("preview decodes off the message thread", cv.busy());
+            for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+            const double previewGap = watch.worstMs;
+            TEST("preview ready: map, checks, exact bytes, recipe", cv.model().built() && cv.previewText().contains("Layer 'Soft'  velocity 0-63") &&
+                 cv.previewText().contains("30720000 bytes uncompressed PCM (exact") && cv.recipeText().contains("POST-IMPORT CONFIGURATION"));
+            {   // key map: a one-key zone shows the zone colour, the root is only a tick (snapshot defect 2026-11-09)
+                app::KeyMapView v;
+                v.setBounds(0, 0, 128 * 8 + 128, 100);
+                v.setInstrument(&cv.model().instrument());
+                const auto img = v.createComponentSnapshot(v.getLocalBounds(), true, 1.0f);
+                const auto px = img.getPixelAt(4 + 120 + 60 * 8 + 4, 4 + 10);   // key C4, upper part of the top row
+                TEST("key map: one-key zone keeps its zone colour (root drawn as a tick)", px.getBlue() > px.getRed());
+            }
+            TEST("checks name the limited key range", cv.previewText().contains("plays only C3-G5"));
+            watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
+            cv.generate(juce::File(root.string() + "/out/Big Sine"));
+            for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
+            const double generateGap = watch.worstMs;
+            TEST("generate: package written, summary with budget", cv.statusText().startsWith("Package written") && cv.previewText().contains("verdict: fits") &&
+                 fs::exists(root / "out/Big Sine/RESOURCES.tsv"));
+            watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
+            for (int i = 0; i < 1500 && rc.loading(); ++i) pump(20);
+            const double loadGap = watch.worstMs;
+            watch.stopTimer();
+            TEST("the new package opens in Resource Graph", rc.tabs().getCurrentTabIndex() == 0 && rc.model().packages().size() == 1 &&
+                 rc.summaryText().contains("unique sample resources  64 (0 mono, 64 stereo)"));
+            std::printf("  info: longest UI stall: preview %.0f ms, generate %.0f ms, load %.0f ms\n", previewGap, generateGap, loadGap);
+            TEST("UI stays responsive (no stall over 500 ms) while a 30 MB Sound is decoded, written and loaded",
+                 previewGap < 500 && generateGap < 500 && loadGap < 500);
+            TEST("generate refuses an existing folder", [&] { cv.generate(juce::File(root.string() + "/out/Big Sine"));
+                 for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
+        }
         fs::remove_all(root);
     }
 

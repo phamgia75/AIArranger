@@ -84,7 +84,7 @@ LiveHostComponent::LiveHostComponent() {
     resourcesBtn_.onClick = [this] {
         if (!resourcesWindow_) {
             struct Window : juce::DocumentWindow {
-                Window() : DocumentWindow("AI Arranger - Resources", juce::Colours::black, DocumentWindow::allButtons) {
+                Window() : DocumentWindow("AI Arranger - Sounds & Resources", juce::Colours::black, DocumentWindow::allButtons) {
                     setUsingNativeTitleBar(true);
                     setContentOwned(new ResourcesComponent(), true);
                     setResizable(true, true);

@@ -117,6 +117,56 @@ inline SoundRecipe recipeFromRender(const RenderSpec& spec, const RenderReport& 
     return r;
 }
 
+// From recorded samples (WAV folder): only the per-layer level can be measured. Release, filter,
+// modulation and effects are whatever the recording holds; nothing about them is in the files.
+inline SoundRecipe recipeFromSamples(const Instrument& in) {
+    SoundRecipe r;
+    r.sound = in.name;
+    auto add = [&](RecipeParam p) { r.params.push_back(std::move(p)); };
+    std::vector<double> med;   // per layer: median over its zones of the first-200 ms RMS (dBFS)
+    for (const Layer& L : in.layers) {
+        std::vector<double> xs;
+        for (const Zone& z : L.zones) {
+            const Sample& s = in.samples[static_cast<size_t>(z.sample)];
+            const size_t n = std::min(s.frames(), static_cast<size_t>(s.rate / 5)) * s.channels;
+            double e = 0;
+            for (size_t i = 0; i < n; ++i) e += double(s.pcm[i]) * s.pcm[i];
+            if (n && e > 0) xs.push_back(20 * std::log10(std::sqrt(e / n) / 32768.0));
+        }
+        std::sort(xs.begin(), xs.end());
+        med.push_back(xs.empty() ? -1e9 : xs[xs.size() / 2]);
+    }
+    if (in.layers.size() >= 2) {
+        const double top = *std::max_element(med.begin(), med.end());
+        std::string v;
+        char b[96];
+        for (size_t l = 0; l < in.layers.size(); ++l) {
+            std::snprintf(b, sizeof b, "%s%s (vel %u-%u): %+.1f dB", v.empty() ? "" : ", ", in.layers[l].name.c_str(),
+                          in.layers[l].velLo, in.layers[l].velHi, med[l] - top);
+            v += b;
+        }
+        add({"Velocity", "Level per layer (relative to the loudest)", v, Provenance::Measured,
+             "RMS of the first 200 ms of each sample, median over the layer's zones",
+             "Sound Edit > Basic > Velocity/Range and Amp > Mod (manual pp.1082, 1126)"});
+    } else {
+        add({"Velocity", "Level per layer", "", Provenance::NotAvailable, "only one layer", ""});
+    }
+    add({"Amp EG", "Attack", "fastest", Provenance::Estimated,
+         "rule: the attack is recorded in each sample, so an added Pa5X attack would slow it",
+         "Sound Edit > Amp > Envelope Generator (manual p.1130)"});
+    add({"Amp EG", "Release time", "", Provenance::NotAvailable,
+         "WAV files carry no release information; a looped sample stops at note-off unless a release is set by ear",
+         "Sound Edit > Amp > Envelope Generator (manual p.1130)"});
+    add({"Filter", "Type / cutoff / resonance / EG", "", Provenance::NotAvailable,
+         "any filtering is baked into the recordings; no Pa5X filter setting is derived", "Sound Edit > Filter (manual pp.1111-1118)"});
+    add({"Pitch", "Pitch EG / modulation", "", Provenance::NotAvailable, "not analysed", "Sound Edit > Pitch (manual pp.1102-1107)"});
+    add({"LFO", "Vibrato / tremolo rate and depth", "", Provenance::NotAvailable,
+         "not analysed; motion inside a loop repeats at the loop length", "Sound Edit > LFO (manual p.1134)"});
+    add({"Effects", "Reverb / chorus / insert effects", "", Provenance::NotAvailable,
+         "whatever was recorded is in the samples; choose Pa5X effects by ear", "Sound Edit > Effects (manual pp.1068, 1139)"});
+    return r;
+}
+
 inline std::string formatRecipe(const SoundRecipe& r) {
     std::string o = "POST-IMPORT CONFIGURATION for \"" + r.sound + "\" (manual steps; AIArranger does not set these on the Pa5X,\n"
                     "and the TX16Wx/SF2 import does not carry them: TX16Wx guide pp.51, 85)\n";
@@ -130,6 +180,11 @@ inline std::string formatRecipe(const SoundRecipe& r) {
         }
     }
     return o;
+}
+
+// REPORT.txt notes for a WAV-folder package (CLI and macOS Convert Sound write the same text).
+inline std::string wavFolderNotes(const std::string& sourceDir, const Instrument& in) {
+    return "Source: WAV folder " + sourceDir + " (root and loop from each WAV's smpl chunk)\n\n" + formatRecipe(recipeFromSamples(in));
 }
 
 } // namespace ai_arranger::media::sound

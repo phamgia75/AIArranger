@@ -9,6 +9,7 @@
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
 #include "media/sound/package_writer.h"
+#include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
 #include <cstdio>
 #include <map>
@@ -59,7 +60,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "%s\n", e.c_str());
             return 1;
         }
-        notes = "Source: WAV folder " + opt["--in"] + " (root and loop from each WAV's smpl chunk)\n";
+        notes = wavFolderNotes(opt["--in"], in);
     } else {
         return usage();
     }
