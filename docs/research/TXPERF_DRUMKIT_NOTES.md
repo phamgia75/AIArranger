@@ -57,3 +57,12 @@ A local element-path/attribute comparison (`structdiff`) found our three file ty
 4. Exclusive Group numbering: whether TX choke 1 becomes Pa5X Exclusive Group 1.
 5. Velocity curve in the `.txperf` slot (`Exponential 2`, copied from the example): a preview setting in TX16Wx, presumably ignored.
 6. Out of scope: round-robins (up to 4 matrix columns, GUIDE p.79) and Ambience kits (second `_A` Program, GUIDE p.23).
+
+## Range conflicts between Korg documents (resolved 2026-11-09)
+
+| Item | Sources | Resolution | Writer limit |
+|---|---|---|---|
+| Velocity layers per key (X3) | 16: MAN p.1090 (Drum Kit editor has "1-8" and "9-16" layer buttons), GUIDE pp.18, 76, 78 (Matrix up to 16 rows). 6: MAN p.1152 (one sentence in the Sampling overview) | 16. The editor page and the dedicated guide are the specific sources; p.1152 is a general overview and the only outlier. DOC, not hardware-verified (consolidated report Q8) | 16 (`kMaxDrumLayers`) |
+| Drum key Transpose / Tune on the Pa5X (X4) | GUIDE p.25 and pp.69-70: "±12 st", "±1200 cts in Pa5X". MAN p.1093 (Drum Kit page): Transpose −64…+63 st, Tune −99…+99 ct | MAN p.1093 is the Drum Kit page itself. The guide's figures equal the *oscillator* ranges (Transpose ±12, Tune ±1200 ct, MAN p.1078), so they are INF a copy of those. How TX16Wx Shift/Tune values map on import is UNK until S6 (Q9) | Transpose ±12, Tune ±50 ct: inside both ranges and inside TX16Wx's own ±50 ct |
+| Exclusive groups | TX16Wx choke 1-8 (GUIDE p.50); Pa5X Exclusive Group None/1…127 (MAN p.1099) | Not a conflict: the import format carries 1-8; groups above 8 can only be set on the Pa5X | 1-8 |
+| MAN p.1210 "Importing TXPERF files" says "When importing a TXPROG file" (X13) | MAN p.1210 | Manual typo; the section is about TXPERF | — |

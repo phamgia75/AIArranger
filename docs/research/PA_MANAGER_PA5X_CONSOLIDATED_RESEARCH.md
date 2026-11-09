@@ -270,16 +270,16 @@ TX16Wx guide (printed pages): 14-18 (Sound/Drum Kit structure, up to 24 multisam
 
 | # | Contradiction | Locations | Resolution |
 |---|---|---|---|
-| X1 | RM says the manual's sample-memory size was "not found"; the manual states 4 GB / 8 GB compressed | RM §7 last bullet (and §6.2 "PA Manager's 4 GiB") vs MAN p.1174, p.1176, p.1936 | DOC wins; RM §7 is stale |
-| X2 | ROAD cites the 4 GB/8 GB fact at MAN "p.1156, p.1207"; those pages do not contain it | ROAD §2 row "User Sample memory" vs MAN p.1174/1176/1936 | page cite error |
-| X3 | Drum layers per key: 16 vs 6 | MAN p.1090 and GUIDE p.18 vs MAN p.1152 | open (Q8) |
-| X4 | Drum Kit Transpose/Tune range on the Pa5X: ±12 st / ±1200 ct vs −64…+63 st / ±99 ct | GUIDE p.25 (followed by TXPERF_DRUMKIT_NOTES and `drumkit.h`) vs MAN p.1093 | open (Q9); writer stays inside both |
-| X5 | ROAD S1 says the model allows "up to 2 velocity layers" and refuses 3; S9 and code allow 1-24 | ROAD §4 S1 row and S1 status vs ROAD S9, `instrument.h` (`kMaxLayers = 24`) | S9 superseded S1; S1 text stale |
-| X6 | AUDIT header says "No file has been loaded … not a completed audit", and the §3 feature inventory lists Sound/Multisample dependencies, Keyboard Sets, Drum Kits as UNKNOWN; §3d-3i observed them | AUDIT status line and §3 inventory vs AUDIT §3d-3i | stale sections |
-| X7 | RM §5 lists KST merge/remap and "used by" views as UNKNOWN; RM §3/§3a and §7 record them as observed | RM §5 vs RM §3a, §7 | stale section |
-| X8 | PARITY vendor matrix says AIArranger has "None" for multisample processing, drum kits, sample memory; later work built them | PARITY matrix rows vs ROAD S1-S12, P2.3 (and PARITY's own observed matrix row "Memory budget") | stale (dated 2026-11-06) |
-| X9 | PARITY open question 5 cites "web specs 768/384" User Sounds/DKs; manual and PA Manager agree on 1 536/768 | PARITY §Open questions 5 vs MAN p.1935, AUDIT §3e | web figure unsupported here |
-| X10 | AUDIT "PreLoad semantics UNKNOWN"; the manual defines Play from Preload Buffer | AUDIT §3h vs MAN p.1159, pp.1176-1177 | Pa5X side DOC; PA Manager mapping INF |
-| X11 | SPA cites multisample key zones at "MAN p.1190"; zones are documented at pp.1183-1188 (p.1190 is deletion) | SPA §1 "Key zones" row | page cite error |
-| X12 | PA Manager offers De-Compress; the Pa5X says compressed samples cannot be decompressed | AUDIT §3a/§3f vs MAN p.1181 | not strictly contradictory (different tools); Q7 |
-| X13 | MAN p.1210 heading "Importing TXPERF files" repeats "When importing a TXPROG file" | MAN p.1210 | manual typo; read as TXPERF |
+| X1 | RM says the manual's sample-memory size was "not found"; the manual states 4 GB / 8 GB compressed | RM §7 last bullet (and §6.2 "PA Manager's 4 GiB") vs MAN p.1174, p.1176, p.1936 | **fixed** in `9f8cd19` |
+| X2 | ROAD cites the 4 GB/8 GB fact at MAN "p.1156, p.1207"; those pages do not contain it | ROAD §2 row "User Sample memory" vs MAN p.1174/1176/1936 | **fixed** in `9f8cd19` |
+| X3 | Drum layers per key: 16 vs 6 | MAN p.1090 and GUIDE p.18 vs MAN p.1152 | **resolved 2026-11-09 (DOC):** 16 — the Drum Kit editor page (1-8 / 9-16 buttons) and the guide are specific; p.1152 is an overview outlier. HW confirmation still Q8 (TXPERF_DRUMKIT_NOTES) |
+| X4 | Drum Kit Transpose/Tune range on the Pa5X: ±12 st / ±1200 ct vs −64…+63 st / ±99 ct | GUIDE p.25 (followed by TXPERF_DRUMKIT_NOTES and `drumkit.h`) vs MAN p.1093 | **resolved 2026-11-09 (DOC + INF):** MAN p.1093 is the Drum Kit range; the guide's figures equal the oscillator ranges (MAN p.1078). Writer ±12 st / ±50 ct is inside both. Import mapping still Q9 |
+| X5 | ROAD S1 says the model allows "up to 2 velocity layers" and refuses 3; S9 and code allow 1-24 | ROAD §4 S1 row and S1 status vs ROAD S9, `instrument.h` (`kMaxLayers = 24`) | **fixed** in `9f8cd19` (ROAD S1 row annotated) |
+| X6 | AUDIT header says "No file has been loaded … not a completed audit", and the §3 feature inventory lists Sound/Multisample dependencies, Keyboard Sets, Drum Kits as UNKNOWN; §3d-3i observed them | AUDIT status line and §3 inventory vs AUDIT §3d-3i | **fixed** 2026-11-09: status line and §3 inventory rows updated, session records unchanged |
+| X7 | RM §5 lists KST merge/remap and "used by" views as UNKNOWN; RM §3/§3a and §7 record them as observed | RM §5 vs RM §3a, §7 | **fixed** 2026-11-09 (RM §5 split into observed later / still unknown) |
+| X8 | PARITY vendor matrix says AIArranger has "None" for multisample processing, drum kits, sample memory; later work built them | PARITY matrix rows vs ROAD S1-S12, P2.3 (and PARITY's own observed matrix row "Memory budget") | **fixed** 2026-11-09 (columns 5-6 updated, dated) |
+| X9 | PARITY open question 5 cites "web specs 768/384" User Sounds/DKs; manual and PA Manager agree on 1 536/768 | PARITY §Open questions 5 vs MAN p.1935, AUDIT §3e | **fixed** in `9f8cd19` |
+| X10 | AUDIT "PreLoad semantics UNKNOWN"; the manual defines Play from Preload Buffer | AUDIT §3h vs MAN p.1159, pp.1176-1177 | **fixed** 2026-11-09: AUDIT §3h annotated (Pa5X side DOC; PA Manager mapping INF) |
+| X11 | SPA cites multisample key zones at "MAN p.1190"; zones are documented at pp.1183-1188 (p.1190 is deletion) | SPA §1 "Key zones" row | **fixed** in `9f8cd19` |
+| X12 | PA Manager offers De-Compress; the Pa5X says compressed samples cannot be decompressed | AUDIT §3a/§3f vs MAN p.1181 | **resolved:** not a contradiction (PC tool vs instrument); AUDIT §3f annotated; data fidelity still Q7 |
+| X13 | MAN p.1210 heading "Importing TXPERF files" repeats "When importing a TXPROG file" | MAN p.1210 | **resolved:** manual typo; recorded in TXPERF_DRUMKIT_NOTES |

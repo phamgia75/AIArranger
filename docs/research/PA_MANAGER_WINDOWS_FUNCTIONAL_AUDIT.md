@@ -1,6 +1,6 @@
 # KORG PA Manager v5.2 on Windows: functional audit
 
-**Status: STARTED (2026-11-06).** The KST Manager file explorer and the Sample Manager main screen have been observed (§3a). **No file has been loaded**, so nothing inside a KST has been seen. This document must not be read as a completed audit.
+**Status: read-only sessions 2026-11-06 to 2026-11-07 (§3a-§3i).** A research copy was loaded in KST Manager and Sample Manager (§3d-§3i): tabs, reports, "where used", duplicates, unused, ReMAP and Copy dialogs were observed, nothing was saved, copied or remapped, and the copy's manifest was unchanged after every session. Still not observed: what an executed copy/remap writes, RE-MAP MODE tile behaviour, how Used Size is computed. Consolidated view: `PA_MANAGER_PA5X_CONSOLIDATED_RESEARCH.md`. *(Status line updated 2026-11-09; the original 2026-11-06 status was "started, no file loaded". Session records below are unchanged.)*
 
 Each statement carries one of these labels:
 
@@ -138,7 +138,7 @@ Differences recorded without explanation:
 **KST view (OBSERVED, screenshot):**
 
 - Header: KST path; tabs STYLE / KBD SET / PAD / SOUND; summary tiles STY / PRF / PAD / PCG; Style bank list (6 banks; FAVORITE01 = 36 items; pages P1-P6); right column: Load KST, Save, Generate Report (STYLE), Copy from another KST, Advanced Settings. None of these were pressed.
-- **Memory INFO** panel, model selector "[4 GB] | PA5X": Used 1 403 084 800 B (1.31 GB), Total 4 294 967 296 B (4.00 GB), Available 2 891 882 496 B (2.69 GB); Sample 14274 / 53130; preLoadBuffer 224 MB / 420 MB. So PA Manager budgets **4 GB** of Pa5X sample memory (PA Manager's figure; the manual value is still not found). The meaning of "Sample 14274 / 53130" (count of sample slots?) is UNKNOWN.
+- **Memory INFO** panel, model selector "[4 GB] | PA5X": Used 1 403 084 800 B (1.31 GB), Total 4 294 967 296 B (4.00 GB), Available 2 891 882 496 B (2.69 GB); Sample 14274 / 53130; preLoadBuffer 224 MB / 420 MB. So PA Manager budgets **4 GB** of Pa5X sample memory (PA Manager's figure; the manual value is still not found). *[2026-11-09: found since: the manual states 4 GB uncompressed / 8 GB compressed, MAN pp.1174, 1176, 1936; it matches.]* The meaning of "Sample 14274 / 53130" (count of sample slots?) is UNKNOWN.
 
 **UIA with the KST view open (OBSERVED):** 2 windows of the PA Manager process ("KORG PA Manager v5.2", "Memory INFO"); 90 elements = 88 Pane + 2 Window; classes `ThunderRT6UserControlDC` 80, `ThunderRT6PictureBoxDC` 6, `ThunderRT6FormDC` 2, `Edit` 2. 61 named. Exposed: every button label, tab and page control, the model selector text, and the **names of the 10 Style tiles on the visible page**. Not exposed: memory figures (drawn in picture boxes), the Edit values. Conclusion: UIA can locate controls by name and read the visible list page; counts and memory need screenshots; no AutomationIds.
 
@@ -203,7 +203,7 @@ Same research copy. Nothing was saved, applied, remapped, copied, compressed, ex
 | **Search Where this MultiSample is used** | Per Sound: name, User bank / position, and the oscillator slot as **OSC High: n / OSC Low: n**. One multisample was used 9 times by 3 Sounds → **Sound → Multisample is OBSERVED and multisamples are shared between Sounds** |
 | Zone editor (Properties) | "MULTISAMPLE Manager": keyboard map of zones; per zone: sample, **From / To key**, **Original Note**, Level (dB), Pitch; Add Zone / Delete Zone / Save Changes / Close. **No velocity range per zone**: velocity layering appears only at Sound level (OSC High / Low). MIDI audition shown "Not Connected". Closed without saving |
 | Drum Sample columns | ID, Name, Category, Stereo; a lower pane for the selected item's samples |
-| Compression | Compress SET / De-Compress SET, a "34%" bar (meaning UNKNOWN: likely the compressed share), Options ▸ {Options ▸, Threads ▸} |
+| Compression | Compress SET / De-Compress SET, a "34%" bar (meaning UNKNOWN: likely the compressed share), Options ▸ {Options ▸, Threads ▸}. *[2026-11-09: the Pa5X cannot decompress (MAN p.1181); PA Manager's De-Compress runs on the PC, so this is not a contradiction. Whether it restores the original data is open, consolidated report Q7.]* |
 | Import formats | Label "aif / wav / ksf / kmp / rex" next to Import (not used) |
 | Memory profiles | 8 MB / 16 MB PA80, 32 MB PA1X/PA300, 64 MB PA800, 96 MB PA600, 128 MB PA2X/3X/700, 192 MB PA900, 256 MB, 480 MB PA1000, 400 MB PA4X, 1.5 GB PA4X OS Next, **4 GB PA5X** (Total Size 4 294 967 296 B). Sample-count limit with PA5X: 53 130; preLoadBuffer 420 MB. PA Manager's figures, not hardware-verified |
 | Memory vs disk | PA Manager "Used Size" 1 403 084 800 B; the copy's PCM folder ≈ 1285 MB and the explorer's ".KST Size 1.26 GB". How PA Manager computes Used Size is UNKNOWN; it is not simply the PCM file total |
@@ -222,7 +222,7 @@ The owner confirmed opening the File Explorer window of §3g; the session was cl
 |---|---|
 | Compress ▸ Options | **✓ Compress All Samples** (current), or "Duration Above > 1 / 2 / 3 / 4 / 5 / 10 Sec": compression can be limited to samples longer than a threshold |
 | Compress ▸ Threads | 1, 2, **✓ 3** (current), 4 Thread(s): PC-side compression worker count |
-| PreLoad | A per-sample checkbox; every visible row unchecked, yet "preLoadBuffer: 224 MB / 420 MB" (PA5X profile; 300 MB in the PA4X profile). What PreLoad marks and how the buffer is filled is **UNKNOWN**. Clicking the column header does not sort |
+| PreLoad | A per-sample checkbox; every visible row unchecked, yet "preLoadBuffer: 224 MB / 420 MB" (PA5X profile; 300 MB in the PA4X profile). What PreLoad marks and how the buffer is filled is **UNKNOWN** in PA Manager. *[2026-11-09: the Pa5X side is DOC: per-sample "Prel" = Play from Preload Buffer, the whole sample in RAM, not compressible, MAN p.1159, pp.1176-1177. That PA Manager's checkbox is the same flag is INF.]* Clicking the column header does not sort |
 | Root note, two levels | Samples 43-47 show Orig Note C4 in the Sample tab, while the zone editor showed Original Note **G3** for the zone using sample 43: a Multisample zone can override a sample's own root note |
 | Sample rates seen | 24 000, 44 100 and 48 000 Hz, all 16-bit, in one KST |
 | Copy Options | Not reachable: the KST explorer is modal until a **source** KST is loaded into the right pane. Loading one was not done (it puts the `<<` copy button one click away); needs the owner's decision |
@@ -247,12 +247,12 @@ Reading (interpretation of labels, not tested by copying): copying a Style bring
 | Area | Status | What is known |
 |---|---|---|
 | Home screen | **OBSERVED** 2026-11-06 (screenshot, not committed; it contained personal data) | Version **5.2**. Entries: Language (English [British]), New KPM Window, **KST Manager (PA5X)**, **SET Manager (PA4X…PA1X)**, **Sample Manager (.KST/.SET)**, **File Viewer (.STY/.PRF/.PAD…)**. Nothing was clicked |
-| KST Manager (Pa5X) | **OBSERVED** (explorer only) | Folder browser with per-KST summary: size, STY/PRF/PAD/PCG/PCM counts (§3a). Editor not seen: nothing loaded |
+| KST Manager (Pa5X) | **OBSERVED** | Folder browser with per-KST summary (§3a); loaded copy: STYLE / KBD SET / PAD / SOUND tabs, reports, Copy from another KST pane (§3d-§3i) |
 | SET Manager (older Pa) | UNKNOWN | Not opened. Out of the Pa5X-first scope except for import paths |
-| Sample Manager | **OBSERVED** (empty) | Sample / Drum Sample / MultiSample tabs, per-sample loop and rate columns, compression, aif/wav/kmp import, memory budget per model (§3a). Nothing loaded |
-| Sound / Multisample / PCM dependencies | UNKNOWN | Sample Manager has a MultiSample tab; no "used by" view seen yet. Needs a loaded copy |
+| Sample Manager | **OBSERVED** (empty on 2026-11-06; loaded copy §3f-§3h) | Sample / Drum Sample / MultiSample tabs, per-sample loop and rate columns, compression, aif/wav/kmp import, memory budget per model (§3a). Nothing loaded |
+| Sound / Multisample / PCM dependencies | **OBSERVED** (§3e-§3f) | "Search Where this Sound/MultiSample is used", DK Report with shared samples, one multisample used 9x by 3 Sounds. *(Was UNKNOWN on 2026-11-06.)* |
 | Style management | UNKNOWN | The File Viewer label lists .STY. Editing ability unknown |
-| Keyboard Sets, Drum Kits | UNKNOWN | Not seen |
+| Keyboard Sets, Drum Kits | **OBSERVED** (§3e) | KBD SET tab; User DK 6 banks x 128, DK Report per key (RAM/ROM/RAM [Comp]). *(Was UNKNOWN on 2026-11-06.)* |
 | Import / export formats | UNKNOWN beyond the home-screen labels (.KST, .SET, .STY, .PRF, .PAD) | |
 
 ## 4. Input/output formats

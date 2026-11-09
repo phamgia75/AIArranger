@@ -38,7 +38,7 @@ struct DrumKey {
     char    family = 0;           // B S H T C L E X, or 0
     std::vector<DrumCell> layers; // 1-16, softest first
     int8_t  panPct = 0;           // -100..100 -> Voice Mixer Pan (GUIDE p.25)
-    int8_t  transpose = 0;        // semitones; Pa5X range +-12 (GUIDE p.25)
+    int8_t  transpose = 0;        // semitones; +-12 (GUIDE p.25), inside the Drum Kit page range -64..+63 (MAN p.1093)
     int8_t  tuneCents = 0;        // TX16Wx range +-50 cents (GUIDE p.25)
 };
 

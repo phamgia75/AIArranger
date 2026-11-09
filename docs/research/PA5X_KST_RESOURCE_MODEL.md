@@ -152,10 +152,12 @@ These are the semantics an independent tool must respect:
   - KST Explorer: per-KST size and type counts without loading;
   - Sample Manager: Sample / Drum Sample / MultiSample tabs, compression and decompression, import of aif / wav / kmp / …;
   - a sample memory budget per model (default "400 MB | PA4X", Total 419430400 bytes).
+- **OBSERVED later (audit §3e-§3i; this list was UNKNOWN on 2026-11-06):**
+  - "used by" views: Search Where this Sound / MultiSample is used, DK Report, Check for Unused Sounds;
+  - remap and copy dialogs: Global Sound ReMAP, RE-MAP MODE toggle, Copy from another KST with Copy Options (options only; nothing executed).
 - **UNKNOWN:**
-  - KST Merge and Remapping workflows (not opened);
-  - "used by" or dependency views;
-  - export formats;
+  - what an executed copy or remap writes (needs separate authorization, even on a copy);
+  - export formats beyond "Export All Samples to .Wav" and Export MultiSample;
   - ~~whether a Pa5X memory budget is offered~~: yes, "[4 GB] | PA5X" (OBSERVED, audit §3d).
 
 ## 6. Proposed independent implementation in AIArranger (macOS / iPadOS)
