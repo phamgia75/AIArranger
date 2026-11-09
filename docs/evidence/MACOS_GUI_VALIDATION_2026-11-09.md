@@ -41,8 +41,9 @@ synthetic content, but screenshots are not committed by rule.
 | Key map: octave labels were overpainted by keys, then unreadable over black keys (snapshot, zoomed) | Labels drawn last, in their own row under the keyboard | Visual (snapshot re-checked) |
 | Preview text built on the message thread (about 270 ms measured) | Checks, mapping table and recipe are built on the worker | Stall measurement in `test_app_smoke` |
 
-**Remaining stall.** About 200 ms in JUCE `TextEditor::setText` for the roughly 70-line mapping table
-in the Debug build. It is within the limit; not optimised.
+**Former stall, fixed.** JUCE `TextEditor::setText` took about 200 ms for the 70-line mapping table
+(632 ms on a CI runner, failing the check). The preview and recipe now use a read-only code view that
+lays out only visible lines; the longest preview stall is about 30 ms.
 
 ## 4. Wording review (user-facing)
 

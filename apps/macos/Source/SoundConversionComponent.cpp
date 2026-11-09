@@ -63,7 +63,6 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
         };
     }
     for (auto* t : {&preview_, &recipe_}) {
-        t->setMultiLine(true); t->setReadOnly(true); t->setScrollbarsShown(true);
         t->setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
         addAndMakeVisible(*t);
     }
@@ -152,10 +151,11 @@ void SoundConversionComponent::showPreview(media::sound::Instrument* in, const s
         status_.setText("Cannot build: " + juce::String(err), juce::dontSendNotification);
         return;
     }
+    if (auto old = model_.snapshot()) std::thread([o = std::move(old)] {}).detach();   // free the previous Sound's audio off the message thread
     model_.adopt(std::move(*in));
     map_.setInstrument(&model_.instrument());
-    preview_.setText(texts[0], false);
-    recipe_.setText(texts[1], false);
+    preview_.setText(texts[0]);
+    recipe_.setText(texts[1]);
     generateBtn_.setEnabled(true);
     status_.setText("Preview ready. Generate writes a new package folder; nothing is sent to the instrument.", juce::dontSendNotification);
 }
@@ -177,7 +177,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
             if (gen != generation_) return;   // the user moved on (new folder, settings or preview): keep their state
             generateBtn_.setEnabled(true);
             if (sum.empty()) { status_.setText("Not written: " + juce::String(err), juce::dontSendNotification); return; }
-            preview_.setText(sum, false);
+            preview_.setText(sum);
             status_.setText("Package written to " + juce::String(out) + ". Opened in Resource Graph.", juce::dontSendNotification);
             if (openInResources_) openInResources_(juce::File(out));
         });

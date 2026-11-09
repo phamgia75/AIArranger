@@ -12,6 +12,21 @@
 namespace ai_arranger::app {
 
 // Keys across, one row per velocity layer: every zone as a box with its root marked.
+// Read-only text that lays out only the visible lines: juce::TextEditor::setText re-lays out all of
+// it on the message thread (about 200 ms for the 5 KB mapping table, 600 ms on CI runners).
+class TextView : public juce::Component {
+public:
+    TextView() { ed_.setReadOnly(true); ed_.setLineNumbersShown(false); addAndMakeVisible(ed_); }
+    void setText(const juce::String& t) { doc_.replaceAllContent(t); ed_.scrollToLine(0); }
+    juce::String getText() const { return doc_.getAllContent(); }
+    void clear() { setText({}); }
+    void setFont(const juce::Font& f) { ed_.setFont(f); }
+    void resized() override { ed_.setBounds(getLocalBounds()); }
+private:
+    juce::CodeDocument doc_;
+    juce::CodeEditorComponent ed_{doc_, nullptr};
+};
+
 class KeyMapView : public juce::Component {
 public:
     void setInstrument(const media::sound::Instrument* in) { in_ = in; repaint(); }
@@ -45,7 +60,8 @@ private:
     std::function<void(const juce::File&)> openInResources_;
     juce::TextButton folderBtn_{"Choose WAV Folder..."}, previewBtn_{"Preview"}, generateBtn_{"Generate Package..."};
     juce::Label folder_, nameLbl_{{}, "Sound name"}, orderLbl_{{}, "Layers, softest first"}, splitsLbl_{{}, "Velocity splits"}, status_, pluginNote_;
-    juce::TextEditor name_, order_, splits_, preview_, recipe_;
+    juce::TextEditor name_, order_, splits_;
+    TextView preview_, recipe_;
     KeyMapView map_;
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
