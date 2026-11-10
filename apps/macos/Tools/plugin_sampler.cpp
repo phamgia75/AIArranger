@@ -4,6 +4,7 @@
 // MidiBuffer. The user is responsible for the plugin licence permitting sampled use.
 //
 //   aiarranger-plugin-sampler list
+//   aiarranger-plugin-sampler programs --plugin NAME
 //   aiarranger-plugin-sampler render --plugin NAME --name "Sound Name" --out DIR
 //        [--program N] [--low 36] [--high 96] [--step 3] [--vel 100 | --vel 40,80,120] [--splits 60,100]
 //        [--hold 2.0] [--release 1.0] [--loop on] [--stereo on]
@@ -11,7 +12,8 @@
 // 2..N (default: halfway). --loop on: loop the held part. --stereo on: keep L/R (default: mono sum).
 // Exit 0 = done, 1 = usage/plugin/package error.
 // Output for programs (the Sample Plugin tab reads it; human text may appear between these lines):
-//   list:    one line per instrument: FORMAT<TAB>NAME<TAB>MANUFACTURER<TAB>IDENTIFIER
+//   list:     one line per instrument: FORMAT<TAB>NAME<TAB>MANUFACTURER<TAB>IDENTIFIER
+//   programs: one line per program the plugin exposes: program<TAB>INDEX<TAB>NAME (none: the plugin has no program list)
 //   render:  stderr "progress<TAB>i<TAB>N" before each note; on success stdout ends with
 //            "layers<TAB>a,b,..." (WAV prefixes, softest first), "splits<TAB>v,..." and "package<TAB>DIR".
 
@@ -49,8 +51,29 @@ int main(int argc, char** argv) {
     }
     std::map<std::string, std::string> a;
     for (int i = 2; i + 1 < argc; i += 2) a[argv[i]] = argv[i + 1];
+    std::unique_ptr<juce::PluginDescription> desc;
+    auto load = [&](double rate, int block) -> std::unique_ptr<juce::AudioPluginInstance> {
+        for (auto* p : instruments(fm))
+            if (p->name.equalsIgnoreCase(juce::String(a["--plugin"])) || p->fileOrIdentifier == juce::String(a["--plugin"])) {
+                desc = std::make_unique<juce::PluginDescription>(*p);
+                break;
+            }
+        if (!desc) { std::fprintf(stderr, "no instrument plugin named '%s' (see: list)\n", a["--plugin"].c_str()); return nullptr; }
+        juce::String err;
+        auto plugin = fm.createPluginInstance(*desc, rate, block, err);
+        if (!plugin) std::fprintf(stderr, "cannot load %s: %s\n", desc->name.toRawUTF8(), err.toRawUTF8());
+        return plugin;
+    };
+    if (cmd == "programs" && a.count("--plugin") && argc == 4) {
+        auto plugin = load(44100, 512);
+        if (!plugin) return 1;
+        if (const int n = plugin->getNumPrograms(); n > 1)   // 0 or 1: no list to choose from
+            for (int i = 0; i < n; ++i) std::printf("program\t%d\t%s\n", i, plugin->getProgramName(i).replace("\t", " ").replace("\n", " ").toRawUTF8());
+        return 0;
+    }
     if (cmd != "render" || !a.count("--plugin") || !a.count("--name") || !a.count("--out") || (argc % 2) != 0) {
         std::fprintf(stderr, "usage: aiarranger-plugin-sampler list\n"
+                             "       aiarranger-plugin-sampler programs --plugin NAME\n"
                              "       aiarranger-plugin-sampler render --plugin NAME --name \"Sound Name\" --out DIR\n"
                              "            [--program N] [--low 36] [--high 96] [--step 3] [--vel 100|40,80,120] [--splits 60,100]\n"
                              "            [--hold 2.0] [--release 1.0] [--loop on] [--stereo on]\n");
@@ -74,23 +97,23 @@ int main(int argc, char** argv) {
     if (!renderTimingValid(hold, release)) { std::fprintf(stderr, "hold + release must be 0-21 s\n"); return 1; }
     if (const auto r = outputFolderRefusal(a["--out"]); !r.empty()) { std::fprintf(stderr, "%s\n", r.c_str()); return 1; }
 
-    std::unique_ptr<juce::PluginDescription> desc;
-    for (auto* p : instruments(fm))
-        if (p->name.equalsIgnoreCase(juce::String(a["--plugin"])) || p->fileOrIdentifier == juce::String(a["--plugin"])) {
-            desc = std::make_unique<juce::PluginDescription>(*p);
-            break;
-        }
-    if (!desc) { std::fprintf(stderr, "no instrument plugin named '%s' (see: list)\n", a["--plugin"].c_str()); return 1; }
-
     const double rate = spec.rate;
     const int block = 512;
-    juce::String err;
-    auto plugin = fm.createPluginInstance(*desc, rate, block, err);
-    if (!plugin) { std::fprintf(stderr, "cannot load %s: %s\n", desc->name.toRawUTF8(), err.toRawUTF8()); return 1; }
+    auto plugin = load(rate, block);
+    if (!plugin) return 1;
     plugin->enableAllBuses();
     plugin->setNonRealtime(true);
     plugin->prepareToPlay(rate, block);
-    if (a.count("--program")) plugin->setCurrentProgram(static_cast<int>(num("--program", 0)));
+    if (a.count("--program")) {
+        const juce::String t(a["--program"]);
+        const int n = plugin->getNumPrograms(), k = t.getIntValue();
+        if (!t.containsOnly("0123456789") || t.isEmpty() || k >= n) {   // an unknown index used to go straight to the plugin
+            std::fprintf(stderr, "program %s does not exist: %s has %d program(s), numbered from 0 (see: programs)\n", t.toRawUTF8(),
+                         desc->name.toRawUTF8(), n);
+            return 1;
+        }
+        plugin->setCurrentProgram(k);
+    }
     const int chans = juce::jmax(plugin->getTotalNumInputChannels(), plugin->getTotalNumOutputChannels());
     const int outs = plugin->getTotalNumOutputChannels();
     if (outs < 1) { std::fprintf(stderr, "%s has no audio output\n", desc->name.toRawUTF8()); return 1; }

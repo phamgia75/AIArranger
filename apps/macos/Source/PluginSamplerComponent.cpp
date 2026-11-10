@@ -111,7 +111,16 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
     status_.setText(exe_.existsAsFile() ? "Press Find Instruments." : "The sampler tool (aiarranger-plugin-sampler) was not found.",
                     juce::dontSendNotification);
     plugin_.setTextWhenNothingSelected("(no instrument chosen)");
-    plugin_.onChange = [this] { settingsChanged(); };
+    plugin_.onChange = [this] { findPrograms(); settingsChanged(); };
+    // The Program field stays the single source of truth (checked, passed to the sampler); the list only fills it.
+    fields_[1]->setVisible(false);
+    program_.setTextWhenNothingSelected("(the plugin's current sound)");
+    program_.setTitle("Program");
+    program_.onChange = [this] {
+        const int k = program_.getSelectedId();   // 1 = current sound, 2.. = program k-2
+        fields_[1]->setText(k >= 2 ? juce::String(k - 2) : juce::String(), juce::sendNotificationSync);
+    };
+    addAndMakeVisible(program_);
     for (auto* t : {&loop_, &stereo_}) { t->onClick = [this] { settingsChanged(); }; addAndMakeVisible(*t); }
     for (auto* t : {&preview_, &report_}) {
         t->setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
@@ -140,6 +149,7 @@ PluginSamplerComponent::~PluginSamplerComponent() {
     *alive_ = false;
     proc_.reset();   // kills a running render and stops its reader (bounded); queued callbacks are then dropped
     listProc_.reset();
+    progProc_.reset();
     if (copier_.joinable()) copier_.join();   // let Generate finish copying out of staging before it is deleted
     discardStaging();
 }
@@ -154,6 +164,24 @@ juce::StringArray PluginSamplerComponent::instrumentNames() const {
     juce::StringArray a;
     for (const auto& p : plugins_) a.add(juce::String(p.name));
     return a;
+}
+
+void PluginSamplerComponent::findPrograms() {
+    progProc_.reset();   // a previous instrument's scan: killed, its callbacks dropped
+    program_.clear(juce::dontSendNotification);
+    fields_[1]->setText({}, juce::dontSendNotification);
+    program_.setEnabled(false);
+    const auto id = settings().pluginId;
+    if (id.empty()) return;
+    auto lines = std::make_shared<std::string>();
+    progProc_ = std::make_unique<SamplerProcess>();
+    progProc_->start(exe_, {"programs", "--plugin", id}, [lines](const std::string& l) { *lines += l + "\n"; }, [this, lines](int, bool) {
+        const auto names = ui::parseProgramList(*lines);
+        program_.addItem("(the plugin's current sound)", 1);
+        for (size_t i = 0; i < names.size(); ++i) program_.addItem(juce::String(i) + ": " + juce::String(names[i]), int(i) + 2);
+        program_.setSelectedId(1, juce::sendNotificationSync);
+        program_.setEnabled(names.size() > 1);
+    });
 }
 
 bool PluginSamplerComponent::selectInstrument(const juce::String& name) {
@@ -194,6 +222,7 @@ void PluginSamplerComponent::findInstruments() {
     findBtn_.setEnabled(false);
     plugins_.clear();   // a new scan replaces the list; nothing stale stays selectable
     plugin_.clear(juce::dontSendNotification);
+    findPrograms();     // no instrument: clears the program list and the Program field
     settingsChanged();
     status_.setText("Looking for AU/VST3 instruments...", juce::dontSendNotification);
     auto lines = std::make_shared<std::string>();
@@ -352,7 +381,7 @@ void PluginSamplerComponent::resized() {
     auto row = r.removeFromTop(28);
     findBtn_.setBounds(row.removeFromLeft(150)); row.removeFromLeft(8);
     plugin_.setBounds(row.removeFromLeft(420)); row.removeFromLeft(12);
-    labels_[1]->setBounds(row.removeFromLeft(64)); fields_[1]->setBounds(row.removeFromLeft(60));
+    labels_[1]->setBounds(row.removeFromLeft(64)); program_.setBounds(row.removeFromLeft(260));
     r.removeFromTop(6);
     auto put = [&](juce::Rectangle<int>& line, int k, int lw, int fw) {
         labels_[k]->setBounds(line.removeFromLeft(lw)); fields_[k]->setBounds(line.removeFromLeft(fw)); line.removeFromLeft(10);

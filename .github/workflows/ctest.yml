@@ -44,7 +44,7 @@ jobs:
       - name: App UI smoke test
         env:
           AIARR_REQUIRE_REAL_PLUGIN: '1'   # the real DLSMusicDevice render must run, not SKIP
-        run: ctest --test-dir build-app -R '^test_app_smoke$' --output-on-failure --timeout 300
+        run: ctest --test-dir build-app -R '^test_app_smoke$' -V --timeout 300   # -V: SKIP and timing lines stay visible
 
   ipados-simulator:
     # P2.6: the core cross-built for the iOS simulator, the Swift host tests run

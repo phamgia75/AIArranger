@@ -34,6 +34,20 @@ inline std::vector<PluginEntry> parsePluginList(const std::string& out) {
     return v;
 }
 
+// `aiarranger-plugin-sampler programs` output: program<TAB>INDEX<TAB>NAME per line, in index order 0..N-1;
+// anything else is ignored. A list that is not exactly 0..N-1 is dropped: the index is what gets rendered.
+inline std::vector<std::string> parseProgramList(const std::string& out) {
+    std::vector<std::string> v;
+    std::istringstream is(out);
+    for (std::string line; std::getline(is, line);) {
+        if (line.rfind("program\t", 0) != 0) continue;
+        const size_t tab = line.find('\t', 8);
+        if (tab == std::string::npos || line.compare(8, tab - 8, std::to_string(v.size())) != 0) return {};
+        v.push_back(line.substr(tab + 1));
+    }
+    return v;
+}
+
 // The form, as typed. Numbers stay text until checked.
 struct SamplerSettings {
     std::string pluginId, name, program;

@@ -23,6 +23,14 @@ int main() {
     TEST("plugin list: tab lines parsed, banner and short lines ignored",
          list.size() == 1 && list[0].name == "DLSMusicDevice" && list[0].manufacturer == "Apple" && list[0].id == "AudioUnit:Synths/aumu,dls ,appl");
 
+    const auto progs = parseProgramList("JUCE v8.0.4\nprogram\t0\tSoft Pad\nnoise\nprogram\t1\tLead\twith tab\n");
+    TEST("program list: index order, other lines ignored, name keeps later tabs",
+         progs.size() == 2 && progs[0] == "Soft Pad" && progs[1] == "Lead\twith tab");
+    TEST("program list out of order or with a gap is dropped (the index is what gets rendered)",
+         parseProgramList("program\t1\tA\n").empty() && parseProgramList("program\t0\tA\nprogram\t2\tB\n").empty() &&
+         parseProgramList("program\t0A\tA\n").empty());
+    TEST("no program lines: empty list", parseProgramList("JUCE v8.0.4\n").empty());
+
     SamplerSettings s;
     s.pluginId = "id"; s.name = "Piano"; s.low = "48"; s.high = "72"; s.step = "12"; s.velocities = "60, 110"; s.hold = "1.0"; s.release = "0.5";
     SamplerPlan p;

@@ -299,6 +299,7 @@ int main() {
             TEST("not ready until an instrument is chosen", ps.estimateText().startsWith("Not ready: choose an instrument"));
             auto waitIdle = [&](int ms) { for (int i = 0; i < ms / 20 && ps.busy(); ++i) pump(20); };
             const std::string lister = "if [ \"$1\" = list ]; then printf 'AudioUnit\\tFake Synth\\tTest\\tfake-id\\n'; exit 0; fi\n"
+                                       "if [ \"$1\" = programs ]; then printf 'program\\t0\\tSoft Pad\\nprogram\\t1\\tBright Lead\\n'; exit 0; fi\n"
                                        "while [ $# -gt 0 ]; do [ \"$1\" = --out ] && OUT=\"$2\"; shift; done\n";
             auto fake = [&](const char* name, const std::string& body) {
                 const auto p = root / name;
@@ -325,6 +326,21 @@ int main() {
                 waitIdle(10000);
                 return staging;
             };
+            {   // program names from the plugin fill the Program field with the index the sampler renders
+                form(ps, fake("progs.sh", "exit 1\n"), "Fake Synth", "Fake");
+                auto& pc = ps.programChoice();
+                for (int i = 0; i < 250 && pc.getNumItems() == 0; ++i) pump(20);
+                const bool listed = pc.getNumItems() == 3 && pc.getItemText(2) == "1: Bright Lead" && pc.isEnabled() && ps.field("Program").getText().isEmpty();
+                pc.setSelectedId(3, juce::sendNotificationSync);
+                const bool picked = ps.field("Program").getText() == "1";
+                pc.setSelectedId(1, juce::sendNotificationSync);
+                TEST("program list: names shown, choosing one sets its index, 'current sound' clears it",
+                     listed && picked && ps.field("Program").getText().isEmpty());
+                pc.setSelectedId(3, juce::sendNotificationSync);
+                ps.findInstruments();   // a new scan clears the instrument; the old program must not stay selected
+                for (int i = 0; i < 250 && ps.instrumentNames().isEmpty(); ++i) pump(20);
+                TEST("program choice is cleared when the instrument changes", ps.field("Program").getText().isEmpty());
+            }
             juce::File st = run(fake("fail.sh", "echo 'JUCE v8.0.4'\necho 'cannot load Fake Synth: the plugin refused to open' >&2\nexit 1\n"));
             TEST("plugin load failure: the tool's message is shown, nothing kept",
                  ps.statusText().contains("Render failed: cannot load Fake Synth: the plugin refused to open") && !st.exists() && !ps.rendered());
@@ -450,6 +466,15 @@ int main() {
                     auto count = [](const fs::path& d) { size_t n = 0; for (auto& e : fs::recursive_directory_iterator(d)) n += e.is_regular_file(); return n; };
                     TEST("closing the window during Generate leaves a complete package",
                          fs::exists(root / "plug-out/DLS Piano 2/RESOURCES.tsv") && count(root / "plug-out/DLS Piano 2") == count(root / "plug-out/DLS Piano"));
+                }
+                {   // a program the plugin does not have is refused instead of being passed to it unchecked
+                    juce::ChildProcess cp;
+                    const auto out = root / "noprog";
+                    cp.start(juce::StringArray{real.getFullPathName(), "render", "--plugin", "DLSMusicDevice", "--name", "X", "--out",
+                                               juce::String(out.string()), "--low", "60", "--high", "60", "--program", "9999"});
+                    const auto text = cp.readAllProcessOutput();
+                    TEST("sampler refuses a program number the plugin does not have",
+                         cp.getExitCode() == 1 && text.contains("program 9999 does not exist") && !fs::exists(out));
                 }
                 ps.field("Hold (s)").setText("1.5");
                 pump(50);

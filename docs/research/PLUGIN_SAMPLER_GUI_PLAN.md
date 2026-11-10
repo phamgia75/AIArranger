@@ -10,6 +10,10 @@ Two things go beyond the plan:
 - **Staging.** The render lands in a private staging folder and is previewed with the WAV engine before
   Generate copies it.
 - **Memory.** The memory estimate and cap were measured (`estimateRender`).
+- **Program list (2026-11-10).** `aiarranger-plugin-sampler programs --plugin ID` lists the plugin's programs
+  by name. The tab shows them in a Program list, and the chosen index fills the Program field that is checked
+  and passed to the sampler. A program number the plugin does not have is refused; it used to reach
+  `setCurrentProgram` unchecked, so on a plugin without programs it did nothing, silently.
 
 ## Decision: run the existing sampler as a child process
 

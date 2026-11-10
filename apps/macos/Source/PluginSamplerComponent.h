@@ -65,6 +65,7 @@ public:
     juce::StringArray instrumentNames() const;
     juce::TextEditor& field(const juce::String& label);   // by label text, for tests
     juce::ToggleButton& loopToggle() { return loop_; }
+    juce::ComboBox& programChoice() { return program_; }   // fills the (hidden) Program field: "" or the index
     juce::String estimateText() const { return estimate_.getText(); }
     juce::String statusText() const { return status_.getText(); }
     juce::String previewText() const { return preview_.getText(); }
@@ -83,7 +84,7 @@ private:
     juce::File exe_ = locateSampler();
     std::vector<ui::PluginEntry> plugins_;
     juce::TextButton findBtn_{"Find Instruments"}, renderBtn_{"Render Samples"}, cancelBtn_{"Cancel"}, generateBtn_{"Generate Package..."};
-    juce::ComboBox plugin_;
+    juce::ComboBox plugin_, program_;
     juce::ToggleButton loop_{"Loop the held part"}, stereo_{"Stereo"};
     juce::OwnedArray<juce::Label> labels_;
     juce::OwnedArray<juce::TextEditor> fields_;
@@ -94,7 +95,8 @@ private:
     TextView preview_, report_;
     std::shared_ptr<juce::FileChooser> chooser_;
     std::thread copier_;   // Generate: joined before staging is deleted, so a package is never left half-copied
-    std::unique_ptr<SamplerProcess> proc_, listProc_;   // destroyed first in ~PluginSamplerComponent: their callbacks capture this
+    void findPrograms();
+    std::unique_ptr<SamplerProcess> proc_, listProc_, progProc_;   // destroyed first in ~PluginSamplerComponent: their callbacks capture this
     ui::SamplerProgress got_;
     ui::SamplerSettings renderedWith_;
     juce::File staging_;
