@@ -1,6 +1,8 @@
 #ifndef AI_ARRANGER_MEDIA_OUTPUT_GUARD_H
 #define AI_ARRANGER_MEDIA_OUTPUT_GUARD_H
 
+#include <cstdio>
+#include <fcntl.h>
 #include <filesystem>
 #include <string>
 
@@ -16,7 +18,20 @@ inline std::string outputFolderRefusal(const std::filesystem::path& out) {
     if (ec || real.string().rfind("/Volumes/", 0) == 0)
         return "refusing to write onto a mounted volume (" + out.string() + "): write to a local folder, then copy it to the USB stick by hand";
     if (std::filesystem::exists(out, ec) || ec) return "refusing: " + out.string() + " already exists";
+    if (std::filesystem::exists(out.string() + ".INCOMPLETE", ec) || ec)
+        return "refusing: " + out.string() + ".INCOMPLETE already exists (an earlier write that did not finish; delete it when you no longer need it)";
     return "";
+}
+
+// A new folder is written under NAME.INCOMPLETE and published under NAME by one rename that never replaces anything,
+// so a failed or interrupted write never leaves a half-written folder under its real name.
+inline std::filesystem::path incompletePath(const std::filesystem::path& out) { return out.string() + ".INCOMPLETE"; }
+inline bool publishNewFolder(const std::filesystem::path& work, const std::filesystem::path& out) {
+#ifdef __APPLE__
+    return ::renameatx_np(AT_FDCWD, work.c_str(), AT_FDCWD, out.c_str(), RENAME_EXCL) == 0;
+#else
+    return ::renameat2(AT_FDCWD, work.c_str(), AT_FDCWD, out.c_str(), RENAME_NOREPLACE) == 0;
+#endif
 }
 
 }  // namespace ai_arranger::media

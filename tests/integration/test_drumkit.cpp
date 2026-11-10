@@ -126,6 +126,7 @@ int main() {
          rep.find("H_AIA HH Open") != std::string::npos);
     TEST("REPORT states the 4/8 GB budget and irreversible compression", rep.find("8 GB") != std::string::npos && rep.find("cannot be undone") != std::string::npos);
     TEST("package refuses an existing folder", writeDrumPackage(kit, root / "pkg", "", &err).empty() && err.find("exists") != std::string::npos);
+    TEST("drum package published by rename: no INCOMPLETE folder left", fs::exists(root / "pkg/REPORT.txt") && !fs::exists(root / "pkg.INCOMPLETE"));
     fs::remove_all(root);
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

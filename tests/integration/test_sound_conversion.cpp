@@ -247,11 +247,24 @@ int main() {
         std::string err2;
         TEST("package refuses an existing folder and writes nothing", writePackage(org, dir, "", &err2).empty() &&
              err2.find("already exists") != std::string::npos);
+        TEST("package published by rename: no INCOMPLETE folder left", !fs::exists(dir.string() + ".INCOMPLETE"));
+        const fs::path d2 = dir.string() + " 2";
+        fs::create_directories(d2.string() + ".INCOMPLETE/wav");
+        TEST("an unfinished earlier write (NAME.INCOMPLETE) is refused and left alone",
+             writePackage(org, d2, "", &err2).empty() && err2.find("did not finish") != std::string::npos && !fs::exists(d2) &&
+             fs::is_empty(d2.string() + ".INCOMPLETE/wav") && outputFolderRefusal(d2).find(".INCOMPLETE already exists") != std::string::npos);
+        const fs::path pub = dir.string() + "-pub";
+        fs::create_directories(pub / "work/x");
+        fs::create_directories(pub / "taken");
+        TEST("publishing never replaces a folder that appeared", !publishNewFolder(pub / "work", pub / "taken") &&
+             fs::exists(pub / "work/x") && fs::is_empty(pub / "taken") && publishNewFolder(pub / "work", pub / "new") &&
+             fs::exists(pub / "new/x"));
         Instrument bad = org; bad.layers.clear();
         TEST("package refuses an invalid instrument before creating anything",
              writePackage(bad, dir / "x", "", &err2).empty() && !fs::exists(dir / "x"));
         std::error_code ec;
         fs::remove_all(dir, ec);   // our own unique temp folder
+        fs::remove_all(pub, ec); fs::remove_all(d2, ec); fs::remove_all(d2.string() + ".INCOMPLETE", ec);
     }
 
     // ── WAV ──

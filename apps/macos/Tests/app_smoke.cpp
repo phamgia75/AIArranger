@@ -540,6 +540,17 @@ int main() {
                 TEST("generate copies the package and opens it in Resource Graph",
                      fs::exists(root / "plug-out/DLS Piano/RESOURCES.tsv") && fs::exists(root / "plug-out/DLS Piano/REPORT.txt") &&
                      rc.tabs().getCurrentTabIndex() == 0 && ps.statusText().startsWith("Package written"));
+                {   // a copy that fails part way is never left under the package's name (only NAME.INCOMPLETE)
+                    fs::path wav;
+                    for (const auto& e : fs::directory_iterator(ps.stagingFolder().getChildFile("pkg/wav").getFullPathName().toStdString())) { wav = e.path(); break; }
+                    fs::permissions(wav, fs::perms::none);
+                    ps.generate(juce::File((root / "plug-out" / "DLS Piano bad").string()));
+                    waitIdle(10000);
+                    fs::permissions(wav, fs::perms::owner_read | fs::perms::owner_write);
+                    TEST("a failed Generate copy stays NAME.INCOMPLETE, never a package under its name",
+                         !wav.empty() && ps.statusText().contains("copy failed") && ps.statusText().contains("INCOMPLETE") &&
+                         !fs::exists(root / "plug-out/DLS Piano bad") && fs::is_directory(root / "plug-out/DLS Piano bad.INCOMPLETE"));
+                }
                 {   // closing the window while Generate copies: the copy completes before staging is deleted
                     auto c = std::make_unique<app::PluginSamplerComponent>(nullptr);
                     form(*c, real, "DLSMusicDevice", "DLS Piano");

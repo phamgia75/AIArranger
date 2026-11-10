@@ -35,12 +35,15 @@ inline std::string wavPrefix(const std::string& layerName) {
 
 using media::outputFolderRefusal;   // media/output_guard.h: shared by every writer and the KST backup
 
-inline std::string writePackage(const Instrument& in, const std::filesystem::path& out, const std::string& notes,
+// Written under DEST.INCOMPLETE and renamed to DEST only once every file is written (media/output_guard.h).
+inline std::string writePackage(const Instrument& in, const std::filesystem::path& dest, const std::string& notes,
                                 std::string* error) {
     namespace fs = std::filesystem;
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
-    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists");
+    const fs::path out = incompletePath(dest);
+    if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
+    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
     if (const auto e = validate(in); !e.empty()) return fail("invalid: " + e.front());
     const auto sf2 = writeSf2(in);
     const auto tx = writeTxProg(in);
@@ -50,7 +53,8 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     std::string ge;
     if (!addInstrument(rg, in, pkg, &ge)) return fail("resource graph: " + ge);
     const std::string manifest = writeManifest(rg, pkg, graph::Kind::Sound);
-    if (!fs::create_directories(out / "wav", ec)) return fail("cannot create " + out.string());
+    fs::create_directories(dest.parent_path(), ec);   // as before: missing parents are made
+    if (!fs::create_directory(out, ec) || !fs::create_directory(out / "wav", ec)) return fail("cannot create " + out.string());
 
     bool ok = true;
     auto save = [&](const fs::path& p, const std::vector<uint8_t>& b) {
@@ -103,18 +107,21 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
            "     in Sound Edit assign each to its own oscillator with the velocity zone above and save to an\n"
            "     empty User Sound.\n";
     save(out / "REPORT.txt", std::vector<uint8_t>(rep.begin(), rep.end()));
-    if (!ok) return fail("write failed under " + out.string());
+    if (!ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
+    if (!publishNewFolder(out, dest)) return fail("refusing: " + dest.string() + " appeared while writing; the package stays at " + out.string());
     return rep;
 }
 
 // Drum Kit package: tx/<name>/ (.txperf, .txprog, .txmatrix, samples) + REPORT.txt. No SF2: an SF2
 // import yields multisamples, not a Drum Kit (manual p.1206). Never writes into an existing folder.
-inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::path& out, const std::string& notes,
+inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::path& dest, const std::string& notes,
                                     std::string* error) {
     namespace fs = std::filesystem;
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
-    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists");
+    const fs::path out = incompletePath(dest);   // renamed to dest once complete, as writePackage
+    if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
+    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
     if (const auto e = validate(kit); !e.empty()) return fail("invalid: " + e.front());
     const auto tx = writeTxPerf(kit);
     if (tx.empty()) return fail("the writer refused the kit (two samples or keys map to the same file name)");
@@ -123,7 +130,8 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     std::string ge;
     if (!addDrumKit(rg, kit, pkg, &ge)) return fail("resource graph: " + ge);
     const std::string manifest = writeManifest(rg, pkg, graph::Kind::DrumKit);
-    if (!fs::create_directories(out, ec)) return fail("cannot create " + out.string());
+    fs::create_directories(dest.parent_path(), ec);
+    if (!fs::create_directory(out, ec)) return fail("cannot create " + out.string());
     bool ok = true;
     for (const auto& f : tx) {
         const fs::path p = out / "tx" / f.path;
@@ -173,8 +181,10 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
            "  tx/.../<name>.txperf, choose an empty User Drum Kit location (manual p.1210).\n";
     std::ofstream r(out / "REPORT.txt", std::ios::binary);
     r << rep;
+    r.close();
     ok &= static_cast<bool>(r);
-    if (!ok) return fail("write failed under " + out.string());
+    if (!ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
+    if (!publishNewFolder(out, dest)) return fail("refusing: " + dest.string() + " appeared while writing; the package stays at " + out.string());
     return rep;
 }
 

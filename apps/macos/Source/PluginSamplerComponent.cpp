@@ -360,8 +360,11 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
         const fs::path out = fs::weakly_canonical(chosen, ec);
         if (ec) err = "cannot resolve " + chosen.string() + ": " + ec.message();
         else if (const auto r = media::sound::outputFolderRefusal(out); !r.empty()) err = r;
-        else if (!fs::create_directory(out, ec) || ec) err = "cannot create " + out.string() + (ec ? ": " + ec.message() : " (it exists)");
-        else if (fs::copy(from, out, fs::copy_options::recursive, ec); ec) err = "copy failed: " + ec.message() + " (" + out.string() + " is incomplete)";
+        else if (const auto work = media::incompletePath(out); !fs::create_directory(work, ec) || ec)
+            err = "cannot create " + work.string() + (ec ? ": " + ec.message() : " (it exists)");
+        else if (fs::copy(from, work, fs::copy_options::recursive, ec); ec)
+            err = "copy failed: " + ec.message() + ". The unfinished copy stays at " + work.string() + " (not a package; delete it)";
+        else if (!media::publishNewFolder(work, out)) err = out.string() + " appeared while writing; the package stays at " + work.string();
         else sum = SoundConversionModel::writtenSummary(out);
         juce::MessageManager::callAsync([this, alive, gen, out, sum, err] {
             if (alive.expired()) return;
