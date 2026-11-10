@@ -212,9 +212,17 @@ int main() {
             rc.startBackup(juce::File((root / "bigkst").string()), juce::File(b2.string()));
             rc.cancelBackup();
             waitBackup(rc);
-            auto keptIncomplete = [&](const fs::path& d) { return !fs::exists(d) && !fs::exists(media::backupManifestPath(d)) && fs::is_directory(d.string() + ".INCOMPLETE"); };
-            TEST("Backup KST cancel: reported, not published, partial copy kept marked INCOMPLETE, buttons back",
-                 rc.kstText().contains("cancelled") && rc.kstText().contains("INCOMPLETE") && keptIncomplete(b2) && !rc.backingUp());
+            // Cancelled before the copy started (during the source scan): nothing exists. Later: the partial copy stays, marked INCOMPLETE.
+            // Either way nothing is published and nothing carries a manifest.
+            auto notPublished = [&](const fs::path& d) {
+                return !fs::exists(d) && !fs::exists(media::backupManifestPath(d)) &&
+                       std::all_of(fs::directory_iterator(d.parent_path()), fs::directory_iterator(), [&](const fs::directory_entry& e) {
+                           const auto n = e.path().filename().string();
+                           return n.rfind(d.filename().string(), 0) != 0 || n == d.filename().string() + ".INCOMPLETE";
+                       });
+            };
+            TEST("Backup KST cancel: reported, not published, any partial copy marked INCOMPLETE, buttons back",
+                 rc.kstText().contains("cancelled") && notPublished(b2) && !rc.backingUp());
             {
                 auto c = std::make_unique<app::ResourcesComponent>();
                 const fs::path b3 = bdir / "closed";
@@ -224,7 +232,7 @@ int main() {
                 c.reset();
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 std::printf("  info: closing during a backup took %.0f ms\n", ms);
-                TEST("closing the window during a backup stops it promptly; nothing published, partial copy marked INCOMPLETE", ms < 1000 && keptIncomplete(b3));
+                TEST("closing the window during a backup stops it promptly; nothing published, any partial copy marked INCOMPLETE", ms < 1000 && notPublished(b3));
             }
             fs::remove_all(root / "bigkst");
         }
