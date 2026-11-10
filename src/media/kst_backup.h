@@ -29,7 +29,15 @@
 
 namespace ai_arranger::media {
 
-struct BackupProgress { uintmax_t bytesDone = 0, bytesTotal = 0; size_t filesDone = 0, filesTotal = 0; };
+// bytesDone counts the copy pass only. workDone/workTotal cover the whole job: the copy, its read-back, the source
+// re-hash and the final check each read every byte once, and each file also weighs kFileWork per pass, so the bar
+// stays honest for many small files. workDone == workTotal exactly when a backup succeeds.
+struct BackupProgress {
+    enum class Phase { Scan, Copy, CheckSource, CheckCopy } phase = Phase::Scan;
+    uintmax_t bytesDone = 0, bytesTotal = 0, workDone = 0, workTotal = 0;
+    size_t filesDone = 0, filesTotal = 0;
+    static constexpr uintmax_t kFileWork = 4096;
+};
 // Called often from the copying thread; return false to cancel.
 using BackupCallback = std::function<bool(const BackupProgress&)>;
 
@@ -187,6 +195,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     for (const auto& [rel, e] : L.files) if (badName(rel)) { r.message = "refusing: a file name holds a line break, which the manifest cannot record"; return r; }
     pr.filesTotal = L.files.size();
     for (const auto& [rel, e] : L.files) pr.bytesTotal += e.size;
+    pr.workTotal = 4 * (pr.bytesTotal + pr.filesTotal * BackupProgress::kFileWork);
     const auto space = fs::space(realParent, ec);
     const uintmax_t needed = pr.bytesTotal + pr.bytesTotal / 100 + (16u << 20);   // copy + 1% + 16 MB headroom for the manifest and the file system
     if (ec || space.available < needed) {
@@ -211,8 +220,9 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         if (at.v < 0 || ::mkdirat(at.v, leaf.c_str(), 0755) != 0) return fail("Backup failed: cannot create the folder " + d);
         if (!wanted()) return cancel();
     }
-    const std::function<bool(size_t)> tick = [&](size_t n) { pr.bytesDone += n; return wanted(); };
-    const std::function<bool(size_t)> stillWanted = [&](size_t) { return wanted(); };   // read-back and re-hash: cancel works there too
+    const std::function<bool(size_t)> tick = [&](size_t n) { pr.bytesDone += n; pr.workDone += n; return wanted(); };
+    const std::function<bool(size_t)> stillWanted = [&](size_t n) { pr.workDone += n; return wanted(); };   // read-back, re-hash, final check
+    pr.phase = BackupProgress::Phase::Copy;
     std::map<std::string, std::string> hashes;
     bool cancelled = false;
     for (const auto& [rel, e] : L.files) {
@@ -228,6 +238,20 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
             return fail("Backup failed: cannot read " + rel);
         }
         std::string hs = detail::sha256Stream(in, out, tick, &cancelled, &err, rel);
+        // Like shutil.copy2 (tools/kst_copy.py): keep the permission bits and access/modification times. Set after the data
+        // and flushed first, so closing the file cannot change them. Not kept: owner, ACLs, extended attributes, folder times.
+        struct stat sst {};
+        if (!hs.empty() && (std::fflush(out) != 0 || ::fstat(::fileno(in), &sst) != 0 || ::fchmod(::fileno(out), sst.st_mode & 0777) != 0)) {
+            hs.clear(); err = "cannot set the permissions of the copy of " + rel;
+        }
+        if (!hs.empty()) {
+#ifdef __APPLE__
+            const struct timespec times[2] = {sst.st_atimespec, sst.st_mtimespec};
+#else
+            const struct timespec times[2] = {sst.st_atim, sst.st_mtim};
+#endif
+            if (::futimens(::fileno(out), times) != 0) { hs.clear(); err = "cannot set the times of the copy of " + rel; }
+        }
         std::fclose(in);
         if (std::fclose(out) != 0 && !hs.empty()) { hs.clear(); err = "cannot write the copy of " + rel; }
         if (cancelled) return cancel();
@@ -240,9 +264,11 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         if (hd != hs) return fail("Backup failed: the copy of " + rel + " does not match its source");
         hashes[rel] = hs;
         ++pr.filesDone;
+        pr.workDone += 2 * BackupProgress::kFileWork;   // copy + read-back
         if (!wanted()) return cancel();
     }
     if (afterCopy) afterCopy();
+    pr.phase = BackupProgress::Phase::CheckSource;
     detail::Listing again;   // the source must be exactly as it was: same folders, same files, same bytes
     if (!detail::listFiles(src, again, err, wanted)) return err == "cancelled" ? cancel() : fail("Backup failed: cannot re-read the source: " + err);
     auto a = L.dirs, b = again.dirs;
@@ -253,6 +279,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         if (!same) break;
         const auto it = hashes.find(rel);
         same = it != hashes.end() && detail::sha256File(e.abs, stillWanted, &cancelled, &err) == it->second;
+        pr.workDone += BackupProgress::kFileWork;
     }
     if (cancelled) return cancel();
     struct stat srcNow {};
@@ -269,6 +296,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     wrote &= std::fclose(m) == 0;
     if (!wrote) return fail("Backup failed: cannot write " + (parent / manTmpName).string());
     // Final check of the finished copy, through the pinned work folder: exactly the expected folders and files, same bytes.
+    pr.phase = BackupProgress::Phase::CheckCopy;
     detail::Listing pub;
     const std::string workNow = detail::fdPath(workFd.v);   // where the pinned folder is now, even if a parent was swapped
     if (workNow.empty() || !detail::listFiles(workNow, pub, err, wanted))
@@ -283,9 +311,11 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         std::FILE* f = at.v < 0 ? nullptr : detail::openRegular(at.v, leaf.c_str());
         exact = f && pub.files.count(rel) && detail::sha256Stream(f, nullptr, stillWanted, &cancelled, &err, rel) == h;
         if (f) std::fclose(f);
+        pr.workDone += BackupProgress::kFileWork;
     }
     if (cancelled) return cancel();
     if (!exact) return fail("Backup failed: the copy changed after it was verified");
+    if (!wanted()) return cancel();   // reports 100% of the work; a cancel here still keeps it unpublished
     // Publish exactly the folder this run filled and checked: same device and inode before and after the rename.
     struct stat mine {}, there {};
     const auto isMine = [&](const std::string& n) {

@@ -261,10 +261,17 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
     backupThread_ = std::thread([this, alive, src = source.getFullPathName().toStdString(), dst = newFolder.getFullPathName().toStdString()] {
         auto last = std::chrono::steady_clock::now();
         const auto r = media::backupKst(src, dst, [&](const media::BackupProgress& p) {
-            if (const auto now = std::chrono::steady_clock::now(); now - last > std::chrono::milliseconds(100) || p.bytesDone == p.bytesTotal) {
+            if (const auto now = std::chrono::steady_clock::now(); now - last > std::chrono::milliseconds(100) || p.workDone == p.workTotal) {
                 last = now;
-                const double f = p.bytesTotal ? double(p.bytesDone) / double(p.bytesTotal) : 1.0;
-                juce::MessageManager::callAsync([this, alive, f] { if (!alive.expired()) backupProgress_ = f; });
+                const double f = p.workTotal ? double(p.workDone) / double(p.workTotal) : 0.0;
+                using Ph = media::BackupProgress::Phase;
+                const char* what = p.phase == Ph::Scan ? "Reading the source" : p.phase == Ph::Copy ? "Copying and reading back"
+                                 : p.phase == Ph::CheckSource ? "Re-checking the source" : "Final check of the copy";
+                juce::MessageManager::callAsync([this, alive, f, what] {
+                    if (alive.expired()) return;
+                    backupProgress_ = f;
+                    backupBar_.setTextToDisplay(juce::String(what) + " " + juce::String(int(f * 100)) + "%");
+                });
             }
             return !cancelBackup_;
         });
@@ -272,6 +279,7 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
             if (alive.expired()) return;
             backingUp_ = false;
             backupProgress_ = r.ok ? 1.0 : 0.0;
+            backupBar_.setTextToDisplay(r.ok ? "Verified" : r.cancelled ? "Cancelled" : "Not completed");
             backupBtn_.setEnabled(true);
             cancelBackupBtn_.setEnabled(false);
             kstOut_.setText(juce::String(r.message) + (r.ok ? "" : "\nNo backup was made: nothing at the destination is a complete copy."), false);
