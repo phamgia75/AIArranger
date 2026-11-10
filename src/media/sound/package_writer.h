@@ -8,7 +8,9 @@
 //   REPORT.txt        zones, loops, memory use, import steps, caller notes
 // Never writes into an existing folder. Returns the report, or "" with *error set.
 
+#include "media/kst_inventory.h"
 #include "media/output_guard.h"
+#include "media/sha256.h"
 #include "media/sound/package_graph.h"
 #include "media/sound/sf2_writer.h"
 #include "media/sound/txprog_writer.h"
@@ -35,6 +37,54 @@ inline std::string wavPrefix(const std::string& layerName) {
 
 using media::outputFolderRefusal;   // media/output_guard.h: shared by every writer and the KST backup
 
+namespace pkgio {
+// The files of one package being written. Each is closed and checked as it is written, and its length and SHA-256
+// are kept, so the finished folder can be checked against them before it is published.
+struct FileSet {
+    std::filesystem::path root;
+    std::map<std::string, std::pair<uint64_t, std::string>> want;   // relative path -> (bytes, SHA-256)
+    bool ok = true;
+    void save(const std::string& rel, const void* data, size_t n) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path p = root / rel;
+        ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
+        std::ofstream f(p, std::ios::binary);
+        f.write(static_cast<const char*>(data), static_cast<std::streamsize>(n));
+        f.close();   // the last buffered bytes are written here; a failure must stop publication
+        ok &= static_cast<bool>(f);
+        Sha256 h;
+        h.update(data, n);
+        want[rel] = {n, h.hex()};
+    }
+    void save(const std::string& rel, const std::vector<uint8_t>& b) { save(rel, b.data(), b.size()); }
+    void save(const std::string& rel, const std::string& s) { save(rel, s.data(), s.size()); }
+    // "" when the folder holds exactly these files, each with its length and SHA-256, and the package loads back
+    // with the reader every other tool uses (loadPackage: WAVs against RESOURCES.tsv, TX references). Read-only.
+    std::string check() const {
+        detail::Listing L;
+        std::string err;
+        if (!detail::listFiles(root, L, err)) return "cannot list it: " + err;
+        if (!L.skipped.empty()) return "unexpected link or special file " + L.skipped.front();
+        for (const auto& [rel, e] : L.files) if (!want.count(rel)) return "unexpected file " + rel;
+        for (const auto& [rel, w] : want) {
+            const auto it = L.files.find(rel);
+            if (it == L.files.end()) return rel + " is missing";
+            if (it->second.size != w.first) return rel + " has " + std::to_string(it->second.size) + " bytes, " + std::to_string(w.first) + " written";
+            std::ifstream f(it->second.abs, std::ios::binary);
+            Sha256 h;
+            char buf[65536];
+            while (f.read(buf, sizeof buf) || f.gcount() > 0) { h.update(buf, static_cast<size_t>(f.gcount())); if (!f) break; }
+            if (!f.eof() || h.hex() != w.second) return rel + " does not read back as written";
+        }
+        graph::Graph g;
+        std::string pkg;
+        if (!loadPackage(root, g, pkg, &err)) return "it does not load back: " + err;
+        return "";
+    }
+};
+}  // namespace pkgio
+
 // Written under DEST.INCOMPLETE and renamed to DEST only once every file is written (media/output_guard.h).
 inline std::string writePackage(const Instrument& in, const std::filesystem::path& destGiven, const std::string& notes,
                                 std::string* error) {
@@ -56,21 +106,14 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     fs::create_directories(dest.parent_path(), ec);   // as before: missing parents are made
     if (!fs::create_directory(out, ec) || !fs::create_directory(out / "wav", ec)) return fail("cannot create " + out.string());
 
-    bool ok = true;
-    auto save = [&](const fs::path& p, const std::vector<uint8_t>& b) {
-        ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
-        std::ofstream f(p, std::ios::binary);
-        f.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
-        f.close();   // the last buffered bytes are written here; a failure must stop publication
-        ok &= static_cast<bool>(f);
-    };
+    pkgio::FileSet files{out};
     auto under = [](std::string s) { for (char& c : s) if (c == ' ') c = '_'; return s; };
     uint64_t h = 1469598103934665603ull;   // FNV-1a fingerprint for the report, not a security hash
     for (uint8_t c : sf2) { h ^= c; h *= 1099511628211ull; }
 
     const std::string stem = under(txw::fileSafe(in.name));
-    save(out / (stem + ".sf2"), sf2);
-    for (const auto& f : tx) save(out / "tx" / f.path, f.bytes);
+    files.save(stem + ".sf2", sf2);
+    for (const auto& f : tx) files.save("tx/" + f.path, f.bytes);
 
     std::string rep = "AIArranger Sound package (SOFTWARE evidence only until imported on a Pa5X)\n\n";
     char line[1024];   // the header line with a 20-char name and paths is ~330 chars
@@ -92,12 +135,12 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
                           s.frames(), s.rate, s.channels, s.looped ? (std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd)).c_str() : "one-shot");
             rep += line;
             std::snprintf(line, sizeof line, "%s_%03u_%03u_%03u.wav", wavPrefix(L.name).c_str(), z.root, z.lo, z.hi);
-            save(out / "wav" / line, writeWav(s));
+            files.save(std::string("wav/") + line, writeWav(s));
         }
         rep += "\n";
     }
     if (!notes.empty()) rep += notes + "\n";
-    save(out / "RESOURCES.tsv", std::vector<uint8_t>(manifest.begin(), manifest.end()));
+    files.save("RESOURCES.tsv", manifest);
     rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
            "  Budget several packages together: aiarranger-resources budget DIR...\n\n";
     rep += kMemoryNote;
@@ -107,8 +150,10 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
            "  B) Same page, format SoundFont (SF2), Complete Bank (p.1209): one multisample per layer; then\n"
            "     in Sound Edit assign each to its own oscillator with the velocity zone above and save to an\n"
            "     empty User Sound.\n";
-    save(out / "REPORT.txt", std::vector<uint8_t>(rep.begin(), rep.end()));
-    if (!ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
+    files.save("REPORT.txt", rep);
+    if (!files.ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
+    if (const auto why = files.check(); !why.empty())
+        return fail("the written package does not check (" + why + "); the unfinished package stays at " + out.string() + " (not a package; delete it)");
     if (!publishNewFolder(out, dest)) return fail("refusing: " + dest.string() + " appeared while writing; the package stays at " + out.string());
     return rep;
 }
@@ -133,15 +178,8 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     const std::string manifest = writeManifest(rg, pkg, graph::Kind::DrumKit);
     fs::create_directories(dest.parent_path(), ec);
     if (!fs::create_directory(out, ec)) return fail("cannot create " + out.string());
-    bool ok = true;
-    for (const auto& f : tx) {
-        const fs::path p = out / "tx" / f.path;
-        ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
-        std::ofstream o(p, std::ios::binary);
-        o.write(reinterpret_cast<const char*>(f.bytes.data()), static_cast<std::streamsize>(f.bytes.size()));
-        o.close();
-        ok &= static_cast<bool>(o);
-    }
+    pkgio::FileSet files{out};
+    for (const auto& f : tx) files.save("tx/" + f.path, f.bytes);
     uint64_t bytes = 0;
     size_t stereo = 0;
     for (const auto& s : kit.samples) { bytes += s.pcm.size() * 2ull; stereo += s.channels == 2; }
@@ -170,23 +208,17 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
            "  group; kit effects. Ambience layers and round-robins are not produced by AIArranger (GUIDE pp.21-23).\n"
            "  Velocity switch points can be refined in Sound Edit > Drum Kit > Drum Sample Levels (GUIDE p.83).\n\n";
     if (!notes.empty()) rep += notes + "\n";
-    {
-        std::ofstream mf(out / "RESOURCES.tsv", std::ios::binary);
-        mf << manifest;
-        mf.close();
-        ok &= static_cast<bool>(mf);
-    }
+    files.save("RESOURCES.tsv", manifest);
     rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
            "  Budget several packages together: aiarranger-resources budget DIR...\n\n";
     rep += kMemoryNote;
     rep += "Pa5X import (owner, requires approval):\n"
            "  Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX DrumKit (TXPERF), select\n"
            "  tx/.../<name>.txperf, choose an empty User Drum Kit location (manual p.1210).\n";
-    std::ofstream r(out / "REPORT.txt", std::ios::binary);
-    r << rep;
-    r.close();
-    ok &= static_cast<bool>(r);
-    if (!ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
+    files.save("REPORT.txt", rep);
+    if (!files.ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
+    if (const auto why = files.check(); !why.empty())
+        return fail("the written package does not check (" + why + "); the unfinished package stays at " + out.string() + " (not a package; delete it)");
     if (!publishNewFolder(out, dest)) return fail("refusing: " + dest.string() + " appeared while writing; the package stays at " + out.string());
     return rep;
 }

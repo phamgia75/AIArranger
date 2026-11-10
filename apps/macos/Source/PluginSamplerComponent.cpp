@@ -1,3 +1,4 @@
+#include "media/kst_diff.h"
 #include "PluginSamplerComponent.h"
 #include <cstdlib>
 #include <fstream>
@@ -358,14 +359,23 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
         // Write to the resolved path and check it again here, so a symlink retargeted since the click cannot redirect the copy.
         // shortcut: a parent folder swapped between this check and create_directory still races; needs openat()-anchored writes to close.
         const fs::path out = fs::weakly_canonical(chosen, ec);
-        if (ec) err = "cannot resolve " + chosen.string() + ": " + ec.message();
-        else if (const auto r = media::sound::outputFolderRefusal(out); !r.empty()) err = r;
-        else if (const auto work = media::incompletePath(out); !fs::create_directory(work, ec) || ec)
-            err = "cannot create " + work.string() + (ec ? ": " + ec.message() : " (it exists)");
-        else if (fs::copy(from, work, fs::copy_options::recursive, ec); ec)
-            err = "copy failed: " + ec.message() + ". The unfinished copy stays at " + work.string() + " (not a package; delete it)";
-        else if (!media::publishNewFolder(work, out)) err = out.string() + " appeared while writing; the package stays at " + work.string();
-        else sum = SoundConversionModel::writtenSummary(out);
+        const auto copyOut = [&]() -> std::string {   // "" = published at `out`
+            if (ec) return "cannot resolve " + chosen.string() + ": " + ec.message();
+            if (const auto r = media::sound::outputFolderRefusal(out); !r.empty()) return r;
+            const auto work = media::incompletePath(out);
+            if (!fs::create_directory(work, ec) || ec) return "cannot create " + work.string() + (ec ? ": " + ec.message() : " (it exists)");
+            const std::string stays = ". The unfinished copy stays at " + work.string() + " (not a package; delete it)";
+            if (fs::copy(from, work, fs::copy_options::recursive, ec); ec) return "copy failed: " + ec.message() + stays;
+            // Before publishing: the same files and bytes as the rendered package, and it loads back with the shared reader.
+            if (const auto d = media::diff(from, work); !d.same()) return "the copy does not match the rendered package (" + (d.ok ? std::string("files differ") : d.error) + ")" + stays;
+            media::graph::Graph g;
+            std::string pkg, e;
+            if (!media::sound::loadPackage(work, g, pkg, &e)) return "the copy does not load back (" + e + ")" + stays;
+            if (!media::publishNewFolder(work, out)) return out.string() + " appeared while writing; the package stays at " + work.string();
+            return "";
+        };
+        err = copyOut();
+        if (err.empty()) sum = SoundConversionModel::writtenSummary(out);
         juce::MessageManager::callAsync([this, alive, gen, out, sum, err] {
             if (alive.expired()) return;
             --jobs_;

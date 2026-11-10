@@ -7,6 +7,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "../Source/LiveHostComponent.h"
 #include "../Source/ResourcesComponent.h"
+#include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
 #include "media/sound/package_writer.h"
@@ -534,8 +535,13 @@ int main() {
                 fs::create_directories(root / "plug-out");
                 ps.generate(juce::File((root / "plug-out").string()));
                 TEST("generate refuses an existing folder", ps.statusText().contains("already exists"));
+                const fs::path stagedPkg = ps.stagingFolder().getChildFile("pkg").getFullPathName().toStdString();
+                fs::copy(stagedPkg, root / "staged-before", fs::copy_options::recursive);
                 ps.generate(juce::File((root / "plug-out" / "DLS Piano").string()));
                 waitIdle(10000);
+                TEST("Generate leaves the rendered package (its source) byte-identical, and the copy equals it",
+                     ai_arranger::media::diff(root / "staged-before", stagedPkg).same() &&
+                     ai_arranger::media::diff(stagedPkg, root / "plug-out/DLS Piano").same());
                 for (int i = 0; i < 200 && rc.loading(); ++i) pump(20);
                 TEST("generate copies the package and opens it in Resource Graph",
                      fs::exists(root / "plug-out/DLS Piano/RESOURCES.tsv") && fs::exists(root / "plug-out/DLS Piano/REPORT.txt") &&

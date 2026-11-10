@@ -2,6 +2,7 @@
 // (recipeFromSamples): inspect, order/splits, mapping preview, checks, generate. Original synthetic
 // WAVs only; SOFTWARE evidence.
 
+#include "media/kst_diff.h"
 #include "media/sound/wav_writer.h"
 #include "ui/sound/sound_conversion_model.h"
 #include <cmath>
@@ -120,13 +121,17 @@ int main() {
     m.invalidate();
     TEST("invalidate: a changed setting means nothing is built", !m.built());
     TEST("rebuild", m.build("Test Piano", "Soft, Hard", " 70", &err));
+    fs::copy(root / "src", root / "src-before", fs::copy_options::recursive);
+    const auto srcTime = fs::last_write_time(root / "src");
     const std::string out = SoundConversionModel::generate(m.instrument(), root / "src", root / "out", &err);
     TEST("generate: package written, reloads, budget and recipe in the summary",
          contains(out, "Package written") && contains(out, "0 unresolved") && contains(out, "verdict: fits") &&
          fs::exists(root / "out/Test_Piano.sf2") && fs::exists(root / "out/RESOURCES.tsv") && fs::exists(root / "out/REPORT.txt"));
     TEST("REPORT.txt carries the Sound Recipe", [&] { std::ifstream f(root / "out/REPORT.txt"); std::string s((std::istreambuf_iterator<char>(f)), {}); return contains(s, "POST-IMPORT CONFIGURATION"); }());
     TEST("generate never overwrites", SoundConversionModel::generate(m.instrument(), root / "src", root / "out", &err).empty() && contains(err, "already exists"));
-    TEST("source folder unchanged (4 files)", std::distance(fs::directory_iterator(root / "src"), fs::directory_iterator{}) == 4);
+    TEST("source folder unchanged: same 4 files, same bytes, folder not modified",
+         std::distance(fs::directory_iterator(root / "src"), fs::directory_iterator{}) == 4 && ai_arranger::media::diff(root / "src-before", root / "src").same() &&
+         fs::last_write_time(root / "src") == srcTime);
     TEST("note names", SoundConversionModel::key(60) == "C4" && SoundConversionModel::key(0) == "C-1" && SoundConversionModel::key(127) == "G9");
 
     fs::remove_all(root);

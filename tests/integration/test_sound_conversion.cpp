@@ -286,6 +286,48 @@ int main() {
             fs::remove_all(d4.string() + ".INCOMPLETE", ec0);
         }
         fs::remove_all(d3, ec0);
+        {   // the pre-publication check: exact files, lengths and SHA-256, and the package must load back
+            const fs::path d6 = dir.string() + " 6";
+            pkgio::FileSet fsx{d6};
+            fsx.save("a.txt", std::string("alpha"));
+            fsx.save("sub/b.bin", std::string(3000, 'b'));
+            TEST("check: files as written but no RESOURCES.tsv -> does not load back", fsx.ok && fsx.check().find("does not load back") != std::string::npos);
+            std::ofstream(d6 / "a.txt") << "alphA";
+            TEST("check: same length, other bytes -> caught", fsx.check() == "a.txt does not read back as written");
+            std::ofstream(d6 / "a.txt") << "alph";
+            TEST("check: other length -> caught", fsx.check() == "a.txt has 4 bytes, 5 written");
+            std::ofstream(d6 / "a.txt") << "alpha";
+            std::ofstream(d6 / "extra.txt") << "x";
+            TEST("check: a file nobody wrote -> caught", fsx.check() == "unexpected file extra.txt");
+            fs::remove(d6 / "extra.txt");
+            fs::remove(d6 / "sub/b.bin");
+            TEST("check: a missing file -> caught", fsx.check() == "sub/b.bin is missing");
+            fs::remove_all(d6, ec0);
+        }
+        {   // a failure that shows only when the file is closed (the last buffered bytes): never published
+            Instrument tiny; tiny.name = "Tiny";
+            Sample s; s.name = "Tiny C4"; s.pcm.assign(64, 1000);
+            tiny.samples.push_back(s);
+            Layer l; l.name = "Tiny"; Zone z; z.sample = 0; l.zones.push_back(z); tiny.layers.push_back(l);
+            const fs::path d7 = dir.string() + " 7", d8 = dir.string() + " 8";
+            struct rlimit old {};
+            ::getrlimit(RLIMIT_FSIZE, &old);
+            const auto prev = std::signal(SIGXFSZ, SIG_IGN);
+            struct rlimit lim = old;
+            lim.rlim_cur = 1800;   // every file of this package is smaller except the .txprog (about 2 KB), which fits in the stream buffer
+            ::setrlimit(RLIMIT_FSIZE, &lim);
+            pkgio::FileSet one{d8};
+            one.save("big.txt", std::string(2000, 'x'));
+            const std::string r7 = writePackage(tiny, d7, "", &err2);
+            ::setrlimit(RLIMIT_FSIZE, &old);
+            std::signal(SIGXFSZ, prev);
+            TEST("a write that fails only at close is reported (stream closed before it is checked)", !one.ok);
+            TEST("...and a package whose .txprog fails at close is not published, only NAME.INCOMPLETE",
+                 r7.empty() && err2.find("write failed") != std::string::npos && !fs::exists(d7) && fs::is_directory(d7.string() + ".INCOMPLETE"));
+            TEST("the same tiny package writes and checks without the limit", !writePackage(tiny, d8.string() + "-ok", "", &err2).empty() &&
+                 fs::exists(d8.string() + "-ok/REPORT.txt"));
+            for (const auto& p : {d7.string() + ".INCOMPLETE", d8.string(), d8.string() + "-ok"}) fs::remove_all(p, ec0);
+        }
         Instrument bad = org; bad.layers.clear();
         TEST("package refuses an invalid instrument before creating anything",
              writePackage(bad, dir / "x", "", &err2).empty() && !fs::exists(dir / "x"));
