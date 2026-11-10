@@ -42,6 +42,8 @@ jobs:
       - name: Build app + smoke test
         run: cmake --build build-app -j4 --target aiarranger-macos aiarranger-app-smoke aiarranger-plugin-sampler
       - name: App UI smoke test
+        env:
+          AIARR_REQUIRE_REAL_PLUGIN: '1'   # the real DLSMusicDevice render must run, not SKIP
         run: ctest --test-dir build-app -R '^test_app_smoke$' --output-on-failure --timeout 300
 
   ipados-simulator:

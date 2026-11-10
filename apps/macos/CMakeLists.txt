@@ -51,6 +51,7 @@ target_link_libraries(aiarranger-app-smoke PRIVATE
     platform-apple importer-sff1
     juce::juce_gui_extra juce::juce_audio_basics juce::juce_audio_devices)
 add_test(NAME test_app_smoke COMMAND aiarranger-app-smoke)
+set_tests_properties(test_app_smoke PROPERTIES ENVIRONMENT "AIARR_PLUGIN_SAMPLER=$<TARGET_FILE:aiarranger-plugin-sampler>")
 set_tests_properties(test_app_smoke PROPERTIES ENVIRONMENT "AIARR_MIDI_HW_TX=0" RUN_SERIAL TRUE)
 
 # ── Sound conversion S7: offline AU/VST3 instrument sampler (no audio device, no MIDI port) ──

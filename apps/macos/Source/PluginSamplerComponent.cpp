@@ -83,7 +83,7 @@ juce::File PluginSamplerComponent::locateSampler() {
     // shortcut: development builds find the tool in the CMake build tree; bundle it into the app for distribution.
     int depth = 0;
     for (auto d = exe.getParentDirectory(); depth++ < 8 && d.getParentDirectory() != d; d = d.getParentDirectory())
-        for (const char* cfg : {"Debug", "Release", "RelWithDebInfo", "MinSizeRel"})
+        for (const char* cfg : {"", "Debug", "Release", "RelWithDebInfo", "MinSizeRel"})   // "": single-config build without CMAKE_BUILD_TYPE
             if (const auto f = d.getChildFile("aiarranger-plugin-sampler_artefacts").getChildFile(cfg).getChildFile("aiarranger-plugin-sampler");
                 f.existsAsFile())
                 return f;

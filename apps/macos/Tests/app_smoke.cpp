@@ -358,6 +358,7 @@ int main() {
                 c.reset();
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 pump(100);
+                std::printf("  info: close mid-render took %.0f ms (component teardown included)\n", ms);
                 TEST("closing the window mid-render kills the tool quickly and removes staging", wasRunning && !pidAlive() && ms < 2000 && !cst.exists());
             }
 
@@ -403,6 +404,9 @@ int main() {
             const auto real = app::PluginSamplerComponent::locateSampler();
             if (!real.existsAsFile() || !form(ps, real, "DLSMusicDevice", "DLS Piano")) {
                 std::printf("  SKIP: real plugin render (%s)\n", real.existsAsFile() ? "DLSMusicDevice not installed" : "sampler tool not built");
+                // CI sets AIARR_REQUIRE_REAL_PLUGIN=1: there a skipped real render is a failure, not silent partial coverage.
+                if (const char* req = std::getenv("AIARR_REQUIRE_REAL_PLUGIN"); req && *req == '1')
+                    TEST("real plugin render ran (required by AIARR_REQUIRE_REAL_PLUGIN)", false);
             } else {
                 struct Watch : juce::Timer {
                     std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
