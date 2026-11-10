@@ -75,7 +75,7 @@ int main() {
     TEST("backup is byte-identical to the source, empty folders kept", diff(src, dst).same() && fs::is_directory(dst / "PAD/empty"));
     TEST("source untouched (paths, sizes, times, bytes)", snapshot(src) == before);
     TEST("manifest beside the backup, not inside it; no INCOMPLETE left",
-         fs::is_regular_file(r.manifest) && r.manifest == backupManifestPath(dst) && !fs::exists(dst / "MY.SET backup.manifest.sha256") &&
+         fs::is_regular_file(r.manifest) && fs::equivalent(r.manifest, backupManifestPath(dst)) && !fs::exists(dst / "MY.SET backup.manifest.sha256") &&
          !fs::exists(dst.string() + ".INCOMPLETE") && !fs::exists(r.manifest.string() + ".INCOMPLETE"));
     {
         std::ifstream m(r.manifest);
@@ -145,8 +145,10 @@ int main() {
          !manRace.ok && std::string(std::istreambuf_iterator<char>(mk), {}) == "someone else's");
     const fs::path d5 = root / "backups/raced-dir";
     const auto dirRace = backupKst(src, d5, {}, [&] { put(d5 / "THEIRS.TXT", "theirs"); });
-    TEST("a destination folder that appears during the backup is never replaced",
-         !dirRace.ok && fs::exists(d5 / "THEIRS.TXT") && !fs::exists(d5 / "STYLE") && fs::is_directory(d5.string() + ".INCOMPLETE"));
+    TEST("a destination folder that appears during the backup is never replaced; our manifest is withdrawn, the copy stays INCOMPLETE",
+         !dirRace.ok && fs::exists(d5 / "THEIRS.TXT") && !fs::exists(d5 / "STYLE") && fs::is_directory(d5.string() + ".INCOMPLETE") &&
+         !fs::exists(backupManifestPath(d5)) && fs::exists(backupManifestPath(d5).string() + ".INCOMPLETE"));
+    TEST("...and the manifest race leaves the copy marked INCOMPLETE too", fs::is_directory(d4.string() + ".INCOMPLETE") && !fs::exists(d4));
     // The destination's parent is pinned: swapping it for a symlink mid-backup cannot redirect the writes.
     const fs::path pinned = root / "pinned", elsewhere = root / "elsewhere";
     fs::create_directories(pinned);
@@ -154,6 +156,11 @@ int main() {
     const auto swap = backupKst(src, pinned / "b", {}, [&] { fs::rename(pinned, root / "pinned.moved"); fs::create_directory_symlink(elsewhere, pinned); });
     TEST("a parent folder swapped for a symlink mid-backup: writes stay in the folder that was checked",
          swap.ok && fs::is_empty(elsewhere) && diff(src, root / "pinned.moved/b").same() && fs::exists(root / "pinned.moved/b.manifest.sha256"));
+    TEST("...and success names where the backup really is, not the swapped path",
+         swap.folder == fs::canonical(root / "pinned.moved/b") && swap.manifest == fs::canonical(root / "pinned.moved") / "b.manifest.sha256" &&
+         swap.message.find("NOT at") != std::string::npos);
+    TEST("a normal backup reports the chosen folder with no relocation note",
+         r.folder == fs::canonical(dst) && r.message.find("NOT at") == std::string::npos);
     // Cancel while the source is still being listed: nothing is created at all.
     const auto early = backupKst(src, root / "backups/early", [](const BackupProgress&) { return false; });
     TEST("cancel during the source scan: nothing created", !early.ok && early.cancelled && !fs::exists(root / "backups/early.INCOMPLETE") &&
@@ -179,6 +186,43 @@ int main() {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         TEST("a source file swapped for a FIFO is refused promptly, not waited on", swappedIn && !fr.ok && ms < 5000 &&
                                                                                      fr.message.find("B.STY") != std::string::npos);
+    }
+    // A copy swapped for a FIFO before its read-back cannot hang the backup.
+    {
+        bool swappedIn = false;
+        const fs::path d7 = root / "backups/fifo-copy";
+        ::alarm(30);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto fc = backupKst(src, d7, [&](const BackupProgress& p) {
+            if (!swappedIn && p.bytesDone >= (1u << 20)) {   // inside PCM/RAM01.PCM: its copy is still open for writing
+                swappedIn = true;
+                const fs::path copy = d7.string() + ".INCOMPLETE/PCM/RAM01.PCM";
+                fs::remove(copy);
+                ::mkfifo(copy.c_str(), 0600);
+            }
+            return true;
+        });
+        ::alarm(0);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        TEST("a copy swapped for a FIFO before its read-back is refused promptly", swappedIn && !fc.ok && ms < 5000 &&
+                                                                                    fc.message.find("RAM01.PCM") != std::string::npos);
+    }
+    // The source folder replaced by a look-alike (same names, other bytes) is never backed up as "verified".
+    {
+        const fs::path s2 = root / "SRC2.SET";
+        put(s2 / "A.STY", "original");
+        const auto look = backupKst(s2, root / "backups/lookalike", {}, [&] {
+            fs::rename(s2, root / "SRC2.moved");
+            put(s2 / "A.STY", "impostor");
+        });
+        TEST("a source folder replaced during the backup fails it", !look.ok &&
+                                                                     !fs::exists(root / "backups/lookalike"));
+        const auto same = backupKst(root / "SRC2.moved", root / "backups/lookalike2", {}, [&] {
+            fs::rename(root / "SRC2.moved", root / "SRC2.moved2");
+            fs::copy(root / "SRC2.moved2", root / "SRC2.moved", fs::copy_options::recursive);
+        });
+        TEST("even an identical copy put in the source's place fails it (the backup is of the folder that was chosen)",
+             !same.ok && same.message.find("was replaced by another folder") != std::string::npos);
     }
     // Names the manifest cannot hold are refused up front.
     const fs::path nl = root / "NL.SET";

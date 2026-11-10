@@ -163,8 +163,9 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         r.message = "refusing to write onto a mounted volume (" + dst.string() + "): write to a local folder, then copy it to the USB stick by hand";
         return r;
     }
+    Fd srcFd(::open(src.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));   // pinned: a source folder swapped later is detected
     struct stat srcSt {};
-    if (::stat(src.c_str(), &srcSt) != 0) { r.message = "cannot read " + src.string(); return r; }
+    if (srcFd.v < 0 || ::fstat(srcFd.v, &srcSt) != 0) { r.message = "cannot read " + src.string(); return r; }
     if (detail::isSameOrBelow(parentFd.v, srcSt)) { r.message = "refusing: the backup would be inside the folder being backed up"; return r; }
     for (const auto& n : {name, workName, manName, manTmpName}) {
         struct stat st {};
@@ -231,9 +232,8 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         if (std::fclose(out) != 0 && !hs.empty()) { hs.clear(); err = "cannot write the copy of " + rel; }
         if (cancelled) return cancel();
         if (hs.empty()) return fail("Backup failed: " + err);
-        const int rfd = ::openat(at.v, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);   // read back what was written
-        std::FILE* back = rfd < 0 ? nullptr : ::fdopen(rfd, "rb");
-        if (!back) { if (rfd >= 0) ::close(rfd); return fail("Backup failed: cannot read back the copy of " + rel); }
+        std::FILE* back = detail::openRegular(at.v, leaf.c_str());   // read back what was written (a FIFO swapped in cannot block)
+        if (!back) return fail("Backup failed: cannot read back the copy of " + rel + " (missing, or no longer a regular file)");
         const std::string hd = detail::sha256Stream(back, nullptr, stillWanted, &cancelled, &err, rel);
         std::fclose(back);
         if (cancelled) return cancel();
@@ -255,6 +255,9 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         same = it != hashes.end() && detail::sha256File(e.abs, stillWanted, &cancelled, &err) == it->second;
     }
     if (cancelled) return cancel();
+    struct stat srcNow {};
+    if (same && (::stat(src.c_str(), &srcNow) != 0 || srcNow.st_dev != srcSt.st_dev || srcNow.st_ino != srcSt.st_ino))
+        return fail("Backup failed: the source folder " + src.string() + " was replaced by another folder during the backup");
     if (!same) return fail("Backup failed: the source changed during the backup");
     if (!wanted()) return cancel();   // last chance, also for a backup of folders only
 
@@ -290,21 +293,31 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
                mine.st_ino == there.st_ino;
     };
     if (!isMine(workName)) return fail("Backup failed: " + work.string() + " was replaced by another folder during the backup");
-    if (!detail::renameNewAt(parentFd.v, workName, name)) return fail("refusing: " + dst.string() + " appeared during the backup");
+    // Manifest first, folder last: until the folder rename, the copy is still named INCOMPLETE (also after a crash), and a
+    // manifest without its folder verifies as nothing. If the folder cannot be published, the manifest is renamed back.
+    if (!detail::renameNewAt(parentFd.v, manTmpName, manName)) return fail("refusing: " + man.string() + " appeared during the backup");
+    const auto unpublish = [&](const std::string& why) {
+        const bool back = detail::renameNewAt(parentFd.v, manName, manTmpName);
+        return fail(why + (back ? "" : "; the manifest " + man.string() + " could not be withdrawn: it does not describe a backup"));
+    };
+    if (!detail::renameNewAt(parentFd.v, workName, name)) return unpublish("refusing: " + dst.string() + " appeared during the backup");
     if (!isMine(name)) {
-        r.message = "Backup failed: the folder at " + dst.string() + " is not the one this run filled; it is NOT a verified backup (no manifest).";
+        r.message = "Backup failed: the folder at " + dst.string() + " is not the one this run filled; it is NOT a verified backup.";
         return r;
     }
-    if (!detail::renameNewAt(parentFd.v, manTmpName, manName)) {
-        r.message = "Backup copied and verified at " + dst.string() + ", but its manifest could not be published (" + (parent / manTmpName).string() +
-                    " is left): treat it as INCOMPLETE until Compare Folders shows it equals the source";
-        return r;
-    }
+    // Report where the backup really is: the pinned folder, even if a parent was moved or swapped during the backup.
+    const fs::path realDir = detail::fdPath(workFd.v), realParentNow = detail::fdPath(parentFd.v);
+    const fs::path chosen = fs::weakly_canonical(dst, ec);
     r.ok = true;
-    r.folder = dst; r.manifest = man; r.files = hashes.size(); r.bytes = pr.bytesTotal;
+    r.folder = realDir.empty() ? dst : realDir;
+    r.manifest = realParentNow.empty() ? man : realParentNow / manName;
+    r.files = hashes.size(); r.bytes = pr.bytesTotal;
     r.message = "Backup complete and verified: " + std::to_string(r.files) + " files, " + std::to_string(r.bytes) + " bytes, " + src.string() +
-                " -> " + dst.string() + ". Every file was read back and matched its source by SHA-256, and the source was re-hashed "
-                "after the copy (unchanged). Manifest: " + man.string() + "\n";
+                " -> " + r.folder.string() + ". Every file was read back and matched its source by SHA-256, and the source was re-hashed "
+                "after the copy (unchanged). Manifest: " + r.manifest.string() + "\n";
+    if (r.folder != chosen)
+        r.message += "Note: the destination folder was moved or replaced during the backup. The backup is at " + r.folder.string() + ", NOT at " +
+                     dst.string() + ".\n";
     return r;
 }
 
