@@ -3,6 +3,8 @@
 // determinism, malformed prefixes), the WAV writer. SOFTWARE evidence only: nothing here shows the
 // Pa5X accepts the files (that is S6).
 
+#include <csignal>
+#include <sys/resource.h>
 #include "media/sound/instrument.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/sf2_writer.h"
@@ -253,12 +255,33 @@ int main() {
         TEST("an unfinished earlier write (NAME.INCOMPLETE) is refused and left alone",
              writePackage(org, d2, "", &err2).empty() && err2.find("did not finish") != std::string::npos && !fs::exists(d2) &&
              fs::is_empty(d2.string() + ".INCOMPLETE/wav") && outputFolderRefusal(d2).find(".INCOMPLETE already exists") != std::string::npos);
+        std::error_code ec0;
         const fs::path pub = dir.string() + "-pub";
         fs::create_directories(pub / "work/x");
         fs::create_directories(pub / "taken");
         TEST("publishing never replaces a folder that appeared", !publishNewFolder(pub / "work", pub / "taken") &&
              fs::exists(pub / "work/x") && fs::is_empty(pub / "taken") && publishNewFolder(pub / "work", pub / "new") &&
              fs::exists(pub / "new/x"));
+        const fs::path d3 = dir.string() + " 3";
+        TEST("a destination given with a trailing slash is written beside it and published under its name",
+             !writePackage(org, d3.string() + "/", "", &err2).empty() && fs::exists(d3 / "REPORT.txt") && !fs::exists(d3.string() + ".INCOMPLETE") &&
+             !fs::exists(d3 / ".INCOMPLETE"));
+        {   // a full disk (here a file-size limit): the write fails, nothing is published under the package's name
+            const fs::path d4 = dir.string() + " 4";
+            struct rlimit old {};
+            ::getrlimit(RLIMIT_FSIZE, &old);
+            const auto prev = std::signal(SIGXFSZ, SIG_IGN);
+            struct rlimit lim = old;
+            lim.rlim_cur = 1000;   // smaller than REPORT.txt and every WAV
+            ::setrlimit(RLIMIT_FSIZE, &lim);
+            const std::string r4 = writePackage(org, d4, "", &err2);
+            ::setrlimit(RLIMIT_FSIZE, &old);
+            std::signal(SIGXFSZ, prev);
+            TEST("a write that runs out of space fails and leaves only NAME.INCOMPLETE", r4.empty() && err2.find("write failed") != std::string::npos &&
+                 !fs::exists(d4) && fs::is_directory(d4.string() + ".INCOMPLETE"));
+            fs::remove_all(d4.string() + ".INCOMPLETE", ec0);
+        }
+        fs::remove_all(d3, ec0);
         Instrument bad = org; bad.layers.clear();
         TEST("package refuses an invalid instrument before creating anything",
              writePackage(bad, dir / "x", "", &err2).empty() && !fs::exists(dir / "x"));

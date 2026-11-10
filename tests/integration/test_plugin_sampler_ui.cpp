@@ -4,6 +4,7 @@
 
 #include "ui/sound/plugin_sampler_model.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <unistd.h>
 
@@ -71,13 +72,30 @@ int main() {
         auto after = [&](const char* flag) { const auto it = std::find(a.begin(), a.end(), flag); return it + 1 < a.end() ? *(it + 1) : ""; };
         TEST("the sampler gets note numbers, never names", after("--low") == "48" && after("--high") == "72");
     }
-    TEST("map text: keys, sampled notes and velocity ranges", contains(mapText(p), "Keys C3-C5, sampled at C3, C4, C5; velocity 0-85, 86-127."));
+    {   // the preview describes what the engine builds: zones from key 0 to 127, the same velocity ranges, roots at the sampled notes
+        const auto built = snd::buildFromRenders(p.spec, [](uint8_t note, uint8_t) {
+            std::vector<float> x(48000);
+            for (size_t i = 0; i < x.size(); ++i) x[i] = 0.5f * float(std::sin(2 * M_PI * 440.0 * std::pow(2.0, (note - 69) / 12.0) * double(i) / 48000.0));
+            return x;
+        });
+        bool match = built.layers.size() == 2;
+        const auto vel = snd::layerVelocityRanges(p.spec);
+        for (size_t l = 0; match && l < built.layers.size(); ++l) {
+            const auto& z = built.layers[l].zones;
+            match = z.size() == 3 && z.front().lo == 0 && z.back().hi == 127 && z[0].root == 48 && z[1].root == 60 && z[2].root == 72 &&
+                    built.layers[l].velLo == vel[l].first && built.layers[l].velHi == vel[l].second;
+        }
+        TEST("the preview matches the instrument the engine builds (keys 0-127, roots, velocity ranges)", match);
+    }
+    TEST("map text: sampled notes, the keys that play, velocity ranges",
+         contains(mapText(p), "Samples at C3, C4, C5; every key C-1 to G9 plays (the lowest and highest samples stretch to the ends); velocity 0-85, 86-127."));
     {
         SamplerSettings t = s; t.low = "C2"; t.high = "C7"; t.step = "3"; t.velocities = "40,80,120"; t.splits = "50,100";
         SamplerPlan q;
         planRender(t, &q);
         TEST("map text shortens long note lists and follows the splits",
-             contains(mapText(q), "sampled at C2, D#2, F#2, A2, ..., F#6, A6, C7; velocity 0-49, 50-99, 100-127."));
+             contains(mapText(q), "Samples at C2, D#2, F#2, A2, ..., F#6, A6, C7; every key C-1 to G9 plays") &&
+             contains(mapText(q), "; velocity 0-49, 50-99, 100-127."));
         t.high = "D7";
         planRender(t, &q);
         TEST("map text says when the highest note is off the sampling step", contains(mapText(q), "D7 is not on the sampling step; the top sample is C7."));

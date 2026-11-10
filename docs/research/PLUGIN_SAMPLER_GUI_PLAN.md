@@ -17,7 +17,7 @@ Two things go beyond the plan:
 
 - **Note names and map preview (2026-11-10).** Lowest and Highest note take a name (C2, F#4, Bb3; C4 = 60 as on
   the Pa5X and in TX16Wx) or a number; the sampler still receives numbers. Before rendering, the estimate line shows
-  the key and velocity map the render will make (sampled notes and each layer's velocity range, from the engine's
+  the key and velocity map the render will make (sampled notes, that every key C-1 to G9 plays because the outer samples stretch to the ends, and each layer's velocity range, from the engine's
   own `layerVelocityRanges`), and says when the highest note is off the sampling step.
 
 ## Decision: run the existing sampler as a child process

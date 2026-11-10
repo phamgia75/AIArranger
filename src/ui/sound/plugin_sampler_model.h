@@ -134,16 +134,17 @@ inline std::string planRender(const SamplerSettings& s, SamplerPlan* plan) {
     return "";
 }
 
-// The key and velocity map the render will make, before rendering: "Keys C2-C7, sampled at C2, D#2, ...; velocity 0-63, 64-127."
+// The key and velocity map the render will make, before rendering: "Samples at C2, D#2, ..., C7; every key C-1 to G9 plays
+// (...); velocity 0-63, 64-127." As buildFromRenders, which maps keys 0-127 (the outer zones reach the ends).
 inline std::string mapText(const SamplerPlan& p) {
     namespace txw = media::sound::txw;
     const auto roots = media::sound::renderRoots(p.spec);
-    std::string s = "Keys " + txw::noteName(p.spec.lowRoot) + "-" + txw::noteName(roots.empty() ? p.spec.highRoot : roots.back()) + ", sampled at ";
+    std::string s = "Samples at ";
     for (size_t i = 0; i < roots.size(); ++i) {
         if (roots.size() > 8 && i == 4) { s += "..., "; i = roots.size() - 3; }
         s += txw::noteName(roots[i]) + (i + 1 < roots.size() ? ", " : "");
     }
-    s += "; velocity ";
+    s += "; every key C-1 to G9 plays (the lowest and highest samples stretch to the ends); velocity ";
     const auto vel = media::sound::layerVelocityRanges(p.spec);
     for (size_t l = 0; l < vel.size(); ++l) s += std::to_string(vel[l].first) + "-" + std::to_string(vel[l].second) + (l + 1 < vel.size() ? ", " : ".");
     if (!roots.empty() && roots.back() < p.spec.highRoot)

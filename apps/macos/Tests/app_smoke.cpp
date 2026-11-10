@@ -518,7 +518,7 @@ int main() {
                 ps.loopToggle().setToggleState(true, juce::sendNotificationSync);
                 TEST("estimate before rendering", ps.estimateText().startsWith("6 samples (3 notes x 2 layers), 9 s of audio"));
                 TEST("the form takes note names and shows the key and velocity map before rendering",
-                     ps.estimateText().contains("Keys C3-C5, sampled at C3, C4, C5; velocity 0-85, 86-127."));
+                     ps.estimateText().contains("Samples at C3, C4, C5; every key C-1 to G9 plays") && ps.estimateText().contains("velocity 0-85, 86-127."));
                 watch.startTimer(20);
                 ps.startRender();
                 waitIdle(120000);

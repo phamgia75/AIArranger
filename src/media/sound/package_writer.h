@@ -36,12 +36,12 @@ inline std::string wavPrefix(const std::string& layerName) {
 using media::outputFolderRefusal;   // media/output_guard.h: shared by every writer and the KST backup
 
 // Written under DEST.INCOMPLETE and renamed to DEST only once every file is written (media/output_guard.h).
-inline std::string writePackage(const Instrument& in, const std::filesystem::path& dest, const std::string& notes,
+inline std::string writePackage(const Instrument& in, const std::filesystem::path& destGiven, const std::string& notes,
                                 std::string* error) {
     namespace fs = std::filesystem;
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
-    const fs::path out = incompletePath(dest);
+    const fs::path dest = folderPath(destGiven), out = incompletePath(dest);
     if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
     if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
     if (const auto e = validate(in); !e.empty()) return fail("invalid: " + e.front());
@@ -61,6 +61,7 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
         ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
         std::ofstream f(p, std::ios::binary);
         f.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+        f.close();   // the last buffered bytes are written here; a failure must stop publication
         ok &= static_cast<bool>(f);
     };
     auto under = [](std::string s) { for (char& c : s) if (c == ' ') c = '_'; return s; };
@@ -114,12 +115,12 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
 
 // Drum Kit package: tx/<name>/ (.txperf, .txprog, .txmatrix, samples) + REPORT.txt. No SF2: an SF2
 // import yields multisamples, not a Drum Kit (manual p.1206). Never writes into an existing folder.
-inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::path& dest, const std::string& notes,
+inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::path& destGiven, const std::string& notes,
                                     std::string* error) {
     namespace fs = std::filesystem;
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
-    const fs::path out = incompletePath(dest);   // renamed to dest once complete, as writePackage
+    const fs::path dest = folderPath(destGiven), out = incompletePath(dest);   // renamed to dest once complete, as writePackage
     if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
     if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
     if (const auto e = validate(kit); !e.empty()) return fail("invalid: " + e.front());
@@ -138,6 +139,7 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
         ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
         std::ofstream o(p, std::ios::binary);
         o.write(reinterpret_cast<const char*>(f.bytes.data()), static_cast<std::streamsize>(f.bytes.size()));
+        o.close();
         ok &= static_cast<bool>(o);
     }
     uint64_t bytes = 0;
@@ -171,6 +173,7 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     {
         std::ofstream mf(out / "RESOURCES.tsv", std::ios::binary);
         mf << manifest;
+        mf.close();
         ok &= static_cast<bool>(mf);
     }
     rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
