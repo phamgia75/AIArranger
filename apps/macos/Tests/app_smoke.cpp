@@ -418,6 +418,10 @@ int main() {
 
             // Real offline render with an instrument that ships with macOS (Apple DLSMusicDevice).
             const auto real = app::PluginSamplerComponent::locateSampler();
+            if (const char* req = std::getenv("AIARR_REQUIRE_REAL_PLUGIN"); req && *req == '1') {   // CI: the exact build-tree tool, not a search
+                const char* given = std::getenv("AIARR_PLUGIN_SAMPLER");
+                TEST("CTest passes the sampler's exact path (AIARR_PLUGIN_SAMPLER)", given && *given && real == juce::File(given) && real.existsAsFile());
+            }
             if (!real.existsAsFile() || !form(ps, real, "DLSMusicDevice", "DLS Piano")) {
                 std::printf("  SKIP: real plugin render (%s)\n", real.existsAsFile() ? "DLSMusicDevice not installed" : "sampler tool not built");
                 // CI sets AIARR_REQUIRE_REAL_PLUGIN=1: there a skipped real render is a failure, not silent partial coverage.
@@ -473,6 +477,7 @@ int main() {
                     cp.start(juce::StringArray{real.getFullPathName(), "render", "--plugin", "DLSMusicDevice", "--name", "X", "--out",
                                                juce::String(out.string()), "--low", "60", "--high", "60", "--program", "9999"});
                     const auto text = cp.readAllProcessOutput();
+                    cp.waitForProcessToFinish(10000);   // JUCE reports exit code 0 for a child it has not reaped yet
                     TEST("sampler refuses a program number the plugin does not have",
                          cp.getExitCode() == 1 && text.contains("program 9999 does not exist") && !fs::exists(out));
                 }

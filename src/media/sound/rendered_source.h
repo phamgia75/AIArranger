@@ -154,6 +154,15 @@ inline bool renderTimingValid(double holdSec, double releaseSec) {
     return holdSec > 0 && releaseSec >= 0 && holdSec + releaseSec <= 21;
 }
 
+// A program number as typed, checked against the plugin's program count: digits only, no overflow, 0 <= k < count.
+inline bool programIndexValid(const std::string& text, int count, int* index) {
+    if (text.empty() || text.size() > 9 || text.find_first_not_of("0123456789") != std::string::npos) return false;   // 9 digits: no int overflow
+    const int k = std::stoi(text);
+    if (k >= count) return false;
+    *index = k;
+    return true;
+}
+
 // What a render costs before it starts. pcmBytesMax is the 16-bit package audio before silence
 // trimming and loop cutting, so the package audio is at most this large. workingBytes is the peak
 // memory of the sampler process: every render is kept as float until the last one (all samples share

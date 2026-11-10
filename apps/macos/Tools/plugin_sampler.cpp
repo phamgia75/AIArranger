@@ -105,10 +105,11 @@ int main(int argc, char** argv) {
     plugin->setNonRealtime(true);
     plugin->prepareToPlay(rate, block);
     if (a.count("--program")) {
-        const juce::String t(a["--program"]);
-        const int n = plugin->getNumPrograms(), k = t.getIntValue();
-        if (!t.containsOnly("0123456789") || t.isEmpty() || k >= n) {   // an unknown index used to go straight to the plugin
-            std::fprintf(stderr, "program %s does not exist: %s has %d program(s), numbered from 0 (see: programs)\n", t.toRawUTF8(),
+        const std::string t = a["--program"];
+        const int n = plugin->getNumPrograms();
+        int k = 0;
+        if (!programIndexValid(t, n, &k)) {   // an unknown index used to go straight to the plugin
+            std::fprintf(stderr, "program %s does not exist: %s has %d program(s), numbered from 0 (see: programs)\n", t.c_str(),
                          desc->name.toRawUTF8(), n);
             return 1;
         }

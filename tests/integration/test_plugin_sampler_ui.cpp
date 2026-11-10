@@ -30,6 +30,14 @@ int main() {
          parseProgramList("program\t1\tA\n").empty() && parseProgramList("program\t0\tA\nprogram\t2\tB\n").empty() &&
          parseProgramList("program\t0A\tA\n").empty());
     TEST("no program lines: empty list", parseProgramList("JUCE v8.0.4\n").empty());
+    {
+        int k = -1;
+        TEST("program index: inside the plugin's list accepted", ai_arranger::media::sound::programIndexValid("3", 10, &k) && k == 3);
+        TEST("program index: out of range, negative, overflowing, empty or junk refused",
+             !ai_arranger::media::sound::programIndexValid("10", 10, &k) && !ai_arranger::media::sound::programIndexValid("-1", 10, &k) &&
+             !ai_arranger::media::sound::programIndexValid("4294967296", 10, &k) && !ai_arranger::media::sound::programIndexValid("", 10, &k) &&
+             !ai_arranger::media::sound::programIndexValid("1x", 10, &k) && !ai_arranger::media::sound::programIndexValid("0", 0, &k) && k == 3);
+    }
 
     SamplerSettings s;
     s.pluginId = "id"; s.name = "Piano"; s.low = "48"; s.high = "72"; s.step = "12"; s.velocities = "60, 110"; s.hold = "1.0"; s.release = "0.5";
