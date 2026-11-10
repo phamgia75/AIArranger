@@ -185,6 +185,48 @@ int main() {
         for (int i = 0; i < 50 && rc.kstText().startsWith("Working"); ++i) pump(50);
         TEST("KST inventory runs in the background and says semantic merge is unavailable",
              rc.kstText().contains("UNAVAILABLE") && rc.kstText().contains("STY"));
+        {   // Backup KST: verified copy into a new folder; refusals, cancel and window close leave nothing presented as a backup
+            const fs::path kst = root / "kst", bdir = root / "kst-backups";
+            fs::create_directories(bdir);
+            auto waitBackup = [&](app::ResourcesComponent& c) { for (int i = 0; i < 600 && c.backingUp(); ++i) pump(20); };
+            const auto b1 = app::ResourcesComponent::backupFolderFor(juce::File(kst.string()), juce::File(bdir.string()));
+            TEST("backup folder name: '<source> backup <date time>' inside the chosen folder",
+                 b1.getParentDirectory() == juce::File(bdir.string()) && b1.getFileName().startsWith("kst backup 20"));
+            rc.startBackup(juce::File(kst.string()), b1);
+            TEST("backup runs in the background", rc.backingUp());
+            waitBackup(rc);
+            const fs::path b1p = b1.getFullPathName().toStdString();
+            TEST("Backup KST: complete and verified, manifest beside it, progress full",
+                 rc.kstText().startsWith("Backup complete and verified") && media::diff(kst, b1p).same() && media::verifyBackup(b1p).empty() &&
+                 rc.backupProgress() == 1.0);
+            rc.startBackup(juce::File(kst.string()), b1);
+            waitBackup(rc);
+            TEST("Backup KST never reuses an existing folder", rc.kstText().contains("already exists") && rc.kstText().contains("No backup was made") &&
+                                                                media::verifyBackup(b1p).empty());
+            rc.startBackup(juce::File(kst.string()), juce::File("/Volumes/AIARR-NO-SUCH/kst backup"));
+            waitBackup(rc);
+            TEST("Backup KST refuses a USB stick (mounted volume)", rc.kstText().contains("mounted volume"));
+            fs::create_directories(root / "bigkst/PCM");   // a large source so that cancel and close land mid-copy
+            { std::ofstream big(root / "bigkst/PCM/RAM01.PCM", std::ios::binary); std::string mb(1 << 20, 'p'); for (int i = 0; i < 256; ++i) big << mb; }
+            const fs::path b2 = bdir / "cancelled";
+            rc.startBackup(juce::File((root / "bigkst").string()), juce::File(b2.string()));
+            rc.cancelBackup();
+            waitBackup(rc);
+            auto nothingLeft = [&](const fs::path& d) { return !fs::exists(d) && !fs::exists(d.string() + ".INCOMPLETE") && !fs::exists(media::backupManifestPath(d)); };
+            TEST("Backup KST cancel: reported, nothing kept, buttons back", rc.kstText().contains("cancelled") && nothingLeft(b2) && !rc.backingUp());
+            {
+                auto c = std::make_unique<app::ResourcesComponent>();
+                const fs::path b3 = bdir / "closed";
+                c->startBackup(juce::File((root / "bigkst").string()), juce::File(b3.string()));
+                pump(20);
+                const auto t0 = std::chrono::steady_clock::now();
+                c.reset();
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                std::printf("  info: closing during a backup took %.0f ms\n", ms);
+                TEST("closing the window during a backup stops it promptly and keeps no incomplete folder", ms < 1000 && nothingLeft(b3));
+            }
+            fs::remove_all(root / "bigkst");
+        }
         rc.memoryBefore().setText("aiarranger-memory-info\t1\nsamples\t3\n");
         rc.memoryAfter().setText("aiarranger-memory-info\t1\nsamples\t50\n");
         rc.compareMemory();
@@ -407,6 +449,21 @@ int main() {
                 TEST("closing the window is bounded even when a helper holds the output pipe open", closeMs < 1500 && !alive);
                 killOrphan();
                 fs::remove(pidFile);
+                {   // the same close, process wrapper only: separates the 500 ms reader wait from the rest of the teardown
+                    auto p = std::make_unique<app::SamplerProcess>();
+                    bool progressed = false;
+                    p->start(orphan, {"render", "--out", (root / "orphan-out").string()}, [&](const std::string& l) { progressed |= l.rfind("progress", 0) == 0; },
+                             [](int, bool) {});
+                    for (int i = 0; i < 250 && !progressed; ++i) pump(20);
+                    const auto t2 = std::chrono::steady_clock::now();
+                    p.reset();
+                    const double waitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count();
+                    std::printf("  info: held pipe: SamplerProcess close %.0f ms (bound %d ms), whole component %.0f ms, other teardown %.0f ms\n", waitMs,
+                                app::SamplerProcess::kCloseGraceMs, closeMs, closeMs - waitMs);
+                    TEST("held pipe: the process wrapper waits the 500 ms bound (under 600 ms, not the 2 s cancel grace)", progressed && waitMs >= 500 && waitMs < 600 && !pidAlive());
+                    killOrphan();
+                    fs::remove(pidFile);
+                }
             }
             {   // a finished process is never signalled again: its PID may already belong to another program
                 app::SamplerProcess p;

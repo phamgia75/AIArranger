@@ -238,6 +238,9 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME test_kst_copy
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py --self-test)
+    # The app's backup and kst_copy.py share one manifest format: each verifies the other's copy.
+    add_test(NAME test_kst_backup_manifest_interop
+             COMMAND sh -c "T=$(mktemp -d) && mkdir -p \"$T/src/STYLE\" \"$T/src/PCM/empty\" && printf x > \"$T/src/STYLE/A B.STY\" && head -c 300000 /dev/urandom > \"$T/src/SOUND.PCG\" && $<TARGET_FILE:kst-backup> \"$T/src\" \"$T/app\" && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py --verify \"$T/app\" && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py \"$T/src\" \"$T/py\" && $<TARGET_FILE:kst-backup> --verify \"$T/py\"; rc=$?; rm -rf \"$T\"; exit $rc")
     add_test(NAME test_make_kst_test_samples
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_kst_test_samples.py --self-test)
     add_test(NAME test_make_synthetic_kst_library
@@ -295,6 +298,8 @@ add_executable(kst-diff tools/kst_diff.cpp)   # read-only folder comparison (P2)
 target_include_directories(kst-diff PRIVATE src)
 add_executable(kst-merge-plan tools/kst_merge_plan.cpp)   # read-only load/merge prediction (P2)
 target_include_directories(kst-merge-plan PRIVATE src)
+add_executable(kst-backup tools/kst_backup.cpp)   # verified backup copy into a new folder (K1)
+target_include_directories(kst-backup PRIVATE src)
 add_test(NAME test_kst_cli_exit COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_kst_cli_exit.sh ${CMAKE_BINARY_DIR})
 add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
 target_include_directories(sf2-check PRIVATE src)

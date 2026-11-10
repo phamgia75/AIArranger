@@ -1,10 +1,13 @@
 #pragma once
 
-// Resources window: Resource Graph browser, KST Library (file-level, read-only) and Memory Check.
-// A JUCE view over ui::ResourceBrowserModel. Read-only: it opens folders and text files, never
-// writes, never sends MIDI and never talks to the instrument.
+// Resources window: Resource Graph browser, KST Library (file-level) and Memory Check.
+// A JUCE view over ui::ResourceBrowserModel. Inventory, Compare and Merge Plan only read. The one KST write
+// is Backup KST: a verified copy into a NEW local folder (media/kst_backup.h); the source is only read.
+// Never sends MIDI and never talks to the instrument.
 
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "media/kst_backup.h"
+#include <thread>
 #include "ui/resources/resource_browser_model.h"
 #include "SoundConversionComponent.h"
 #include "PluginSamplerComponent.h"
@@ -25,6 +28,11 @@ public:
     void showDetails(const media::graph::ResourceId& id);
     void runKst(ui::ResourceBrowserModel::KstAction a, const juce::String& first, const juce::String& second = {});
     void compareMemory();
+    void startBackup(const juce::File& source, const juce::File& newFolder);   // asynchronous; backingUp() until done
+    void cancelBackup() { cancelBackup_ = true; }
+    bool backingUp() const { return backingUp_; }
+    double backupProgress() const { return backupProgress_; }
+    static juce::File backupFolderFor(const juce::File& source, const juce::File& parent);   // "<name> backup <date time>"
 
     ui::ResourceBrowserModel& model() { return model_; }
     juce::TreeView& tree() { return tree_; }
@@ -58,6 +66,12 @@ private:
 
     // KST Library
     juce::TextButton invBtn_{"Inventory..."}, diffBtn_{"Compare Folders..."}, planBtn_{"Merge Plan..."}, semanticBtn_{"Semantic Merge"};
+    juce::TextButton backupBtn_{"Backup KST..."}, cancelBackupBtn_{"Cancel Backup"};
+    double backupProgress_ = 0;   // message thread only
+    juce::ProgressBar backupBar_{backupProgress_};
+    bool backingUp_ = false;      // message thread only
+    std::atomic<bool> cancelBackup_{false};
+    std::thread backupThread_;    // joined in the destructor (cancelled first), never detached
     juce::Label kstNote_;
     juce::TextEditor kstOut_;
     std::atomic<int> kstJobs_{0};

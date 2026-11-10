@@ -181,7 +181,8 @@ public:
     }
     static constexpr const char* kSemanticMergeNote =
         "Semantic merge (by Sound/sample dependency): UNAVAILABLE until validated dependency data exists (Q17, Q18).\n"
-        "These results are file-level only and read-only. AIArranger never merges, copies or deletes KST data.\n";
+        "These results are file-level only and read-only. AIArranger never merges, changes or deletes KST data; Backup KST only reads\n"
+        "the source and writes a NEW folder, reported complete only after every copied file matched its source by SHA-256.\n";
 
 private:
     static bool fail(std::string* err, const std::string& m) { if (err) *err = m; return false; }

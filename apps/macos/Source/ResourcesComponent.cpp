@@ -109,6 +109,18 @@ ResourcesComponent::ResourcesComponent() {
             });
         });
     };
+    backupBtn_.onClick = [this] {
+        chooseFolder("KST folder to back up (it is only read)", [this](juce::File a) {
+            chooseFolder("Where to create the backup (a NEW folder is made there; local disk, not a USB stick)", [this, a](juce::File parent) {
+                startBackup(a, backupFolderFor(a, parent));
+            });
+        });
+    };
+    cancelBackupBtn_.onClick = [this] { cancelBackup(); };
+    cancelBackupBtn_.setEnabled(false);
+    kstPage_.addAndMakeVisible(backupBtn_);
+    kstPage_.addAndMakeVisible(cancelBackupBtn_);
+    kstPage_.addAndMakeVisible(backupBar_);
     semanticBtn_.setEnabled(false);   // stays off until validated dependency data exists (Q17, Q18)
     semanticBtn_.setTooltip("Unavailable: needs validated Sound/sample dependency data");
     for (auto* b : {&invBtn_, &diffBtn_, &planBtn_, &semanticBtn_}) kstPage_.addAndMakeVisible(*b);
@@ -141,6 +153,8 @@ ResourcesComponent::ResourcesComponent() {
 }
 
 ResourcesComponent::~ResourcesComponent() {
+    cancelBackup_ = true;   // the copy stops within one 1 MB chunk and removes its INCOMPLETE folder
+    if (backupThread_.joinable()) backupThread_.join();
     *alive_ = false;
     tree_.setRootItem(nullptr);
 }
@@ -230,6 +244,41 @@ void ResourcesComponent::runKst(Action a, const juce::String& first, const juce:
     }).detach();
 }
 
+juce::File ResourcesComponent::backupFolderFor(const juce::File& source, const juce::File& parent) {
+    return parent.getChildFile(source.getFileName() + " backup " + juce::Time::getCurrentTime().formatted("%Y-%m-%d %H%M%S"));
+}
+
+void ResourcesComponent::startBackup(const juce::File& source, const juce::File& newFolder) {
+    if (backingUp_) return;
+    if (backupThread_.joinable()) backupThread_.join();   // the previous backup has finished: backingUp_ was false
+    backingUp_ = true;
+    cancelBackup_ = false;
+    backupProgress_ = 0;
+    backupBtn_.setEnabled(false);
+    cancelBackupBtn_.setEnabled(true);
+    kstOut_.setText("Backing up " + source.getFullPathName() + "\n  to " + newFolder.getFullPathName() + "\n(the source is only read)...", false);
+    std::weak_ptr<bool> alive = alive_;
+    backupThread_ = std::thread([this, alive, src = source.getFullPathName().toStdString(), dst = newFolder.getFullPathName().toStdString()] {
+        auto last = std::chrono::steady_clock::now();
+        const auto r = media::backupKst(src, dst, [&](const media::BackupProgress& p) {
+            if (const auto now = std::chrono::steady_clock::now(); now - last > std::chrono::milliseconds(100) || p.bytesDone == p.bytesTotal) {
+                last = now;
+                const double f = p.bytesTotal ? double(p.bytesDone) / double(p.bytesTotal) : 1.0;
+                juce::MessageManager::callAsync([this, alive, f] { if (!alive.expired()) backupProgress_ = f; });
+            }
+            return !cancelBackup_;
+        });
+        juce::MessageManager::callAsync([this, alive, r] {
+            if (alive.expired()) return;
+            backingUp_ = false;
+            backupProgress_ = r.ok ? 1.0 : 0.0;
+            backupBtn_.setEnabled(true);
+            cancelBackupBtn_.setEnabled(false);
+            kstOut_.setText(juce::String(r.message) + (r.ok ? "" : "\nNo backup was made: nothing at the destination is a complete copy."), false);
+        });
+    });
+}
+
 void ResourcesComponent::compareMemory() {
     memOut_.setText(model_.memoryCheck(memBefore_.getText().toStdString(), memAfter_.getText().toStdString()), false);
 }
@@ -256,6 +305,11 @@ void ResourcesComponent::resized() {
         auto r = page.withZeroOrigin();
         auto top = r.removeFromTop(28);
         for (auto* b : {&invBtn_, &diffBtn_, &planBtn_, &semanticBtn_}) { b->setBounds(top.removeFromLeft(150)); top.removeFromLeft(8); }
+        r.removeFromTop(4);
+        auto row = r.removeFromTop(28);
+        backupBtn_.setBounds(row.removeFromLeft(150)); row.removeFromLeft(8);
+        cancelBackupBtn_.setBounds(row.removeFromLeft(130)); row.removeFromLeft(8);
+        backupBar_.setBounds(row.removeFromLeft(300));
         r.removeFromTop(4);
         kstNote_.setBounds(r.removeFromTop(40));
         kstOut_.setBounds(r);

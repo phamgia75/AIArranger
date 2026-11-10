@@ -8,6 +8,7 @@
 //   REPORT.txt        zones, loops, memory use, import steps, caller notes
 // Never writes into an existing folder. Returns the report, or "" with *error set.
 
+#include "media/output_guard.h"
 #include "media/sound/package_graph.h"
 #include "media/sound/sf2_writer.h"
 #include "media/sound/txprog_writer.h"
@@ -32,18 +33,7 @@ inline std::string wavPrefix(const std::string& layerName) {
     return s;
 }
 
-// Why a new package may not be written to `out`, or "" when it may. A mounted volume (USB stick) is
-// refused, also when reached through a symlink, because hardware-side writes are not authorized in
-// this project phase: write locally and copy the folder by hand. An existing path is never reused.
-// Shared by every writer (WAV conversion, plugin sampler CLI and GUI) so the rule cannot drift.
-inline std::string outputFolderRefusal(const std::filesystem::path& out) {
-    std::error_code ec;
-    const auto real = std::filesystem::weakly_canonical(out, ec);   // follows symlinks in the existing part of the path
-    if (ec || real.string().rfind("/Volumes/", 0) == 0)
-        return "refusing to write onto a mounted volume (" + out.string() + "): write the package to a local folder, then copy it to the USB stick";
-    if (std::filesystem::exists(out, ec) || ec) return "refusing: " + out.string() + " already exists";
-    return "";
-}
+using media::outputFolderRefusal;   // media/output_guard.h: shared by every writer and the KST backup
 
 inline std::string writePackage(const Instrument& in, const std::filesystem::path& out, const std::string& notes,
                                 std::string* error) {

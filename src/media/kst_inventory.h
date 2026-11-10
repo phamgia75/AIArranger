@@ -67,6 +67,7 @@ struct Entry { std::filesystem::path abs; uintmax_t size; };
 struct Listing {
     std::map<std::string, Entry> files;   // relative path -> entry
     std::vector<std::string> skipped;     // symlinks and special files (not followed, not compared)
+    std::vector<std::string> dirs;        // every subfolder, relative (a backup recreates empty ones too)
     bool pcm = false;                     // a directory named PCM exists (manual p.736: the KST holds User Samples)
 };
 
@@ -86,6 +87,7 @@ inline bool listFiles(const std::filesystem::path& root, Listing& out, std::stri
             std::string n = it->path().filename().string();
             std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::toupper(c); });
             out.pcm |= n == "PCM";
+            out.dirs.push_back(rel);
         } else if (fs::is_regular_file(st)) {
             const uintmax_t size = it->file_size(ec);
             if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
