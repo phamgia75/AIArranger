@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <sstream>
 #include <string>
@@ -71,8 +72,9 @@ struct Listing {
     bool pcm = false;                     // a directory named PCM exists (manual p.736: the KST holds User Samples)
 };
 
-// Full recursive listing. Returns false (with error) on any permission, iteration or metadata error.
-inline bool listFiles(const std::filesystem::path& root, Listing& out, std::string& error) {
+// Full recursive listing. Returns false (with error) on any permission, iteration or metadata error, or when
+// `keepGoing` (checked per entry, optional) returns false.
+inline bool listFiles(const std::filesystem::path& root, Listing& out, std::string& error, const std::function<bool()>& keepGoing = {}) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::is_directory(fs::symlink_status(root, ec))) { error = "not a directory (symlinks are not followed): " + root.string(); return false; }
@@ -80,6 +82,7 @@ inline bool listFiles(const std::filesystem::path& root, Listing& out, std::stri
     for (;;) {
         if (ec) { error = "cannot read " + root.string() + ": " + ec.message(); return false; }
         if (it == end) break;
+        if (keepGoing && !keepGoing()) { error = "cancelled"; return false; }
         const auto st = it->symlink_status(ec);
         if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
         const std::string rel = it->path().lexically_relative(root).generic_string();

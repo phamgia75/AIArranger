@@ -6,6 +6,8 @@
 #include "media/kst_diff.h"
 #include <chrono>
 #include <cstdio>
+#include <csignal>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -152,6 +154,32 @@ int main() {
     const auto swap = backupKst(src, pinned / "b", {}, [&] { fs::rename(pinned, root / "pinned.moved"); fs::create_directory_symlink(elsewhere, pinned); });
     TEST("a parent folder swapped for a symlink mid-backup: writes stay in the folder that was checked",
          swap.ok && fs::is_empty(elsewhere) && diff(src, root / "pinned.moved/b").same() && fs::exists(root / "pinned.moved/b.manifest.sha256"));
+    // Cancel while the source is still being listed: nothing is created at all.
+    const auto early = backupKst(src, root / "backups/early", [](const BackupProgress&) { return false; });
+    TEST("cancel during the source scan: nothing created", !early.ok && early.cancelled && !fs::exists(root / "backups/early.INCOMPLETE") &&
+                                                             !fs::exists(root / "backups/early"));
+    // The work folder swapped for another one after the copy is never published as a verified backup.
+    const fs::path d6 = root / "backups/swapped";
+    const auto swapped = backupKst(src, d6, {}, [&] { fs::rename(d6.string() + ".INCOMPLETE", root / "backups/swapped.moved"); fs::create_directory(d6.string() + ".INCOMPLETE"); });
+    TEST("a work folder replaced after the copy: fails, nothing published, no manifest",
+         !swapped.ok && !fs::exists(d6) && !fs::exists(backupManifestPath(d6)) && fs::is_empty(d6.string() + ".INCOMPLETE"));
+    // A listed source file replaced by a FIFO cannot hang the backup (or a window waiting for it).
+    {
+        const fs::path fsrc = root / "FIFO.SET";
+        put(fsrc / "A.STY", "a");
+        put(fsrc / "B.STY", "b");
+        bool swappedIn = false;
+        ::alarm(30);   // watchdog: a hang fails the test run instead of blocking CI forever
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto fr = backupKst(fsrc, root / "backups/fifo", [&](const BackupProgress&) {
+            if (!swappedIn) { swappedIn = true; fs::remove(fsrc / "B.STY"); ::mkfifo((fsrc / "B.STY").c_str(), 0600); }
+            return true;
+        });
+        ::alarm(0);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        TEST("a source file swapped for a FIFO is refused promptly, not waited on", swappedIn && !fr.ok && ms < 5000 &&
+                                                                                     fr.message.find("B.STY") != std::string::npos);
+    }
     // Names the manifest cannot hold are refused up front.
     const fs::path nl = root / "NL.SET";
     put(nl / "A\nB.STY", "x");
@@ -167,6 +195,9 @@ int main() {
          bad.find("changed: STYLE/BANK01.STY") != std::string::npos && bad.find("missing: SOUND/USER 01.PCG") != std::string::npos &&
          bad.find("extra:   EXTRA.TXT") != std::string::npos);
     TEST("verify without a manifest says so", verifyBackup(root / "LINKED").rfind("no manifest", 0) == 0);
+    fs::create_directories(root / "EMPTYDST");
+    fs::create_directories(backupManifestPath(root / "EMPTYDST"));
+    TEST("a manifest that is not a regular file never verifies as an empty backup", !verifyBackup(root / "EMPTYDST").empty());
 
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);

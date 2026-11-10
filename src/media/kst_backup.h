@@ -67,9 +67,20 @@ inline std::string sha256Stream(std::FILE* in, std::FILE* out, const std::functi
     if (std::ferror(in)) { *error = "read error in " + name; return ""; }
     return h.hex();
 }
+// Opens an existing file for reading only if it is a regular file: no symlink is followed and a FIFO or device
+// swapped in after the listing cannot block the open. nullptr on failure.
+inline std::FILE* openRegular(int dir, const char* path) {
+    const int fd = ::openat(dir, path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    struct stat st {};
+    if (fd < 0 || ::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { if (fd >= 0) ::close(fd); return nullptr; }
+    ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) & ~O_NONBLOCK);
+    std::FILE* f = ::fdopen(fd, "rb");
+    if (!f) ::close(fd);
+    return f;
+}
 inline std::string sha256File(const std::filesystem::path& p, const std::function<bool(size_t)>& more, bool* cancelled, std::string* error) {
-    std::FILE* in = std::fopen(p.c_str(), "rb");
-    if (!in) { *error = "cannot read " + p.string(); return ""; }
+    std::FILE* in = openRegular(AT_FDCWD, p.c_str());
+    if (!in) { *error = "cannot read " + p.string() + " (missing, or no longer a regular file)"; return ""; }
     auto h = sha256Stream(in, nullptr, more, cancelled, error, p.string());
     std::fclose(in);
     return h;
@@ -160,14 +171,19 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         if (::fstatat(parentFd.v, n.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0) { r.message = "refusing: " + (parent / n).string() + " already exists"; return r; }
     }
 
+    BackupProgress pr;
+    const auto wanted = [&] { return !progress || progress(pr); };
     detail::Listing L;
     std::string err;
-    if (!detail::listFiles(src, L, err)) { r.message = "cannot list the source: " + err; return r; }
+    if (!detail::listFiles(src, L, err, wanted)) {
+        r.cancelled = err == "cancelled";
+        r.message = r.cancelled ? "Backup cancelled while reading the source; nothing was created" : "cannot list the source: " + err;
+        return r;
+    }
     if (!L.skipped.empty()) { r.message = "refusing: the source holds a symbolic link or special file, not copied: " + L.skipped.front(); return r; }
     auto badName = [](const std::string& rel) { return rel.find_first_of("\n\r") != std::string::npos; };   // the manifest is one line per file
     for (const auto& d : L.dirs) if (badName(d)) { r.message = "refusing: a folder name holds a line break, which the manifest cannot record"; return r; }
     for (const auto& [rel, e] : L.files) if (badName(rel)) { r.message = "refusing: a file name holds a line break, which the manifest cannot record"; return r; }
-    BackupProgress pr;
     pr.filesTotal = L.files.size();
     for (const auto& [rel, e] : L.files) pr.bytesTotal += e.size;
     const auto space = fs::space(realParent, ec);
@@ -187,7 +203,6 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     };
     Fd workFd(::openat(parentFd.v, workName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if (workFd.v < 0) return fail("Backup failed: cannot open " + work.string());
-    const auto wanted = [&] { return !progress || progress(pr); };
     const auto cancel = [&] { r.cancelled = true; return fail("Backup cancelled"); };
     for (const auto& d : L.dirs) {   // listed parents first
         const auto [up, leaf] = detail::splitRel(d);
@@ -205,7 +220,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         const int fd = at.v < 0 ? -1 : ::openat(at.v, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
         if (fd < 0) return fail("Backup failed: cannot create the copy of " + rel);
         std::FILE* out = ::fdopen(fd, "wb");
-        std::FILE* in = std::fopen(e.abs.c_str(), "rb");
+        std::FILE* in = detail::openRegular(AT_FDCWD, e.abs.c_str());
         if (!out || !in) {
             if (out) std::fclose(out); else ::close(fd);
             if (in) std::fclose(in);
@@ -229,7 +244,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     }
     if (afterCopy) afterCopy();
     detail::Listing again;   // the source must be exactly as it was: same folders, same files, same bytes
-    if (!detail::listFiles(src, again, err)) return fail("Backup failed: cannot re-read the source: " + err);
+    if (!detail::listFiles(src, again, err, wanted)) return err == "cancelled" ? cancel() : fail("Backup failed: cannot re-read the source: " + err);
     auto a = L.dirs, b = again.dirs;
     std::sort(a.begin(), a.end());
     std::sort(b.begin(), b.end());
@@ -250,7 +265,36 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     for (const auto& [rel, h] : hashes) wrote &= std::fprintf(m, "%s  %s\n", h.c_str(), rel.c_str()) > 0;
     wrote &= std::fclose(m) == 0;
     if (!wrote) return fail("Backup failed: cannot write " + (parent / manTmpName).string());
+    // Final check of the finished copy, through the pinned work folder: exactly the expected folders and files, same bytes.
+    detail::Listing pub;
+    const std::string workNow = detail::fdPath(workFd.v);   // where the pinned folder is now, even if a parent was swapped
+    if (workNow.empty() || !detail::listFiles(workNow, pub, err, wanted))
+        return err == "cancelled" ? cancel() : fail("Backup failed: cannot re-read the copy: " + err);
+    auto pd = pub.dirs;
+    std::sort(pd.begin(), pd.end());
+    bool exact = pd == a && pub.files.size() == hashes.size() && pub.skipped.empty();
+    for (const auto& [rel, h] : hashes) {
+        if (!exact) break;
+        const auto [up, leaf] = detail::splitRel(rel);
+        Fd at(detail::openDirBelow(workFd.v, up));
+        std::FILE* f = at.v < 0 ? nullptr : detail::openRegular(at.v, leaf.c_str());
+        exact = f && pub.files.count(rel) && detail::sha256Stream(f, nullptr, stillWanted, &cancelled, &err, rel) == h;
+        if (f) std::fclose(f);
+    }
+    if (cancelled) return cancel();
+    if (!exact) return fail("Backup failed: the copy changed after it was verified");
+    // Publish exactly the folder this run filled and checked: same device and inode before and after the rename.
+    struct stat mine {}, there {};
+    const auto isMine = [&](const std::string& n) {
+        return ::fstat(workFd.v, &mine) == 0 && ::fstatat(parentFd.v, n.c_str(), &there, AT_SYMLINK_NOFOLLOW) == 0 && mine.st_dev == there.st_dev &&
+               mine.st_ino == there.st_ino;
+    };
+    if (!isMine(workName)) return fail("Backup failed: " + work.string() + " was replaced by another folder during the backup");
     if (!detail::renameNewAt(parentFd.v, workName, name)) return fail("refusing: " + dst.string() + " appeared during the backup");
+    if (!isMine(name)) {
+        r.message = "Backup failed: the folder at " + dst.string() + " is not the one this run filled; it is NOT a verified backup (no manifest).";
+        return r;
+    }
     if (!detail::renameNewAt(parentFd.v, manTmpName, manName)) {
         r.message = "Backup copied and verified at " + dst.string() + ", but its manifest could not be published (" + (parent / manTmpName).string() +
                     " is left): treat it as INCOMPLETE until Compare Folders shows it equals the source";
@@ -268,8 +312,8 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
 // the problems (changed / missing / extra / unreadable), one per line.
 inline std::string verifyBackup(const std::filesystem::path& dst) {
     const auto man = backupManifestPath(dst);
-    std::FILE* f = std::fopen(man.c_str(), "r");
-    if (!f) return "no manifest at " + man.string();
+    std::FILE* f = detail::openRegular(AT_FDCWD, man.c_str());
+    if (!f) return "no manifest at " + man.string() + " (missing or not a regular file)";
     std::map<std::string, std::string> want;
     char line[8192];
     std::string bad;
@@ -280,7 +324,9 @@ inline std::string verifyBackup(const std::filesystem::path& dst) {
         if (sep != 64) { bad += "malformed manifest line: " + s + "\n"; continue; }
         want[s.substr(66)] = s.substr(0, 64);
     }
+    const bool readError = std::ferror(f) != 0;
     std::fclose(f);
+    if (readError) return "cannot read the manifest " + man.string();
     detail::Listing L;
     std::string err;
     if (!detail::listFiles(dst, L, err)) return "cannot list " + dst.string() + ": " + err;
