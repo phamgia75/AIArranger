@@ -120,7 +120,8 @@ int main() {
          refused(backupKst(src, root / "backups/c1"), "already exists") && keptIncomplete(root / "backups/c1"));
     size_t calls = 0, copyCalls = 0;
     backupKst(src, root / "backups/count", [&](const BackupProgress&) { ++copyCalls; return true; });
-    const auto late = backupKst(src, root / "backups/c2", [&](const BackupProgress&) { return ++calls < copyCalls; });   // cancel at the very last check
+    // copyCalls - 1: the very last report is the published result, which cannot cancel; cancel at the check before it.
+    const auto late = backupKst(src, root / "backups/c2", [&](const BackupProgress&) { return ++calls < copyCalls - 1; });
     TEST("cancel at the final check before publishing: not published", !late.ok && late.cancelled && keptIncomplete(root / "backups/c2"));
     fs::create_directories(root / "EMPTY.SET");
     const auto empty = backupKst(root / "EMPTY.SET", root / "backups/c3", [](const BackupProgress&) { return false; });
@@ -148,6 +149,11 @@ int main() {
     TEST("a destination folder that appears during the backup is never replaced; our manifest is withdrawn, the copy stays INCOMPLETE",
          !dirRace.ok && fs::exists(d5 / "THEIRS.TXT") && !fs::exists(d5 / "STYLE") && fs::is_directory(d5.string() + ".INCOMPLETE") &&
          !fs::exists(backupManifestPath(d5)) && fs::exists(backupManifestPath(d5).string() + ".INCOMPLETE"));
+    uintmax_t raceMax = 0, raceTotal = 0;
+    const fs::path dLate = root / "backups/raced-late";
+    const auto late100 = backupKst(src, dLate, [&](const BackupProgress& p) { raceMax = std::max(raceMax, p.workDone); raceTotal = p.workTotal; return true; },
+                                   [&] { fs::create_directories(dLate); });
+    TEST("a backup that fails at publication never reports 100%", !late100.ok && raceTotal && raceMax < raceTotal);
     TEST("...and the manifest race leaves the copy marked INCOMPLETE too", fs::is_directory(d4.string() + ".INCOMPLETE") && !fs::exists(d4));
     // The destination's parent is pinned: swapping it for a symlink mid-backup cannot redirect the writes.
     const fs::path pinned = root / "pinned", elsewhere = root / "elsewhere";
@@ -230,6 +236,23 @@ int main() {
     TEST("refuses a file name with a line break (the manifest is one line per file)",
          refused(backupKst(nl, root / "backups/nl"), "line break") && !fs::exists(root / "backups/nl.INCOMPLETE"));
 
+    {   // Like shutil.copy2: every permission bit and the times the source has once read (copy2 stats after copying too).
+        const fs::path ms = root / "MODES", md = root / "backups/modes";
+        put(ms / "TOOL.BIN", std::string(100000, 'm'));
+        const std::string f = (ms / "TOOL.BIN").string();
+        const struct timespec t[2] = {{1000000000, 0}, {1000003600, 0}};
+        const bool set = ::chmod(f.c_str(), 04755) == 0 && ::utimensat(AT_FDCWD, f.c_str(), t, 0) == 0;
+        const auto mr = backupKst(ms, md);
+        struct stat c {}, o {};
+        const bool got = ::stat((md / "TOOL.BIN").c_str(), &c) == 0 && ::stat(f.c_str(), &o) == 0;
+#ifdef __APPLE__
+        const bool same = c.st_atimespec.tv_sec == o.st_atimespec.tv_sec && c.st_mtimespec.tv_sec == 1000003600;
+#else
+        const bool same = c.st_atim.tv_sec == o.st_atim.tv_sec && c.st_mtim.tv_sec == 1000003600;
+#endif
+        TEST("copies keep all permission bits (setuid too), the modification time, and the access time the source has",
+             set && mr.ok && got && (c.st_mode & 07777) == 04755 && same);
+    }
     // Verify reports damage to a backup.
     put(dst / "STYLE/BANK01.STY", "style-2");
     fs::remove(dst / "SOUND/USER 01.PCG");
@@ -239,6 +262,10 @@ int main() {
          bad.find("changed: STYLE/BANK01.STY") != std::string::npos && bad.find("missing: SOUND/USER 01.PCG") != std::string::npos &&
          bad.find("extra:   EXTRA.TXT") != std::string::npos);
     TEST("verify can be cancelled", verifyBackup(dst, [] { return false; }) == "cancelled");
+    size_t listed = 0, polls = 0;
+    TEST("verify can be cancelled while reading the manifest", verifyBackup(dst, [&] { return ++polls < 2; }) == "cancelled" && polls == 2);
+    verifyBackup(dst, {}, &listed);
+    TEST("verify reports how many files the manifest lists", listed == 3);
     TEST("verify without a manifest says so", verifyBackup(root / "LINKED").rfind("no manifest", 0) == 0);
     fs::create_directories(root / "EMPTYDST");
     fs::create_directories(backupManifestPath(root / "EMPTYDST"));

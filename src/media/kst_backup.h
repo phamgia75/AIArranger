@@ -23,6 +23,7 @@
 #include <climits>
 #include <cstdio>
 #include <fcntl.h>
+#include <array>
 #include <functional>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -31,7 +32,8 @@ namespace ai_arranger::media {
 
 // bytesDone counts the copy pass only. workDone/workTotal cover the whole job: the copy, its read-back, the source
 // re-hash and the final check each read every byte once, and each file also weighs kFileWork per pass, so the bar
-// stays honest for many small files. workDone == workTotal exactly when a backup succeeds.
+// stays honest for many small files. One last unit is publication: workDone == workTotal only once a backup has
+// succeeded and been published (that final report cannot cancel any more).
 struct BackupProgress {
     enum class Phase { Scan, Copy, CheckSource, CheckCopy } phase = Phase::Scan;
     uintmax_t bytesDone = 0, bytesTotal = 0, workDone = 0, workTotal = 0;
@@ -195,7 +197,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     for (const auto& [rel, e] : L.files) if (badName(rel)) { r.message = "refusing: a file name holds a line break, which the manifest cannot record"; return r; }
     pr.filesTotal = L.files.size();
     for (const auto& [rel, e] : L.files) pr.bytesTotal += e.size;
-    pr.workTotal = 4 * (pr.bytesTotal + pr.filesTotal * BackupProgress::kFileWork);
+    pr.workTotal = 4 * (pr.bytesTotal + pr.filesTotal * BackupProgress::kFileWork) + 1;   // + 1: publication
     const auto space = fs::space(realParent, ec);
     const uintmax_t needed = pr.bytesTotal + pr.bytesTotal / 100 + (16u << 20);   // copy + 1% + 16 MB headroom for the manifest and the file system
     if (ec || space.available < needed) {
@@ -224,6 +226,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     const std::function<bool(size_t)> stillWanted = [&](size_t n) { pr.workDone += n; return wanted(); };   // read-back, re-hash, final check
     pr.phase = BackupProgress::Phase::Copy;
     std::map<std::string, std::string> hashes;
+    std::map<std::string, std::array<struct timespec, 2>> times;   // put back after the final check, whose reads may move atime
     bool cancelled = false;
     for (const auto& [rel, e] : L.files) {
         const auto [up, leaf] = detail::splitRel(rel);
@@ -241,16 +244,16 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         // Like shutil.copy2 (tools/kst_copy.py): keep the permission bits and access/modification times. Set after the data
         // and flushed first, so closing the file cannot change them. Not kept: owner, ACLs, extended attributes, folder times.
         struct stat sst {};
-        if (!hs.empty() && (std::fflush(out) != 0 || ::fstat(::fileno(in), &sst) != 0 || ::fchmod(::fileno(out), sst.st_mode & 0777) != 0)) {
+        if (!hs.empty() && (std::fflush(out) != 0 || ::fstat(::fileno(in), &sst) != 0 || ::fchmod(::fileno(out), sst.st_mode & 07777) != 0)) {
             hs.clear(); err = "cannot set the permissions of the copy of " + rel;
         }
         if (!hs.empty()) {
 #ifdef __APPLE__
-            const struct timespec times[2] = {sst.st_atimespec, sst.st_mtimespec};
+            times[rel] = {sst.st_atimespec, sst.st_mtimespec};
 #else
-            const struct timespec times[2] = {sst.st_atim, sst.st_mtim};
+            times[rel] = {sst.st_atim, sst.st_mtim};
 #endif
-            if (::futimens(::fileno(out), times) != 0) { hs.clear(); err = "cannot set the times of the copy of " + rel; }
+            if (::futimens(::fileno(out), times[rel].data()) != 0) { hs.clear(); err = "cannot set the times of the copy of " + rel; }
         }
         std::fclose(in);
         if (std::fclose(out) != 0 && !hs.empty()) { hs.clear(); err = "cannot write the copy of " + rel; }
@@ -309,13 +312,14 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         const auto [up, leaf] = detail::splitRel(rel);
         Fd at(detail::openDirBelow(workFd.v, up));
         std::FILE* f = at.v < 0 ? nullptr : detail::openRegular(at.v, leaf.c_str());
-        exact = f && pub.files.count(rel) && detail::sha256Stream(f, nullptr, stillWanted, &cancelled, &err, rel) == h;
+        exact = f && pub.files.count(rel) && detail::sha256Stream(f, nullptr, stillWanted, &cancelled, &err, rel) == h &&
+                ::futimens(::fileno(f), times[rel].data()) == 0;   // the read-backs may have moved the access time
         if (f) std::fclose(f);
         pr.workDone += BackupProgress::kFileWork;
     }
     if (cancelled) return cancel();
     if (!exact) return fail("Backup failed: the copy changed after it was verified");
-    if (!wanted()) return cancel();   // reports 100% of the work; a cancel here still keeps it unpublished
+    if (!wanted()) return cancel();   // last chance to cancel; still unpublished
     // Publish exactly the folder this run filled and checked: same device and inode before and after the rename.
     struct stat mine {}, there {};
     const auto isMine = [&](const std::string& n) {
@@ -335,6 +339,8 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         r.message = "Backup failed: the folder at " + dst.string() + " is not the one this run filled; it is NOT a verified backup.";
         return r;
     }
+    pr.workDone = pr.workTotal;   // published: 100%, reported once (it can no longer be cancelled)
+    if (progress) progress(pr);
     // Report where the backup really is: the pinned folder, even if a parent was moved or swapped during the backup.
     const fs::path realDir = detail::fdPath(workFd.v), realParentNow = detail::fdPath(parentFd.v);
     const fs::path chosen = fs::weakly_canonical(dst, ec);
@@ -353,7 +359,9 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
 
 // Re-check a backup against its manifest (ours or tools/kst_copy.py's). Read-only. "" = every file matches; otherwise
 // the problems (changed / missing / extra / unreadable), one per line, or "cancelled" when `keepGoing` returned false.
-inline std::string verifyBackup(const std::filesystem::path& dst, const std::function<bool()>& keepGoing = {}) {
+// `files` (optional) receives the number of files the manifest lists.
+inline std::string verifyBackup(const std::filesystem::path& dst, const std::function<bool()>& keepGoing = {}, size_t* files = nullptr) {
+    const auto going = [&] { return !keepGoing || keepGoing(); };
     const auto man = backupManifestPath(dst);
     std::FILE* f = detail::openRegular(AT_FDCWD, man.c_str());
     if (!f) return "no manifest at " + man.string() + " (missing or not a regular file)";
@@ -361,6 +369,7 @@ inline std::string verifyBackup(const std::filesystem::path& dst, const std::fun
     char line[8192];
     std::string bad;
     while (std::fgets(line, sizeof line, f)) {
+        if (!going()) { std::fclose(f); return "cancelled"; }
         std::string s(line);
         if (!s.empty() && s.back() == '\n') s.pop_back();
         const auto sep = s.find("  ");
@@ -370,15 +379,17 @@ inline std::string verifyBackup(const std::filesystem::path& dst, const std::fun
     const bool readError = std::ferror(f) != 0;
     std::fclose(f);
     if (readError) return "cannot read the manifest " + man.string();
+    if (files) *files = want.size();
     detail::Listing L;
     std::string err;
     if (!detail::listFiles(dst, L, err, keepGoing)) return err == "cancelled" ? err : "cannot list " + dst.string() + ": " + err;
     for (const auto& s : L.skipped) bad += "unexpected link or special file: " + s + "\n";
     bool cancelled = false;
     for (const auto& [rel, h] : want) {
+        if (!going()) return "cancelled";
         const auto it = L.files.find(rel);
         if (it == L.files.end()) { bad += "missing: " + rel + "\n"; continue; }
-        const auto have = detail::sha256File(it->second.abs, [&](size_t) { return !keepGoing || keepGoing(); }, &cancelled, &err);
+        const auto have = detail::sha256File(it->second.abs, [&](size_t) { return going(); }, &cancelled, &err);
         if (cancelled) return "cancelled";
         if (have.empty()) bad += "unreadable: " + rel + "\n";
         else if (have != h) bad += "changed: " + rel + "\n";

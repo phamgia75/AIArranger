@@ -304,12 +304,8 @@ void ResourcesComponent::startVerify(const juce::File& folder) {
     kstOut_.setText("Verifying " + folder.getFullPathName() + " against its manifest (read-only)...", false);
     std::weak_ptr<bool> alive = alive_;
     backupThread_ = std::thread([this, alive, dir = folder.getFullPathName().toStdString()] {
-        const auto bad = media::verifyBackup(dir, [this] { return !cancelBackup_; });
         size_t files = 0;
-        if (bad.empty()) {
-            std::ifstream m(media::backupManifestPath(dir));
-            for (std::string line; std::getline(m, line);) ++files;
-        }
+        const auto bad = media::verifyBackup(dir, [this] { return !cancelBackup_; }, &files);
         juce::MessageManager::callAsync([this, alive, dir, bad, files] {
             if (alive.expired()) return;
             backingUp_ = false;
