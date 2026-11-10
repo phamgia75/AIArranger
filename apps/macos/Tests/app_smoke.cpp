@@ -212,8 +212,9 @@ int main() {
             rc.startBackup(juce::File((root / "bigkst").string()), juce::File(b2.string()));
             rc.cancelBackup();
             waitBackup(rc);
-            auto nothingLeft = [&](const fs::path& d) { return !fs::exists(d) && !fs::exists(d.string() + ".INCOMPLETE") && !fs::exists(media::backupManifestPath(d)); };
-            TEST("Backup KST cancel: reported, nothing kept, buttons back", rc.kstText().contains("cancelled") && nothingLeft(b2) && !rc.backingUp());
+            auto keptIncomplete = [&](const fs::path& d) { return !fs::exists(d) && !fs::exists(media::backupManifestPath(d)) && fs::is_directory(d.string() + ".INCOMPLETE"); };
+            TEST("Backup KST cancel: reported, not published, partial copy kept marked INCOMPLETE, buttons back",
+                 rc.kstText().contains("cancelled") && rc.kstText().contains("INCOMPLETE") && keptIncomplete(b2) && !rc.backingUp());
             {
                 auto c = std::make_unique<app::ResourcesComponent>();
                 const fs::path b3 = bdir / "closed";
@@ -223,7 +224,7 @@ int main() {
                 c.reset();
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 std::printf("  info: closing during a backup took %.0f ms\n", ms);
-                TEST("closing the window during a backup stops it promptly and keeps no incomplete folder", ms < 1000 && nothingLeft(b3));
+                TEST("closing the window during a backup stops it promptly; nothing published, partial copy marked INCOMPLETE", ms < 1000 && keptIncomplete(b3));
             }
             fs::remove_all(root / "bigkst");
         }
@@ -458,8 +459,8 @@ int main() {
                     const auto t2 = std::chrono::steady_clock::now();
                     p.reset();
                     const double waitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t2).count();
-                    std::printf("  info: held pipe: SamplerProcess close %.0f ms (bound %d ms), whole component %.0f ms, other teardown %.0f ms\n", waitMs,
-                                app::SamplerProcess::kCloseGraceMs, closeMs, closeMs - waitMs);
+                    std::printf("  info: held pipe, two separate closes: SamplerProcess alone %.0f ms (deadline %d ms), whole component %.0f ms\n", waitMs,
+                                app::SamplerProcess::kCloseGraceMs, closeMs);
                     TEST("held pipe: the process wrapper waits the 500 ms bound (under 600 ms, not the 2 s cancel grace)", progressed && waitMs >= 500 && waitMs < 600 && !pidAlive());
                     killOrphan();
                     fs::remove(pidFile);

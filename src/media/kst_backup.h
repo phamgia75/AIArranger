@@ -1,26 +1,31 @@
 // Verified KST backup (K1 in the app; same guarantees as tools/kst_copy.py, whose manifest format it shares).
 //
 // Folder level only: files are copied as opaque bytes, never decoded or rewritten. The source is only read.
-//   1. Refuse: a source that is not a folder or holds symlinks/special files, a destination that exists, sits
-//      on a mounted volume or inside the source, its manifest or work folder existing, or too little free space.
-//   2. Copy into DST.INCOMPLETE (the name marks an interrupted backup, e.g. after a crash), hashing each file
-//      with SHA-256 as it is read, then re-read the copy and compare hashes.
-//   3. Re-hash the whole source: if it changed during the copy, the backup is discarded.
-//   4. Only then rename DST.INCOMPLETE -> DST (never over an existing folder) and publish DST.manifest.sha256
-//      next to it, so the backup folder stays byte-identical to the source.
-// Cancel or any failure removes DST.INCOMPLETE (only this run's own folder). Success is reported only after
-// every step passed.
+//   1. Refuse: a source that is not a folder or holds symlinks, special files or line breaks in names; a
+//      destination that exists, sits on a mounted volume or inside the source; its manifest or work folder
+//      existing; too little free space.
+//   2. The destination's parent folder is opened once and checked through that handle (its real path and
+//      its identity versus the source); every write then happens relative to it with *at() calls that never
+//      follow symlinks and never replace anything (O_EXCL, exclusive rename). A path swapped after the check
+//      cannot redirect the writes.
+//   3. Copy into DST.INCOMPLETE, hashing each file with SHA-256 as it is read; read each copy back and compare.
+//   4. Re-hash the whole source and re-list its folders: if anything changed during the copy, the backup fails.
+//   5. Only then rename DST.INCOMPLETE -> DST and publish DST.manifest.sha256 beside it (the backup folder stays
+//      byte-identical to the source).
+// Nothing is ever deleted: a cancelled or failed backup stays as DST.INCOMPLETE (also after a crash), clearly
+// marked, for the user to inspect or delete. Success is reported only after every step passed.
 #ifndef AI_ARRANGER_MEDIA_KST_BACKUP_H
 #define AI_ARRANGER_MEDIA_KST_BACKUP_H
 
 #include "media/kst_inventory.h"
 #include "media/output_guard.h"
 #include "media/sha256.h"
+#include <climits>
 #include <cstdio>
+#include <fcntl.h>
 #include <functional>
-#ifdef __APPLE__
-#include <stdio.h>   // renamex_np, RENAME_EXCL
-#endif
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace ai_arranger::media {
 
@@ -41,44 +46,92 @@ inline std::filesystem::path backupManifestPath(const std::filesystem::path& dst
 }
 
 namespace detail {
-// SHA-256 of a file; when `to` is set, also writes the bytes there (created exclusively: never overwrites).
-// "" on any error or when `more` returns false (cancelled is then set).
-inline std::string sha256File(const std::filesystem::path& from, const std::filesystem::path* to, const std::function<bool(size_t)>& more,
-                              bool* cancelled, std::string* error) {
-    std::FILE* in = std::fopen(from.c_str(), "rb");
-    if (!in) { *error = "cannot read " + from.string(); return ""; }
-    std::FILE* out = to ? std::fopen(to->c_str(), "wbx") : nullptr;
-    if (to && !out) { std::fclose(in); *error = "cannot create " + to->string(); return ""; }
+struct Fd {
+    int v = -1;
+    explicit Fd(int x = -1) : v(x) {}
+    Fd(const Fd&) = delete;
+    Fd& operator=(const Fd&) = delete;
+    ~Fd() { if (v >= 0) ::close(v); }
+};
+// SHA-256 of a stream; when `out` is set, also writes the bytes there. "" on any error or when `more` returns
+// false (cancelled is then set). Closes neither stream.
+inline std::string sha256Stream(std::FILE* in, std::FILE* out, const std::function<bool(size_t)>& more, bool* cancelled, std::string* error,
+                                const std::string& name) {
     Sha256 h;
     static thread_local char buf[1 << 20];
-    bool ok = true;
     for (size_t n; (n = std::fread(buf, 1, sizeof buf, in)) > 0;) {
         h.update(buf, n);
-        if (out && std::fwrite(buf, 1, n, out) != n) { *error = "cannot write " + to->string() + " (disk full?)"; ok = false; break; }
-        if (more && !more(n)) { *cancelled = true; ok = false; break; }
+        if (out && std::fwrite(buf, 1, n, out) != n) { *error = "cannot write the copy of " + name + " (disk full?)"; return ""; }
+        if (more && !more(n)) { *cancelled = true; return ""; }
     }
-    if (ok && std::ferror(in)) { *error = "read error in " + from.string(); ok = false; }
-    std::fclose(in);
-    if (out && std::fclose(out) != 0 && ok) { *error = "cannot write " + to->string(); ok = false; }
-    return ok ? h.hex() : "";
+    if (std::ferror(in)) { *error = "read error in " + name; return ""; }
+    return h.hex();
 }
-// Rename that never replaces an existing destination.
-inline bool renameNew(const std::filesystem::path& from, const std::filesystem::path& to) {
+inline std::string sha256File(const std::filesystem::path& p, const std::function<bool(size_t)>& more, bool* cancelled, std::string* error) {
+    std::FILE* in = std::fopen(p.c_str(), "rb");
+    if (!in) { *error = "cannot read " + p.string(); return ""; }
+    auto h = sha256Stream(in, nullptr, more, cancelled, error, p.string());
+    std::fclose(in);
+    return h;
+}
+// The real path of an open folder, as the kernel sees it.
+inline std::string fdPath(int fd) {
+    char b[PATH_MAX] = {};
 #ifdef __APPLE__
-    return renamex_np(from.c_str(), to.c_str(), RENAME_EXCL) == 0;
+    return fcntl(fd, F_GETPATH, b) == 0 ? std::string(b) : std::string();
 #else
-    // shortcut: check-then-rename; POSIX rename() can replace an EMPTY folder created in between. Use renameat2(RENAME_NOREPLACE) on Linux if needed.
-    std::error_code ec;
-    if (std::filesystem::exists(std::filesystem::symlink_status(to, ec))) return false;
-    std::filesystem::rename(from, to, ec);
-    return !ec;
+    const ssize_t n = ::readlink(("/proc/self/fd/" + std::to_string(fd)).c_str(), b, sizeof b - 1);
+    return n > 0 ? std::string(b, size_t(n)) : std::string();
 #endif
+}
+// True when the open folder `dir` is `target` or lies anywhere below it (compared by device and inode, walking "..").
+inline bool isSameOrBelow(int dir, const struct stat& target) {
+    Fd cur(::dup(dir));
+    for (int depth = 0; cur.v >= 0 && depth < 4096; ++depth) {
+        struct stat st {};
+        if (::fstat(cur.v, &st) != 0) return true;   // unknown: treat as inside (refuse)
+        if (st.st_dev == target.st_dev && st.st_ino == target.st_ino) return true;
+        Fd up(::openat(cur.v, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        struct stat ust {};
+        if (up.v < 0 || ::fstat(up.v, &ust) != 0) return true;
+        if (ust.st_dev == st.st_dev && ust.st_ino == st.st_ino) return false;   // reached the root
+        std::swap(cur.v, up.v);
+    }
+    return true;
+}
+// Opens folder `rel` below `base` one component at a time, never following a symlink. -1 on failure.
+inline int openDirBelow(int base, const std::string& rel) {
+    int cur = ::dup(base);
+    size_t from = 0;
+    while (cur >= 0 && from < rel.size()) {
+        const size_t to = rel.find('/', from);
+        const std::string part = rel.substr(from, to == std::string::npos ? std::string::npos : to - from);
+        from = to == std::string::npos ? rel.size() : to + 1;
+        if (part.empty()) continue;
+        const int next = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        ::close(cur);
+        cur = next;
+    }
+    return cur;
+}
+// Rename inside one folder that never replaces an existing entry.
+inline bool renameNewAt(int dir, const std::string& from, const std::string& to) {
+#ifdef __APPLE__
+    return ::renameatx_np(dir, from.c_str(), dir, to.c_str(), RENAME_EXCL) == 0;
+#else
+    return ::renameat2(dir, from.c_str(), dir, to.c_str(), RENAME_NOREPLACE) == 0;
+#endif
+}
+inline std::pair<std::string, std::string> splitRel(const std::string& rel) {
+    const auto k = rel.rfind('/');
+    return k == std::string::npos ? std::pair<std::string, std::string>{"", rel} : std::pair<std::string, std::string>{rel.substr(0, k), rel.substr(k + 1)};
 }
 }  // namespace detail
 
 inline BackupResult backupKst(const std::filesystem::path& source, const std::filesystem::path& destination, const BackupCallback& progress = {},
                               const std::function<void()>& afterCopy = {}) {
     namespace fs = std::filesystem;
+    using detail::Fd;
     BackupResult r;
     std::error_code ec;
     const fs::path src = fs::canonical(source, ec);
@@ -86,21 +139,34 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     const fs::path dst = fs::absolute(destination);
     if (const auto why = outputFolderRefusal(dst); !why.empty()) { r.message = why; return r; }
     const fs::path parent = dst.parent_path();
-    if (!fs::is_directory(parent, ec)) { r.message = "refusing: the folder " + parent.string() + " does not exist"; return r; }
-    const fs::path realParent = fs::canonical(parent, ec);
-    if (ec) { r.message = "cannot resolve " + parent.string(); return r; }
-    if (const auto rel = realParent.lexically_relative(src); !rel.empty() && *rel.begin() != "..") {
-        r.message = "refusing: the backup would be inside the folder being backed up";
+    const std::string name = dst.filename().string(), workName = name + ".INCOMPLETE", manName = name + ".manifest.sha256",
+                      manTmpName = manName + ".INCOMPLETE";
+    if (name.empty() || name == "." || name == "..") { r.message = "refusing: no folder name in " + dst.string(); return r; }
+    const fs::path work = parent / workName, man = parent / manName;
+
+    // Pin the destination's parent and check it through the handle.
+    Fd parentFd(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (parentFd.v < 0) { r.message = "refusing: the folder " + parent.string() + " does not exist"; return r; }
+    const std::string realParent = detail::fdPath(parentFd.v);
+    if (realParent.empty() || realParent.rfind("/Volumes/", 0) == 0 || realParent == "/Volumes") {
+        r.message = "refusing to write onto a mounted volume (" + dst.string() + "): write to a local folder, then copy it to the USB stick by hand";
         return r;
     }
-    const fs::path man = backupManifestPath(dst), work = dst.string() + ".INCOMPLETE";
-    for (const auto& p : {man, work})
-        if (fs::exists(fs::symlink_status(p, ec))) { r.message = "refusing: " + p.string() + " already exists"; return r; }
+    struct stat srcSt {};
+    if (::stat(src.c_str(), &srcSt) != 0) { r.message = "cannot read " + src.string(); return r; }
+    if (detail::isSameOrBelow(parentFd.v, srcSt)) { r.message = "refusing: the backup would be inside the folder being backed up"; return r; }
+    for (const auto& n : {name, workName, manName, manTmpName}) {
+        struct stat st {};
+        if (::fstatat(parentFd.v, n.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0) { r.message = "refusing: " + (parent / n).string() + " already exists"; return r; }
+    }
 
     detail::Listing L;
     std::string err;
     if (!detail::listFiles(src, L, err)) { r.message = "cannot list the source: " + err; return r; }
     if (!L.skipped.empty()) { r.message = "refusing: the source holds a symbolic link or special file, not copied: " + L.skipped.front(); return r; }
+    auto badName = [](const std::string& rel) { return rel.find_first_of("\n\r") != std::string::npos; };   // the manifest is one line per file
+    for (const auto& d : L.dirs) if (badName(d)) { r.message = "refusing: a folder name holds a line break, which the manifest cannot record"; return r; }
+    for (const auto& [rel, e] : L.files) if (badName(rel)) { r.message = "refusing: a file name holds a line break, which the manifest cannot record"; return r; }
     BackupProgress pr;
     pr.filesTotal = L.files.size();
     for (const auto& [rel, e] : L.files) pr.bytesTotal += e.size;
@@ -113,52 +179,80 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
         return r;
     }
 
-    if (!fs::create_directory(work, ec) || ec) { r.message = "cannot create " + work.string(); return r; }
+    if (::mkdirat(parentFd.v, workName.c_str(), 0755) != 0) { r.message = "cannot create " + work.string(); return r; }
     auto fail = [&](const std::string& why) {
-        fs::remove_all(work, ec);   // only this run's own folder: it did not exist before
-        r.message = why + (fs::exists(work) ? "; the incomplete copy is left at " + work.string() : "; nothing was kept");
+        r.message = why + ". Nothing was deleted: the incomplete copy stays at " + work.string() +
+                    " (marked INCOMPLETE; it is not a backup). Delete it when you no longer need it.";
         return r;
     };
-    for (const auto& d : L.dirs)
-        if (fs::create_directories(work / d, ec); ec) return fail("cannot create " + (work / d).string());
-    const auto tick = [&](size_t n) { pr.bytesDone += n; return !progress || progress(pr); };
-    const std::function<bool(size_t)> stillWanted = [&](size_t) { return !progress || progress(pr); };   // read-back and re-hash: cancel works there too
+    Fd workFd(::openat(parentFd.v, workName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (workFd.v < 0) return fail("Backup failed: cannot open " + work.string());
+    const auto wanted = [&] { return !progress || progress(pr); };
+    const auto cancel = [&] { r.cancelled = true; return fail("Backup cancelled"); };
+    for (const auto& d : L.dirs) {   // listed parents first
+        const auto [up, leaf] = detail::splitRel(d);
+        Fd at(detail::openDirBelow(workFd.v, up));
+        if (at.v < 0 || ::mkdirat(at.v, leaf.c_str(), 0755) != 0) return fail("Backup failed: cannot create the folder " + d);
+        if (!wanted()) return cancel();
+    }
+    const std::function<bool(size_t)> tick = [&](size_t n) { pr.bytesDone += n; return wanted(); };
+    const std::function<bool(size_t)> stillWanted = [&](size_t) { return wanted(); };   // read-back and re-hash: cancel works there too
     std::map<std::string, std::string> hashes;
     bool cancelled = false;
     for (const auto& [rel, e] : L.files) {
-        const fs::path to = work / rel;
-        const std::string hs = detail::sha256File(e.abs, &to, tick, &cancelled, &err);
-        if (cancelled) { r.cancelled = true; return fail("Backup cancelled"); }
+        const auto [up, leaf] = detail::splitRel(rel);
+        Fd at(detail::openDirBelow(workFd.v, up));
+        const int fd = at.v < 0 ? -1 : ::openat(at.v, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (fd < 0) return fail("Backup failed: cannot create the copy of " + rel);
+        std::FILE* out = ::fdopen(fd, "wb");
+        std::FILE* in = std::fopen(e.abs.c_str(), "rb");
+        if (!out || !in) {
+            if (out) std::fclose(out); else ::close(fd);
+            if (in) std::fclose(in);
+            return fail("Backup failed: cannot read " + rel);
+        }
+        std::string hs = detail::sha256Stream(in, out, tick, &cancelled, &err, rel);
+        std::fclose(in);
+        if (std::fclose(out) != 0 && !hs.empty()) { hs.clear(); err = "cannot write the copy of " + rel; }
+        if (cancelled) return cancel();
         if (hs.empty()) return fail("Backup failed: " + err);
-        const std::string hd = detail::sha256File(to, nullptr, stillWanted, &cancelled, &err);   // read back what was written
-        if (cancelled) { r.cancelled = true; return fail("Backup cancelled"); }
+        const int rfd = ::openat(at.v, leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);   // read back what was written
+        std::FILE* back = rfd < 0 ? nullptr : ::fdopen(rfd, "rb");
+        if (!back) { if (rfd >= 0) ::close(rfd); return fail("Backup failed: cannot read back the copy of " + rel); }
+        const std::string hd = detail::sha256Stream(back, nullptr, stillWanted, &cancelled, &err, rel);
+        std::fclose(back);
+        if (cancelled) return cancel();
         if (hd != hs) return fail("Backup failed: the copy of " + rel + " does not match its source");
         hashes[rel] = hs;
         ++pr.filesDone;
-        if (progress && !progress(pr)) { r.cancelled = true; return fail("Backup cancelled"); }
+        if (!wanted()) return cancel();
     }
     if (afterCopy) afterCopy();
-    detail::Listing again;   // the source must be exactly as it was: same files, same bytes
+    detail::Listing again;   // the source must be exactly as it was: same folders, same files, same bytes
     if (!detail::listFiles(src, again, err)) return fail("Backup failed: cannot re-read the source: " + err);
-    bool same = again.files.size() == L.files.size() && again.skipped.empty();
+    auto a = L.dirs, b = again.dirs;
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    bool same = a == b && again.files.size() == L.files.size() && again.skipped.empty();
     for (const auto& [rel, e] : again.files) {
         if (!same) break;
         const auto it = hashes.find(rel);
-        same = it != hashes.end() && detail::sha256File(e.abs, nullptr, stillWanted, &cancelled, &err) == it->second;
+        same = it != hashes.end() && detail::sha256File(e.abs, stillWanted, &cancelled, &err) == it->second;
     }
-    if (cancelled) { r.cancelled = true; return fail("Backup cancelled"); }
+    if (cancelled) return cancel();
     if (!same) return fail("Backup failed: the source changed during the backup");
+    if (!wanted()) return cancel();   // last chance, also for a backup of folders only
 
-    const fs::path manTmp = man.string() + ".INCOMPLETE";
-    std::FILE* m = std::fopen(manTmp.c_str(), "wx");
-    if (!m) return fail("cannot create " + manTmp.string());
+    const int mfd = ::openat(parentFd.v, manTmpName.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    std::FILE* m = mfd < 0 ? nullptr : ::fdopen(mfd, "w");
+    if (!m) { if (mfd >= 0) ::close(mfd); return fail("Backup failed: cannot create " + (parent / manTmpName).string()); }
     bool wrote = true;
     for (const auto& [rel, h] : hashes) wrote &= std::fprintf(m, "%s  %s\n", h.c_str(), rel.c_str()) > 0;
     wrote &= std::fclose(m) == 0;
-    if (!wrote) { fs::remove(manTmp, ec); return fail("cannot write " + manTmp.string()); }
-    if (!detail::renameNew(work, dst)) { fs::remove(manTmp, ec); return fail("refusing: " + dst.string() + " appeared during the backup"); }
-    if (!detail::renameNew(manTmp, man)) {
-        r.message = "Backup copied and verified at " + dst.string() + ", but its manifest could not be published (" + manTmp.string() +
+    if (!wrote) return fail("Backup failed: cannot write " + (parent / manTmpName).string());
+    if (!detail::renameNewAt(parentFd.v, workName, name)) return fail("refusing: " + dst.string() + " appeared during the backup");
+    if (!detail::renameNewAt(parentFd.v, manTmpName, manName)) {
+        r.message = "Backup copied and verified at " + dst.string() + ", but its manifest could not be published (" + (parent / manTmpName).string() +
                     " is left): treat it as INCOMPLETE until Compare Folders shows it equals the source";
         return r;
     }
@@ -195,7 +289,7 @@ inline std::string verifyBackup(const std::filesystem::path& dst) {
     for (const auto& [rel, h] : want) {
         const auto it = L.files.find(rel);
         if (it == L.files.end()) { bad += "missing: " + rel + "\n"; continue; }
-        const auto have = detail::sha256File(it->second.abs, nullptr, {}, &cancelled, &err);
+        const auto have = detail::sha256File(it->second.abs, {}, &cancelled, &err);
         if (have.empty()) bad += "unreadable: " + rel + "\n";
         else if (have != h) bad += "changed: " + rel + "\n";
     }

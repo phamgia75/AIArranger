@@ -29,6 +29,8 @@ def tree(root):
         for name in dirs + files:
             if os.path.islink(os.path.join(dp, name)):
                 raise ValueError(f"symbolic link not copied: {os.path.join(dp, name)}")
+            if "\n" in name or "\r" in name:   # the manifest is one line per file
+                raise ValueError(f"name with a line break, which the manifest cannot record: {os.path.join(dp, name)!r}")
         for name in files:
             p = os.path.join(dp, name)
             out[os.path.relpath(p, root).replace(os.sep, "/")] = (os.path.getsize(p), sha256(p))

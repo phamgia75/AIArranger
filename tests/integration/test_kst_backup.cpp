@@ -40,9 +40,9 @@ static std::string snapshot(const fs::path& root) {
     for (const auto& r : rows) s += r + "\n";
     return s;
 }
-static bool nothingLeft(const fs::path& dst) {
-    return !fs::exists(dst) && !fs::exists(dst.string() + ".INCOMPLETE") && !fs::exists(backupManifestPath(dst)) &&
-           !fs::exists(backupManifestPath(dst).string() + ".INCOMPLETE");
+// A cancelled or failed backup is never published and never deleted: it stays, marked, as DST.INCOMPLETE.
+static bool keptIncomplete(const fs::path& dst) {
+    return !fs::exists(dst) && !fs::exists(backupManifestPath(dst)) && fs::is_directory(dst.string() + ".INCOMPLETE");
 }
 
 int main() {
@@ -110,23 +110,53 @@ int main() {
     TEST("refuses a source holding a symbolic link", refused(backupKst(linked, d2), "symbolic link") && !fs::exists(d2));
     TEST("source still untouched after the refusals", snapshot(src) == before);
 
-    // Cancel inside the large file: nothing kept, nothing presented as a backup.
-    const fs::path d3 = root / "backups/cancelled";
-    const auto c = backupKst(src, d3, [](const BackupProgress& p) { return p.bytesDone < (1u << 20); });
-    TEST("cancel: reported as cancelled, no backup, no manifest, no INCOMPLETE left", !c.ok && c.cancelled && nothingLeft(d3));
+    // Cancel inside the large file: not published, nothing deleted, marked INCOMPLETE.
+    const auto c = backupKst(src, root / "backups/c1", [](const BackupProgress& p) { return p.bytesDone < (1u << 20); });
+    TEST("cancel: reported, not published, the partial copy kept as INCOMPLETE",
+         !c.ok && c.cancelled && keptIncomplete(root / "backups/c1") && c.message.find("Nothing was deleted") != std::string::npos);
+    TEST("a second backup to the same name refuses while the INCOMPLETE copy is there",
+         refused(backupKst(src, root / "backups/c1"), "already exists") && keptIncomplete(root / "backups/c1"));
     size_t calls = 0, copyCalls = 0;
-    backupKst(src, root / "count", [&](const BackupProgress&) { ++copyCalls; return true; });
-    fs::remove_all(root / "count"); fs::remove(backupManifestPath(root / "count"));
-    const auto late = backupKst(src, d3, [&](const BackupProgress&) { return ++calls < copyCalls - 1; });   // cancel in the last verification step
-    TEST("cancel during the final verification: reported as cancelled, nothing kept", !late.ok && late.cancelled && nothingLeft(d3));
-    // Source changing during the copy: discarded.
-    const auto m = backupKst(src, d3, {}, [&] { put(src / "STYLE/BANK01.STY", "style-X"); });
-    TEST("a source changed during the copy is detected and the copy discarded",
-         !m.ok && m.message.find("source changed") != std::string::npos && nothingLeft(d3));
+    backupKst(src, root / "backups/count", [&](const BackupProgress&) { ++copyCalls; return true; });
+    const auto late = backupKst(src, root / "backups/c2", [&](const BackupProgress&) { return ++calls < copyCalls; });   // cancel at the very last check
+    TEST("cancel at the final check before publishing: not published", !late.ok && late.cancelled && keptIncomplete(root / "backups/c2"));
+    fs::create_directories(root / "EMPTY.SET");
+    const auto empty = backupKst(root / "EMPTY.SET", root / "backups/c3", [](const BackupProgress&) { return false; });
+    TEST("cancel also stops a backup with no files", !empty.ok && empty.cancelled && keptIncomplete(root / "backups/c3"));
+    TEST("source untouched after the cancelled backups", snapshot(src) == before);
+    // The source changing during the copy fails the backup.
+    const auto m = backupKst(src, root / "backups/m1", {}, [&] { put(src / "STYLE/BANK01.STY", "style-X"); });
+    TEST("a source file changed during the copy fails the backup", !m.ok && m.message.find("source changed") != std::string::npos &&
+                                                                    keptIncomplete(root / "backups/m1"));
     put(src / "STYLE/BANK01.STY", "style-1");
-    const auto add = backupKst(src, d3, {}, [&] { put(src / "STYLE/NEW.STY", "n"); });
-    TEST("a file added to the source during the copy is detected", !add.ok && nothingLeft(d3));
+    const auto add = backupKst(src, root / "backups/m2", {}, [&] { put(src / "STYLE/NEW.STY", "n"); });
+    TEST("a file added to the source during the copy fails the backup", !add.ok && keptIncomplete(root / "backups/m2"));
     fs::remove(src / "STYLE/NEW.STY");
+    const auto dirAdded = backupKst(src, root / "backups/m3", {}, [&] { fs::create_directories(src / "NEWDIR"); });
+    TEST("a folder added to the source during the copy fails the backup", !dirAdded.ok && keptIncomplete(root / "backups/m3"));
+    fs::remove(src / "NEWDIR");
+    // Nothing is ever replaced, even when names appear while the backup runs.
+    const fs::path d4 = root / "backups/raced";
+    const auto manRace = backupKst(src, d4, {}, [&] { put(backupManifestPath(d4), "someone else's"); });
+    std::ifstream mk(backupManifestPath(d4));
+    TEST("a manifest that appears during the backup is never replaced",
+         !manRace.ok && std::string(std::istreambuf_iterator<char>(mk), {}) == "someone else's");
+    const fs::path d5 = root / "backups/raced-dir";
+    const auto dirRace = backupKst(src, d5, {}, [&] { put(d5 / "THEIRS.TXT", "theirs"); });
+    TEST("a destination folder that appears during the backup is never replaced",
+         !dirRace.ok && fs::exists(d5 / "THEIRS.TXT") && !fs::exists(d5 / "STYLE") && fs::is_directory(d5.string() + ".INCOMPLETE"));
+    // The destination's parent is pinned: swapping it for a symlink mid-backup cannot redirect the writes.
+    const fs::path pinned = root / "pinned", elsewhere = root / "elsewhere";
+    fs::create_directories(pinned);
+    fs::create_directories(elsewhere);
+    const auto swap = backupKst(src, pinned / "b", {}, [&] { fs::rename(pinned, root / "pinned.moved"); fs::create_directory_symlink(elsewhere, pinned); });
+    TEST("a parent folder swapped for a symlink mid-backup: writes stay in the folder that was checked",
+         swap.ok && fs::is_empty(elsewhere) && diff(src, root / "pinned.moved/b").same() && fs::exists(root / "pinned.moved/b.manifest.sha256"));
+    // Names the manifest cannot hold are refused up front.
+    const fs::path nl = root / "NL.SET";
+    put(nl / "A\nB.STY", "x");
+    TEST("refuses a file name with a line break (the manifest is one line per file)",
+         refused(backupKst(nl, root / "backups/nl"), "line break") && !fs::exists(root / "backups/nl.INCOMPLETE"));
 
     // Verify reports damage to a backup.
     put(dst / "STYLE/BANK01.STY", "style-2");
