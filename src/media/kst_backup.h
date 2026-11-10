@@ -351,9 +351,9 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     return r;
 }
 
-// Re-check a backup against its manifest (ours or tools/kst_copy.py's). "" = every file matches; otherwise
-// the problems (changed / missing / extra / unreadable), one per line.
-inline std::string verifyBackup(const std::filesystem::path& dst) {
+// Re-check a backup against its manifest (ours or tools/kst_copy.py's). Read-only. "" = every file matches; otherwise
+// the problems (changed / missing / extra / unreadable), one per line, or "cancelled" when `keepGoing` returned false.
+inline std::string verifyBackup(const std::filesystem::path& dst, const std::function<bool()>& keepGoing = {}) {
     const auto man = backupManifestPath(dst);
     std::FILE* f = detail::openRegular(AT_FDCWD, man.c_str());
     if (!f) return "no manifest at " + man.string() + " (missing or not a regular file)";
@@ -372,13 +372,14 @@ inline std::string verifyBackup(const std::filesystem::path& dst) {
     if (readError) return "cannot read the manifest " + man.string();
     detail::Listing L;
     std::string err;
-    if (!detail::listFiles(dst, L, err)) return "cannot list " + dst.string() + ": " + err;
+    if (!detail::listFiles(dst, L, err, keepGoing)) return err == "cancelled" ? err : "cannot list " + dst.string() + ": " + err;
     for (const auto& s : L.skipped) bad += "unexpected link or special file: " + s + "\n";
     bool cancelled = false;
     for (const auto& [rel, h] : want) {
         const auto it = L.files.find(rel);
         if (it == L.files.end()) { bad += "missing: " + rel + "\n"; continue; }
-        const auto have = detail::sha256File(it->second.abs, {}, &cancelled, &err);
+        const auto have = detail::sha256File(it->second.abs, [&](size_t) { return !keepGoing || keepGoing(); }, &cancelled, &err);
+        if (cancelled) return "cancelled";
         if (have.empty()) bad += "unreadable: " + rel + "\n";
         else if (have != h) bad += "changed: " + rel + "\n";
     }

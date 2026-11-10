@@ -116,6 +116,8 @@ ResourcesComponent::ResourcesComponent() {
             });
         });
     };
+    verifyBtn_.onClick = [this] { chooseFolder("Backup folder to verify (its .manifest.sha256 sits next to it)", [this](juce::File f) { startVerify(f); }); };
+    kstPage_.addAndMakeVisible(verifyBtn_);
     cancelBackupBtn_.onClick = [this] { cancelBackup(); };
     cancelBackupBtn_.setEnabled(false);
     kstPage_.addAndMakeVisible(backupBtn_);
@@ -255,6 +257,7 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
     cancelBackup_ = false;
     backupProgress_ = 0;
     backupBtn_.setEnabled(false);
+    verifyBtn_.setEnabled(false);
     cancelBackupBtn_.setEnabled(true);
     kstOut_.setText("Backing up " + source.getFullPathName() + "\n  to " + newFolder.getFullPathName() + "\n(the source is only read)...", false);
     std::weak_ptr<bool> alive = alive_;
@@ -281,8 +284,46 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
             backupProgress_ = r.ok ? 1.0 : 0.0;
             backupBar_.setTextToDisplay(r.ok ? "Verified" : r.cancelled ? "Cancelled" : "Not completed");
             backupBtn_.setEnabled(true);
+            verifyBtn_.setEnabled(true);
             cancelBackupBtn_.setEnabled(false);
             kstOut_.setText(juce::String(r.message) + (r.ok ? "" : "\nNo backup was made: nothing at the destination is a complete copy."), false);
+        });
+    });
+}
+
+void ResourcesComponent::startVerify(const juce::File& folder) {
+    if (backingUp_) return;
+    if (backupThread_.joinable()) backupThread_.join();
+    backingUp_ = true;
+    cancelBackup_ = false;
+    backupProgress_ = -1.0;   // indeterminate: verify reports no byte counts
+    backupBar_.setTextToDisplay("Verifying");
+    backupBtn_.setEnabled(false);
+    verifyBtn_.setEnabled(false);
+    cancelBackupBtn_.setEnabled(true);
+    kstOut_.setText("Verifying " + folder.getFullPathName() + " against its manifest (read-only)...", false);
+    std::weak_ptr<bool> alive = alive_;
+    backupThread_ = std::thread([this, alive, dir = folder.getFullPathName().toStdString()] {
+        const auto bad = media::verifyBackup(dir, [this] { return !cancelBackup_; });
+        size_t files = 0;
+        if (bad.empty()) {
+            std::ifstream m(media::backupManifestPath(dir));
+            for (std::string line; std::getline(m, line);) ++files;
+        }
+        juce::MessageManager::callAsync([this, alive, dir, bad, files] {
+            if (alive.expired()) return;
+            backingUp_ = false;
+            backupBtn_.setEnabled(true);
+            verifyBtn_.setEnabled(true);
+            cancelBackupBtn_.setEnabled(false);
+            backupProgress_ = bad.empty() ? 1.0 : 0.0;
+            backupBar_.setTextToDisplay(bad.empty() ? "Verified" : bad == "cancelled" ? "Cancelled" : "NOT verified");
+            kstOut_.setText(bad.empty() ? "Backup verified: all " + juce::String(files) + " files in " + juce::String(dir) +
+                                              " match its manifest by SHA-256, and nothing is missing or extra.\n"
+                            : bad == "cancelled" ? juce::String("Verify cancelled. Nothing was changed.\n")
+                                                 : "Backup NOT verified (" + juce::String(dir) + "):\n" + juce::String(bad) +
+                                                       "Nothing was changed. Do not rely on this folder as a backup.\n",
+                            false);
         });
     });
 }
@@ -316,6 +357,7 @@ void ResourcesComponent::resized() {
         r.removeFromTop(4);
         auto row = r.removeFromTop(28);
         backupBtn_.setBounds(row.removeFromLeft(150)); row.removeFromLeft(8);
+        verifyBtn_.setBounds(row.removeFromLeft(150)); row.removeFromLeft(8);
         cancelBackupBtn_.setBounds(row.removeFromLeft(130)); row.removeFromLeft(8);
         backupBar_.setBounds(row.removeFromLeft(300));
         r.removeFromTop(4);

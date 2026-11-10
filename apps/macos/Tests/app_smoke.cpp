@@ -199,6 +199,18 @@ int main() {
             TEST("Backup KST: complete and verified, manifest beside it, progress full",
                  rc.kstText().startsWith("Backup complete and verified") && media::diff(kst, b1p).same() && media::verifyBackup(b1p).empty() &&
                  rc.backupProgress() == 1.0);
+            rc.startVerify(b1);
+            waitBackup(rc);
+            TEST("Verify Backup: a good backup verifies", rc.kstText().startsWith("Backup verified: all 1 files"));
+            std::ofstream(b1p / "STYLE/BANK01.STY") << "tampered";
+            rc.startVerify(b1);
+            waitBackup(rc);
+            TEST("Verify Backup: a changed file is reported, nothing is changed", rc.kstText().startsWith("Backup NOT verified") &&
+                                                                                 rc.kstText().contains("changed: STYLE/BANK01.STY"));
+            std::ofstream(b1p / "STYLE/BANK01.STY") << "x";
+            rc.startVerify(juce::File(kst.string()));
+            waitBackup(rc);
+            TEST("Verify Backup: a folder without a manifest is not a backup", rc.kstText().contains("no manifest"));
             rc.startBackup(juce::File(kst.string()), b1);
             waitBackup(rc);
             TEST("Backup KST never reuses an existing folder", rc.kstText().contains("already exists") && rc.kstText().contains("No backup was made") &&

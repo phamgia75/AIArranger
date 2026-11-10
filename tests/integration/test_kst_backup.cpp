@@ -238,6 +238,7 @@ int main() {
     TEST("verify reports changed, missing and extra files",
          bad.find("changed: STYLE/BANK01.STY") != std::string::npos && bad.find("missing: SOUND/USER 01.PCG") != std::string::npos &&
          bad.find("extra:   EXTRA.TXT") != std::string::npos);
+    TEST("verify can be cancelled", verifyBackup(dst, [] { return false; }) == "cancelled");
     TEST("verify without a manifest says so", verifyBackup(root / "LINKED").rfind("no manifest", 0) == 0);
     fs::create_directories(root / "EMPTYDST");
     fs::create_directories(backupManifestPath(root / "EMPTYDST"));

@@ -29,7 +29,8 @@ public:
     void runKst(ui::ResourceBrowserModel::KstAction a, const juce::String& first, const juce::String& second = {});
     void compareMemory();
     void startBackup(const juce::File& source, const juce::File& newFolder);   // asynchronous; backingUp() until done
-    void cancelBackup() { cancelBackup_ = true; }
+    void cancelBackup() { cancelBackup_ = true; }   // also stops a Verify Backup
+    void startVerify(const juce::File& backupFolder);   // asynchronous, read-only; backingUp() until done
     bool backingUp() const { return backingUp_; }
     double backupProgress() const { return backupProgress_; }
     static juce::File backupFolderFor(const juce::File& source, const juce::File& parent);   // "<name> backup <date time>"
@@ -66,7 +67,7 @@ private:
 
     // KST Library
     juce::TextButton invBtn_{"Inventory..."}, diffBtn_{"Compare Folders..."}, planBtn_{"Merge Plan..."}, semanticBtn_{"Semantic Merge"};
-    juce::TextButton backupBtn_{"Backup KST..."}, cancelBackupBtn_{"Cancel Backup"};
+    juce::TextButton backupBtn_{"Backup KST..."}, verifyBtn_{"Verify Backup..."}, cancelBackupBtn_{"Cancel Backup"};
     double backupProgress_ = 0;   // message thread only
     juce::ProgressBar backupBar_{backupProgress_};
     bool backingUp_ = false;      // message thread only
