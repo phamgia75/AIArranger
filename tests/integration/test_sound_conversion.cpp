@@ -266,6 +266,10 @@ int main() {
         TEST("a destination given with a trailing slash is written beside it and published under its name",
              !writePackage(org, d3.string() + "/", "", &err2).empty() && fs::exists(d3 / "REPORT.txt") && !fs::exists(d3.string() + ".INCOMPLETE") &&
              !fs::exists(d3 / ".INCOMPLETE"));
+        const fs::path d5 = dir.string() + " 5";
+        TEST("...and one ending in /. too", !writePackage(org, d5.string() + "/.", "", &err2).empty() && fs::exists(d5 / "REPORT.txt") &&
+             !fs::exists(d5.string() + ".INCOMPLETE") && !fs::exists(d5 / "..INCOMPLETE") && folderPath("/a/b/.") == "/a/b" && folderPath("/a/b/") == "/a/b");
+        fs::remove_all(d5, ec0);
         {   // a full disk (here a file-size limit): the write fails, nothing is published under the package's name
             const fs::path d4 = dir.string() + " 4";
             struct rlimit old {};

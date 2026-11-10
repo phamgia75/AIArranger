@@ -127,6 +127,9 @@ int main() {
     TEST("REPORT states the 4/8 GB budget and irreversible compression", rep.find("8 GB") != std::string::npos && rep.find("cannot be undone") != std::string::npos);
     TEST("package refuses an existing folder", writeDrumPackage(kit, root / "pkg", "", &err).empty() && err.find("exists") != std::string::npos);
     TEST("drum package published by rename: no INCOMPLETE folder left", fs::exists(root / "pkg/REPORT.txt") && !fs::exists(root / "pkg.INCOMPLETE"));
+    TEST("drum package to DIR/. and DIR/ publishes under DIR", !writeDrumPackage(kit, (root / "dot").string() + "/.", "", &err).empty() &&
+         fs::exists(root / "dot/REPORT.txt") && !fs::exists(root / "dot/..INCOMPLETE") &&
+         !writeDrumPackage(kit, (root / "slash").string() + "/", "", &err).empty() && fs::exists(root / "slash/REPORT.txt") && !fs::exists(root / "slash/.INCOMPLETE"));
     fs::remove_all(root);
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

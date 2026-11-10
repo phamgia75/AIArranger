@@ -8,8 +8,9 @@
 
 namespace ai_arranger::media {
 
-// `out` without trailing separators: "/tmp/pkg/" names the folder /tmp/pkg, so its work folder is the sibling /tmp/pkg.INCOMPLETE.
+// `out` as the folder it names: "/tmp/pkg/" and "/tmp/pkg/." are /tmp/pkg, so its work folder is the sibling /tmp/pkg.INCOMPLETE.
 inline std::filesystem::path folderPath(std::filesystem::path out) {
+    out = out.lexically_normal();   // drops "." and resolves "x/.." lexically
     while (!out.has_filename() && out.has_parent_path() && out.parent_path() != out) out = out.parent_path();
     return out;
 }
