@@ -122,6 +122,12 @@ inline std::string planRender(const SamplerSettings& s, SamplerPlan* plan) {
         return "velocities must rise (1-24 layers) and each split must lie above the previous velocity and at most the next";
     if (!seconds(s.hold, &p.hold) || !seconds(s.release, &p.release) || !snd::renderTimingValid(p.hold, p.release))
         return "hold must be above 0 s, release 0 s or more, together at most 21 s";
+    if (s.loop && p.hold * p.spec.rate < double(snd::loopMinHeldFrames(p.spec.rate))) {
+        char b[160];
+        std::snprintf(b, sizeof b, "a loop needs a hold of at least %.2f s (the held part must be long enough to find a loop in)",
+                      double(snd::loopMinHeldFrames(p.spec.rate)) / p.spec.rate);
+        return b;
+    }
     if (s.loop) p.spec.loopHoldSec = p.hold;
     p.estimate = snd::estimateRender(p.spec, p.hold, p.release);
     if (p.estimate.workingBytes > snd::kMaxRenderWorkingBytes) {

@@ -20,6 +20,11 @@ Two things go beyond the plan:
   the key and velocity map the render will make (sampled notes, that every key C-1 to G9 plays because the outer samples stretch to the ends, and each layer's velocity range, from the engine's
   own `layerVelocityRanges`), and says when the highest note is off the sampling step.
 
+- **Loop needs a long enough hold (2026-11-10).** With Loop on, a hold shorter than the engine's loop search
+  window (`loopMinHeldFrames`, about 0.61 s at 48 kHz) used to be accepted and every sample came out one-shot,
+  with only a warning in the report afterwards. The form and the `aiarranger-plugin-sampler` CLI now refuse it
+  before rendering and name the minimum.
+
 ## Decision: run the existing sampler as a child process
 
 The Convert Sound tab will run `aiarranger-plugin-sampler` (`apps/macos/Tools/plugin_sampler.cpp`)

@@ -578,6 +578,18 @@ int main() {
                     TEST("sampler refuses a program number the plugin does not have",
                          cp.getExitCode() == 1 && text.contains("program 9999 does not exist") && !fs::exists(out));
                 }
+                {   // a loop that cannot be found: refused before any render, as the form does
+                    juce::ChildProcess cp;
+                    const auto out = root / "noloop";
+                    cp.start(juce::StringArray{real.getFullPathName(), "render", "--plugin", "DLSMusicDevice", "--name", "X", "--out",
+                                               juce::String(out.string()), "--low", "60", "--high", "60", "--loop", "on", "--hold", "0.5"});
+                    const auto text = cp.readAllProcessOutput();
+                    cp.waitForProcessToFinish(10000);
+                    TEST("sampler refuses --loop on with a hold too short to loop", cp.getExitCode() == 1 && text.contains("--loop on needs --hold 0.61") && !fs::exists(out));
+                    ps.field("Hold (s)").setText("0.5");
+                    pump(50);
+                    TEST("the form refuses Loop with a hold too short to loop", ps.estimateText().startsWith("Not ready: a loop needs a hold of at least 0.61 s"));
+                }
                 ps.field("Hold (s)").setText("1.5");
                 pump(50);
                 TEST("editing the form after a render asks for a new render", ps.statusText().contains("Settings changed since the render"));

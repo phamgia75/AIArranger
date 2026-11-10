@@ -95,6 +95,10 @@ int main(int argc, char** argv) {
     const double hold = num("--hold", 2.0), release = num("--release", 1.0);
     if (a.count("--loop") && a["--loop"] == "on") spec.loopHoldSec = hold;
     if (!renderTimingValid(hold, release)) { std::fprintf(stderr, "hold + release must be 0-21 s\n"); return 1; }
+    if (spec.loopHoldSec > 0 && hold * spec.rate < double(loopMinHeldFrames(spec.rate))) {
+        std::fprintf(stderr, "--loop on needs --hold %.2f or more (a shorter held part cannot be looped)\n", double(loopMinHeldFrames(spec.rate)) / spec.rate);
+        return 1;
+    }
     if (const auto r = outputFolderRefusal(a["--out"]); !r.empty()) { std::fprintf(stderr, "%s\n", r.c_str()); return 1; }
 
     const double rate = spec.rate;

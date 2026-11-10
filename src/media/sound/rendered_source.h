@@ -81,10 +81,13 @@ inline double measurePitch(const int16_t* x, size_t n, uint32_t rate, double exp
 // jump end -> start continues the waveform exactly. The sample is cut after the loop (plus 64 frames
 // copied from the loop start, for interpolation); the release then comes from the player's envelope.
 // Returns the correlation (1 = identical neighbourhoods), or -1 when the held part is too short.
+// The shortest held part loopSustain can loop: 50 ms before note-off, a loop starting at 0.3 s at the earliest,
+// at least 0.25 s long, and the 256-frame seam window (about 0.61 s at 48 kHz).
+inline size_t loopMinHeldFrames(size_t rate) { return rate / 20 + rate * 3 / 10 + rate / 4 + 256; }
 inline double loopSustain(Sample& s, size_t noteOff) {
     const size_t R = s.rate, W = 256, minLen = R / 4, startMin = R * 3 / 10, ch = s.channels;
     noteOff = std::min(noteOff, s.frames());
-    if (noteOff < R / 20 + startMin + minLen + W) return -1;
+    if (noteOff < loopMinHeldFrames(R)) return -1;
     const size_t e = noteOff - R / 20;
     auto mid = [&](size_t f) { double m = 0; for (size_t c = 0; c < ch; ++c) m += s.pcm[f * ch + c]; return m; };
     auto corr = [&](size_t p) {   // on the channel sum, so a stereo loop uses one seam for both channels
