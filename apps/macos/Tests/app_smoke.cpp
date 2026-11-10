@@ -375,7 +375,7 @@ int main() {
                 c.findInstruments();
                 for (int i = 0; i < 1500 && c.instrumentNames().isEmpty(); ++i) pump(20);
                 const bool found = c.selectInstrument(instrument);
-                for (auto [k, v] : {std::pair<const char*, const char*>{"Lowest note", "48"}, {"Highest note", "72"}, {"Every (semitones)", "12"},
+                for (auto [k, v] : {std::pair<const char*, const char*>{"Lowest note", "C3"}, {"Highest note", "c5"}, {"Every (semitones)", "12"},
                                     {"Velocities, softest first", "60,110"}, {"Hold (s)", "1.0"}, {"Release (s)", "0.5"}})
                     c.field(k).setText(v);
                 c.field("Sound name").setText(name);
@@ -517,6 +517,8 @@ int main() {
                 } watch;
                 ps.loopToggle().setToggleState(true, juce::sendNotificationSync);
                 TEST("estimate before rendering", ps.estimateText().startsWith("6 samples (3 notes x 2 layers), 9 s of audio"));
+                TEST("the form takes note names and shows the key and velocity map before rendering",
+                     ps.estimateText().contains("Keys C3-C5, sampled at C3, C4, C5; velocity 0-85, 86-127."));
                 watch.startTimer(20);
                 ps.startRender();
                 waitIdle(120000);

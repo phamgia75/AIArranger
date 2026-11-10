@@ -9,6 +9,7 @@
 #include "media/sound/package_writer.h"
 #include "media/sound/rendered_source.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -46,6 +47,29 @@ inline std::vector<std::string> parseProgramList(const std::string& out) {
         v.push_back(line.substr(tab + 1));
     }
     return v;
+}
+
+// A note typed as a MIDI number (0-127) or a name: C4 = 60 (the Pa5X and TX16Wx convention), sharps with #,
+// flats with b, octaves -1 to 9 ("C-1" = 0, "G9" = 127). Letters in either case; spaces around are ignored.
+inline bool noteNumber(std::string t, int* out) {
+    while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+    while (!t.empty() && t.back() == ' ') t.pop_back();
+    int n = 0;
+    if (!t.empty() && t.size() <= 3 && t.find_first_not_of("0123456789") == std::string::npos) n = std::stoi(t);
+    else {
+        static const int pc[7] = {9, 11, 0, 2, 4, 5, 7};   // A B C D E F G
+        const char L = static_cast<char>(std::toupper(static_cast<unsigned char>(t.empty() ? ' ' : t[0])));
+        if (L < 'A' || L > 'G') return false;
+        size_t i = 1;
+        int acc = 0;
+        if (i < t.size() && (t[i] == '#' || t[i] == 'b')) acc = t[i++] == '#' ? 1 : -1;
+        const std::string oct = t.substr(i);
+        if (oct != "-1" && (oct.size() != 1 || oct[0] < '0' || oct[0] > '9')) return false;
+        n = (std::stoi(oct) + 1) * 12 + pc[L - 'A'] + acc;
+    }
+    if (n < 0 || n > 127) return false;
+    *out = n;
+    return true;
 }
 
 // The form, as typed. Numbers stay text until checked.
@@ -87,8 +111,8 @@ inline std::string planRender(const SamplerSettings& s, SamplerPlan* plan) {
     if (s.name.empty() || s.name.size() > 20) return "the Sound name needs 1-20 characters";
     int v = 0;
     if (!s.program.empty() && !integer(s.program, 0, 9999, &v)) return "program must be a number (or empty for the plugin's current one)";
-    if (!integer(s.low, 0, 127, &p.spec.lowRoot) || !integer(s.high, 0, 127, &p.spec.highRoot) || p.spec.lowRoot > p.spec.highRoot)
-        return "lowest and highest note must be 0-127 (60 = C4), lowest first";
+    if (!noteNumber(s.low, &p.spec.lowRoot) || !noteNumber(s.high, &p.spec.highRoot) || p.spec.lowRoot > p.spec.highRoot)
+        return "lowest and highest note: a name such as C2 or F#4, or a number 0-127 (60 = C4), lowest first";
     if (!integer(s.step, 1, 127, &p.spec.step)) return "sample every 1-127 semitones";
     if (!list(s.velocities, &p.spec.velocities) || p.spec.velocities.empty()) return "velocities: numbers 1-127, softest first, e.g. 40,80,120";
     if (!s.splits.empty() && !list(s.splits, &p.spec.splits)) return "splits: numbers 1-127, e.g. 60,100 (empty = halfway)";
@@ -110,6 +134,23 @@ inline std::string planRender(const SamplerSettings& s, SamplerPlan* plan) {
     return "";
 }
 
+// The key and velocity map the render will make, before rendering: "Keys C2-C7, sampled at C2, D#2, ...; velocity 0-63, 64-127."
+inline std::string mapText(const SamplerPlan& p) {
+    namespace txw = media::sound::txw;
+    const auto roots = media::sound::renderRoots(p.spec);
+    std::string s = "Keys " + txw::noteName(p.spec.lowRoot) + "-" + txw::noteName(roots.empty() ? p.spec.highRoot : roots.back()) + ", sampled at ";
+    for (size_t i = 0; i < roots.size(); ++i) {
+        if (roots.size() > 8 && i == 4) { s += "..., "; i = roots.size() - 3; }
+        s += txw::noteName(roots[i]) + (i + 1 < roots.size() ? ", " : "");
+    }
+    s += "; velocity ";
+    const auto vel = media::sound::layerVelocityRanges(p.spec);
+    for (size_t l = 0; l < vel.size(); ++l) s += std::to_string(vel[l].first) + "-" + std::to_string(vel[l].second) + (l + 1 < vel.size() ? ", " : ".");
+    if (!roots.empty() && roots.back() < p.spec.highRoot)
+        s += " " + txw::noteName(p.spec.highRoot) + " is not on the sampling step; the top sample is " + txw::noteName(roots.back()) + ".";
+    return s;
+}
+
 inline std::string estimateText(const SamplerPlan& p) {
     char b[400];
     std::snprintf(b, sizeof b,
@@ -117,13 +158,14 @@ inline std::string estimateText(const SamplerPlan& p) {
                   "(%.2f%% of the 4 GB User Sample memory, before trimming%s); about %.0f MB of memory while rendering, plus the plugin's own.",
                   p.estimate.samples, p.estimate.roots, p.spec.velocities.size(), p.estimate.audioSec, p.estimate.pcmBytesMax / 1e6,
                   100.0 * double(p.estimate.pcmBytesMax) / 4e9, p.spec.loopHoldSec > 0 ? " and loop cutting" : "", p.estimate.workingBytes / 1e6);
-    return b;
+    return std::string(b) + "\n" + mapText(p);
 }
 
 inline std::vector<std::string> samplerArgs(const SamplerSettings& s, const std::string& outDir) {
     auto strip = [](std::string t) { t.erase(std::remove(t.begin(), t.end(), ' '), t.end()); return t; };   // "40, 80" -> "40,80"
+    auto num = [](const std::string& t) { int n = 0; return noteNumber(t, &n) ? std::to_string(n) : t; };   // the tool takes numbers
     std::vector<std::string> a{"render", "--plugin", s.pluginId, "--name", s.name, "--out", outDir,
-                               "--low", s.low, "--high", s.high, "--step", s.step, "--vel", strip(s.velocities),
+                               "--low", num(s.low), "--high", num(s.high), "--step", s.step, "--vel", strip(s.velocities),
                                "--hold", s.hold, "--release", s.release};
     if (!s.splits.empty()) { a.push_back("--splits"); a.push_back(strip(s.splits)); }
     if (!s.program.empty()) { a.push_back("--program"); a.push_back(s.program); }

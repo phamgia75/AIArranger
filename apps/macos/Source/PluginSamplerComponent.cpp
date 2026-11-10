@@ -393,7 +393,7 @@ void PluginSamplerComponent::resized() {
     put(row, 5, 170, 150); put(row, 6, 50, 90); put(row, 7, 64, 50); put(row, 8, 84, 50);
     loop_.setBounds(row.removeFromLeft(150)); stereo_.setBounds(row.removeFromLeft(80));
     r.removeFromTop(4);
-    estimate_.setBounds(r.removeFromTop(36));
+    estimate_.setBounds(r.removeFromTop(52));   // estimate + key/velocity map: up to 3 lines
     row = r.removeFromTop(28);
     renderBtn_.setBounds(row.removeFromLeft(150)); row.removeFromLeft(8);
     cancelBtn_.setBounds(row.removeFromLeft(90)); row.removeFromLeft(8);

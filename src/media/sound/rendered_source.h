@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <utility>
+#include <vector>
 
 namespace ai_arranger::media::sound {
 
@@ -135,6 +137,20 @@ inline std::vector<int> renderRoots(const RenderSpec& spec) {
     return roots;
 }
 
+// The velocity range each layer plays (softest first): from 0 (layer 1) or one above the previous layer, up to
+// the next split - 1 (or halfway to the next render when no splits are given), and 127 for the loudest.
+// Meaningful for a spec renderSpecValid accepts.
+inline std::vector<std::pair<uint8_t, uint8_t>> layerVelocityRanges(const RenderSpec& spec) {
+    std::vector<std::pair<uint8_t, uint8_t>> v;
+    const size_t N = spec.velocities.size();
+    for (size_t l = 0; l < N; ++l) {
+        const int lo = l == 0 ? 0 : v.back().second + 1;
+        const int hi = l + 1 == N ? 127 : spec.splits.empty() ? (spec.velocities[l] + spec.velocities[l + 1]) / 2 : spec.splits[l] - 1;
+        v.emplace_back(static_cast<uint8_t>(lo), static_cast<uint8_t>(hi));
+    }
+    return v;
+}
+
 // True when buildFromRenders can render this spec: roots, 1-24 ascending velocities, splits between them.
 inline bool renderSpecValid(const RenderSpec& spec) {
     const size_t N = spec.velocities.size(), ch = spec.channels;
@@ -216,14 +232,14 @@ inline Instrument buildFromRenders(const RenderSpec& spec, const RenderFn& rende
     Instrument in;
     in.name = spec.name;
     const std::string pfx = spec.name.substr(0, 12);
+    const auto vel = layerVelocityRanges(spec);
     for (size_t l = 0; l < N; ++l) {
         Layer layer;
         // 2 layers keep the Lo/Hi names; more are numbered from the softest
         const std::string tag = N == 1 ? "" : N == 2 ? (l == 0 ? "Lo" : "Hi") : "V" + std::to_string(l + 1);
         layer.name = tag.empty() ? spec.name : spec.name.substr(0, 19 - tag.size()) + " " + tag;   // <= 20 chars
-        layer.velLo = static_cast<uint8_t>(l == 0 ? 0 : in.layers.back().velHi + 1);
-        layer.velHi = static_cast<uint8_t>(l + 1 == N ? 127
-                      : spec.splits.empty() ? (spec.velocities[l] + spec.velocities[l + 1]) / 2 : spec.splits[l] - 1);
+        layer.velLo = vel[l].first;
+        layer.velHi = vel[l].second;
         const std::string stag = N == 1 ? "" : N == 2 ? (l == 0 ? " L" : " H") : " " + std::to_string(l + 1);
         for (size_t i = 0; i < roots.size(); ++i) {
             const int r = roots[i];

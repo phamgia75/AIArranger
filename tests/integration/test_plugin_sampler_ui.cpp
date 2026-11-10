@@ -3,6 +3,7 @@
 // No plugin is loaded here; SOFTWARE evidence.
 
 #include "ui/sound/plugin_sampler_model.h"
+#include <algorithm>
 #include <cstdio>
 #include <unistd.h>
 
@@ -54,6 +55,35 @@ int main() {
     }
     TEST("estimate text names samples, audio, package size and working memory",
          contains(estimateText(p), "6 samples (3 notes x 2 layers), 9 s of audio") && contains(estimateText(p), "memory while rendering"));
+    {   // notes by name (C4 = 60, as on the Pa5X and in TX16Wx)
+        int n = -1;
+        auto note = [&](const char* t) { n = -1; return noteNumber(t, &n) ? n : -1; };
+        TEST("note names: C4 60, C-1 0, G9 127, sharps, flats, either case, numbers, spaces",
+             note("C4") == 60 && note("C-1") == 0 && note("G9") == 127 && note("F#4") == 66 && note("Bb3") == 58 && note("c2") == 36 &&
+             note("a0") == 21 && note("72") == 72 && note(" D#5 ") == 75 && note("0") == 0 && note("127") == 127);
+        TEST("note names: nonsense and out of range refused",
+             note("") < 0 && note("H2") < 0 && note("C10") < 0 && note("G#9") < 0 && note("Cb-1") < 0 && note("128") < 0 && note("C") < 0 &&
+             note("C4x") < 0 && note("C##4") < 0 && note("-1") < 0 && note("1000") < 0);
+        SamplerSettings t = s; t.low = "C3"; t.high = "c5";
+        SamplerPlan q;
+        TEST("the form accepts note names", planRender(t, &q).empty() && q.spec.lowRoot == 48 && q.spec.highRoot == 72);
+        const auto a = samplerArgs(t, "/tmp/x");
+        auto after = [&](const char* flag) { const auto it = std::find(a.begin(), a.end(), flag); return it + 1 < a.end() ? *(it + 1) : ""; };
+        TEST("the sampler gets note numbers, never names", after("--low") == "48" && after("--high") == "72");
+    }
+    TEST("map text: keys, sampled notes and velocity ranges", contains(mapText(p), "Keys C3-C5, sampled at C3, C4, C5; velocity 0-85, 86-127."));
+    {
+        SamplerSettings t = s; t.low = "C2"; t.high = "C7"; t.step = "3"; t.velocities = "40,80,120"; t.splits = "50,100";
+        SamplerPlan q;
+        planRender(t, &q);
+        TEST("map text shortens long note lists and follows the splits",
+             contains(mapText(q), "sampled at C2, D#2, F#2, A2, ..., F#6, A6, C7; velocity 0-49, 50-99, 100-127."));
+        t.high = "D7";
+        planRender(t, &q);
+        TEST("map text says when the highest note is off the sampling step", contains(mapText(q), "D7 is not on the sampling step; the top sample is C7."));
+        const std::vector<std::pair<uint8_t, uint8_t>> want{{0, 49}, {50, 99}, {100, 127}};
+        TEST("the layer ranges are the engine's own", snd::layerVelocityRanges(q.spec) == want);
+    }
     TEST("roots come from the engine's own rule", snd::renderRoots(p.spec) == std::vector<int>({48, 60, 72}));
 
     auto bad = [&](const char* what, auto change, const char* expect) {
