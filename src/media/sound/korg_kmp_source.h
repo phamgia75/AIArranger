@@ -19,6 +19,7 @@
 #include "media/sound/sound_recipe.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -99,6 +100,7 @@ inline std::string readKmp(const std::vector<uint8_t>& b, Kmp* k) {
                 g.tune = static_cast<int8_t>(b[r + 2]);
                 g.level = static_cast<int8_t>(b[r + 3]);
                 if (g.tune < -99 || g.tune > 99) return "region " + std::to_string(i + 1) + ": tune outside -99..+99";
+                if (g.level < -99 || g.level > 99) return "region " + std::to_string(i + 1) + ": level outside -99..+99";
                 g.ksf = korg::text(b, r + 6, 12);
                 if (g.ksf.empty()) return "region " + std::to_string(i + 1) + ": no KSF file name";
                 k->regions.push_back(g);
@@ -126,10 +128,46 @@ inline std::string readKmp(const std::vector<uint8_t>& b, Kmp* k) {
 }
 
 struct KsfHead {
-    uint32_t rate = 0, frames = 0, start = 0, loopStart = 0, end = 0;
-    bool loopOn = false, plus12dB = false;
+    uint32_t rate = 0, frames = 0, start = 0, start2 = 0, loopStart = 0, end = 0;
+    bool loopOn = false, plus12dB = false, use2ndStart = false;
     int8_t loopTune = 0;
 };
+
+namespace korg {
+inline std::string smp1(const std::vector<uint8_t>& b, size_t o, size_t len, KsfHead* h) {
+    if (len != 32) return "SMP1 must be 32 bytes";
+    h->start = be32(b, o + 16);
+    h->start2 = be32(b, o + 20);
+    h->loopStart = be32(b, o + 24);
+    h->end = be32(b, o + 28);
+    return "";
+}
+// The 12 fixed SMD1 bytes at o (chunk length len, the audio follows them).
+inline std::string smd1(const std::vector<uint8_t>& b, size_t o, size_t len, KsfHead* h) {
+    if (len < 12) return "SMD1 shorter than 12 bytes";
+    h->rate = be32(b, o);
+    const uint8_t a = b[o + 4];
+    if (a & 0x10) return "compressed sample data (not documented; save it uncompressed on the KRONOS)";
+    if (a & 0x0E) return "attribute bits 3-1 set on uncompressed data (undocumented)";
+    if (a & 0x40) return "Reverse is on (a reversed sample cannot be carried into a Pa5X package; turn Reverse off on the KRONOS)";
+    h->loopOn = !(a & 0x80);
+    h->use2ndStart = !(a & 0x20);
+    h->plus12dB = a & 0x01;
+    h->loopTune = static_cast<int8_t>(b[o + 5]);
+    if (h->loopTune < -99 || h->loopTune > 99) return "loop tune outside -99..+99";
+    if (b[o + 6] != 1) return std::to_string(b[o + 6]) + " channels (the KRONOS documents 1; stereo is a -L/-R pair)";
+    if (b[o + 7] != 16) return std::to_string(b[o + 7]) + "-bit data (only 16-bit is converted)";
+    h->frames = be32(b, o + 8);
+    if (uint64_t(h->frames) * 2 != len - 12) return "sample count does not match the data length";
+    return "";
+}
+inline std::string ranges(const KsfHead* h) {
+    if (h->frames == 0) return "no audio";
+    if (h->end >= h->frames || h->start > h->end) return "Start/End outside the audio";
+    if (h->loopOn && (h->loopStart < h->start || h->loopStart > h->end)) return "Loop Start outside Start..End";
+    return "";
+}
+}  // namespace korg
 
 // Mono 16-bit uncompressed KSF -> Sample trimmed to Start..End (what plays), loop Loop Start..End inclusive.
 // head only (s == nullptr): the parameters, without copying audio.
@@ -139,24 +177,10 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s)
     size_t dataAt = 0;
     const auto e = korg::walk(b, [&](const std::string& id, size_t o, size_t len) -> std::string {
         if (id == "SMP1") {
-            if (len != 32) return "SMP1 must be 32 bytes";
-            h->start = korg::be32(b, o + 16);
-            h->loopStart = korg::be32(b, o + 24);
-            h->end = korg::be32(b, o + 28);
+            if (const auto e = korg::smp1(b, o, len, h); !e.empty()) return e;
             smp = true;
         } else if (id == "SMD1") {
-            if (len < 12) return "SMD1 shorter than 12 bytes";
-            h->rate = korg::be32(b, o);
-            const uint8_t a = b[o + 4];
-            if (a & 0x10) return "compressed sample data (not documented; save it uncompressed on the KRONOS)";
-            if (a & 0x40) return "Reverse is on (a reversed sample cannot be carried into a Pa5X package; turn Reverse off on the KRONOS)";
-            h->loopOn = !(a & 0x80);
-            h->plus12dB = a & 0x01;
-            h->loopTune = static_cast<int8_t>(b[o + 5]);
-            if (b[o + 6] != 1) return std::to_string(b[o + 6]) + " channels (the KRONOS documents 1; stereo is a -L/-R pair)";
-            if (b[o + 7] != 16) return std::to_string(b[o + 7]) + "-bit data (only 16-bit is converted)";
-            h->frames = korg::be32(b, o + 8);
-            if (uint64_t(h->frames) * 2 != len - 12) return "sample count does not match the data length";
+            if (const auto e = korg::smd1(b, o, len, h); !e.empty()) return e;
             dataAt = o + 12;
             smd = true;
         } else if (id == "SNO1") {
@@ -174,9 +198,7 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s)
     });
     if (!e.empty()) return e;
     if (!smp || !smd) return "not a KSF file (needs SMP1 and SMD1)";
-    if (h->frames == 0) return "no audio";
-    if (h->end >= h->frames || h->start > h->end) return "Start/End outside the audio";
-    if (h->loopOn && (h->loopStart < h->start || h->loopStart > h->end)) return "Loop Start outside Start..End";
+    if (const auto r = korg::ranges(h); !r.empty()) return r;
     if (!s) return "";
     s->rate = h->rate;
     s->channels = 1;
@@ -213,12 +235,36 @@ inline std::vector<uint8_t> slurp(const std::filesystem::path& p, std::string* e
 inline std::string lower(std::string s) { for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; }
 // A KSF named in a KMP: next to it ("Save All") or in the folder named like it ("One Multisample", p.856). FAT is
 // case-insensitive, so the name is matched without case.
-inline std::filesystem::path findKsf(const std::filesystem::path& kmp, const std::string& name) {
+// Two files that differ only in case (possible on a case-sensitive disk) are refused rather than picked.
+inline std::filesystem::path findKsf(const std::filesystem::path& kmp, const std::string& name, std::string* why) {
     std::error_code ec;
-    for (const auto& d : {kmp.parent_path(), kmp.parent_path() / kmp.stem()})
+    for (const auto& d : {kmp.parent_path(), kmp.parent_path() / kmp.stem()}) {
+        std::vector<std::filesystem::path> hits;
         for (const auto& e : std::filesystem::directory_iterator(d, ec))
-            if (lower(e.path().filename().string()) == lower(name) && e.is_regular_file(ec)) return e.path();
+            if (lower(e.path().filename().string()) == lower(name) && e.is_regular_file(ec)) hits.push_back(e.path());
+        if (hits.size() > 1) { *why = "several files named " + name + " (differing only in case) in " + d.string(); return {}; }
+        if (hits.size() == 1) return hits.front();
+    }
+    *why = name + " not found (looked next to it and in " + kmp.stem().string() + "/)";
     return {};
+}
+// The documented order SMP1 then SMD1 lets the scan read 60 bytes instead of the audio; anything else is read whole.
+inline std::string ksfHead(const std::filesystem::path& p, KsfHead* h) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(p, ec);
+    if (ec) return "unreadable";
+    std::vector<uint8_t> b(60);
+    std::ifstream is(p, std::ios::binary);
+    if (size >= 60 && is.read(reinterpret_cast<char*>(b.data()), 60) && !std::memcmp(b.data(), "SMP1", 4) && be32(b, 4) == 32 &&
+        !std::memcmp(&b[40], "SMD1", 4) && be32(b, 44) <= size - 48) {
+        *h = {};
+        if (const auto e = smp1(b, 8, 32, h); !e.empty()) return e;
+        if (const auto e = smd1(b, 48, be32(b, 44), h); !e.empty()) return e;
+        return ranges(h);
+    }
+    std::string err;
+    const auto all = slurp(p, &err);
+    return err.empty() ? readKsf(all, h, nullptr) : err;
 }
 inline std::string layerName(std::string s) {
     for (auto& c : s) if (c < 0x20 || c > 0x7E || c == ',') c = ' ';
@@ -244,7 +290,8 @@ inline bool isKorgFolder(const std::filesystem::path& dir) {
     return false;
 }
 
-// Reads every .KMP in dir (and the header of every KSF they name); pairs -L/-R. No audio is read. "" on success.
+// Reads every .KMP in dir and the first 60 bytes of every KSF they name; pairs -L/-R. No audio is read (fast enough for
+// the UI thread). "" on success.
 inline std::string scanKorgFolder(const std::filesystem::path& dir, std::vector<KorgMultisample>& out) {
     namespace fs = std::filesystem;
     out.clear();
@@ -257,6 +304,7 @@ inline std::string scanKorgFolder(const std::filesystem::path& dir, std::vector<
     std::sort(kmps.begin(), kmps.end());
     struct One { fs::path p; Kmp k; std::vector<fs::path> ksf; std::vector<KsfHead> head; };
     std::map<std::string, std::map<char, One>> byBase;
+    std::map<fs::path, KsfHead> heads;   // a KSF used by several regions is read once
     for (const auto& p : kmps) {
         std::string err;
         const auto b = korg::slurp(p, &err);
@@ -266,12 +314,15 @@ inline std::string scanKorgFolder(const std::filesystem::path& dir, std::vector<
         for (const auto& r : one.k.regions) {
             if (r.ksf == "SKIPPEDSAMPL") { one.ksf.emplace_back(); one.head.emplace_back(); continue; }
             if (r.ksf.rfind("INTERNAL", 0) == 0) return p.filename().string() + ": " + r.ksf + " refers to a sample built into an older Korg instrument";
-            const fs::path f = korg::findKsf(p, r.ksf);
-            if (f.empty()) return p.filename().string() + ": " + r.ksf + " not found (looked next to it and in " + p.stem().string() + "/)";
-            const auto kb = korg::slurp(f, &err);
-            if (!err.empty()) return err;
-            KsfHead h;
-            if (const auto e = readKsf(kb, &h, nullptr); !e.empty()) return f.filename().string() + ": " + e;
+            std::string why;
+            const fs::path f = korg::findKsf(p, r.ksf, &why);
+            if (f.empty()) return p.filename().string() + ": " + why;
+            if (!heads.count(f)) {
+                KsfHead h;
+                if (const auto e = korg::ksfHead(f, &h); !e.empty()) return f.filename().string() + ": " + e;
+                heads[f] = h;
+            }
+            const KsfHead h = heads[f];
             one.ksf.push_back(f);
             one.head.push_back(h);
         }
@@ -294,11 +345,16 @@ inline std::string scanKorgFolder(const std::filesystem::path& dir, std::vector<
                 bool same = L.size() == R.size();
                 for (size_t i = 0; same && i < L.size(); ++i)
                     same = L[i].lo == R[i].lo && L[i].hi == R[i].hi && L[i].root == R[i].root && L[i].tune == R[i].tune &&
+                           L[i].fixedPitch == R[i].fixedPitch && L[i].level == R[i].level &&
                            m.ksf[i].empty() == m.ksfR[i].empty() &&
                            (m.ksf[i].empty() || (m.head[i].rate == m.headR[i].rate && m.head[i].end - m.head[i].start == m.headR[i].end - m.headR[i].start &&
-                                                 m.head[i].loopOn == m.headR[i].loopOn &&
+                                                 m.head[i].loopOn == m.headR[i].loopOn && m.head[i].plus12dB == m.headR[i].plus12dB &&
+                                                 m.head[i].loopTune == m.headR[i].loopTune &&
                                                  (!m.head[i].loopOn || m.head[i].loopStart - m.head[i].start == m.headR[i].loopStart - m.headR[i].start)));
-                if (!same) return m.kmp.filename().string() + " and " + m.kmpR.filename().string() + ": the -L and -R halves differ (keys, roots, length, rate or loop)";
+                same = same && std::equal(std::begin(m.left.rlp2), std::end(m.left.rlp2), std::begin(m.right.rlp2)) &&
+                       std::equal(std::begin(m.left.rlp3), std::end(m.left.rlp3), std::begin(m.right.rlp3));
+                if (!same) return m.kmp.filename().string() + " and " + m.kmpR.filename().string() +
+                                  ": the -L and -R halves differ (keys, roots, tune, level, length, rate, loop, +12 dB or relative parameters)";
             }
             out.push_back(std::move(m));
             return "";
@@ -336,8 +392,9 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
         for (size_t i = 0; i < it->left.regions.size(); ++i) {
             const KmpRegion& r = it->left.regions[i];
             if (it->ksf[i].empty()) continue;   // SKIPPEDSAMPL: those keys stay silent (reported by the checks)
-            if (r.fixedPitch && r.lo != r.hi)
-                return it->kmp.filename().string() + " region " + std::to_string(i + 1) + ": Non Transpose over several keys (a Pa5X zone always transposes)";
+            if (r.fixedPitch && (r.lo != r.hi || r.root != r.lo))   // a one-key zone rooted at its key plays untransposed either way
+                return it->kmp.filename().string() + " region " + std::to_string(i + 1) +
+                       ": Non Transpose (fixed pitch) where the key differs from the original key (a Pa5X zone always transposes)";
             const std::string key = it->ksf[i].string() + "|" + (it->ksfR.empty() ? "" : it->ksfR[i].string());
             if (!loaded.count(key)) {
                 std::string err;
@@ -378,6 +435,7 @@ inline std::string korgFolderNotes(const std::filesystem::path& dir, const Instr
     std::string o = "Source: KRONOS Korg-format multisamples (.KMP/.KSF) in " + dir.string() +
                     "\nFormat: KRONOS Parameter Guide En 3 p.1158-1159 (Korg format sample files)\n";
     if (const auto e = scanKorgFolder(dir, ms); !e.empty()) return o + "(source could not be re-read: " + e + ")\n\n" + formatRecipe(recipeFromSamples(in));
+    o += "Stereo pairs are converted only when the -L and -R halves carry identical settings, so the left half describes both.\n";
     o += "Preserved: key zones (low key = previous top key + 1), original keys, zone tune (cents), sample rate, 16-bit audio "
          "exactly, Start..End, loops (Loop Start..End), stereo from -L/-R pairs.\n";
     for (const auto& L : in.layers) {
@@ -385,7 +443,7 @@ inline std::string korgFolderNotes(const std::filesystem::path& dir, const Instr
         if (it == ms.end()) continue;
         o += "Layer '" + L.name + "' (velocity " + std::to_string(L.velLo) + "-" + std::to_string(L.velHi) + "): " + it->kmp.filename().string() +
              (it->kmpR.empty() ? "" : " + " + it->kmpR.filename().string()) + ", " + std::to_string(it->left.regions.size()) + " regions\n";
-        size_t skipped = 0, level = 0, loopTune = 0, p12 = 0, trimmed = 0;
+        size_t skipped = 0, level = 0, loopTune = 0, p12 = 0, trimmed = 0, start2 = 0;
         for (size_t i = 0; i < it->left.regions.size(); ++i) {
             if (it->ksf[i].empty()) { ++skipped; continue; }
             level += it->left.regions[i].level != 0;
@@ -393,6 +451,7 @@ inline std::string korgFolderNotes(const std::filesystem::path& dir, const Instr
             loopTune += h.loopOn && h.loopTune != 0;
             p12 += h.plus12dB;
             trimmed += h.start > 0 || h.end + 1 < h.frames;
+            start2 += h.use2ndStart && h.start2 != h.start;
         }
         const auto line = [&](size_t n, const std::string& what) { if (n) o += "  " + std::to_string(n) + " " + what + "\n"; };
         line(trimmed, "sample(s): audio outside Start..End is not copied (it never plays on the KRONOS either)");
@@ -400,6 +459,8 @@ inline std::string korgFolderNotes(const std::filesystem::path& dir, const Instr
         line(level, "region(s) have a Level offset: LOST (unit not documented for the Pa5X; adjust the zone level on the Pa5X)");
         line(loopTune, "sample(s) have Loop Tune: LOST (no Pa5X equivalent in the package)");
         if (p12 && p12 < it->head.size() - skipped) line(p12, "sample(s) have +12 dB and others not: the relative level is LOST");
+        else line(p12, "sample(s) have +12 dB (all of them): not carried; set the Sound level on the Pa5X");
+        line(start2, "sample(s) have a 2nd Start in use: not carried (the Pa5X plays from Start; a KRONOS Program may start at the 2nd)");
         bool rel = false;
         for (int v : it->left.rlp2) rel |= v != 0;
         for (int v : it->left.rlp3) rel |= v != 0;

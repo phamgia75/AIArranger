@@ -169,6 +169,68 @@ int main() {
         TEST("SKIPPEDSAMPL: converts, one shared sample, C4-B4 reported silent: " + e, e.empty() && x.samples.size() == 1 && x.layers[0].zones.size() == 2 && silent);
     }
 
+    std::printf("== Codex review of 7dc072f: regressions\n");
+    const auto ok = ksf({pcm, 48000, 0, 0, 3999, 0x80});
+    refuse("Non Transpose, one key, original key elsewhere", kmp("Bad", {{48, 60, 0, 0, "BAD00000.KSF", true}, {48, 127, 0, 0, "BAD00000.KSF"}}), ok, "region 1");
+    {   // the first region spans 0-60 there; a real one-key case: skipped 0-59, then a fixed-pitch key 60 rooted at C3
+        const fs::path d = root / "fixed";
+        put(d / "F.KMP", kmp("Fix", {{48, 59, 0, 0, "SKIPPEDSAMPL"}, {48, 60, 0, 0, "F.KSF", true}, {72, 127, 0, 0, "F.KSF"}}));
+        put(d / "F.KSF", ok);
+        snd::Instrument x;
+        TEST("Non Transpose on one key whose original key differs is refused (it would play transposed)",
+             snd::buildFromKorgFolder(d, "Fix", {}, {}, &x).find("Non Transpose (fixed pitch)") != std::string::npos);
+        put(d / "F.KMP", kmp("Fix", {{48, 59, 0, 0, "SKIPPEDSAMPL"}, {60, 60, 0, 0, "F.KSF", true}, {72, 127, 0, 0, "F.KSF"}}));
+        TEST("Non Transpose on one key rooted at that key converts (plays untransposed either way)", snd::buildFromKorgFolder(d, "Fix", {}, {}, &x).empty());
+    }
+    const auto pair = [&](const std::string& what, const Bytes& kl, const Bytes& kr, const Bytes& sl, const Bytes& sr) {
+        const fs::path d = root / ("pair" + std::to_string(std::hash<std::string>{}(what) % 100000));
+        put(d / "A.KMP", kl); put(d / "B.KMP", kr); put(d / "A.KSF", sl); put(d / "B.KSF", sr);
+        snd::Instrument x;
+        TEST(what, snd::buildFromKorgFolder(d, "Pad", {}, {}, &x).find("halves differ") != std::string::npos);
+    };
+    const auto KL = kmp("Pad -L", {{60, 127, 0, 0, "A.KSF"}}), KR = kmp("Pad -R", {{60, 127, 0, 0, "B.KSF"}});
+    pair("-R Non Transpose, -L not: refused", KL, kmp("Pad -R", {{60, 127, 0, 0, "B.KSF", true}}), ok, ok);
+    pair("-R +12 dB, -L not: refused", KL, KR, ok, ksf({pcm, 48000, 0, 0, 3999, 0x81}));
+    pair("-R Level differs: refused", KL, kmp("Pad -R", {{60, 127, 0, 9, "B.KSF"}}), ok, ok);
+    pair("-R RLP2 differs: refused", KL, kmp("Pad -R", {{60, 127, 0, 0, "B.KSF"}}, true, 5), ok, ok);
+    refuse("Level byte 0x80 (-128)", kmp("Bad", {{60, 127, 0, int8_t(-128), "BAD00000.KSF"}}), ok, "level outside -99..+99");
+    refuse("undocumented attribute bits on uncompressed data (0x8E)", K, ksf({pcm, 48000, 0, 0, 3999, 0x8E}), "attribute bits 3-1");
+    {   // 2nd Start in use and uniform +12 dB are reported
+        const fs::path d = root / "start2";
+        Ksf k2{pcm, 48000, 0, 0, 3999, 0x01};   // bit 5 clear: 2nd start used
+        Bytes b2 = ksf(k2);
+        b2[8 + 16 + 4 + 3] = 50;   // SMP1 2nd start address (offset 20 in the body) = 50
+        put(d / "S.KMP", kmp("Two", {{60, 127, 0, 0, "S.KSF"}}));
+        put(d / "S.KSF", b2);
+        snd::Instrument x;
+        TEST("2nd Start in use: converts from Start", snd::buildFromKorgFolder(d, "Two", {}, {}, &x).empty() && x.samples[0].frames() == 4000);
+        const auto n = snd::korgFolderNotes(d, x);
+        TEST("REPORT: 2nd Start and +12 dB on all samples are stated",
+             n.find("1 sample(s) have a 2nd Start in use: not carried") != std::string::npos && n.find("have +12 dB (all of them)") != std::string::npos);
+    }
+    {   // the scan reads the first 60 bytes; the conversion reads (and checks) the whole file
+        const fs::path d = root / "head";
+        Bytes b3 = ok;
+        Bytes junk(12, 0); chunk(b3, "ZZZ1", junk);
+        put(d / "H.KMP", kmp("Head", {{60, 127, 0, 0, "H.KSF"}}));
+        put(d / "H.KSF", b3);
+        std::vector<snd::KorgMultisample> m3;
+        snd::Instrument x;
+        TEST("scan (header only) accepts what it does not read; the conversion refuses the undocumented chunk",
+             snd::scanKorgFolder(d, m3).empty() && snd::buildFromKorgFolder(d, "Head", {}, {}, &x).find("ZZZ1") != std::string::npos);
+    }
+    {   // A.KSF and a.ksf: only possible on a case-sensitive disk (Linux CI); macOS APFS default is case-insensitive
+        const fs::path d = root / "case";
+        put(d / "C.KMP", kmp("Case", {{60, 127, 0, 0, "A.KSF"}}));
+        put(d / "A.KSF", ok);
+        put(d / "a.ksf", ksf({tone(4000, 900, 5000, 8), 48000, 0, 0, 3999, 0x80}));
+        size_t n = 0;
+        for (const auto& e : fs::directory_iterator(d)) n += e.path().extension() != ".KMP";
+        snd::Instrument x;
+        if (n == 2) TEST("A.KSF and a.ksf both present: refused, not picked", snd::buildFromKorgFolder(d, "Case", {}, {}, &x).find("differing only in case") != std::string::npos);
+        else std::printf("  (case-insensitive disk: A.KSF/a.ksf ambiguity cannot exist here; covered on Linux CI)\n");
+    }
+
     fs::remove_all(root);
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
