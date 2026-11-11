@@ -366,17 +366,22 @@ inline std::string verifyBackup(const std::filesystem::path& dst, const std::fun
 // SHA-256, nothing else. `skip` (optional) names files that are neither expected nor reported (the manifest itself when
 // it sits inside the folder, or what a file manager adds). Read-only. "" = all match.
 inline std::string verifyManifest(const std::filesystem::path& dst, const std::filesystem::path& man, const std::function<bool()>& keepGoing,
-                                  size_t* files, const std::function<bool(const std::string& rel)>& skip = {}) {
+                                  size_t* files, const std::function<bool(const std::string& rel)>& skip = {},
+                                  bool counted = false) {
     const auto going = [&] { return !keepGoing || keepGoing(); };
     std::FILE* f = detail::openRegular(AT_FDCWD, man.c_str());
     if (!f) return "no manifest at " + man.string() + " (missing or not a regular file)";
     std::map<std::string, std::string> want;
     char line[8192];
     std::string bad;
+    long count = -1;  // counted manifests end with "# N files", so one cut short at a line boundary does not pass
     while (std::fgets(line, sizeof line, f)) {
         if (!going()) { std::fclose(f); return "cancelled"; }
         std::string s(line);
         if (!s.empty() && s.back() == '\n') s.pop_back();
+        if (counted && count < 0 && s.rfind("# ", 0) == 0 && s.size() > 8 && s.size() < 24 && s.compare(s.size() - 6, 6, " files") == 0 &&
+            s.find_first_not_of("0123456789", 2) == s.size() - 6) { count = std::stol(s.substr(2, s.size() - 8)); continue; }
+        if (count >= 0) { bad += "line after the end of the manifest: " + s + "\n"; continue; }
         const auto sep = s.find("  ");
         if (sep != 64) { bad += "malformed manifest line: " + s + "\n"; continue; }
         want[s.substr(66)] = s.substr(0, 64);
@@ -384,6 +389,9 @@ inline std::string verifyManifest(const std::filesystem::path& dst, const std::f
     const bool readError = std::ferror(f) != 0;
     std::fclose(f);
     if (readError) return "cannot read the manifest " + man.string();
+    if (counted && count < 0) bad += "the manifest is incomplete (no \"# N files\" line at its end)\n";
+    else if (counted && static_cast<size_t>(count) != want.size())
+        bad += "the manifest is incomplete (" + std::to_string(want.size()) + " of " + std::to_string(count) + " files listed)\n";
     if (files) *files = want.size();
     detail::Listing L;
     std::string err;

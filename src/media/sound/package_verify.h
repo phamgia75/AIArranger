@@ -28,7 +28,7 @@ inline PackageCheck verifyPackage(const std::filesystem::path& dir, const std::f
         const std::string leaf = fs::path(rel).filename().string();
         return rel == pkgio::FileSet::kPackageManifest || leaf == ".DS_Store" || leaf.rfind("._", 0) == 0;
     };
-    const std::string bad = verifyManifest(dir, man, keepGoing, &files, skip);
+    const std::string bad = verifyManifest(dir, man, keepGoing, &files, skip, true);
     if (bad == "cancelled") { r.text = "Verify cancelled. Nothing was changed."; return r; }
     if (!bad.empty()) { r.text = "NOT verified (" + dir.string() + "):\n" + bad + "Do not import this copy; copy the package again."; return r; }
     graph::Graph g;

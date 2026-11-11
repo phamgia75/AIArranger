@@ -318,6 +318,24 @@ int main() {
             TEST("verifyPackage: a folder without PACKAGE.sha256 is not verified, and says why", verifyPackage(stick).text.find("has no PACKAGE.sha256") != std::string::npos);
             TEST("verifyPackage: cancel", verifyPackage(dir, [] { return false; }).text == "Verify cancelled. Nothing was changed.");
             fs::remove_all(stick, ec0);
+            {   // a manifest cut short at a line boundary, with the files it no longer lists also gone (Codex review of dae33f4)
+                fs::copy(dir, stick, fs::copy_options::recursive);
+                std::ifstream in(stick / "PACKAGE.sha256");
+                std::string kept, ln;
+                bool last = false;
+                while (std::getline(in, ln)) { if (ln.find("  wav/") != std::string::npos) continue; if (ln.rfind("# ", 0) == 0) last = true; else kept += ln + "\n"; }
+                in.close();
+                TEST("PACKAGE.sha256 ends with its \"# N files\" line", last);
+                fs::remove_all(stick / "wav");
+                std::ofstream(stick / "PACKAGE.sha256", std::ios::trunc) << kept;
+                const auto cut = verifyPackage(stick);
+                TEST("verifyPackage: a truncated manifest (no count line) is not verified", !cut.ok && cut.text.find("the manifest is incomplete") != std::string::npos);
+                std::ofstream(stick / "PACKAGE.sha256", std::ios::trunc) << kept << "# 80 files\n";
+                const auto short_ = verifyPackage(stick);
+                TEST("verifyPackage: a manifest listing fewer files than its count is not verified",
+                     !short_.ok && short_.text.find("42 of 80 files listed") != std::string::npos);
+                fs::remove_all(stick, ec0);
+            }
         }
         {   // the pre-publication check: exact files, lengths and SHA-256, and the package must load back
             const fs::path d6 = dir.string() + " 6";

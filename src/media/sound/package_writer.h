@@ -64,6 +64,7 @@ struct FileSet {
     void saveManifest() {
         std::string m;
         for (const auto& [rel, w] : want) m += w.second + "  " + rel + "\n";
+        m += "# " + std::to_string(want.size()) + " files\n";  // completeness line for verifyPackage; shasum -c ignores it
         save(kPackageManifest, m);
     }
     static constexpr const char* kPackageManifest = "PACKAGE.sha256";
