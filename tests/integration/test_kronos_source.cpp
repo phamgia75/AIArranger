@@ -166,7 +166,7 @@ int main() {
         const auto e = snd::buildFromKorgFolder(d, "Gap", {}, {}, &x);
         bool silent = false;
         for (const auto& w : ai_arranger::ui::SoundConversionModel::checksOf(x)) silent |= w.find("C4-B4 are silent") != std::string::npos;
-        TEST("SKIPPEDSAMPL: converts, one shared sample, C4-B4 reported silent: " + e, e.empty() && x.samples.size() == 1 && x.layers[0].zones.size() == 2 && silent);
+        TEST("SKIPPEDSAMPL: converts (the KSF under roots C3 and C5 = 2 samples), C4-B4 reported silent: " + e, e.empty() && x.samples.size() == 2 && x.layers[0].zones.size() == 2 && silent);
     }
 
     std::printf("== Codex review of 7dc072f: regressions\n");
@@ -264,6 +264,40 @@ int main() {
         put(d / "O.KSF", odd);
         std::vector<snd::KorgMultisample> m4;
         TEST("scan refuses a KSF not starting SMP1 then SMD1", snd::scanKorgFolder(d, m4).find("does not start with SMP1") != std::string::npos);
+    }
+
+    std::printf("== Codex review of fd2eb4e: regressions\n");
+    {   // only -L present
+        const fs::path d = root / "half";
+        put(d / "A.KMP", KL); put(d / "A.KSF", ok);
+        snd::Instrument x;
+        TEST("a -L half without its -R is refused, not converted as mono",
+             snd::buildFromKorgFolder(d, "Pad", {}, {}, &x).find("-R half is not in the folder") != std::string::npos);
+    }
+    {   // _L/_R names are two mono multisamples (only -L/-R is the documented stereo naming)
+        const fs::path d = root / "under";
+        put(d / "A.KMP", kmp("Pad_L", {{60, 127, 0, 0, "A.KSF"}})); put(d / "B.KMP", kmp("Pad_R", {{60, 127, 0, 0, "B.KSF"}}));
+        put(d / "A.KSF", ok); put(d / "B.KSF", ok);
+        std::vector<snd::KorgMultisample> m5;
+        TEST("Pad_L and Pad_R stay two mono multisamples", snd::scanKorgFolder(d, m5).empty() && m5.size() == 2 && m5[0].kmpR.empty() && m5[1].kmpR.empty());
+    }
+    {   // one KSF in two regions with different original keys -> two samples, each with its root; the package writes
+        const fs::path d = root / "reuse";
+        put(d / "R.KMP", kmp("Reuse", {{48, 59, 0, 0, "R.KSF"}, {60, 127, 0, 0, "R.KSF"}}));
+        put(d / "R.KSF", ok);
+        snd::Instrument x;
+        const auto e = snd::buildFromKorgFolder(d, "Reuse", {}, {}, &x);
+        TEST("a KSF reused under two original keys becomes two samples with those roots: " + e,
+             e.empty() && x.samples.size() == 2 && x.samples[0].root == 48 && x.samples[1].root == 60);
+        std::string werr;
+        TEST("... and the package is written: " + werr, !snd::writePackage(x, root / "out" / "Reuse", snd::korgFolderNotes(d, x), &werr).empty());
+        put(d / "R.KMP", kmp("Reuse", {{48, 59, 0, 0, "R.KSF"}, {48, 127, 0, 0, "R.KSF"}}));
+        TEST("a KSF reused under the same original key stays one sample", snd::buildFromKorgFolder(d, "Reuse", {}, {}, &x).empty() && x.samples.size() == 1);
+    }
+    {   // 2nd Start in use but outside the audio
+        Bytes bad2 = ksf({pcm, 48000, 0, 0, 3999, 0x80});   // bit 5 clear: in use
+        bad2[28] = bad2[29] = bad2[30] = bad2[31] = 0xFF;
+        refuse("2nd Start 0xFFFFFFFF in use", K, bad2, "2nd Start outside the audio");
     }
 
     fs::remove_all(root);

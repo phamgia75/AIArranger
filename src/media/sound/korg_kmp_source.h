@@ -169,6 +169,7 @@ inline std::string ranges(const KsfHead* h) {
     if (h->frames == 0) return "no audio";
     if (h->end >= h->frames || h->start > h->end) return "Start/End outside the audio";
     if (h->loopOn && (h->loopStart < h->start || h->loopStart > h->end)) return "Loop Start outside Start..End";
+    if (h->use2ndStart && h->start2 >= h->frames) return "2nd Start outside the audio";
     return "";
 }
 }  // namespace korg
@@ -275,9 +276,9 @@ inline std::string layerName(std::string s) {
     while (!s.empty() && s.front() == ' ') s.erase(0, 1);
     return s.substr(0, 20);
 }
-// "PIANO -L" -> ("PIANO", 'L'); also "PIANO-L", "PIANO_L".
+// "PIANO -L" -> ("PIANO", 'L'), also "PIANO-L": the KRONOS stereo naming (p.836, p.1161). Nothing else is paired.
 inline std::pair<std::string, char> side(const std::string& n) {
-    if (n.size() > 2 && (n[n.size() - 2] == '-' || n[n.size() - 2] == '_') && (n.back() == 'L' || n.back() == 'R')) {
+    if (n.size() > 2 && n[n.size() - 2] == '-' && (n.back() == 'L' || n.back() == 'R')) {
         std::string base = n.substr(0, n.size() - 2);
         while (!base.empty() && base.back() == ' ') base.pop_back();
         if (!base.empty()) return {base, n.back()};
@@ -366,7 +367,11 @@ inline std::string scanKorgFolder(const std::filesystem::path& dir, std::vector<
         if (sides.count('L') && sides.count('R') && sides.size() == 2) {
             if (const auto e = add(sides['L'], &sides['R'], base); !e.empty()) return e;
         } else {
-            for (auto& [ch, one] : sides) if (const auto e = add(one, nullptr, one.k.name); !e.empty()) return e;
+            for (auto& [ch, one] : sides) {
+                if (ch) return one.p.filename().string() + ": '" + one.k.name + "' is half of a stereo multisample, but its -" +
+                               std::string(1, ch == 'L' ? 'R' : 'L') + " half is not in the folder (copy both halves)";
+                if (const auto e = add(one, nullptr, one.k.name); !e.empty()) return e;
+            }
         }
     }
     return "";
@@ -399,7 +404,8 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
             if (r.fixedPitch && (r.lo != r.hi || r.root != r.lo))   // a one-key zone rooted at its key plays untransposed either way
                 return it->kmp.filename().string() + " region " + std::to_string(i + 1) +
                        ": Non Transpose (fixed pitch) where the key differs from the original key (a Pa5X zone always transposes)";
-            const std::string key = it->ksf[i].string() + "|" + (it->ksfR.empty() ? "" : it->ksfR[i].string());
+            // one sample per KSF (pair) and original key: a package sample has one root
+            const std::string key = it->ksf[i].string() + "|" + (it->ksfR.empty() ? "" : it->ksfR[i].string()) + "|" + std::to_string(r.root);
             if (!loaded.count(key)) {
                 std::string err;
                 Sample s;
