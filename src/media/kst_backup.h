@@ -360,9 +360,14 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
 // Re-check a backup against its manifest (ours or tools/kst_copy.py's). Read-only. "" = every file matches; otherwise
 // the problems (changed / missing / extra / unreadable), one per line, or "cancelled" when `keepGoing` returned false.
 // `files` (optional) receives the number of files the manifest lists.
-inline std::string verifyBackup(const std::filesystem::path& dst, const std::function<bool()>& keepGoing = {}, size_t* files = nullptr) {
+inline std::string verifyBackup(const std::filesystem::path& dst, const std::function<bool()>& keepGoing = {}, size_t* files = nullptr);
+
+// The check behind verifyBackup, for any folder and sha256sum-format manifest: every listed file present with its
+// SHA-256, nothing else. `skip` (optional) names files that are neither expected nor reported (the manifest itself when
+// it sits inside the folder, or what a file manager adds). Read-only. "" = all match.
+inline std::string verifyManifest(const std::filesystem::path& dst, const std::filesystem::path& man, const std::function<bool()>& keepGoing,
+                                  size_t* files, const std::function<bool(const std::string& rel)>& skip = {}) {
     const auto going = [&] { return !keepGoing || keepGoing(); };
-    const auto man = backupManifestPath(dst);
     std::FILE* f = detail::openRegular(AT_FDCWD, man.c_str());
     if (!f) return "no manifest at " + man.string() + " (missing or not a regular file)";
     std::map<std::string, std::string> want;
@@ -394,8 +399,12 @@ inline std::string verifyBackup(const std::filesystem::path& dst, const std::fun
         if (have.empty()) bad += "unreadable: " + rel + "\n";
         else if (have != h) bad += "changed: " + rel + "\n";
     }
-    for (const auto& [rel, e] : L.files) if (!want.count(rel)) bad += "extra:   " + rel + "\n";
+    for (const auto& [rel, e] : L.files) if (!want.count(rel) && !(skip && skip(rel))) bad += "extra:   " + rel + "\n";
     return bad;
+}
+
+inline std::string verifyBackup(const std::filesystem::path& dst, const std::function<bool()>& keepGoing, size_t* files) {
+    return verifyManifest(dst, backupManifestPath(dst), keepGoing, files);
 }
 
 }  // namespace ai_arranger::media

@@ -59,6 +59,14 @@ struct FileSet {
     }
     void save(const std::string& rel, const std::vector<uint8_t>& b) { save(rel, b.data(), b.size()); }
     void save(const std::string& rel, const std::string& s) { save(rel, s.data(), s.size()); }
+    // PACKAGE.sha256 inside the folder, sha256sum format (`shasum -a 256 -c` from inside the folder checks it), listing
+    // every file written so far; written last, so a copy of the folder (e.g. on a USB stick) can be verified later.
+    void saveManifest() {
+        std::string m;
+        for (const auto& [rel, w] : want) m += w.second + "  " + rel + "\n";
+        save(kPackageManifest, m);
+    }
+    static constexpr const char* kPackageManifest = "PACKAGE.sha256";
     // "" when the folder holds exactly these files, each with its length and SHA-256, and the package loads back
     // with the reader every other tool uses (loadPackage: WAVs against RESOURCES.tsv, TX references). Read-only.
     std::string check() const {
@@ -144,6 +152,8 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
            "  Budget several packages together: aiarranger-resources budget DIR...\n\n";
     rep += kMemoryNote;
+    rep += "Before import: copy this whole folder to the USB stick, then check the copy: Verify Package... in Sounds &\n"
+           "  Resources (Resource Graph tab), or in a terminal inside the copied folder: shasum -a 256 -c PACKAGE.sha256\n\n";
     rep += "Pa5X import (owner, requires approval; docs/evidence/hardware/PA5X_SOUND_IMPORT_PROCEDURE.md):\n"
            "  A) Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX Sound (TXPROG),\n"
            "     select tx/.../<name>.txprog, choose an empty User Sound location: one step (p.1210).\n"
@@ -151,6 +161,7 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
            "     in Sound Edit assign each to its own oscillator with the velocity zone above and save to an\n"
            "     empty User Sound.\n";
     files.save("REPORT.txt", rep);
+    files.saveManifest();
     if (!files.ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
     if (const auto why = files.check(); !why.empty())
         return fail("the written package does not check (" + why + "); the unfinished package stays at " + out.string() + " (not a package; delete it)");
@@ -212,10 +223,13 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     rep += "Resources: RESOURCES.tsv, package " + pkg + " (provisional identities; the Pa5X assigns slots on import).\n"
            "  Budget several packages together: aiarranger-resources budget DIR...\n\n";
     rep += kMemoryNote;
+    rep += "Before import: copy this whole folder to the USB stick, then check the copy: Verify Package... in Sounds &\n"
+           "  Resources (Resource Graph tab), or in a terminal inside the copied folder: shasum -a 256 -c PACKAGE.sha256\n\n";
     rep += "Pa5X import (owner, requires approval):\n"
            "  Sample Edit > Menu > Import/Export > Import (manual p.1207), format TX DrumKit (TXPERF), select\n"
            "  tx/.../<name>.txperf, choose an empty User Drum Kit location (manual p.1210).\n";
     files.save("REPORT.txt", rep);
+    files.saveManifest();
     if (!files.ok) return fail("write failed; the unfinished package stays at " + out.string() + " (not a package; delete it)");
     if (const auto why = files.check(); !why.empty())
         return fail("the written package does not check (" + why + "); the unfinished package stays at " + out.string() + " (not a package; delete it)");

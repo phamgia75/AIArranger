@@ -1,3 +1,4 @@
+#include "media/sound/package_verify.h"
 #include "ResourcesComponent.h"
 #include <thread>
 
@@ -82,7 +83,8 @@ ResourcesComponent::ResourcesComponent() {
             }));
     };
     clearBtn_.onClick = [this] { model_.clear(); details_.clear(); rebuildTree(); };
-    for (auto* b : {&openPkgBtn_, &openEvBtn_, &clearBtn_}) graphPage_.addAndMakeVisible(*b);
+    verifyPkgBtn_.onClick = [this] { chooseFolder("Package folder to verify (for example the copy on a USB stick; read-only)", [this](juce::File f) { verifyPackage(f); }); };
+    for (auto* b : {&openPkgBtn_, &verifyPkgBtn_, &openEvBtn_, &clearBtn_}) graphPage_.addAndMakeVisible(*b);
     graphPage_.addAndMakeVisible(legend_);
     tree_.setRootItemVisible(false);
     tree_.setDefaultOpenness(false);
@@ -196,6 +198,20 @@ void ResourcesComponent::openPackage(const juce::File& dir) {
             const bool ok = loaded && model_.adoptPackage(std::move(*one), pkg, d, &e);
             rebuildTree();
             details_.setText(ok ? juce::String("Opened ") + d : "Could not open package:\n" + juce::String(e), false);
+        });
+    }).detach();
+}
+
+void ResourcesComponent::verifyPackage(const juce::File& dir) {
+    ++loads_;
+    details_.setText("Verifying " + dir.getFullPathName() + " (read-only)...", false);
+    std::weak_ptr<bool> alive = alive_;
+    std::thread([this, alive, d = dir.getFullPathName().toStdString()] {
+        const auto r = media::sound::verifyPackage(d, [alive] { return !alive.expired(); });   // a closed window stops it
+        juce::MessageManager::callAsync([this, alive, r] {
+            if (alive.expired()) return;
+            --loads_;
+            details_.setText(r.text, false);
         });
     }).detach();
 }
@@ -337,7 +353,7 @@ void ResourcesComponent::resized() {
     {   // Resource Graph
         auto r = page.withZeroOrigin();
         auto top = r.removeFromTop(28);
-        for (auto* b : {&openPkgBtn_, &openEvBtn_, &clearBtn_}) { b->setBounds(top.removeFromLeft(140)); top.removeFromLeft(8); }
+        for (auto* b : {&openPkgBtn_, &verifyPkgBtn_, &openEvBtn_, &clearBtn_}) { b->setBounds(top.removeFromLeft(140)); top.removeFromLeft(8); }
         r.removeFromTop(4);
         legend_.setBounds(r.removeFromTop(36));
         summary_.setBounds(r.removeFromBottom(150));

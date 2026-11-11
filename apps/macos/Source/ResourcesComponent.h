@@ -23,6 +23,7 @@ public:
 
     // Used by the buttons and by the UI smoke test.
     void openPackage(const juce::File& dir);   // asynchronous; loading() is true until it lands
+    void verifyPackage(const juce::File& dir); // asynchronous, read-only; loading() until it lands; result in detailsText()
     bool loading() const { return loads_ > 0; }
     void openEvidence(const juce::File& file);   // asynchronous, like openPackage
     void showDetails(const media::graph::ResourceId& id);
@@ -59,7 +60,7 @@ private:
     juce::Component graphPage_, kstPage_, memPage_;
 
     // Resource Graph
-    juce::TextButton openPkgBtn_{"Open Package..."}, openEvBtn_{"Open Evidence..."}, clearBtn_{"Close All"};
+    juce::TextButton openPkgBtn_{"Open Package..."}, verifyPkgBtn_{"Verify Package..."}, openEvBtn_{"Open Evidence..."}, clearBtn_{"Close All"};
     juce::Label legend_;
     juce::TreeView tree_;
     std::unique_ptr<juce::TreeViewItem> rootItem_;

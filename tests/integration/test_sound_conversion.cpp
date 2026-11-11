@@ -3,6 +3,7 @@
 // determinism, malformed prefixes), the WAV writer. SOFTWARE evidence only: nothing here shows the
 // Pa5X accepts the files (that is S6).
 
+#include "media/sound/package_verify.h"
 #include <csignal>
 #include <sys/resource.h>
 #include "media/sound/instrument.h"
@@ -242,8 +243,8 @@ int main() {
         const std::string rep = writePackage(org, dir, "", &err);
         size_t files = 0;
         if (fs::is_directory(dir)) for (const auto& e : fs::recursive_directory_iterator(dir)) files += e.is_regular_file();
-        TEST("package: .sf2 + .txprog + 38 tx WAVs + 38 wav/ + REPORT + RESOURCES = 80 files; report lists 4 GB use",
-             !rep.empty() && files == 80 && fs::exists(dir / "AIA_Demo_Organ.sf2") &&
+        TEST("package: .sf2 + .txprog + 38 tx WAVs + 38 wav/ + REPORT + RESOURCES + PACKAGE.sha256 = 81 files; report lists 4 GB use",
+             !rep.empty() && files == 81 && fs::exists(dir / "AIA_Demo_Organ.sf2") &&
              fs::exists(dir / "wav" / "AIA_Organ_Soft_024_000_025.wav") && rep.find("of the 4 GB User Sample memory)\n\nLayer 0  velocity 0-89  AIA Organ Soft\n") != std::string::npos);
         TEST("REPORT states the 4/8 GB budget and irreversible compression", rep.find("8 GB") != std::string::npos && rep.find("cannot be undone") != std::string::npos);
         std::string err2;
@@ -286,6 +287,38 @@ int main() {
             fs::remove_all(d4.string() + ".INCOMPLETE", ec0);
         }
         fs::remove_all(d3, ec0);
+        {   // PACKAGE.sha256: the copy on a USB stick can be checked later, by the app or by sha256sum/shasum
+            const std::string sumCmd = "cd \"" + dir.string() + "\" && { if command -v sha256sum >/dev/null; then sha256sum -c --quiet PACKAGE.sha256; "
+                                       "else shasum -a 256 -c --quiet PACKAGE.sha256; fi; } >/dev/null 2>&1";
+            TEST("PACKAGE.sha256 lists every other file and passes sha256sum/shasum -c", std::system(sumCmd.c_str()) == 0);
+            TEST("verifyPackage: a fresh package verifies", verifyPackage(dir).ok);
+            const fs::path stick = dir.string() + "-stick";
+            fs::copy(dir, stick, fs::copy_options::recursive);
+            std::ofstream(stick / ".DS_Store") << "finder";
+            std::ofstream(stick / "tx/._AIA Demo Organ") << "appledouble";
+            const auto copied = verifyPackage(stick);
+            TEST("verifyPackage: a copy with Finder's .DS_Store and ._ files verifies (those are ignored)", copied.ok && copied.text.find("all 80 files") != std::string::npos);
+            fs::path txprog;
+            for (const auto& e : fs::recursive_directory_iterator(stick)) if (e.path().extension() == ".txprog") txprog = e.path();
+            {
+                std::fstream f(txprog, std::ios::in | std::ios::out | std::ios::binary);
+                f.seekp(10); f.put('#');
+            }
+            const auto flipped = verifyPackage(stick);
+            TEST("verifyPackage: one changed byte in the .txprog is caught, by name", !flipped.ok && flipped.text.find("changed: tx/") != std::string::npos &&
+                 flipped.text.find("Do not import this copy") != std::string::npos);
+            fs::remove_all(stick, ec0);
+            fs::copy(dir, stick, fs::copy_options::recursive);
+            fs::remove(stick / "REPORT.txt");
+            std::ofstream(stick / "EXTRA.txt") << "x";
+            const auto partial = verifyPackage(stick);
+            TEST("verifyPackage: a missing and an extra file are reported", !partial.ok && partial.text.find("missing: REPORT.txt") != std::string::npos &&
+                 partial.text.find("extra:   EXTRA.txt") != std::string::npos);
+            fs::remove(stick / "PACKAGE.sha256");
+            TEST("verifyPackage: a folder without PACKAGE.sha256 is not verified, and says why", verifyPackage(stick).text.find("has no PACKAGE.sha256") != std::string::npos);
+            TEST("verifyPackage: cancel", verifyPackage(dir, [] { return false; }).text == "Verify cancelled. Nothing was changed.");
+            fs::remove_all(stick, ec0);
+        }
         {   // the pre-publication check: exact files, lengths and SHA-256, and the package must load back
             const fs::path d6 = dir.string() + " 6";
             pkgio::FileSet fsx{d6};

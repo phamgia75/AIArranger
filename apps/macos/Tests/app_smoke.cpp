@@ -329,6 +329,17 @@ int main() {
             watch.stopTimer();
             TEST("the new package opens in Resource Graph", rc.tabs().getCurrentTabIndex() == 0 && rc.model().packages().size() == 1 &&
                  rc.summaryText().contains("unique sample resources  64 (0 mono, 64 stereo)"));
+            {   // Verify Package... (read-only): the generated package, then a damaged copy as a stick copy might be
+                rc.verifyPackage(juce::File(root.string() + "/out/Big Sine"));
+                for (int i = 0; i < 1500 && rc.loading(); ++i) pump(20);
+                TEST("Verify Package: the generated package verifies", rc.detailsText().startsWith("Package verified: all ") && rc.detailsText().contains("loads back"));
+                fs::copy(root / "out/Big Sine", root / "stick-copy", fs::copy_options::recursive);
+                fs::remove(root / "stick-copy/RESOURCES.tsv");
+                rc.verifyPackage(juce::File(root.string() + "/stick-copy"));
+                for (int i = 0; i < 1500 && rc.loading(); ++i) pump(20);
+                TEST("Verify Package: a copy missing a file is NOT verified and names it", rc.detailsText().startsWith("NOT verified") &&
+                     rc.detailsText().contains("missing: RESOURCES.tsv") && rc.detailsText().contains("Do not import this copy"));
+            }
             std::printf("  info: longest UI stall: preview %.0f ms, generate %.0f ms, load %.0f ms\n", previewGap, generateGap, loadGap);
             TEST("UI stays responsive (no stall over 500 ms) while a 30 MB Sound is decoded, written and loaded",
                  previewGap < 500 && generateGap < 500 && loadGap < 500);
