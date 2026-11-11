@@ -361,6 +361,7 @@ int main() {
             auto& ps = rc.sampler();
             TEST("five tabs, the last is Sample Plugin", rc.tabs().getNumTabs() == 5 && rc.tabs().getTabNames()[4] == "Sample Plugin");
             TEST("not ready until an instrument is chosen", ps.estimateText().startsWith("Not ready: choose an instrument"));
+            TEST("the empty key map tells this tab's next step, not the WAV tab's", ps.keyMap().emptyText().startsWith("Render Samples to see"));
             auto waitIdle = [&](int ms) { for (int i = 0; i < ms / 20 && ps.busy(); ++i) pump(20); };
             const std::string lister = "if [ \"$1\" = list ]; then printf 'AudioUnit\\tFake Synth\\tTest\\tfake-id\\n'; exit 0; fi\n"
                                        "if [ \"$1\" = programs ]; then printf 'program\\t0\\tSoft Pad\\nprogram\\t1\\tBright Lead\\n'; exit 0; fi\n"
@@ -520,6 +521,43 @@ int main() {
                 TEST("estimate before rendering", ps.estimateText().startsWith("6 samples (3 notes x 2 layers), 9 s of audio"));
                 TEST("the form takes note names and shows the key and velocity map before rendering",
                      ps.estimateText().contains("Samples at C3, C4, C5; every key C-1 to G9 plays") && ps.estimateText().contains("velocity 0-85, 86-127."));
+                {   // layout: the estimate and the map fit their label at the window's default size (no squashing, no "...")
+                    rc.setSize(980, 640);
+                    rc.tabs().setCurrentTabIndex(4);
+                    pump(50);
+                    const auto& L = ps.estimateLabel();
+                    const auto area = L.getBorderSize().subtractedFrom(L.getLocalBounds());
+                    juce::AttributedString as(L.getText());
+                    as.setFont(L.getFont());
+                    juce::TextLayout tl;
+                    tl.createLayout(as, float(area.getWidth()));
+                    const int maxLines = std::max(1, int(float(area.getHeight()) / L.getFont().getHeight()));
+                    std::printf("  info: estimate label %dx%d, text needs %d lines, label shows %d\n", area.getWidth(), area.getHeight(), tl.getNumLines(), maxLines);
+                    TEST("estimate and key/velocity map fit their label at 980x640 (nothing squashed or cut)", tl.getNumLines() <= maxLines);
+                    {   // the longest map: 24 layers and a highest note off the sampling step
+                        ps.field("Velocities, softest first").setText("5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120");
+                        ps.field("Highest note").setText("C#5");
+                        pump(50);
+                        juce::AttributedString worst(L.getText());
+                        worst.setFont(L.getFont());
+                        juce::TextLayout wl;
+                        wl.createLayout(worst, float(area.getWidth()));
+                        std::printf("  info: longest map (24 layers, off-step top): %d lines, label shows %d\n", wl.getNumLines(), maxLines);
+                        TEST("the longest map (24 layers, off-step top note) still fits its label", L.getText().contains("(24 layers) 0-7") && wl.getNumLines() <= maxLines);
+                        ps.field("Velocities, softest first").setText("60,110");
+                        ps.field("Highest note").setText("c5");
+                        pump(50);
+                    }
+                    if (const char* dir = std::getenv("AIARR_SNAPSHOT_DIR"); dir && *dir) {   // offscreen render for a later look; not a hands-on check
+                        const auto img = ps.createComponentSnapshot(ps.getLocalBounds(), true, 2.0f);
+                        juce::File out = juce::File(dir).getChildFile("sample-plugin-tab.png");
+                        out.deleteFile();
+                        juce::FileOutputStream os(out);
+                        juce::PNGImageFormat().writeImageToStream(img, os);
+                        std::printf("  info: offscreen snapshot written to %s\n", out.getFullPathName().toRawUTF8());
+                    }
+                }
+                watch.last = std::chrono::steady_clock::now();   // measure the render only, not the checks above
                 watch.startTimer(20);
                 ps.startRender();
                 waitIdle(120000);

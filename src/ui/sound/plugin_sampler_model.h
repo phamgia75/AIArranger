@@ -141,7 +141,8 @@ inline std::string planRender(const SamplerSettings& s, SamplerPlan* plan) {
 }
 
 // The key and velocity map the render will make, before rendering: "Samples at C2, D#2, ..., C7; every key C-1 to G9 plays
-// (...); velocity 0-63, 64-127." As buildFromRenders, which maps keys 0-127 (the outer zones reach the ends).
+// (...); velocity 0-63, 64-127." As buildFromRenders, which maps keys 0-127 (the outer zones reach the ends). More than 8
+// notes or 6 layers are shortened so the line fits the tab.
 inline std::string mapText(const SamplerPlan& p) {
     namespace txw = media::sound::txw;
     const auto roots = media::sound::renderRoots(p.spec);
@@ -150,9 +151,13 @@ inline std::string mapText(const SamplerPlan& p) {
         if (roots.size() > 8 && i == 4) { s += "..., "; i = roots.size() - 3; }
         s += txw::noteName(roots[i]) + (i + 1 < roots.size() ? ", " : "");
     }
-    s += "; every key C-1 to G9 plays (the lowest and highest samples stretch to the ends); velocity ";
+    s += "; every key C-1 to G9 plays (the outer samples stretch to the ends); velocity ";
     const auto vel = media::sound::layerVelocityRanges(p.spec);
-    for (size_t l = 0; l < vel.size(); ++l) s += std::to_string(vel[l].first) + "-" + std::to_string(vel[l].second) + (l + 1 < vel.size() ? ", " : ".");
+    if (vel.size() > 6) s += "(" + std::to_string(vel.size()) + " layers) ";
+    for (size_t l = 0; l < vel.size(); ++l) {
+        if (vel.size() > 6 && l == 3) { s += "..., "; l = vel.size() - 2; }   // long lists: the softest three and the loudest two
+        s += std::to_string(vel[l].first) + "-" + std::to_string(vel[l].second) + (l + 1 < vel.size() ? ", " : ".");
+    }
     if (!roots.empty() && roots.back() < p.spec.highRoot)
         s += " " + txw::noteName(p.spec.highRoot) + " is not on the sampling step; the top sample is " + txw::noteName(roots.back()) + ".";
     return s;
@@ -179,6 +184,19 @@ inline std::vector<std::string> samplerArgs(const SamplerSettings& s, const std:
     if (s.loop) { a.push_back("--loop"); a.push_back("on"); }
     if (s.stereo) { a.push_back("--stereo"); a.push_back("on"); }
     return a;
+}
+
+// After a render with Loop on: how many samples came out one-shot. The form refuses a hold below the engine's minimum,
+// but the engine trims the plugin's leading silence first, so a hold just above it can still be too short to loop.
+inline size_t unloopedSamples(const media::sound::Instrument& in, bool loopAsked) {
+    return loopAsked ? size_t(std::count_if(in.samples.begin(), in.samples.end(), [](const media::sound::Sample& s) { return !s.looped; })) : 0;
+}
+inline std::string renderedStatus(const media::sound::Instrument& in, bool loopAsked) {
+    std::string s = "Rendered " + std::to_string(in.samples.size()) + " samples. ";
+    if (const size_t k = unloopedSamples(in, loopAsked))
+        s += "Loop was on, but " + std::to_string(k) + " of them could not be looped and stay one-shot (the held sound after the plugin's own "
+             "attack is too short): raise Hold and render again, or Generate them as one-shots. ";
+    return s + "Check the map, then Generate Package...";
 }
 
 // What the sampler has reported so far, fed one output line at a time.

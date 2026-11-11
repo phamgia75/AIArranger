@@ -22,7 +22,7 @@ void KeyMapView::paint(juce::Graphics& g) {
         g.drawText(SoundConversionModel::key(uint8_t(k)), juce::Rectangle<float>(x0 + k * keyW, kbY + kbH + 1, 40, octH - 1), juce::Justification::left);
     if (!in_ || in_->layers.empty()) {
         g.setColour(juce::Colour(0xff9090a0));
-        g.drawText("Choose a WAV folder and press Preview to see the key and velocity map.", r.withBottom(kbY), juce::Justification::centred);
+        g.drawText(empty_, r.withBottom(kbY), juce::Justification::centred);
         return;
     }
     const size_t n = in_->layers.size();

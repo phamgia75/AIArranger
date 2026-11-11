@@ -2,6 +2,29 @@
 
 ## 00. Sample Plugin tab (2026-11-10)
 
+### Map and estimate layout: hands-on inspection PENDING (screen capture blocked)
+
+**Offscreen evidence only (not a hands-on PASS).** The smoke test renders the tab offscreen at 980x640
+(`createComponentSnapshot`; set `AIARR_SNAPSHOT_DIR` to save a PNG) and measures the estimate label with
+JUCE's own text layout: the default form needs 3 of its 4 lines; the longest map (24 layers, highest note off
+the sampling step) needs 4 of 4. That offscreen render showed one defect, now fixed: before rendering, the
+empty key map said "Choose a WAV folder and press Preview", the Convert Sound tab's instruction; it now says
+"Render Samples to see the key and velocity map of the rendered Sound." Offscreen rendering does not show
+real window chrome, scaling, focus or VoiceOver.
+
+**Checklist for the hands-on pass** (when screen capture works; verify the foreground window and take a
+screenshot before each step; no MIDI, no hardware):
+1. Open Sounds & Resources > Sample Plugin at the default window size and at the smallest size the window allows.
+2. Find Instruments; choose DLSMusicDevice. Type `C3` / `c5` / `12` / `60,110`: the estimate shows 3 lines,
+   the map line reads "Samples at C3, C4, C5; every key C-1 to G9 plays ...; velocity 0-85, 86-127." Nothing is cut or squashed.
+3. Type 24 velocities `5,10,...,120` and Highest note `C#5`: the map shows "(24 layers) 0-7, 8-12, 13-17, ..., 113-117, 118-127."
+   and "C#5 is not on the sampling step; the top sample is C5." in at most 4 lines.
+4. Type `H2` as Lowest note: "Not ready: lowest and highest note: a name such as C2 or F#4 ...". Turn Loop on with Hold `0.5`:
+   "Not ready: a loop needs a hold of at least 0.61 s ...".
+5. Render with Loop on, Hold `1.0`: the key map shows 2 layers x 3 zones covering C-1 to G9; the status has no loop warning.
+6. Generate to a new local folder: Resource Graph opens it; no `NAME.INCOMPLETE` is left beside it.
+7. VoiceOver: each field reads its label; the estimate label is read in full.
+
 **The workflow.**
 1. Find Instruments runs `aiarranger-plugin-sampler list` in a child process.
 2. Choose an instrument and set the notes, step, velocities, splits, hold, release, loop and stereo.

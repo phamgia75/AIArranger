@@ -44,9 +44,12 @@ private:
 class KeyMapView : public juce::Component {
 public:
     void setInstrument(const media::sound::Instrument* in) { in_ = in; repaint(); }
+    void setEmptyText(const juce::String& t) { empty_ = t; repaint(); }   // shown before there is a map
+    juce::String emptyText() const { return empty_; }
     void paint(juce::Graphics& g) override;
 private:
     const media::sound::Instrument* in_ = nullptr;
+    juce::String empty_ = "Choose a WAV folder and press Preview to see the key and velocity map.";
 };
 
 class SoundConversionComponent : public juce::Component {

@@ -88,7 +88,7 @@ int main() {
         TEST("the preview matches the instrument the engine builds (keys 0-127, roots, velocity ranges)", match);
     }
     TEST("map text: sampled notes, the keys that play, velocity ranges",
-         contains(mapText(p), "Samples at C3, C4, C5; every key C-1 to G9 plays (the lowest and highest samples stretch to the ends); velocity 0-85, 86-127."));
+         contains(mapText(p), "Samples at C3, C4, C5; every key C-1 to G9 plays (the outer samples stretch to the ends); velocity 0-85, 86-127."));
     {
         SamplerSettings t = s; t.low = "C2"; t.high = "C7"; t.step = "3"; t.velocities = "40,80,120"; t.splits = "50,100";
         SamplerPlan q;
@@ -101,6 +101,9 @@ int main() {
         TEST("map text says when the highest note is off the sampling step", contains(mapText(q), "D7 is not on the sampling step; the top sample is C7."));
         const std::vector<std::pair<uint8_t, uint8_t>> want{{0, 49}, {50, 99}, {100, 127}};
         TEST("the layer ranges are the engine's own", snd::layerVelocityRanges(q.spec) == want);
+        t.velocities = "5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120"; t.splits = "";
+        planRender(t, &q);
+        TEST("map text shortens 24 layers to the softest three and the loudest two", contains(mapText(q), "velocity (24 layers) 0-7, 8-12, 13-17, ..., 113-117, 118-127."));
     }
     TEST("roots come from the engine's own rule", snd::renderRoots(p.spec) == std::vector<int>({48, 60, 72}));
 

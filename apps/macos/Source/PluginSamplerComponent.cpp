@@ -106,6 +106,7 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
         t->onTextChange = [this] { settingsChanged(); };
         addAndMakeVisible(t);
     }
+    map_.setEmptyText("Render Samples to see the key and velocity map of the rendered Sound.");
     for (auto* l : {&estimate_, &status_, &licence_}) { l->setColour(juce::Label::textColourId, juce::Colour(0xffb8b8c0)); addAndMakeVisible(*l); }
     licence_.setText("Sample only instruments whose licence permits it. Rendering runs offline in a separate process: "
                      "no audio device, no MIDI port, nothing is sent to the instrument.", juce::dontSendNotification);
@@ -335,8 +336,7 @@ void PluginSamplerComponent::finishRender(int code, bool cancelled, uint64_t gen
                 map_.setInstrument(in_.get());
                 preview_.setText((*texts)[0]);
                 report_.setText((*texts)[1]);
-                status_.setText("Rendered " + juce::String(in_->samples.size()) + " samples. Check the map, then Generate Package...",
-                                juce::dontSendNotification);
+                status_.setText(ui::renderedStatus(*in_, renderedWith_.loop), juce::dontSendNotification);
             }
             settingsChanged();
         });
@@ -406,7 +406,7 @@ void PluginSamplerComponent::resized() {
     put(row, 5, 170, 150); put(row, 6, 50, 90); put(row, 7, 64, 50); put(row, 8, 84, 50);
     loop_.setBounds(row.removeFromLeft(150)); stereo_.setBounds(row.removeFromLeft(80));
     r.removeFromTop(4);
-    estimate_.setBounds(r.removeFromTop(52));   // estimate + key/velocity map: up to 3 lines
+    estimate_.setBounds(r.removeFromTop(68));   // estimate + key/velocity map: up to 4 lines (smoke test checks the longest map fits)
     row = r.removeFromTop(28);
     renderBtn_.setBounds(row.removeFromLeft(150)); row.removeFromLeft(8);
     cancelBtn_.setBounds(row.removeFromLeft(90)); row.removeFromLeft(8);

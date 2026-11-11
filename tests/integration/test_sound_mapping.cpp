@@ -54,7 +54,7 @@ static void run(const Case& c, const fs::path& root) {
     // The preview names every sampled note when there are at most 8, and each velocity range.
     bool previewOk = map.find("every key C-1 to G9 plays") != std::string::npos;
     if (roots.size() <= 8) for (int r : roots) previewOk &= map.find(snd::txw::noteName(r)) != std::string::npos;
-    for (const auto& [lo, hi] : vel) previewOk &= map.find(std::to_string(lo) + "-" + std::to_string(hi)) != std::string::npos;
+    if (vel.size() <= 6) for (const auto& [lo, hi] : vel) previewOk &= map.find(std::to_string(lo) + "-" + std::to_string(hi)) != std::string::npos;
     TEST(std::string(c.what) + ": preview names the sampled notes and velocity ranges", previewOk);
 
     // The engine's instrument.
@@ -170,6 +170,20 @@ int main() {
         TEST("Loop with a hold too short to loop (0.6 s) is refused with the minimum", e.find("a loop needs a hold of at least 0.61 s") != std::string::npos);
         t.hold = "0.62";
         TEST("...and accepted just above the engine's minimum", planRender(t, nullptr).empty());
+        {   // the boundary with the plugin's leading silence: accepted, rendered, and every sample one-shot -> said before Generate
+            SamplerPlan p;
+            planRender(t, &p);
+            const auto in = snd::buildFromRenders(p.spec, synth(1, 0.62));   // 50 ms of silence before the note, trimmed by the engine
+            TEST("a 0.62 s hold with 50 ms leading silence renders one-shot, and the status says so with what to do",
+                 unloopedSamples(in, true) == in.samples.size() && renderedStatus(in, true).find("1 of them could not be looped") != std::string::npos &&
+                 renderedStatus(in, true).find("raise Hold") != std::string::npos);
+            SamplerSettings longer = t;
+            longer.hold = "1.0";
+            planRender(longer, &p);
+            const auto ok = snd::buildFromRenders(p.spec, synth(1, 1.0));
+            TEST("...a 1.0 s hold loops, and the status has no loop warning", unloopedSamples(ok, true) == 0 &&
+                 renderedStatus(ok, true) == "Rendered 1 samples. Check the map, then Generate Package...");
+        }
         t.hold = "0.6"; t.loop = false;
         TEST("...a 0.6 s hold without Loop is fine", planRender(t, nullptr).empty());
     }

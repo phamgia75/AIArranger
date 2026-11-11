@@ -67,6 +67,8 @@ public:
     juce::ToggleButton& loopToggle() { return loop_; }
     juce::ComboBox& programChoice() { return program_; }   // fills the (hidden) Program field: "" or the index
     juce::String estimateText() const { return estimate_.getText(); }
+    const juce::Label& estimateLabel() const { return estimate_; }
+    const KeyMapView& keyMap() const { return map_; }
     juce::String statusText() const { return status_.getText(); }
     juce::String previewText() const { return preview_.getText(); }
     juce::String reportText() const { return report_.getText(); }

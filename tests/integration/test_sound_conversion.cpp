@@ -314,15 +314,21 @@ int main() {
             ::getrlimit(RLIMIT_FSIZE, &old);
             const auto prev = std::signal(SIGXFSZ, SIG_IGN);
             struct rlimit lim = old;
-            lim.rlim_cur = 1800;   // every file of this package is smaller except the .txprog (about 2 KB), which fits in the stream buffer
+            lim.rlim_cur = 1800;   // every file of this package is smaller except the .txprog (about 2 KB)
             ::setrlimit(RLIMIT_FSIZE, &lim);
             pkgio::FileSet one{d8};
-            one.save("big.txt", std::string(2000, 'x'));
+            // 900 bytes under an 800-byte limit: small enough to stay in the stream buffer with libc++ and libstdc++ (which
+            // writes 1 KB or more directly), so the failure appears only when the buffer is flushed at close.
+            lim.rlim_cur = 800;
+            ::setrlimit(RLIMIT_FSIZE, &lim);
+            one.save("big.txt", std::string(900, 'x'));
+            lim.rlim_cur = 1800;
+            ::setrlimit(RLIMIT_FSIZE, &lim);
             const std::string r7 = writePackage(tiny, d7, "", &err2);
             ::setrlimit(RLIMIT_FSIZE, &old);
             std::signal(SIGXFSZ, prev);
             TEST("a write that fails only at close is reported (stream closed before it is checked)", !one.ok);
-            TEST("...and a package whose .txprog fails at close is not published, only NAME.INCOMPLETE",
+            TEST("...and a package whose .txprog cannot be written is not published, only NAME.INCOMPLETE",
                  r7.empty() && err2.find("write failed") != std::string::npos && !fs::exists(d7) && fs::is_directory(d7.string() + ".INCOMPLETE"));
             TEST("the same tiny package writes and checks without the limit", !writePackage(tiny, d8.string() + "-ok", "", &err2).empty() &&
                  fs::exists(d8.string() + "-ok/REPORT.txt"));
