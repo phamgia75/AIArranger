@@ -191,12 +191,18 @@ inline std::vector<std::string> samplerArgs(const SamplerSettings& s, const std:
 inline size_t unloopedSamples(const media::sound::Instrument& in, bool loopAsked) {
     return loopAsked ? size_t(std::count_if(in.samples.begin(), in.samples.end(), [](const media::sound::Sample& s) { return !s.looped; })) : 0;
 }
+// One line for the status label; the full explanation goes at the top of the preview (loopWarning).
 inline std::string renderedStatus(const media::sound::Instrument& in, bool loopAsked) {
-    std::string s = "Rendered " + std::to_string(in.samples.size()) + " samples. ";
     if (const size_t k = unloopedSamples(in, loopAsked))
-        s += "Loop was on, but " + std::to_string(k) + " of them could not be looped and stay one-shot (the held sound after the plugin's own "
-             "attack is too short): raise Hold and render again, or Generate them as one-shots. ";
-    return s + "Check the map, then Generate Package...";
+        return "Rendered " + std::to_string(in.samples.size()) + " samples; " + std::to_string(k) + " could not be looped. See the preview.";
+    return "Rendered " + std::to_string(in.samples.size()) + " samples. Check the map, then Generate Package...";
+}
+inline std::string loopWarning(const media::sound::Instrument& in, bool loopAsked) {
+    const size_t k = unloopedSamples(in, loopAsked);
+    if (!k) return "";
+    return "LOOP: Loop was on, but " + std::to_string(k) + " of " + std::to_string(in.samples.size()) +
+           " samples could not be looped and stay one-shot (the held sound after the plugin's own attack is too short).\n"
+           "Raise Hold and render again, or Generate them as one-shots.\n\n";
 }
 
 // What the sampler has reported so far, fed one output line at a time.

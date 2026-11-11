@@ -175,14 +175,14 @@ int main() {
             planRender(t, &p);
             const auto in = snd::buildFromRenders(p.spec, synth(1, 0.62));   // 50 ms of silence before the note, trimmed by the engine
             TEST("a 0.62 s hold with 50 ms leading silence renders one-shot, and the status says so with what to do",
-                 unloopedSamples(in, true) == in.samples.size() && renderedStatus(in, true).find("1 of them could not be looped") != std::string::npos &&
-                 renderedStatus(in, true).find("raise Hold") != std::string::npos);
+                 unloopedSamples(in, true) == in.samples.size() && renderedStatus(in, true) == "Rendered 1 samples; 1 could not be looped. See the preview." &&
+                 loopWarning(in, true).find("1 of 1 samples could not be looped") != std::string::npos && loopWarning(in, true).find("Raise Hold") != std::string::npos);
             SamplerSettings longer = t;
             longer.hold = "1.0";
             planRender(longer, &p);
             const auto ok = snd::buildFromRenders(p.spec, synth(1, 1.0));
             TEST("...a 1.0 s hold loops, and the status has no loop warning", unloopedSamples(ok, true) == 0 &&
-                 renderedStatus(ok, true) == "Rendered 1 samples. Check the map, then Generate Package...");
+                 renderedStatus(ok, true) == "Rendered 1 samples. Check the map, then Generate Package..." && loopWarning(ok, true).empty());
         }
         t.hold = "0.6"; t.loop = false;
         TEST("...a 0.6 s hold without Loop is fine", planRender(t, nullptr).empty());

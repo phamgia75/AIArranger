@@ -534,6 +534,14 @@ int main() {
                     const int maxLines = std::max(1, int(float(area.getHeight()) / L.getFont().getHeight()));
                     std::printf("  info: estimate label %dx%d, text needs %d lines, label shows %d\n", area.getWidth(), area.getHeight(), tl.getNumLines(), maxLines);
                     TEST("estimate and key/velocity map fit their label at 980x640 (nothing squashed or cut)", tl.getNumLines() <= maxLines);
+                    {   // the longest status line (a loop shortfall in a big render) fits the one-line status label
+                        const auto& St = ps.statusLabel();
+                        const auto sa = St.getBorderSize().subtractedFrom(St.getLocalBounds());
+                        const juce::String longest = "Rendered 9999 samples; 9999 could not be looped. See the preview.";
+                        const float w = juce::GlyphArrangement::getStringWidth(St.getFont(), longest);
+                        std::printf("  info: status label %dx%d, loop-shortfall line needs %.0f px\n", sa.getWidth(), sa.getHeight(), w);
+                        TEST("the loop-shortfall status line fits its label at 980x640", w <= float(sa.getWidth()) && sa.getHeight() >= int(St.getFont().getHeight()));
+                    }
                     {   // the longest map: 24 layers and a highest note off the sampling step
                         ps.field("Velocities, softest first").setText("5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100,105,110,115,120");
                         ps.field("Highest note").setText("C#5");

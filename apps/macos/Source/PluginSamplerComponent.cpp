@@ -334,7 +334,7 @@ void PluginSamplerComponent::finishRender(int code, bool cancelled, uint64_t gen
             } else {
                 in_ = in;
                 map_.setInstrument(in_.get());
-                preview_.setText((*texts)[0]);
+                preview_.setText(ui::loopWarning(*in_, renderedWith_.loop) + (*texts)[0]);
                 report_.setText((*texts)[1]);
                 status_.setText(ui::renderedStatus(*in_, renderedWith_.loop), juce::dontSendNotification);
             }
