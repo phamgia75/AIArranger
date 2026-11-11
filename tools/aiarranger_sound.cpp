@@ -69,8 +69,8 @@ int main(int argc, char** argv) {
         } else {
             std::fputs(mapping.c_str(), stdout);
         }
-        if (e = buildFromKsfMapping(opt["--in"], opt["--name"], opt["--name"], mapping, &in); !e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 1; }
-        notes = ksfFolderNotes(opt["--in"], mapping, in);
+        if (e = buildFromKsfMapping(opt["--in"], opt["--name"], opt["--name"], mapping, &in, &notes); !e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 1; }
+        notes += formatRecipe(recipeFromSamples(in));
     } else if ((cmd == "wav" || cmd == "kronos") && opt.count("--in") && opt.count("--name")) {
         std::vector<std::string> layers;
         std::vector<uint8_t> splits;

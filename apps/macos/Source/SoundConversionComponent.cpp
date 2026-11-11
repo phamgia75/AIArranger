@@ -138,11 +138,11 @@ void SoundConversionComponent::buildPreview() {
     const auto gen = ++generation_;
     std::thread([this, alive, gen, dir = model_.folder(), name = name_.getText().trim().toStdString(),
                  order = order_.getText().toStdString(), splits = splits_.getText().toStdString(),
-                 mapping = std::make_shared<std::string>(mapping_.getText().toStdString())] {
+                 mapping = std::make_shared<std::string>(mapping_.getText().toStdString()), notes = std::make_shared<std::string>()] {
         auto in = std::make_shared<media::sound::Instrument>();
         auto texts = std::make_shared<std::array<std::string, 2>>();   // checks + preview, recipe
         std::string err;
-        const bool ok = SoundConversionModel::decode(dir, name, order, splits, *in, &err, mapping.get());
+        const bool ok = SoundConversionModel::decode(dir, name, order, splits, *in, &err, mapping.get(), notes.get());
         if (ok) {   // text building is slow on big Sounds too: keep it off the message thread
             const auto checks = SoundConversionModel::checksOf(*in);
             std::string c = checks.empty() ? "Checks: nothing to report.\n\n" : "Checks (" + std::to_string(checks.size()) + "):\n";
@@ -150,18 +150,19 @@ void SoundConversionComponent::buildPreview() {
             (*texts)[0] = c + "\n" + SoundConversionModel::previewOf(*in);
             (*texts)[1] = media::sound::formatRecipe(media::sound::recipeFromSamples(*in));
         }
-        juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err, mapping] {
+        juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err, mapping, notes] {
             if (alive.expired()) return;
             --jobs_;
             previewBtn_.setEnabled(true);
             if (gen != generation_) return;   // another folder was chosen meanwhile
-            showPreview(ok ? in.get() : nullptr, *texts, err, *mapping);
+            showPreview(ok ? in.get() : nullptr, *texts, err, *mapping, *notes);
         });
     }).detach();
 }
 
 void SoundConversionComponent::showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err,
-                                           const std::string& mapping) {
+                                           const std::string& mapping, const std::string& ksfNotes) {
+    ksfNotes_ = ksfNotes;
     if (model_.ksf() && mapping_.getText().toStdString() != mapping)
         mapping_.setText(mapping, false);   // the proposal (no change notification: it is what the preview was built from)
     if (!in) {
@@ -186,9 +187,9 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     auto in = model_.snapshot();   // shared, immutable: no audio copy on the message thread
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
-    std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder(), mapping = mapping_.getText().toStdString()] {
+    std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder(), notes = ksfNotes_] {
         std::string err;
-        const std::string sum = SoundConversionModel::generate(*in, src, out, &err, mapping);
+        const std::string sum = SoundConversionModel::generate(*in, src, out, &err, notes);
         juce::MessageManager::callAsync([this, alive, gen, sum, err, out] {
             if (alive.expired()) return;
             --jobs_;

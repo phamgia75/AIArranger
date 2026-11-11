@@ -29,10 +29,11 @@ inline bool isKsfFolder(const std::filesystem::path& dir) {
     return ksf;
 }
 
-// YIN fundamental (de Cheveigne & Kawahara 2002, threshold 0.15) of one 2048-frame window at x, 25 Hz-2 kHz.
-// 0 = no periodicity found. x must hold 2048 + rate/25 frames.
+// YIN fundamental (de Cheveigne & Kawahara 2002, threshold 0.15) of one 2048-frame window at x, 25 Hz up to rate/2
+// (lag 2: the normalised difference keeps low notes from dipping there). 0 = no periodicity found.
+// x must hold 2048 + rate/25 frames.
 inline double yinHz(const int16_t* x, uint32_t rate) {
-    const size_t W = 2048, tMin = rate / 2000, tMax = rate / 25;
+    const size_t W = 2048, tMin = 2, tMax = rate / 25;
     std::vector<double> d(tMax + 1, 0.0);
     for (size_t t = 1; t <= tMax; ++t)
         for (size_t i = 0; i < W; ++i) { const double v = double(x[i]) - x[i + t]; d[t] += v * v; }
@@ -72,13 +73,10 @@ inline int parseNote(const std::string& t) {
     return v >= 0 && v <= 127 ? v : -1;
 }
 
-// Reads one KSF fully and measures its pitch. s (optional) receives the decoded audio.
-inline KsfInfo analyseKsf(const std::filesystem::path& p, Sample* s = nullptr) {
+// Decodes one KSF's bytes and measures its pitch. s (optional) receives the decoded audio.
+inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b, Sample* s = nullptr) {
     KsfInfo k;
-    k.file = p.filename().string();
-    std::string err;
-    const auto b = korg::slurp(p, &err);
-    if (!err.empty()) { k.refused = err; return k; }
+    k.file = file;
     Sample tmp;
     Sample& a = s ? *s : tmp;
     if (const auto e = readKsf(b, &k.head, &a); !e.empty()) { k.refused = e; return k; }
@@ -102,10 +100,17 @@ inline KsfInfo analyseKsf(const std::filesystem::path& p, Sample* s = nullptr) {
     if (note < 0 || note > 127) { k.why = "pitch outside the MIDI range"; return k; }
     const double f = measurePitch(&a.pcm[from], len, a.rate, 440 * std::pow(2.0, (note - 69) / 12.0));
     if (f <= 0) { k.why = "too short to measure"; return k; }
+    if (std::fabs(1200 * std::log2(f / med)) > 50) { k.why = "spectrum and period disagree (unsure pitch)"; return k; }
     const double exact = 69 + 12 * std::log2(f / 440);
     k.detected = int(std::lround(exact));
     k.cents = 100 * (exact - k.detected);
     return k;
+}
+inline KsfInfo analyseKsf(const std::filesystem::path& p, Sample* s = nullptr) {
+    std::string err;
+    const auto b = korg::slurp(p, &err);
+    if (!err.empty()) { KsfInfo k; k.file = p.filename().string(); k.refused = err; return k; }
+    return analyseKsf(p.filename().string(), b, s);
 }
 
 // Proposed mapping for every KSF in dir, as editable text: "<file> <root> <low> <high>  # evidence"; '#' at the start
@@ -124,6 +129,9 @@ inline std::string proposeKsfMapping(const std::filesystem::path& dir, std::stri
     std::map<int, std::string> byRoot;
     for (const auto& p : files) {
         KsfInfo k = analyseKsf(p);
+        const std::string fn = k.file;
+        if (fn.empty() || fn.front() == ' ' || fn.back() == ' ' || fn.find(" #") != std::string::npos || fn.find_first_of("\t\r\n") != std::string::npos)
+            k.refused = "this file name cannot be written in a mapping line (leading/trailing space, tab or \" #\"); use a renamed copy";
         if (!k.refused.empty()) { skipped += "# " + k.file + "  NOT USED: " + k.refused + "\n"; continue; }
         std::string ev, hint = k.hint >= 0 ? "name " + k.name + " ends in " + std::to_string(k.hint) + " (" + noteName(k.hint) + ")" : "";
         int root = k.detected, tune = 0;
@@ -170,30 +178,40 @@ inline std::string proposeKsfMapping(const std::filesystem::path& dir, std::stri
 }
 
 struct KsfLine { std::string file; int root, lo, hi, tune = 0; };
+// A line is <file> <root> <low> <high> [tune]; the tune carries its sign (+16, -5, +0), so the columns are read from the
+// right and everything before them is the file name, spaces included.
 inline std::string parseKsfMapping(const std::string& text, std::vector<KsfLine>& out) {
     out.clear();
     std::istringstream is(text);
     int n = 0;
     for (std::string line; std::getline(is, line);) {
         ++n;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         for (size_t c = 0; c < line.size(); ++c)   // a comment is '#' at the start or after a space ("G#3" is a key)
             if (line[c] == '#' && (c == 0 || line[c - 1] == ' ' || line[c - 1] == '\t')) { line.resize(c); break; }
-        std::istringstream ls(line);
-        std::vector<std::string> t;
-        for (std::string w; ls >> w;) t.push_back(w);
+        std::vector<std::pair<size_t, size_t>> t;   // token start, end
+        for (size_t c = 0; c < line.size();) {
+            if (line[c] == ' ' || line[c] == '\t') { ++c; continue; }
+            const size_t b = c;
+            while (c < line.size() && line[c] != ' ' && line[c] != '\t') ++c;
+            t.push_back({b, c});
+        }
         if (t.empty()) continue;
+        const auto tok = [&](size_t i) { return line.substr(t[i].first, t[i].second - t[i].first); };
         const std::string at = "mapping line " + std::to_string(n) + ": ";
-        if (t.size() != 4 && t.size() != 5) return at + "needs <file> <root> <low> <high> [tune] (e.g. MS000000.KSF G#3 C-1 G#3 +16)";
-        if (t[0].find_first_of("/\\") != std::string::npos) return at + "a file name, not a path";
-        KsfLine k{t[0], parseNote(t[1]), parseNote(t[2]), parseNote(t[3])};
+        const bool tuned = line[t.back().first] == '+' || line[t.back().first] == '-';
+        const size_t cols = tuned ? 4 : 3;
+        if (t.size() < cols + 1) return at + "needs <file> <root> <low> <high> [tune with sign] (e.g. MS000000.KSF G#3 C-1 G#3 +16)";
+        const size_t r = t.size() - cols;
+        KsfLine k{line.substr(t[0].first, t[r - 1].second - t[0].first), parseNote(tok(r)), parseNote(tok(r + 1)), parseNote(tok(r + 2))};
+        if (k.file.find_first_of("/\\") != std::string::npos) return at + "a file name, not a path";
         if (k.root < 0 || k.lo < 0 || k.hi < 0) return at + "keys are note names (C-1..G9, C4 = 60) or numbers 0-127";
-        if (k.lo > k.hi) return at + "low key above high key";
-        if (t.size() == 5) {
-            const std::string& v = t[4];
-            const size_t d = v[0] == '+' || v[0] == '-';
-            if (v.size() == d || v.size() > d + 2 || v.find_first_not_of("0123456789", d) != std::string::npos)
-                return at + "tune is whole cents from -99 to +99";
-            k.tune = std::stoi(v.substr(d)) * (v[0] == '-' ? -1 : 1);
+        if (k.lo > k.hi) return at + "low key above high key (a tune needs its sign: +5, -5)";
+        if (tuned) {
+            const std::string v = tok(r + 3);
+            if (v.size() < 2 || v.size() > 3 || v.find_first_not_of("0123456789", 1) != std::string::npos)
+                return at + "tune is whole cents from -99 to +99, with its sign";
+            k.tune = std::stoi(v.substr(1)) * (v[0] == '-' ? -1 : 1);
         }
         out.push_back(k);
     }
@@ -201,9 +219,10 @@ inline std::string parseKsfMapping(const std::string& text, std::vector<KsfLine>
     return "";
 }
 
-// One layer `layer` (velocity 0-127) from the mapping text. "" on success.
+// One layer `layer` (velocity 0-127) from the mapping text. "" on success. notes (optional) receives the REPORT.txt
+// source section, measured on the same bytes that were decoded (not re-read later, when the files may have changed).
 inline std::string buildFromKsfMapping(const std::filesystem::path& dir, const std::string& name, const std::string& layer,
-                                       const std::string& mapping, Instrument* out) {
+                                       const std::string& mapping, Instrument* out, std::string* notes = nullptr) {
     std::vector<KsfLine> lines;
     if (const auto e = parseKsfMapping(mapping, lines); !e.empty()) return e;
     Instrument in;
@@ -211,31 +230,6 @@ inline std::string buildFromKsfMapping(const std::filesystem::path& dir, const s
     Layer L;
     L.name = layer;
     std::error_code ec;
-    for (const auto& m : lines) {
-        std::vector<std::filesystem::path> hits;   // FAT is case-insensitive; two files differing only in case are refused
-        for (const auto& e : std::filesystem::directory_iterator(dir, ec))
-            if (korg::lower(e.path().filename().string()) == korg::lower(m.file) && e.is_regular_file(ec)) hits.push_back(e.path());
-        if (hits.size() != 1) return m.file + (hits.empty() ? ": not in the folder" : ": several files differ only in case");
-        Sample s;
-        KsfHead h;
-        std::string err;
-        const auto b = korg::slurp(hits.front(), &err);
-        if (!err.empty()) return err;
-        if (const auto e = readKsf(b, &h, &s); !e.empty()) return m.file + ": " + e;
-        s.root = uint8_t(m.root);
-        s.name = layer.substr(0, 16) + " " + std::to_string(in.samples.size() + 1);
-        L.zones.push_back({uint8_t(m.lo), uint8_t(m.hi), int(in.samples.size()), uint8_t(m.root), int8_t(m.tune), 0});
-        in.samples.push_back(std::move(s));
-    }
-    std::sort(L.zones.begin(), L.zones.end(), [](const Zone& a, const Zone& b) { return a.lo < b.lo; });
-    in.layers.push_back(std::move(L));
-    if (const auto e = validate(in); !e.empty()) return e.front();
-    *out = std::move(in);
-    return "";
-}
-
-// REPORT.txt source section. Re-measures every mapped sample, so it states the evidence for the roots actually used.
-inline std::string ksfFolderNotes(const std::filesystem::path& dir, const std::string& mapping, const Instrument& in) {
     std::string o = "Source: Korg .KSF samples WITHOUT a .KMP in " + dir.string() +
                     "\nFormat: KSF per KRONOS Parameter Guide En 3 p.1159 (Korg format sample files)\n"
                     "RECOVERED exactly from the files: 16-bit audio (Start..End), sample rate, loop (Loop Start..End), mono.\n"
@@ -244,17 +238,23 @@ inline std::string ksfFolderNotes(const std::filesystem::path& dir, const std::s
                     "NOT AVAILABLE without the KMP and Program: the original key zones, zone tune and level, velocity layers, "
                     "filters, envelopes, LFOs, effects.\n"
                     "Zone tune: the mapping's tune column (proposed as the correction of the measured pitch; 0 = as recorded).\n"
-                    "Per sample (measured now, on the files used):\n";
-    std::vector<KsfLine> lines;
-    parseKsfMapping(mapping, lines);
+                    "Per sample (measured on the audio packaged):\n";
     size_t lt = 0, p12 = 0, s2 = 0;
     for (const auto& m : lines) {
-        const KsfInfo k = analyseKsf(dir / m.file);
+        std::vector<std::filesystem::path> hits;   // FAT is case-insensitive; two files differing only in case are refused
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec))
+            if (korg::lower(e.path().filename().string()) == korg::lower(m.file) && e.is_regular_file(ec)) hits.push_back(e.path());
+        if (hits.size() != 1) return m.file + (hits.empty() ? ": not in the folder" : ": several files differ only in case");
+        std::string err;
+        const auto b = korg::slurp(hits.front(), &err);
+        if (!err.empty()) return err;
+        Sample s;
+        const KsfInfo k = analyseKsf(m.file, b, &s);
+        if (!k.refused.empty()) return m.file + ": " + k.refused;
         char l[300];
         std::snprintf(l, sizeof l, "  %-16s %-16s root %-4s keys %s-%s tune %+d  ", m.file.c_str(), k.name.c_str(), noteName(m.root).c_str(),
                       noteName(m.lo).c_str(), noteName(m.hi).c_str(), m.tune);
         o += l;
-        if (!k.refused.empty()) { o += "(could not be re-read: " + k.refused + ")\n"; continue; }
         if (k.detected >= 0) {
             std::snprintf(l, sizeof l, "measured %s %+.1f cents%s", noteName(k.detected).c_str(), k.cents, k.detected == m.root ? "" : " (ROOT DIFFERS)");
             o += l;
@@ -266,12 +266,21 @@ inline std::string ksfFolderNotes(const std::filesystem::path& dir, const std::s
         lt += k.head.loopOn && k.head.loopTune != 0;
         p12 += k.head.plus12dB;
         s2 += k.head.use2ndStart && k.head.start2 != k.head.start;
+        s.root = uint8_t(m.root);
+        s.name = layer.substr(0, 16) + " " + std::to_string(in.samples.size() + 1);
+        L.zones.push_back({uint8_t(m.lo), uint8_t(m.hi), int(in.samples.size()), uint8_t(m.root), int8_t(m.tune), 0});
+        in.samples.push_back(std::move(s));
     }
+    std::sort(L.zones.begin(), L.zones.end(), [](const Zone& a, const Zone& b) { return a.lo < b.lo; });
+    in.layers.push_back(std::move(L));
+    if (const auto e = validate(in); !e.empty()) return e.front();
     if (lt) o += "  " + std::to_string(lt) + " sample(s) have Loop Tune: LOST\n";
     if (p12) o += "  " + std::to_string(p12) + " sample(s) have +12 dB: not carried (set the level on the Pa5X)\n";
     if (s2) o += "  " + std::to_string(s2) + " sample(s) have a 2nd Start in use: not carried\n";
     o += "Mapping used:\n" + mapping + (mapping.empty() || mapping.back() == '\n' ? "" : "\n") + "\n";
-    return o + formatRecipe(recipeFromSamples(in));
+    if (notes) *notes = o;
+    *out = std::move(in);
+    return "";
 }
 
 } // namespace ai_arranger::media::sound

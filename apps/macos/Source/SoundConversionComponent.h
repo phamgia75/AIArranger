@@ -84,9 +84,11 @@ private:
     KeyMapView map_;
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    std::string ksfNotes_;   // KSF folder: REPORT source section measured on the previewed audio
     int jobs_ = 0;
     uint64_t generation_ = 0;
-    void showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err, const std::string& mapping);
+    void showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err, const std::string& mapping,
+                     const std::string& ksfNotes);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SoundConversionComponent)
 };

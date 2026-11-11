@@ -124,11 +124,12 @@ public:
     }
 
     // Step 2: decode the WAVs with the given order and splits. On failure nothing is kept.
-    bool build(const std::string& name, const std::string& orderCsv, const std::string& splitsCsv, std::string* err, std::string* mapping = nullptr) {
+    bool build(const std::string& name, const std::string& orderCsv, const std::string& splitsCsv, std::string* err, std::string* mapping = nullptr,
+               std::string* notes = nullptr) {
         built_ = false;
         if (dir_.empty()) return fail(err, "choose a WAV folder first");
         snd::Instrument in;
-        if (!decode(dir_, name, orderCsv, splitsCsv, in, err, mapping)) return false;
+        if (!decode(dir_, name, orderCsv, splitsCsv, in, err, mapping, notes)) return false;
         adopt(std::move(in));
         return true;
     }
@@ -144,9 +145,10 @@ public:
     std::shared_ptr<const snd::Instrument> snapshot() const { return in_; }
     void invalidate() { built_ = false; }   // a setting changed: the preview no longer describes what would be written
     const std::filesystem::path& folder() const { return dir_; }
-    // KSF-only folder: `mapping` is the mapping text; when it is empty it is proposed here and returned in it.
+    // KSF-only folder: `mapping` is the mapping text; when it is empty it is proposed here and returned in it. `notes`
+    // receives the REPORT source section measured on the decoded audio; pass it to generate().
     static bool decode(const std::filesystem::path& dir, const std::string& name, const std::string& orderCsv, const std::string& splitsCsv,
-                       snd::Instrument& out, std::string* err, std::string* mapping = nullptr) {
+                       snd::Instrument& out, std::string* err, std::string* mapping = nullptr, std::string* notes = nullptr) {
         if (snd::isKsfFolder(dir)) {
             if (!mapping) return fail(err, "a KSF folder needs a key mapping");
             const auto layer = csv(orderCsv);
@@ -155,7 +157,7 @@ public:
             if (!csv(splitsCsv).empty()) return fail(err, "one layer has no velocity splits; leave the splits empty");
             if (mapping->find_first_not_of(" \t\r\n") == std::string::npos)
                 if (const auto e = snd::proposeKsfMapping(dir, mapping); !e.empty()) return fail(err, e);
-            if (const auto e = snd::buildFromKsfMapping(dir, name, layer[0], *mapping, &out); !e.empty()) return fail(err, e);
+            if (const auto e = snd::buildFromKsfMapping(dir, name, layer[0], *mapping, &out, notes); !e.empty()) return fail(err, e);
             return true;
         }
         std::vector<std::string> order;
@@ -239,10 +241,12 @@ public:
     // shortcut: writing straight onto a mounted volume is refused while hardware writes are not
     // authorized for this project phase; write locally and copy the folder to the USB stick by hand.
     static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err,
-                                const std::string& mapping = {}) {
+                                const std::string& ksfNotes = {}) {   // KSF folder: decode()'s notes for this Sound
         if (const auto r = snd::outputFolderRefusal(out); !r.empty()) { if (err) *err = r; return ""; }
+        const bool ksf = snd::isKsfFolder(sourceDir);
+        if (ksf && ksfNotes.empty()) { if (err) *err = "no measurement notes for this KSF Sound: press Preview again"; return ""; }
         const std::string notes = snd::isKorgFolder(sourceDir) ? snd::korgFolderNotes(sourceDir, in)
-                                : snd::isKsfFolder(sourceDir)  ? snd::ksfFolderNotes(sourceDir, mapping, in)
+                                : ksf                          ? ksfNotes + snd::formatRecipe(snd::recipeFromSamples(in))
                                                                : snd::wavFolderNotes(sourceDir.string(), in);
         const std::string rep = snd::writePackage(in, out, notes, err);
         if (rep.empty()) return "";

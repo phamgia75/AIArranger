@@ -112,7 +112,7 @@ int main() {
         const auto e = snd::buildFromKsfMapping(src, "X", "Strings", m, &x);
         TEST("refused (" + why + "): " + e, has(e, why));
     };
-    refuse("MS000000.KSF C3 C-1\n", "needs <file> <root> <low> <high> [tune]");
+    refuse("MS000000.KSF C3 C-1\n", "needs <file> <root> <low> <high> [tune with sign]");
     refuse("MS000000.KSF C3 C-1 B9\n", "note names");
     refuse("MS000000.KSF C3 C4 C3\n", "low key above high key");
     refuse("MS000000.KSF C3 C-1 G9 +100\n", "whole cents from -99 to +99");
@@ -121,21 +121,64 @@ int main() {
     refuse("MS000005.KSF C3 C-1 G9\n", "compressed sample data");
     refuse("MS000000.KSF C3 C-1 C4\nMS000001.KSF C4 C4 G9\n", "overlap");
     refuse("# only comments\n", "no sample lines");
+    refuse("MS000001.KSF C4 C4 G9 5\n", "a tune needs its sign");
+
+    std::printf("== review round 1 regressions\n");
+    {   // high and low notes: YIN searched only periods >= 24 frames (2 kHz), so MIDI 108 read as 89
+        const fs::path hi = root / "range";
+        for (int note : {28, 100, 108})
+            put(hi / ("N" + std::to_string(note) + ".KSF"), ksf({tone(40000, hz(note), 9000, note), 48000, 0, 0, 39999, 0x20}, nullptr, "N"));
+        for (int note : {28, 100, 108}) {
+            const auto k = snd::analyseKsf(hi / ("N" + std::to_string(note) + ".KSF"));
+            TEST("MIDI " + std::to_string(note) + " measured as itself (got " + std::to_string(k.detected) + ")", k.detected == note && std::fabs(k.cents) < 2);
+        }
+    }
+    {   // file names with spaces: the columns are read from the right
+        const fs::path sp = root / "spaces";
+        put(sp / "Grand Piano.KSF", ksf({c3, 48000, 0, 0, 39999, 0x20}, nullptr, "GP48"));
+        put(sp / "Grand  Piano 2.KSF", ksf({c5, 48000, 0, 0, 39999, 0x20}, nullptr, "GP72"));
+        put(sp / "odd #1.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "ODD60"));
+        std::string pm;
+        snd::Instrument x;
+        TEST("names with spaces are proposed and build", snd::proposeKsfMapping(sp, &pm).empty() && has(pm, "Grand  Piano 2.KSF") &&
+             snd::buildFromKsfMapping(sp, "GP", "GP", pm, &x).empty() && x.samples.size() == 2);
+        TEST("a name a mapping line cannot hold is listed, not mangled", has(pm, "# odd #1.KSF  NOT USED: this file name cannot be written"));
+        std::vector<snd::KsfLine> ls;
+        TEST("parser: file 'Grand  Piano 2.KSF', root C5, tune -3",
+             snd::parseKsfMapping("Grand  Piano 2.KSF  C5 C-1 G9 -3  # x\n", ls).empty() && ls.size() == 1 && ls[0].file == "Grand  Piano 2.KSF" &&
+             ls[0].root == 72 && ls[0].tune == -3);
+    }
+    {   // the report describes the audio that was built, even if the file changes before Generate
+        const fs::path ch = root / "changes";
+        put(ch / "A.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "A60"));
+        std::string pm, nt;
+        snd::Instrument x;
+        const bool ok = snd::proposeKsfMapping(ch, &pm).empty() && snd::buildFromKsfMapping(ch, "A", "A", pm, &x, &nt).empty();
+        put(ch / "A.KSF", ksf({c5, 48000, 0, 0, 39999, 0x20}, nullptr, "A72"));   // replaced after Preview
+        std::string ge;
+        const auto r = ai_arranger::ui::SoundConversionModel::generate(x, ch, root / "out" / "changes", &ge, nt);
+        std::ifstream f(root / "out" / "changes" / "REPORT.txt");
+        const std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        TEST("REPORT states the measurement of the packaged audio (C4), not of the replaced file", ok && !r.empty() &&
+             has(t, "A60") && has(t, "measured C4 -20") && !has(t, "A72"));
+    }
 
     std::printf("== Convert Sound model\n");
     ai_arranger::ui::SoundConversionModel m;
     std::string err;
     TEST("inspect: a KSF folder, one layer named after the folder, no splits", m.inspect(src, &err) && m.ksf() && !m.korg() &&
          m.proposedOrder() == "Test Strings" && m.proposedSplits().empty() && m.layers().front().files == 7);
-    std::string mp;
-    TEST("build with an empty mapping proposes one and builds it", m.build("Test Strings", "Test Strings", "", &err, &mp) && mp == map);
+    std::string mp, notes;
+    TEST("build with an empty mapping proposes one and builds it", m.build("Test Strings", "Test Strings", "", &err, &mp, &notes) && mp == map);
     TEST("two layers are refused (no evidence of velocity layers)",
          !ai_arranger::ui::SoundConversionModel::decode(src, "X", "a,b", "64", in, &err, &mp) && has(err, "one layer"));
     TEST("splits are refused", !ai_arranger::ui::SoundConversionModel::decode(src, "X", "a", "64", in, &err, &mp) && has(err, "splits"));
 
     std::printf("== package and report\n");
     const fs::path out = root / "out" / "Test Strings";
-    const auto sum = ai_arranger::ui::SoundConversionModel::generate(m.instrument(), src, out, &err, mp);
+    TEST("generate without the build's notes is refused", ai_arranger::ui::SoundConversionModel::generate(m.instrument(), src, root / "out" / "x", &err).empty() &&
+         has(err, "press Preview again"));
+    const auto sum = ai_arranger::ui::SoundConversionModel::generate(m.instrument(), src, out, &err, notes);
     TEST("package written: " + err, !sum.empty());
     const auto v = snd::verifyPackage(out);
     TEST("the package verifies", v.ok);
