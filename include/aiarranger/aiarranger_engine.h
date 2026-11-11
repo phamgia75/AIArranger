@@ -24,9 +24,8 @@
  * may come from another thread (they enqueue lock-free); read snapshots from any
  * thread. See the doc for the full thread-ownership table.
  *
- * Gate 4 scope: this skeleton binds NO MIDI hardware (headless). Device binding,
- * style-file loading, and input event injection are Gate 5 additions layered on
- * the same handle — the ABI is designed to extend additively.
+ * Gate 4 scope bound no MIDI. Contract 1.1.0 (P2.4) adds UASF style loading,
+ * chord mode, and host-fed MIDI in/out ports, additively (see the end of file).
  */
 
 #include <stdint.h>
@@ -139,6 +138,55 @@ AiArrError aiarr_engine_snapshot(const AiArrEngine* engine, AiArrSnapshot* out);
 AiArrError aiarr_engine_capabilities(const AiArrEngine* engine, AiArrCapabilities* out);
 AiArrError aiarr_engine_last_error(const AiArrEngine* engine, AiArrError* out);
 AiArrLifecycleState aiarr_engine_lifecycle_state(const AiArrEngine* engine);
+
+/* ── Contract 1.1.0 additions (P2.4, additive) ─────────────────────────────
+ * The bridge owns one HOST MIDI port in each direction. Physical device choice
+ * (CoreMIDI, USB) stays in the host app: it feeds received bytes in and drains
+ * outgoing messages out. Port index 0 = the host port, -1 = disconnected; any
+ * other index -> AIARR_ERR_DEVICE_UNAVAILABLE. Both ports start disconnected. */
+
+/* Owner thread, not while playing (AIARR_ERR_INVALID_STATE). `data` is a
+ * serialized UASF file. Invalid or truncated data -> AIARR_ERR_UNSUPPORTED and
+ * the current style is kept. */
+AiArrError aiarr_engine_load_style_uasf(AiArrEngine* engine, const uint8_t* data, uint32_t size);
+
+/* Chord recognition mode for notes below the split (owner thread). */
+typedef enum AiArrChordMode {
+    AIARR_CHORD_MODE_FINGERED = 0,          /* default */
+    AIARR_CHORD_MODE_FINGERED_ON_BASS,
+    AIARR_CHORD_MODE_SINGLE_FINGER
+} AiArrChordMode;
+AiArrError aiarr_engine_set_chord_mode(AiArrEngine* engine, int32_t mode /* AiArrChordMode */);
+
+/* Changing the output port while playing -> AIARR_ERR_INVALID_STATE (the
+ * NoteOffs of sounding notes would be lost); stop first. */
+AiArrError aiarr_engine_select_midi_input(AiArrEngine* engine, int32_t index);
+AiArrError aiarr_engine_select_midi_output(AiArrEngine* engine, int32_t index);
+
+/* Raw MIDI bytes received by the host, at most 256 per call (more ->
+ * AIARR_ERR_UNSUPPORTED, nothing injected). Running status is allowed within
+ * one call; an incomplete trailing message is dropped. One injecting thread at
+ * a time; it may differ from the tick thread. AIARR_ERR_DEVICE_UNAVAILABLE when
+ * the input port is not selected. Input the engine had to drop (tick() not
+ * draining) shows as AIARR_ERR_QUEUE_FULL in aiarr_engine_last_error(). */
+AiArrError aiarr_engine_send_midi_in(AiArrEngine* engine, const uint8_t* bytes, uint32_t length);
+
+/* One outgoing short message: `length` bytes of status/data1/data2 (1-3). */
+typedef struct AiArrMidiMessage {
+    uint8_t status;
+    uint8_t data1;
+    uint8_t data2;
+    uint8_t length;
+} AiArrMidiMessage;
+
+/* Drain up to `capacity` messages the engine sent to the output port since the
+ * last call (one draining thread at a time). `*count` receives the number
+ * written. While the port is disconnected the engine sends nothing. If the host
+ * stops draining, messages beyond the port's buffer (1024) are dropped; once the
+ * backlog is drained, a call with room for 32 more messages then receives CC 120
+ * + CC 123 on all 16 channels, so a lost NoteOff never leaves a stuck note. */
+AiArrError aiarr_engine_read_midi_out(AiArrEngine* engine, AiArrMidiMessage* out,
+                                      uint32_t capacity, uint32_t* count);
 
 #ifdef __cplusplus
 } /* extern "C" */

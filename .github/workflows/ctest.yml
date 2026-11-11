@@ -30,6 +30,35 @@ jobs:
       - name: Build + CTest (scripts/run_tests.sh)
         run: bash scripts/run_tests.sh
 
+  macos-app:
+    # BUILD_MACOS_APP=ON: the JUCE app must build, and its UI smoke test drives
+    # the real LiveHostComponent (no MIDI device; AIARR_MIDI_HW_TX=0 via CTest).
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (fetches JUCE 8.0.4)
+        run: cmake -S . -B build-app -DBUILD_MACOS_APP=ON
+      - name: Build app + smoke test
+        run: cmake --build build-app -j4 --target aiarranger-macos aiarranger-app-smoke aiarranger-plugin-sampler
+      - name: App UI smoke test
+        env:
+          AIARR_REQUIRE_REAL_PLUGIN: '1'   # the real DLSMusicDevice render must run, not SKIP
+        run: ctest --test-dir build-app -R '^test_app_smoke$' -V --timeout 300   # -V: SKIP and timing lines stay visible
+
+  ipados-simulator:
+    # P2.6: the core cross-built for the iOS simulator, the Swift host tests run
+    # inside a booted iPad simulator, then the app is installed, self-tests and
+    # is sent to the background. No USB MIDI here: hardware stays pending.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests (macOS native)
+        run: bash apps/ipados/build.sh macos
+      - name: Host tests + app in the iPad simulator
+        run: bash apps/ipados/build.sh sim
+
   portable-core-linux:
     # Machine-checks the Gate 4 claim that the portable core (engine, facade,
     # C ABI bridge, importer, validation harness) builds and passes with no Apple

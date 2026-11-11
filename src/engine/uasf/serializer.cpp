@@ -29,7 +29,20 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
     format::FileHeader header;
     header.magic = format::kMagic;
     header.version = format::kVersion;
-    header.flags = (style.tempo_bpm != 0 || !style.unknown_extensions.empty())
+    std::vector<uint8_t> trns;   // 'TRNS' payload, written sections/tracks only
+    for (size_t si = 0; si < style.sections.size() && si < format::kMaxSections; ++si) {
+        const auto& tracks = style.sections[si].tracks;
+        for (size_t ti = 0; ti < tracks.size() && ti < format::kMaxTracksPerSection; ++ti) {
+            const auto& a = tracks[ti].articulation;
+            if (!a.hasRegisterLimits()) continue;
+            if (!ArticulationMetadata::registerLimitsValid(a.high_key, a.note_low, a.note_high))
+                return {false, {}, "Section " + std::to_string(si) + " track " + std::to_string(ti) +
+                                       ": invalid register limits (High Key 0-11, note range >= 1 octave)"};
+            trns.insert(trns.end(), {static_cast<uint8_t>(si), static_cast<uint8_t>(ti),
+                                     a.high_key, a.note_low, a.note_high});
+        }
+    }
+    header.flags = (style.tempo_bpm != 0 || !trns.empty() || !style.unknown_extensions.empty())
                        ? format::kFlagExtensions : 0;
     header.section_count = static_cast<uint32_t>(std::min(style.sections.size(),
                                                          size_t(format::kMaxSections)));
@@ -118,6 +131,11 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
         writeU32(format::kExtTempo);
         writeU32(4);
         writeU32(style.tempo_bpm);
+    }
+    if (!trns.empty()) {
+        writeU32(format::kExtTranspose);
+        writeU32(static_cast<uint32_t>(trns.size()));
+        writeBytes(trns.data(), trns.size());
     }
     // Blocks a reader kept but did not understand, re-emitted verbatim.
     if (!style.unknown_extensions.empty())

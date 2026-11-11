@@ -81,6 +81,17 @@ int main(void) {
               aiarr_engine_transport_start(e) == AIARR_OK);
     }
     CHECK("stop OK", aiarr_engine_stop(e) == AIARR_OK);
+    {   /* Contract 1.1.0 (P2.4): new entry points link and behave from pure C. */
+        AiArrMidiMessage msgs[8];
+        uint32_t count = 7u;
+        const uint8_t note[3] = {0x90u, 48u, 100u};
+        CHECK("1.1.0: select ports", aiarr_engine_select_midi_input(e, 0) == AIARR_OK &&
+                                     aiarr_engine_select_midi_output(e, 0) == AIARR_OK);
+        CHECK("1.1.0: chord mode on bass", aiarr_engine_set_chord_mode(e, AIARR_CHORD_MODE_FINGERED_ON_BASS) == AIARR_OK);
+        CHECK("1.1.0: inject", aiarr_engine_send_midi_in(e, note, 3u) == AIARR_OK);
+        CHECK("1.1.0: read out", aiarr_engine_read_midi_out(e, msgs, 8u, &count) == AIARR_OK && count <= 8u);
+        CHECK("1.1.0: bad UASF", aiarr_engine_load_style_uasf(e, note, 3u) == AIARR_ERR_UNSUPPORTED);
+    }
     aiarr_engine_destroy(e);
     aiarr_engine_destroy(NULL);
 

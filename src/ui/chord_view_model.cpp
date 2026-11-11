@@ -22,6 +22,10 @@ std::string ChordViewModel::displayName() const {
         case ChordType::Sus4:  s += "sus4";    break;
         case ChordType::Sus2:  s += "sus2";    break;
         case ChordType::Power: s += "5";       break;
+        case ChordType::Maj6:  s += "6";       break;
+        case ChordType::Min6:  s += "m6";      break;
+        case ChordType::Dom9:  s += "9";       break;
+        case ChordType::Min7b5: s += "m7b5";   break;
         default:                                break;
     }
     return s;

@@ -27,6 +27,12 @@ enum class ChordType : uint8_t {
     Sus2,
     Power,
     NoChord,
+    // Appended after NoChord: the numeric values reach the C ABI
+    // (AiArrSnapshot.chordType), so existing ones must not move.
+    Maj6,      // {0,4,7,9}
+    Min6,      // {0,3,7,9}
+    Dom9,      // {0,2,4,7,10}
+    Min7b5,    // {0,3,6,10} half-diminished
 };
 
 struct Chord {

@@ -28,6 +28,9 @@ public:
     RealtimeClock();
 
     // ── Configuration (non-realtime) ────────────────────────────────
+    // setTempo/setSampleRate rebase the position, so call them on the thread
+    // that calls advance() or with it excluded (LiveEngineFacade applies tempo
+    // inside tick()); a concurrent getPosition() could read a torn base.
     void setSampleRate(uint32_t sampleRate) noexcept;
     void setTempo(uint32_t bpm) noexcept;
     void setResolution(uint32_t ticksPerQuarter) noexcept;
@@ -51,6 +54,7 @@ public:
     double   getTicksPerSample() const noexcept;
     bool     isRunning() const noexcept;
     uint32_t getSampleRate() const noexcept;
+    uint32_t getResolution() const noexcept { return resolution_.load(std::memory_order_relaxed); } // ticks per quarter
     uint32_t getBeatsPerBar() const noexcept;
 
     // ── Bar/beat helpers (realtime-safe) ────────────────────────────
@@ -86,6 +90,12 @@ private:
     std::atomic<uint64_t>        config_generation_{0};
     mutable std::atomic<uint64_t> cache_generation_{0};
 
+    // Musical position = tick_base_ + (samples - sample_base_) * ticks/sample.
+    // A tempo or sample-rate change rebases here, so it changes the speed from
+    // the current tick on instead of rescaling the whole elapsed time.
+    std::atomic<double>  tick_base_{0.0};
+    std::atomic<int64_t> sample_base_{0};
+    void rebase() noexcept;
     void recalcDerived() noexcept;
     void ensureCache() const noexcept;
 };

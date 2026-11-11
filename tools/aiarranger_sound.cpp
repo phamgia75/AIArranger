@@ -1,0 +1,96 @@
+// aiarranger-sound (roadmap S4): writes the USB-ready package folder (media/sound/package_writer.h:
+// .sf2, tx/ TXPROG, wav/, REPORT.txt). Refuses to write into an existing DIR.
+//   demo --out DIR                                    the original demo organ
+//   drums --out DIR                                   the original demo Drum Kit (.txperf)
+//   wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR
+//       a folder of <layer>_<OrgKey>_<LowKey>_<HighKey>.wav (route C, media/sound/wav_folder_source.h);
+//       SRC is only read.
+//   ksf --in SRC --name NAME [--mapping FILE] --out DIR
+//       .KSF samples without a .KMP (media/sound/ksf_folder_source.h): roots measured, zones proposed (printed first),
+//       or the mapping text in FILE (as the Convert Sound tab edits it);
+//   kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR
+//       a folder of KRONOS .KMP/.KSF multisamples (Save Sampling Data; media/sound/korg_kmp_source.h); SRC is only read.
+// Exit 0 = written, 1 = usage/IO/validation error.
+#include "media/sound/additive_source.h"
+#include "media/sound/drum_source.h"
+#include "media/sound/korg_kmp_source.h"
+#include "media/sound/ksf_folder_source.h"
+#include "media/sound/package_writer.h"
+#include "media/sound/sound_recipe.h"
+#include "media/sound/wav_folder_source.h"
+#include <cstdio>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <string>
+
+using namespace ai_arranger::media::sound;
+
+static int usage() {
+    std::fprintf(stderr, "usage: aiarranger-sound demo --out DIR\n"
+                         "       aiarranger-sound drums --out DIR\n"
+                         "       aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
+                         "       aiarranger-sound kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
+                         "       aiarranger-sound ksf --in SRC --name NAME [--mapping FILE] --out DIR\n"
+                         "       (DIR must not exist)\n");
+    return 1;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2 || argc % 2) return usage();
+    const std::string cmd = argv[1];
+    std::map<std::string, std::string> opt;
+    for (int i = 2; i + 1 < argc; i += 2) opt[argv[i]] = argv[i + 1];
+    if (!opt.count("--out")) return usage();
+    Instrument in;
+    std::string notes;
+    if (cmd == "drums" && opt.size() == 1) {
+        std::string err;
+        const std::string rep = writeDrumPackage(buildDemoKit(), opt["--out"], "Source: original synthesized drums (no recorded audio)\n", &err);
+        if (rep.empty()) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+        std::fputs(rep.c_str(), stdout);
+        return 0;
+    }
+    if (cmd == "demo" && opt.size() == 1) {
+        double worst = 0;
+        in = buildDemoOrgan(&worst);
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "Source: original additive synthesis, looped; worst pitch error %.4f cents\n", worst);
+        notes = buf;
+    } else if (cmd == "ksf" && opt.count("--in") && opt.count("--name")) {
+        std::string mapping, e;
+        if (opt.count("--mapping")) {
+            std::ifstream f(opt["--mapping"]);
+            if (!f) { std::fprintf(stderr, "cannot read %s\n", opt["--mapping"].c_str()); return 1; }
+            mapping.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        } else if (e = proposeKsfMapping(opt["--in"], &mapping); !e.empty()) {
+            std::fprintf(stderr, "%s\n", e.c_str());
+            return 1;
+        } else {
+            std::fputs(mapping.c_str(), stdout);
+        }
+        if (e = buildFromKsfMapping(opt["--in"], opt["--name"], opt["--name"], mapping, &in, &notes); !e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 1; }
+        notes += formatRecipe(recipeFromSamples(in));
+    } else if ((cmd == "wav" || cmd == "kronos") && opt.count("--in") && opt.count("--name")) {
+        std::vector<std::string> layers;
+        std::vector<uint8_t> splits;
+        std::stringstream ls(opt["--layers"]), ss(opt["--splits"]);
+        for (std::string t; std::getline(ls, t, ',');) layers.push_back(t);
+        for (std::string t; std::getline(ss, t, ',');) {
+            if (t.empty() || t.size() > 3 || t.find_first_not_of("0123456789") != std::string::npos || std::stoi(t) > 127) return usage();
+            splits.push_back(static_cast<uint8_t>(std::stoi(t)));
+        }
+        const bool korg = cmd == "kronos";
+        const auto e = korg ? buildFromKorgFolder(opt["--in"], opt["--name"], layers, splits, &in)
+                            : buildFromWavFolder(opt["--in"], opt["--name"], layers, splits, &in);
+        if (!e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 1; }
+        notes = korg ? korgFolderNotes(opt["--in"], in) : wavFolderNotes(opt["--in"], in);
+    } else {
+        return usage();
+    }
+    std::string err;
+    const std::string rep = writePackage(in, opt["--out"], notes, &err);
+    if (rep.empty()) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+    std::fputs(rep.c_str(), stdout);
+    return 0;
+}

@@ -25,6 +25,7 @@ Chord SingleFingerDetector::detect(const uint8_t* notes, size_t count) const noe
     // 3+ notes: fall through to the full fingered templates.
     uint8_t root = 0;
     ChordType t = matchChordType(notes, count, root);
+    if (t == ChordType::NoChord) t = partialMatchChordType(notes, count, root);
     c.root = root;
     c.type = (t == ChordType::NoChord) ? ChordType::Major : t;
     return c;
