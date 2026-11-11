@@ -1,8 +1,12 @@
 # Kronos KMP/KSF → Pa5X: import architecture (P1.6)
 
-**Status: DESIGN only. BLOCKED on authorized test material** (a Kronos KMP/KSF set the owner owns and authorizes, or a Pa5X KMP export of our own demo Sound).
-
-No parser exists yet. None will be written from guessed byte layouts.
+**Status (2026-11-11): route B BUILT (SOFTWARE), from Korg's own documentation.** The KRONOS Parameter Guide
+(En 3, Korg's public PDF, SHA-256 `bfb0cba7…dd`, kept outside the repo) documents the format in full:
+p.1158-1159 "Korg format sample files" (chunks, field sizes, big endian, the SMD1 attribute bits in a figure),
+p.1157 AIFF/WAVE import/export limits, p.855-856 Save Sampling Data, p.858-859 Export Samples as AIF/WAV,
+p.709-710 Start / Loop Start / End in single-sample units. Nothing is guessed: whatever is outside that
+documentation is refused. **Not yet run on real KRONOS files** (none on this Mac): the owner's first saved
+folder is the acceptance test.
 
 Evidence classes:
 - **DOC**: Pa5X User Manual v1.4, printed page numbers.
@@ -26,10 +30,40 @@ Evidence classes:
 | Route | Path | Status |
 |---|---|---|
 | A. Native | Kronos KMP/KSF → USB → Pa5X Import KMP (one multisample, then build the Sound by hand) | UNK: whether Kronos-generation KMP/KSF (newer than Triton) is accepted. Needs one owner test, under the same gate rules as S6 |
-| B. Convert | KMP/KSF → `Instrument` model → TXPROG package (whole Sound, velocity layers, loops) | Needs a KMP/KSF reader, BLOCKED on material |
+| B. Convert | KMP/KSF → `Instrument` model → TXPROG package (whole Sound, velocity layers, loops) | **Built (SOFTWARE):** `src/media/sound/korg_kmp_source.h`; CLI `aiarranger-sound kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR`; app: Sounds & Resources > Convert Sound > Choose Folder... (a folder with .KMP files is read as KRONOS). Tests: `test_kronos_source` (files written from the documented layout), app smoke, 200 000-case ASan/UBSan fuzz of both readers |
 | C. Via WAV | Owner exports WAV from the Kronos (or a DAW) → `Instrument` from WAV + key map → TXPROG | **Built (SOFTWARE):** `aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR` (`src/media/sound/wav_folder_source.h`). Files named `<layer>_<OrgKey>_<LowKey>_<HighKey>.wav` (MAN p.1212); root and forward loop from `smpl`; 16-bit mono/stereo only; anything else refused. Round trip of the demo package is exact. Not yet run on Kronos-exported WAVs (BLOCKED, material) |
 
-**Recommended order:** C (no proprietary parsing), then A (one owner test), then B only if A fails and authorized material exists.
+**Recommended order (revised 2026-11-11, KRONOS FIRST directive):** B. The KRONOS WAV export cannot carry the
+map ("Zone data of the multisamples will not be exported", p.1157; mono 16-bit only; Loop Tune, Reverse, +12 dB and
+the sample name are lost, p.858), and the Pa5X's own KMP import pairs stereo by `_L`/`_R` file names while the
+KRONOS names stereo multisamples `<name> -L` / `<name> -R` (p.836, p.1161) in files like `NAME000.KMP`. Route B reads
+the map from the KMP and joins the pair into stereo samples.
+
+## What the reader does (route B)
+
+| KRONOS (documented) | Package | |
+|---|---|---|
+| RLP1 region: top key; low key = previous top + 1, first = C-1 (p.1158) | zone keys | exact |
+| original key (bits 6-0), tune -99..+99 cents | zone root, tune | exact |
+| SMD1 rate, 16-bit mono, big endian; Start..End (p.710) | sample audio | exact (bit for bit) |
+| Loop On (attribute bit 7 = 0), Loop Start..End | loop [Loop Start, End + 1) | **INF:** End taken as the last looped sample (the parameter is an "end point ... in single-sample units"); confirm with the oracle below |
+| `<name> -L` + `<name> -R` multisamples | stereo samples | exact; halves that differ are refused |
+| SKIPPEDSAMPL region | no zone (keys silent, shown in Checks) | |
+| Level, Loop Tune, +12 dB mixed, RLP2/RLP3 | — | LOST, listed in REPORT.txt |
+| Program (.PCG): velocity zones, filters, EGs, LFOs, FX | — | not in these files; the musician sets layer order and splits |
+
+Refused, with the file and the reason: compressed data, Reverse, 8-bit, more than 1 channel in a KSF, shared data
+(SMF1), divided files (SPD1/SDD1), INTERNALnnnn, Non Transpose over several keys, any undocumented chunk, any chunk
+or value that does not fit the documented size.
+
+## Owner: what to save on the KRONOS (no Pa5X involved)
+
+1. Disk > page menu > **Save Sampling Data** > **One Multisample** (or All Multisamples) to a USB stick (p.855-856).
+   For velocity layers, save each multisample that the Program uses.
+2. Optional oracle for the one inferred point: also **Export Samples as AIF/WAV** > WAVE > **Samples in One MS**
+   for the same multisample (p.858-859). Its WAV loop end, compared with the KSF Loop End, settles whether End is
+   inclusive. Keep both outside the repository.
+3. On the Mac: Convert Sound > Choose Folder... > the saved folder; order the layers, Preview, Generate Package.
 
 ## Reader design for B (when unblocked)
 

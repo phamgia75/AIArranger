@@ -5,9 +5,12 @@
 //   wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR
 //       a folder of <layer>_<OrgKey>_<LowKey>_<HighKey>.wav (route C, media/sound/wav_folder_source.h);
 //       SRC is only read.
+//   kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR
+//       a folder of KRONOS .KMP/.KSF multisamples (Save Sampling Data; media/sound/korg_kmp_source.h); SRC is only read.
 // Exit 0 = written, 1 = usage/IO/validation error.
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
+#include "media/sound/korg_kmp_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
@@ -22,6 +25,7 @@ static int usage() {
     std::fprintf(stderr, "usage: aiarranger-sound demo --out DIR\n"
                          "       aiarranger-sound drums --out DIR\n"
                          "       aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
+                         "       aiarranger-sound kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
                          "       (DIR must not exist)\n");
     return 1;
 }
@@ -47,7 +51,7 @@ int main(int argc, char** argv) {
         char buf[96];
         std::snprintf(buf, sizeof buf, "Source: original additive synthesis, looped; worst pitch error %.4f cents\n", worst);
         notes = buf;
-    } else if (cmd == "wav" && opt.count("--in") && opt.count("--name")) {
+    } else if ((cmd == "wav" || cmd == "kronos") && opt.count("--in") && opt.count("--name")) {
         std::vector<std::string> layers;
         std::vector<uint8_t> splits;
         std::stringstream ls(opt["--layers"]), ss(opt["--splits"]);
@@ -56,11 +60,11 @@ int main(int argc, char** argv) {
             if (t.empty() || t.size() > 3 || t.find_first_not_of("0123456789") != std::string::npos || std::stoi(t) > 127) return usage();
             splits.push_back(static_cast<uint8_t>(std::stoi(t)));
         }
-        if (const auto e = buildFromWavFolder(opt["--in"], opt["--name"], layers, splits, &in); !e.empty()) {
-            std::fprintf(stderr, "%s\n", e.c_str());
-            return 1;
-        }
-        notes = wavFolderNotes(opt["--in"], in);
+        const bool korg = cmd == "kronos";
+        const auto e = korg ? buildFromKorgFolder(opt["--in"], opt["--name"], layers, splits, &in)
+                            : buildFromWavFolder(opt["--in"], opt["--name"], layers, splits, &in);
+        if (!e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 1; }
+        notes = korg ? korgFolderNotes(opt["--in"], in) : wavFolderNotes(opt["--in"], in);
     } else {
         return usage();
     }

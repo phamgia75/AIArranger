@@ -49,7 +49,7 @@ public:
     void paint(juce::Graphics& g) override;
 private:
     const media::sound::Instrument* in_ = nullptr;
-    juce::String empty_ = "Choose a WAV folder and press Preview to see the key and velocity map.";
+    juce::String empty_ = "Choose a KRONOS or WAV folder and press Preview to see the key and velocity map.";
 };
 
 class SoundConversionComponent : public juce::Component {
@@ -76,7 +76,7 @@ public:
 private:
     ui::SoundConversionModel model_;
     std::function<void(const juce::File&)> openInResources_;
-    juce::TextButton folderBtn_{"Choose WAV Folder..."}, previewBtn_{"Preview"}, generateBtn_{"Generate Package..."};
+    juce::TextButton folderBtn_{"Choose Folder..."}, previewBtn_{"Preview"}, generateBtn_{"Generate Package..."};
     juce::Label folder_, nameLbl_{{}, "Sound name"}, orderLbl_{{}, "Layers, softest first"}, splitsLbl_{{}, "Velocity splits"}, status_, pluginNote_;
     juce::TextEditor name_, order_, splits_;
     TextView preview_, recipe_;

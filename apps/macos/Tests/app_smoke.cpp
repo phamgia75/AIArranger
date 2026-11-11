@@ -12,6 +12,7 @@
 #include "media/sound/drum_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/wav_writer.h"
+#include "../../../tests/support/korg_fixture.h"
 #include <chrono>
 #include <csignal>
 #include <mach/mach.h>
@@ -282,6 +283,23 @@ int main() {
                 }
             rc.model().clear();
             auto& cv = rc.converter();
+            {   // KRONOS Save Sampling Data folder (Korg-format KMP/KSF from the documented layout, synthetic audio)
+                using namespace korgfix;
+                const auto k = root / "kronos";
+                put(k / "EPIAN000.KMP", kmp("E.Piano -L", {{48, 59, 0, 0, "EPL00000.KSF"}, {72, 127, 5, 0, "EPL00001.KSF"}}));
+                put(k / "EPIAN001.KMP", kmp("E.Piano -R", {{48, 59, 0, 0, "EPR00000.KSF"}, {72, 127, 5, 0, "EPR00001.KSF"}}));
+                for (const char* f : {"EPL00000.KSF", "EPR00000.KSF", "EPL00001.KSF", "EPR00001.KSF"})
+                    put(k / f, ksf({tone(48000, 262, 7000, f[2]), 48000, 0, 24000, 47999}));
+                TEST("Convert Sound: a KRONOS folder is recognised; the -L/-R pair is one layer",
+                     cv.inspectFolder(juce::File(k.string())) && cv.model().korg() && cv.orderField().getText() == "E.Piano");
+                cv.nameField().setText("Kronos EP");
+                pump(50);
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                TEST("Convert Sound: KRONOS preview shows the stereo zones, root and loop",
+                     cv.model().built() && cv.previewText().contains("C-1 -B3    C3") && cv.previewText().contains("C4  -G9    C5") && cv.previewText().contains("24000-48000") &&
+                     cv.model().instrument().samples.size() == 2 && cv.model().instrument().samples[0].channels == 2);
+            }
             TEST("Convert Sound: a folder of wrongly named files gets a clear message", !cv.inspectFolder(juce::File(root.string() + "/kst")));
             TEST("Convert Sound: inspect lists layers and proposes order and splits",
                  cv.inspectFolder(juce::File(root.string() + "/big")) && cv.orderField().getText() == "Soft,Hard" && cv.splitsField().getText() == "64");

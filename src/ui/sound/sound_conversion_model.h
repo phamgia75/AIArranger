@@ -1,13 +1,14 @@
 #ifndef AI_ARRANGER_UI_SOUND_CONVERSION_MODEL_H
 #define AI_ARRANGER_UI_SOUND_CONVERSION_MODEL_H
 
-// UI-toolkit-agnostic state behind the macOS "Convert Sound" tab: WAV folder -> inspect -> layer order
+// UI-toolkit-agnostic state behind the macOS "Convert Sound" tab: WAV folder or KRONOS .KMP/.KSF folder -> inspect -> layer order
 // and velocity splits -> mapping preview and checks -> Sound Recipe -> package folder (SF2, TX16Wx
 // TXPROG, WAVs, REPORT.txt with memory, RESOURCES.tsv). All conversion logic is the existing engine
 // (wav_folder_source.h, package_writer.h, sound_recipe.h, package_graph.h); this file only orders the
 // steps and words the results. It reads the source folder and writes one new local folder; it never
 // writes to an instrument or sends MIDI.
 
+#include "media/sound/korg_kmp_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
@@ -46,10 +47,27 @@ public:
     struct LayerInfo { std::string prefix; size_t files = 0; uint8_t lo = 127, hi = 0; };
 
     // Step 1: read the file names only (fast); proposes a layer order and even velocity splits.
+    // A folder holding .KMP files is a KRONOS folder (one layer per multisample); otherwise a WAV folder.
     bool inspect(const std::filesystem::path& dir, std::string* err) {
+        if (snd::isKorgFolder(dir)) {
+            std::vector<snd::KorgMultisample> ms;
+            if (const auto e = snd::scanKorgFolder(dir, ms); !e.empty()) return fail(err, e);
+            dir_ = dir;
+            korg_ = true;
+            layers_.clear();
+            built_ = false;
+            for (const auto& m : ms) {
+                LayerInfo li{m.name, m.left.regions.size()};
+                li.lo = m.left.regions.front().lo;
+                li.hi = m.left.regions.back().hi;
+                layers_.push_back(li);
+            }
+            return true;
+        }
         std::map<std::string, std::vector<snd::WavFile>> by;
         if (const auto e = snd::scanWavFolder(dir, by); !e.empty()) return fail(err, e);
         dir_ = dir;
+        korg_ = false;
         layers_.clear();
         built_ = false;
         for (const auto& [p, files] : by) {
@@ -60,6 +78,7 @@ public:
         return true;
     }
     const std::vector<LayerInfo>& layers() const { return layers_; }
+    bool korg() const { return korg_; }
     // Softest first when every layer name is a dynamic (ppp..fff, soft/medium/hard) or ends in a
     // number (v1, vel2); otherwise alphabetical. The musician confirms either way.
     std::string proposedOrder() const {
@@ -119,7 +138,9 @@ public:
         }
         for (size_t i = 1; i < splits.size(); ++i)
             if (splits[i] <= splits[i - 1]) return fail(err, "velocity splits must rise from the softest layer to the loudest");
-        if (const auto e = snd::buildFromWavFolder(dir, name, order, splits, &out); !e.empty()) return fail(err, e);
+        const auto e = snd::isKorgFolder(dir) ? snd::buildFromKorgFolder(dir, name, order, splits, &out)
+                                              : snd::buildFromWavFolder(dir, name, order, splits, &out);
+        if (!e.empty()) return fail(err, e);
         return true;
     }
     bool built() const { return built_; }
@@ -189,7 +210,7 @@ public:
     // authorized for this project phase; write locally and copy the folder to the USB stick by hand.
     static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err) {
         if (const auto r = snd::outputFolderRefusal(out); !r.empty()) { if (err) *err = r; return ""; }
-        const std::string notes = snd::wavFolderNotes(sourceDir.string(), in);
+        const std::string notes = snd::isKorgFolder(sourceDir) ? snd::korgFolderNotes(sourceDir, in) : snd::wavFolderNotes(sourceDir.string(), in);
         const std::string rep = snd::writePackage(in, out, notes, err);
         if (rep.empty()) return "";
         return writtenSummary(out) + rep;
@@ -235,6 +256,7 @@ private:
     std::vector<LayerInfo> layers_;
     std::shared_ptr<const snd::Instrument> in_;
     bool built_ = false;
+    bool korg_ = false;
 };
 
 } // namespace ai_arranger::ui

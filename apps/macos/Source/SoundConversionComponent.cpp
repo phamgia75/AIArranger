@@ -49,7 +49,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
     : openInResources_(std::move(openInResources)) {
     for (auto* l : {&folder_, &status_, &pluginNote_, &nameLbl_, &orderLbl_, &splitsLbl_})
         { l->setColour(juce::Label::textColourId, juce::Colour(0xffb8b8c0)); addAndMakeVisible(*l); }
-    folder_.setText("No folder chosen. Files must be named <layer>_<RootKey>_<LowKey>_<HighKey>.wav (the Pa5X export naming).",
+    folder_.setText("No folder chosen. A KRONOS folder (.KMP + .KSF from Save Sampling Data) or WAVs named <layer>_<RootKey>_<LowKey>_<HighKey>.wav.",
                     juce::dontSendNotification);
     pluginNote_.setText("AU/VST instruments: use the Sample Plugin tab.",
                         juce::dontSendNotification);
@@ -69,7 +69,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
     }
     addAndMakeVisible(map_);
     folderBtn_.onClick = [this] {
-        chooser_ = std::make_shared<juce::FileChooser>("Choose a folder of WAV samples");
+        chooser_ = std::make_shared<juce::FileChooser>("Choose a KRONOS .KMP/.KSF folder or a folder of WAV samples");
         auto c = chooser_;
         c->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
                        [c, this, alive = std::weak_ptr<bool>(alive_)](const juce::FileChooser& fc) {
@@ -102,9 +102,9 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
         status_.setText("Cannot use this folder: " + juce::String(err), juce::dontSendNotification);
         return false;
     }
-    juce::String s = dir.getFullPathName() + "  -  " + juce::String(model_.layers().size()) + " layer(s): ";
+    juce::String s = dir.getFullPathName() + "  -  " + (model_.korg() ? "KRONOS multisamples, " : "") + juce::String(model_.layers().size()) + " layer(s): ";
     for (const auto& l : model_.layers())
-        s += juce::String(l.prefix) + " (" + juce::String(l.files) + " files, " + SoundConversionModel::key(l.lo) + "-" + SoundConversionModel::key(l.hi) + ")  ";
+        s += juce::String(l.prefix) + " (" + juce::String(l.files) + (model_.korg() ? " zones, " : " files, ") + SoundConversionModel::key(l.lo) + "-" + SoundConversionModel::key(l.hi) + ")  ";
     folder_.setText(s, juce::dontSendNotification);
     // Programmatic: no change notification (JUCE delivers it later and it would invalidate the next preview).
     if (name_.isEmpty()) name_.setText(dir.getFileName().substring(0, 20), false);
@@ -115,7 +115,7 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
 }
 
 void SoundConversionComponent::buildPreview() {
-    if (model_.folder().empty()) { status_.setText("Choose a WAV folder first.", juce::dontSendNotification); return; }
+    if (model_.folder().empty()) { status_.setText("Choose a folder first.", juce::dontSendNotification); return; }
     ++jobs_;
     previewBtn_.setEnabled(false);
     generateBtn_.setEnabled(false);
