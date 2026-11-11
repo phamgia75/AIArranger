@@ -87,6 +87,52 @@ hashed unchanged before/after):
   error. The gate is unchanged.
 - Pa5X playback: not done (owner's step).
 
+### Pitch on vibrato recordings (2026-11-12)
+
+The first owner run failed the validator's 5-cent check (10.8 cents worst). The cause was the measurement, not the
+conversion:
+- All 18 violin samples have vibrato: about 5 Hz, swinging 20-35 cents (10th-90th percentile).
+- A single spectral peak, which both the first tune proposal and the validator used, lands anywhere inside that swing.
+  On the same audio it disagreed with the centre of the pitch track by up to 20 cents.
+
+Method now used (`ksf_folder_source.h`, `pitchPoints` and `summarise`):
+- Track the pitch every 5 ms with YIN. The window is 3 periods, between 512 and 2048 frames.
+- Read the track through the playback position, 0.5-2.0 s into the note as it plays with the loop repeated. No window
+  straddles a loop seam.
+- Vibrato (10th-90th percentile spread of at least 8 cents): the centre is the mean of the track. A steady tone keeps the
+  spectral peak.
+- Confidence: 2 standard errors of the per-cycle means, plus 1 cent of method bias.
+
+Evidence:
+- Synthetic vibrato with a known centre (+-20/40 cents, loudness tied to the swing):
+  - the power-spectrum centroid is pulled +8.8/+17 cents towards the loud half;
+  - a 2048-frame track +2.2/+4.5;
+  - the 512-frame track +0.3/+1.1;
+  - steady tones +-0.7.
+- Owner package, all 37 keys G3-G6 rendered by FluidSynth and measured with the same estimator in the same window: the
+  render is within 1.1 cents of source centre + tune, and within 1.3 cents of equal temperament.
+- On that render the spectral peak still reads up to 20.4 cents.
+
+`validate_sound_package.py --vibrato` (opt-in; the default is unchanged):
+- Applies the same 5-cent limit to the vibrato centre, using its own estimator (a narrow-lag difference function every
+  50 ms, pure Python, not AIArranger's code), and still prints the peak.
+- Owner package: PASS, worst 1.75 cents (peak worst 12.4).
+- Negative controls:
+  - the same samples without tune: FAIL, 22.7 cents;
+  - at C6 the peak reads -1.6 (a false pass) while the centre reads -10.8;
+  - demo organ: PASS in both modes.
+
+### Sound quality of the owner set (read-only, 2026-11-12)
+
+- Loop seams are continuous. Pitch steps at the seam beyond the natural change are at most 4.6 cents, below the vibrato's
+  own motion. Seam level steps match the natural level change within 1.2 dB.
+- C6 (MS000014): the seam waveform matches only 0.74, so a long note may tick.
+- Eight loops (A#3, G#4, A#4, C5, D5, F#5, A#5, F#6) hold about one vibrato cycle, so long notes repeat it.
+- Level steps between neighbouring samples are up to 3.7 dB (E4 and D5 quieter).
+- Timbre steps: C4 and C5 are about 5 dB darker than the sample below; D5 is 8.3 dB brighter.
+- 11 samples peak at full scale with 1-2 samples at +-32767: the source's normalisation, not added clipping.
+- These checks are now in REPORT.txt (QUALITY) and in the Convert Sound pane before Generate.
+
 ## Owner: what to save on the KRONOS (no Pa5X involved)
 
 1. Disk > page menu > **Save Sampling Data** > **One Multisample** (or All Multisamples) to a USB stick (p.855-856).

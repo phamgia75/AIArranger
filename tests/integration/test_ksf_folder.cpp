@@ -192,6 +192,64 @@ int main() {
         TEST("8 kHz: NOT USED with the Pa5X limit", has(pm, "# SLOW.KSF  NOT USED: rate outside 11025-48000 Hz"));
         TEST("a 10-frame loop: NOT USED", has(pm, "# TINY.KSF  NOT USED: loop shorter than 32 frames"));
     }
+    std::printf("== vibrato, overrides and quality\n");
+    {   // a vibrato tone with loudness tied to the swing: the centre (-15 cents) is measured, not the loud half
+        const fs::path vb = root / "vibrato";
+        const auto vibrato = [&](int note, double centre, double depth, double am, double gain, size_t n) {
+            std::vector<int16_t> v(n);
+            double ph = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const double t = double(i) / 48000, sw = std::sin(2 * 3.14159265358979 * 5.5 * t);
+                ph += 2 * 3.14159265358979 * hz(note, centre + depth * sw) / 48000;
+                v[i] = int16_t(gain * (1 + am * sw) * (std::sin(ph) + 0.4 * std::sin(2 * ph) + 0.2 * std::sin(3 * ph)));
+            }
+            return v;
+        };
+        put(vb / "V64.KSF", ksf({vibrato(64, -15, 25, 0.5, 6000, 144000), 48000, 0, 48000, 143999, 0x20}, nullptr, "VIB64"));
+        const auto k = snd::analyseKsf(vb / "V64.KSF");
+        TEST("vibrato: E4, centre -15 +-1.5 cents (got " + std::to_string(k.cents) + ")", k.detected == 64 && std::fabs(k.cents + 15) < 1.5 && k.vibrato);
+        TEST("vibrato: swing about -40..+10 and 5.5 Hz reported", k.moveLo < -30 && k.moveHi > 0 && std::fabs(k.vibHz - 5.5) < 0.6 && k.confidence < 4);
+        TEST("a steady tone is not called vibrato", !snd::analyseKsf(src / "MS000001.KSF").vibrato);
+        std::string pm, nt;
+        snd::Instrument x;
+        TEST("the proposal corrects the centre: tune +15", snd::proposeKsfMapping(vb, &pm).empty() && has(pm, "V64.KSF          E4    C-1   G9    +15") &&
+             has(pm, "(vibrato centre)"));
+        // the musician overrides root and tune: the report says so
+        TEST("overrides build", snd::buildFromKsfMapping(vb, "V", "V", "V64.KSF F4 C-1 G9 +3\n", &x, &nt).empty() && has(nt, "ROOT SET BY YOU") &&
+             has(nt, "vibrato centre; swings"));
+        TEST("a tune override is named, with the measured correction", snd::buildFromKsfMapping(vb, "V", "V", "V64.KSF E4 C-1 G9 +3\n", &x, &nt).empty() &&
+             has(nt, "root as measured, TUNE SET BY YOU (measured correction +15)") && has(nt, "plays -12."));
+    }
+    {   // quality: a 6 dB quieter neighbour, a 5x brighter one, a rough loop seam, a one-cycle vibrato loop
+        const fs::path ql = root / "quality";
+        put(ql / "A.KSF", ksf({tone(48000, hz(60), 8000, 1), 48000, 0, 24000, 47999, 0x20}, nullptr, "A60"));
+        put(ql / "B.KSF", ksf({tone(48000, hz(64), 4000, 2), 48000, 0, 24000, 47999, 0x20}, nullptr, "B64"));   // -6 dB
+        std::vector<int16_t> bright(48000);
+        for (size_t i = 0; i < bright.size(); ++i)
+            bright[i] = int16_t(4000 * (std::sin(2 * 3.14159265358979 * hz(67) * i / 48000) + 0.9 * std::sin(2 * 3.14159265358979 * 9 * hz(67) * i / 48000)));
+        put(ql / "C.KSF", ksf({bright, 48000, 0, 24000, 47999, 0x20}, nullptr, "C67"));
+        put(ql / "D.KSF", ksf({tone(48000, hz(72), 4000, 4), 48000, 0, 24000, 47999, 0x20}, nullptr, "D72"));   // loop not a whole number of periods
+        std::string pm, nt;
+        snd::Instrument x;
+        TEST("quality build", snd::proposeKsfMapping(ql, &pm).empty() && snd::buildFromKsfMapping(ql, "Q", "Q", pm, &x, &nt).empty());
+        TEST("quality: a 6 dB quieter zone is named", has(nt, "(B.KSF) are 6.0 dB quieter than the keys below"));
+        TEST("quality: a brighter zone is named", has(nt, "(C.KSF) sound ") && has(nt, "dB brighter than the keys below"));
+        TEST("quality: steady tones raise no vibrato-loop note", !has(nt, "vibrato cycle"));
+        const fs::path q2 = root / "quality2";
+        std::vector<int16_t> one(30000);
+        double ph = 0;
+        for (size_t i = 0; i < one.size(); ++i) { ph += 2 * 3.14159265358979 * hz(64, 25 * std::sin(2 * 3.14159265358979 * 5 * i / 48000.0)) / 48000; one[i] = int16_t(6000 * std::sin(ph)); }
+        put(q2 / "E.KSF", ksf({one, 48000, 0, 20400, 29999, 0x20}, nullptr, "E64"));   // a 0.2 s loop: one 5 Hz cycle, seam off-phase
+        TEST("quality: a one-cycle vibrato loop is named", snd::proposeKsfMapping(q2, &pm).empty() &&
+             snd::buildFromKsfMapping(q2, "Q", "Q", pm, &x, &nt).empty() && has(nt, "the loop holds about 1.0 vibrato cycle(s)"));
+        TEST("quality: that loop's seam is smooth, so no seam note", !has(nt, "the loop seam matches"));
+        // a loop of 100.5 periods: playback jumps to the opposite phase at each pass
+        const fs::path q3 = root / "quality3";
+        const double per = 48000 / hz(72);
+        put(q3 / "F.KSF", ksf({tone(48000, hz(72), 8000, 7), 48000, 0, uint32_t(47999 - std::lround(100.5 * per)), 47999, 0x20}, nullptr, "F72"));
+        TEST("quality: a rough loop seam is named", snd::proposeKsfMapping(q3, &pm).empty() && snd::buildFromKsfMapping(q3, "Q", "Q", pm, &x, &nt).empty() &&
+             has(nt, "(F.KSF): the loop seam matches -"));
+    }
     {   // the report describes the audio that was built, even if the file changes before Generate
         const fs::path ch = root / "changes";
         put(ch / "A.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "A60"));
@@ -228,10 +286,12 @@ int main() {
     TEST("the package verifies", v.ok);
     std::ifstream rf(out / "REPORT.txt");
     const std::string rep((std::istreambuf_iterator<char>(rf)), std::istreambuf_iterator<char>());
-    TEST("REPORT: no KMP, recovered vs approximated vs not available", has(rep, "WITHOUT a .KMP") && has(rep, "RECOVERED exactly") &&
-         has(rep, "APPROXIMATED (not in a KSF)") && has(rep, "NOT AVAILABLE without the KMP"));
-    TEST("REPORT: per-sample measurement and the hint", has(rep, "MS000001.KSF     TSTR60           root C4   keys F#3-F4 tune +20  measured C4 -20") &&
-         has(rep, "name says C#4") && has(rep, "not measured:"));
+    TEST("REPORT: EXACT / MEASURED / ESTIMATED / MISSING, in that order", has(rep, "WITHOUT a .KMP") && rep.find("EXACT (copied") < rep.find("MEASURED (from the audio") &&
+         rep.find("MEASURED (from the audio") < rep.find("ESTIMATED (proposed") && rep.find("ESTIMATED (proposed") < rep.find("MISSING (needs the original KMP"));
+    TEST("REPORT: per-sample row: keys, root, tune, measurement, what plays", has(rep, "MS000001.KSF     TSTR60           keys F#3-F4    root C4   tune +20") &&
+         has(rep, "measured C4 -20.") && has(rep, "(steady); root as measured, tune = the measured correction; plays +0.") && has(rep, "name says C#4") &&
+         has(rep, "pitch not measured ("));
+    TEST("REPORT: a QUALITY section", has(rep, "QUALITY (measured; listen to these on the Pa5X):"));
     TEST("REPORT: the mapping used is recorded", has(rep, "Mapping used:\n# KSF samples without a .KMP"));
     TEST("the source folder is unchanged", hashTree(src) == before);
 

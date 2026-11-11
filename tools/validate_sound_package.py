@@ -7,6 +7,9 @@ SOFTWARE + INDEPENDENT TOOL evidence only; a Pa5X import is the hardware proof (
 
     python3 -I tools/validate_sound_package.py DIR [--pitch-only]   # needs `fluidsynth` on PATH
 --pitch-only: for instruments other than the demo organ (skips the organ's Soft/Bright layer check).
+--vibrato: for recordings with vibrato. The 5-cent limit applies to the vibrato centre (the mean of the pitch over
+  0.5-2.0 s, measured every 50 ms by a narrow-lag difference function) instead of the single spectral peak, which on
+  vibrato lands anywhere inside the swing; the peak is still printed. Without it the peak decides, as before.
 Exit 0 = all checks pass.
 """
 import math, os, struct, subprocess, sys, tempfile, wave
@@ -81,7 +84,23 @@ def txprog(root):
           all(flat[i][1] + 1 == flat[i + 1][0] for i in range(len(flat) - 1)),
           f"velocity zones per group {flat} tile 0-127")
 
-def render(sf2, layers=True):
+def centre_cents(x, a, n, f0, rate):
+    """Mean pitch (cents re f0) of x[a:a+n] every 50 ms: per hop, the lag within +-1 semitone of the period that
+    minimises the squared difference over a window of 3 periods (512..2048 frames), refined by a parabola."""
+    P = rate / f0; W = int(max(512, min(3 * P, 2048)))
+    lo, hi = int(P * 2 ** (-100 / 1200)), int(math.ceil(P * 2 ** (100 / 1200))) + 1
+    out = []
+    for p in range(a, a + n - W - hi, rate // 20):
+        d = {}
+        for t in range(lo - 1, hi + 2):
+            d[t] = sum((x[p + i] - x[p + i + t]) ** 2 for i in range(W))
+        t = min(range(lo, hi + 1), key=d.get)
+        den = d[t - 1] - 2 * d[t] + d[t + 1]
+        tt = t + (0.5 * (d[t - 1] - d[t + 1]) / den if den > 0 else 0)
+        out.append(1200 * math.log2(rate / tt / f0))
+    return sum(out) / len(out) if out else float("nan")
+
+def render(sf2, layers=True, vibrato=False):
     tests = [(24, 60), (25, 60), (36, 60), (48, 110), (57, 60), (60, 60), (60, 110), (61, 110), (69, 60),
              (72, 110), (84, 60), (96, 110), (100, 60), (60, 89), (60, 90)]
     HOLD, GAP, RATE, tpq = 3.0, 0.5, 48000, 480
@@ -107,7 +126,7 @@ def render(sf2, layers=True):
         for i, v in enumerate(seg):
             a = v * win[i]; re += a * cr; im -= a * ci; cr, ci = cr * c - ci * s, ci * c + cr * s
         return math.hypot(re, im)
-    worst = 0; t = 0; allgood = True
+    worst = 0; vworst = 0; t = 0; allgood = True
     for n, v in tests:
         a = int((t + 0.5) * RATE); N = int(1.5 * RATE); seg = x[a:a + N]; t += HOLD + GAP  # 0.5-2.0 s: several loop passes
         win = [0.5 - 0.5 * math.cos(2 * math.pi * i / (N - 1)) for i in range(N)]
@@ -122,18 +141,27 @@ def render(sf2, layers=True):
         f = (lo + hi) / 2; cents = 1200 * math.log2(f / f0); worst = max(worst, abs(cents))
         a1 = dtft(seg, f, win); a5 = dtft(seg, 5 * f, win) if 5 * f < RATE / 2 else 0
         layer = "Bright" if a1 and a5 / a1 > 0.1 else "Soft"
+        if vibrato:
+            c = centre_cents(x, a, N, f0, RATE); vworst = max(vworst, abs(c))
+            allgood &= abs(c) < 5.0 and a1 > 0
+            print(f"        note {n:3d} vel {v:3d}: vibrato centre {c:+.3f} cents (spectral peak {cents:+.3f})")
+            continue
         allgood &= abs(cents) < (1.0 if layers else 5.0) and a1 > 0 and (not layers or layer == ("Bright" if v >= 90 else "Soft"))
         print(f"        note {n:3d} vel {v:3d}: {f:9.3f} Hz ({cents:+.3f} cents) layer {layer}")
+    if vibrato:
+        check(allgood, f"FluidSynth render: {len(tests)} notes' vibrato centre within 5 cents (worst {vworst:.3f}; spectral peak worst {worst:.3f})")
+        return
     check(allgood, f"FluidSynth render: {len(tests)} notes within {'1 cent' if layers else '5 cents'} (worst {worst:.3f})"
           + (", velocity 89/90 switch layers" if layers else ""))
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--pitch-only"]
-    if len(args) != 1: sys.exit("usage: validate_sound_package.py DIR [--pitch-only]")
+    args = [a for a in sys.argv[1:] if a not in ("--pitch-only", "--vibrato")]
+    if len(args) != 1: sys.exit("usage: validate_sound_package.py DIR [--pitch-only] [--vibrato]")
     d = args[0]
     if not os.path.isdir(d): sys.exit("FAIL: not a folder: %s" % d)
     print("TXPROG package (Python XML/wave readers):"); txprog(d)
     sf2 = [f for f in os.listdir(d) if f.endswith(".sf2")]
     check(len(sf2) == 1, "one .sf2")
-    if sf2: print("SF2 (FluidSynth):"); render(os.path.join(d, sf2[0]), "--pitch-only" not in sys.argv)
+    if sf2: print("SF2 (FluidSynth):"); render(os.path.join(d, sf2[0]), "--pitch-only" not in sys.argv and "--vibrato" not in sys.argv,
+                                                           "--vibrato" in sys.argv)
     print("PASS" if ok else "FAIL"); sys.exit(0 if ok else 1)

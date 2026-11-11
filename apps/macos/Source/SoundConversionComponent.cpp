@@ -148,7 +148,8 @@ void SoundConversionComponent::buildPreview() {
             std::string c = checks.empty() ? "Checks: nothing to report.\n\n" : "Checks (" + std::to_string(checks.size()) + "):\n";
             for (const auto& w : checks) c += "  - " + w + "\n";
             (*texts)[0] = c + "\n" + SoundConversionModel::previewOf(*in);
-            (*texts)[1] = media::sound::formatRecipe(media::sound::recipeFromSamples(*in));
+            // a KSF folder: what is exact, measured, estimated and missing, before the recipe (the same text goes into REPORT.txt)
+            (*texts)[1] = *notes + media::sound::formatRecipe(media::sound::recipeFromSamples(*in));
         }
         juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err, mapping, notes] {
             if (alive.expired()) return;

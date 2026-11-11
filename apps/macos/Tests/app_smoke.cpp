@@ -315,6 +315,9 @@ int main() {
                 TEST("Convert Sound: Preview fills the proposed mapping and builds it",
                      cv.model().built() && cv.mappingField().getText().contains("MS000001.KSF     C4    F#3   G9") &&
                      cv.previewText().contains("C-1 -F3    C3") && cv.model().instrument().samples.size() == 2);
+                TEST("Convert Sound: the KSF explanation (exact / measured / estimated / missing, quality) shows before Generate",
+                     cv.recipeText().contains("EXACT (copied from the KSF files") && cv.recipeText().contains("MISSING (needs the original KMP") &&
+                     cv.recipeText().contains("QUALITY (measured") && cv.recipeText().contains("root as measured"));
                 cv.mappingField().setText("MS000000.KSF C3 C-1 B3\nMS000001.KSF C4 C4 G9 +7\n");   // the musician edits
                 pump(50);
                 TEST("Convert Sound: editing the mapping invalidates the preview", !cv.model().built());
