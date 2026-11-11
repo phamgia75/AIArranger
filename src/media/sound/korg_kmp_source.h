@@ -40,13 +40,17 @@ inline std::string text(const std::vector<uint8_t>& b, size_t o, size_t n) {   /
 inline std::string hex(size_t o) { char t[16]; std::snprintf(t, sizeof t, "0x%zx", o); return t; }
 
 // Walks the chunks: f(id, body offset, length) returns "" or a refusal. Chunks are back to back, no padding.
+// Each chunk ID may appear once: a second copy could silently override the first.
 template <class F> std::string walk(const std::vector<uint8_t>& b, F f) {
     size_t o = 0;
+    std::vector<std::string> seen;
     while (o < b.size()) {
         if (b.size() - o < 8) return "trailing bytes at " + hex(o);
         const std::string id(reinterpret_cast<const char*>(&b[o]), 4);
         const size_t len = be32(b, o + 4), body = o + 8;
         if (len > b.size() - body) return "chunk '" + id + "' at " + hex(o) + " runs past the end of the file";
+        if (std::find(seen.begin(), seen.end(), id) != seen.end()) return "chunk '" + id + "' at " + hex(o) + " appears twice";
+        seen.push_back(id);
         if (const auto e = f(id, body, len); !e.empty()) return e + " (chunk '" + id + "' at " + hex(o) + ")";
         o = body + len;
     }
@@ -248,7 +252,8 @@ inline std::filesystem::path findKsf(const std::filesystem::path& kmp, const std
     *why = name + " not found (looked next to it and in " + kmp.stem().string() + "/)";
     return {};
 }
-// The documented order SMP1 then SMD1 lets the scan read 60 bytes instead of the audio; anything else is read whole.
+// The scan reads 60 bytes, not the audio: every documented KSF structure starts SMP1 (32) then SMD1 (p.1159), so any
+// other start is refused here. The conversion later parses the whole file.
 inline std::string ksfHead(const std::filesystem::path& p, KsfHead* h) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(p, ec);
@@ -262,9 +267,7 @@ inline std::string ksfHead(const std::filesystem::path& p, KsfHead* h) {
         if (const auto e = smd1(b, 48, be32(b, 44), h); !e.empty()) return e;
         return ranges(h);
     }
-    std::string err;
-    const auto all = slurp(p, &err);
-    return err.empty() ? readKsf(all, h, nullptr) : err;
+    return "does not start with SMP1 (32 bytes) then SMD1 inside the file, as every documented KSF does";
 }
 inline std::string layerName(std::string s) {
     for (auto& c : s) if (c < 0x20 || c > 0x7E || c == ',') c = ' ';
@@ -349,7 +352,8 @@ inline std::string scanKorgFolder(const std::filesystem::path& dir, std::vector<
                            m.ksf[i].empty() == m.ksfR[i].empty() &&
                            (m.ksf[i].empty() || (m.head[i].rate == m.headR[i].rate && m.head[i].end - m.head[i].start == m.headR[i].end - m.headR[i].start &&
                                                  m.head[i].loopOn == m.headR[i].loopOn && m.head[i].plus12dB == m.headR[i].plus12dB &&
-                                                 m.head[i].loopTune == m.headR[i].loopTune &&
+                                                 m.head[i].loopTune == m.headR[i].loopTune && m.head[i].use2ndStart == m.headR[i].use2ndStart &&
+                                                 (!m.head[i].use2ndStart || m.head[i].start2 - m.head[i].start == m.headR[i].start2 - m.headR[i].start) &&
                                                  (!m.head[i].loopOn || m.head[i].loopStart - m.head[i].start == m.headR[i].loopStart - m.headR[i].start)));
                 same = same && std::equal(std::begin(m.left.rlp2), std::end(m.left.rlp2), std::begin(m.right.rlp2)) &&
                        std::equal(std::begin(m.left.rlp3), std::end(m.left.rlp3), std::begin(m.right.rlp3));
@@ -405,10 +409,15 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
                 if (const auto e = readKsf(b, &h, &s); !e.empty()) return it->ksf[i].filename().string() + ": " + e;
                 if (!it->ksfR.empty()) {
                     Sample r2;
+                    KsfHead hr;
                     const auto br = korg::slurp(it->ksfR[i], &err);
                     if (!err.empty()) return err;
-                    if (const auto e = readKsf(br, &h, &r2); !e.empty()) return it->ksfR[i].filename().string() + ": " + e;
-                    if (r2.pcm.size() != s.pcm.size()) return it->ksfR[i].filename().string() + ": -R length differs from -L";
+                    if (const auto e = readKsf(br, &hr, &r2); !e.empty()) return it->ksfR[i].filename().string() + ": " + e;
+                    // the full parse decides, not only the scan's header: the halves must play identically
+                    const bool same = r2.pcm.size() == s.pcm.size() && hr.rate == h.rate && r2.looped == s.looped && r2.loopStart == s.loopStart &&
+                                      r2.loopEnd == s.loopEnd && hr.plus12dB == h.plus12dB && hr.loopTune == h.loopTune &&
+                                      hr.use2ndStart == h.use2ndStart && (!h.use2ndStart || hr.start2 - hr.start == h.start2 - h.start);
+                    if (!same) return it->ksfR[i].filename().string() + ": the -R sample differs from -L (length, rate, loop, +12 dB, loop tune or 2nd Start)";
                     std::vector<int16_t> st(s.pcm.size() * 2);
                     for (size_t f = 0; f < s.pcm.size(); ++f) { st[2 * f] = s.pcm[f]; st[2 * f + 1] = r2.pcm[f]; }
                     s.pcm = std::move(st);

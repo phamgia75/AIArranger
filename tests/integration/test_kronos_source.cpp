@@ -231,6 +231,41 @@ int main() {
         else std::printf("  (case-insensitive disk: A.KSF/a.ksf ambiguity cannot exist here; covered on Linux CI)\n");
     }
 
+    std::printf("== Codex review of 166f3c5: regressions\n");
+    {   // a second SMP1 after the audio would override the Loop Start the scan approved
+        Bytes rdup = ksf({pcm, 48000, 0, 100, 3999});
+        Bytes smp; str(smp, "X", 16); be32(smp, 0); be32(smp, 0); be32(smp, 900); be32(smp, 3999);
+        chunk(rdup, "SMP1", smp);
+        {
+            const fs::path dp = root / "duppair";
+            put(dp / "A.KMP", KL); put(dp / "B.KMP", KR); put(dp / "A.KSF", ksf({pcm, 48000, 0, 100, 3999})); put(dp / "B.KSF", rdup);
+            snd::Instrument x;
+            TEST("a duplicate SMP1 in the -R KSF (overriding Loop Start) is refused, not converted",
+                 snd::buildFromKorgFolder(dp, "Pad", {}, {}, &x).find("B.KSF: chunk 'SMP1'") != std::string::npos);
+        }
+        const fs::path d = root / "dup";
+        put(d / "D.KMP", kmp("Dup", {{60, 127, 0, 0, "D.KSF"}}));
+        put(d / "D.KSF", rdup);
+        snd::Instrument x;
+        TEST("a duplicate chunk is refused by name", snd::buildFromKorgFolder(d, "Dup", {}, {}, &x).find("'SMP1' at") != std::string::npos);
+        Bytes kdup = KL; Bytes mno; be32(mno, 1); chunk(kdup, "MNO1", mno);
+        refuse("a duplicate chunk in a KMP", kdup, ok, "appears twice");
+    }
+    {   // -L without 2nd Start, -R using 2nd Start 50
+        Bytes r2 = ksf({pcm, 48000, 0, 0, 3999, 0x80});   // bit 5 clear: 2nd start used
+        r2[31] = 50;
+        pair("-R uses a 2nd Start, -L does not: refused", KL, KR, ksf({pcm, 48000, 0, 0, 3999, 0xA0}), r2);
+    }
+    {   // a KSF that does not start SMP1 + SMD1 is refused by the scan without reading its audio
+        const fs::path d = root / "layout";
+        Bytes odd; Bytes sno; be32(sno, 0); chunk(odd, "SNO1", sno);
+        const Bytes rest = ok; odd.insert(odd.end(), rest.begin(), rest.end());
+        put(d / "O.KMP", kmp("Odd", {{60, 127, 0, 0, "O.KSF"}}));
+        put(d / "O.KSF", odd);
+        std::vector<snd::KorgMultisample> m4;
+        TEST("scan refuses a KSF not starting SMP1 then SMD1", snd::scanKorgFolder(d, m4).find("does not start with SMP1") != std::string::npos);
+    }
+
     fs::remove_all(root);
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
