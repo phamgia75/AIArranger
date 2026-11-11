@@ -148,6 +148,31 @@ int main() {
              snd::parseKsfMapping("Grand  Piano 2.KSF  C5 C-1 G9 -3  # x\n", ls).empty() && ls.size() == 1 && ls[0].file == "Grand  Piano 2.KSF" &&
              ls[0].root == 72 && ls[0].tune == -3);
     }
+    std::printf("== review round 2 regressions\n");
+    {   // a long file name must not truncate its row (and swallow the next one); a leading '#' is not a comment row
+        const fs::path ln = root / "long";
+        const std::string longName = std::string(220, 'A') + ".KSF";
+        put(ln / longName, ksf({c3, 48000, 0, 0, 39999, 0x20}, nullptr, "L48"));
+        put(ln / "B.KSF", ksf({c5, 48000, 0, 0, 39999, 0x20}, nullptr, "B72"));
+        put(ln / "#C.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "C60"));
+        std::string pm;
+        snd::Instrument x;
+        TEST("a 224-character name and the next sample both build", snd::proposeKsfMapping(ln, &pm).empty() &&
+             snd::buildFromKsfMapping(ln, "L", "L", pm, &x).empty() && x.samples.size() == 2 && has(pm, longName + " C3"));
+        TEST("a name starting with '#' is listed NOT USED, not silently commented", has(pm, "# #C.KSF  NOT USED: this file name cannot be written"));
+    }
+    {   // the KSF notes are used even when the source folder no longer looks like a KSF folder at Generate
+        const fs::path gone = root / "gone";
+        put(gone / "A.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "A60"));
+        std::string pm, nt, ge;
+        snd::Instrument x;
+        const bool ok = snd::proposeKsfMapping(gone, &pm).empty() && snd::buildFromKsfMapping(gone, "A", "A", pm, &x, &nt).empty();
+        fs::remove(gone / "A.KSF");
+        const auto r = ai_arranger::ui::SoundConversionModel::generate(x, gone, root / "out" / "gone", &ge, nt);
+        std::ifstream f(root / "out" / "gone" / "REPORT.txt");
+        const std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        TEST("REPORT keeps the KSF measurements after the source files are removed", ok && !r.empty() && has(t, "WITHOUT a .KMP") && has(t, "measured C4"));
+    }
     {   // the report describes the audio that was built, even if the file changes before Generate
         const fs::path ch = root / "changes";
         put(ch / "A.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "A60"));

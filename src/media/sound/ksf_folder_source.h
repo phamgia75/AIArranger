@@ -130,8 +130,8 @@ inline std::string proposeKsfMapping(const std::filesystem::path& dir, std::stri
     for (const auto& p : files) {
         KsfInfo k = analyseKsf(p);
         const std::string fn = k.file;
-        if (fn.empty() || fn.front() == ' ' || fn.back() == ' ' || fn.find(" #") != std::string::npos || fn.find_first_of("\t\r\n") != std::string::npos)
-            k.refused = "this file name cannot be written in a mapping line (leading/trailing space, tab or \" #\"); use a renamed copy";
+        if (fn.empty() || fn.front() == ' ' || fn.front() == '#' || fn.back() == ' ' || fn.find(" #") != std::string::npos || fn.find_first_of("\t\r\n") != std::string::npos)
+            k.refused = "this file name cannot be written in a mapping line (leading/trailing space or '#', tab, or \" #\"); use a renamed copy";
         if (!k.refused.empty()) { skipped += "# " + k.file + "  NOT USED: " + k.refused + "\n"; continue; }
         std::string ev, hint = k.hint >= 0 ? "name " + k.name + " ends in " + std::to_string(k.hint) + " (" + noteName(k.hint) + ")" : "";
         int root = k.detected, tune = 0;
@@ -168,10 +168,9 @@ inline std::string proposeKsfMapping(const std::filesystem::path& dir, std::stri
     for (size_t i = 0; i < use.size(); ++i) {
         const int lo = i == 0 ? 0 : (use[i - 1].root + use[i].root - 1) / 2 + 1;
         const int hi = i + 1 == use.size() ? 127 : (use[i].root + use[i + 1].root - 1) / 2;
-        char l[256];
-        std::snprintf(l, sizeof l, "%-16s %-5s %-5s %-5s %+-4d  # %s\n", use[i].k.file.c_str(), noteName(use[i].root).c_str(), noteName(lo).c_str(),
-                      noteName(hi).c_str(), use[i].tune, use[i].ev.c_str());
-        o += l;
+        const auto pad = [](std::string t, size_t w) { return t.size() < w ? t + std::string(w - t.size(), ' ') : t; };   // no fixed buffer: long names stay whole
+        o += pad(use[i].k.file, 16) + " " + pad(noteName(use[i].root), 5) + " " + pad(noteName(lo), 5) + " " + pad(noteName(hi), 5) + " " +
+             pad((use[i].tune < 0 ? "-" : "+") + std::to_string(std::abs(use[i].tune)), 4) + "  # " + use[i].ev + "\n";
     }
     *text = o + skipped;
     return "";

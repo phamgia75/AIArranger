@@ -243,10 +243,10 @@ public:
     static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err,
                                 const std::string& ksfNotes = {}) {   // KSF folder: decode()'s notes for this Sound
         if (const auto r = snd::outputFolderRefusal(out); !r.empty()) { if (err) *err = r; return ""; }
-        const bool ksf = snd::isKsfFolder(sourceDir);
-        if (ksf && ksfNotes.empty()) { if (err) *err = "no measurement notes for this KSF Sound: press Preview again"; return ""; }
-        const std::string notes = snd::isKorgFolder(sourceDir) ? snd::korgFolderNotes(sourceDir, in)
-                                : ksf                          ? ksfNotes + snd::formatRecipe(snd::recipeFromSamples(in))
+        // the notes travel with the previewed Sound: the folder may have changed since Preview
+        if (ksfNotes.empty() && snd::isKsfFolder(sourceDir)) { if (err) *err = "no measurement notes for this KSF Sound: press Preview again"; return ""; }
+        const std::string notes = !ksfNotes.empty()             ? ksfNotes + snd::formatRecipe(snd::recipeFromSamples(in))
+                                : snd::isKorgFolder(sourceDir) ? snd::korgFolderNotes(sourceDir, in)
                                                                : snd::wavFolderNotes(sourceDir.string(), in);
         const std::string rep = snd::writePackage(in, out, notes, err);
         if (rep.empty()) return "";
