@@ -251,6 +251,24 @@ int main() {
         const auto k = snd::analyseKsf(ls / "L.KSF");
         TEST("a steady +20 loop after a moving sustain: loop reads +20 +-2 (got " + std::to_string(k.loopCents) + ")", std::fabs(k.loopCents - 20) < 2);
     }
+    {   // review round 2: C1 at 11025 Hz, +-40 cents vibrato, a one-cycle loop mostly too short to track: the true centre
+        // (0) must lie inside the reported range, and the report must say why the range is wide
+        const fs::path sl = root / "shortloop";
+        std::vector<int16_t> v(11025);
+        double ph = 0;
+        for (size_t i = 0; i < v.size(); ++i) {
+            ph += 2 * 3.14159265358979 * hz(24, 40 * std::cos(2 * 3.14159265358979 * 5 * (i / 11025.0))) / 11025;
+            v[i] = int16_t(8000 * std::sin(ph));
+        }
+        put(sl / "C1.KSF", ksf({v, 11025, 0, 8820, 11024, 0x20}, nullptr, "C1"));
+        const auto k = snd::analyseKsf(sl / "C1.KSF");
+        TEST("short loop: true centre 0 within the range (got " + std::to_string(k.cents) + " +-" + std::to_string(k.confidence) + ")",
+             k.detected == 24 && std::fabs(k.cents) <= k.confidence && k.sparse);
+        std::string pm, nt;
+        snd::Instrument x;
+        TEST("short loop: the report says the loop is too short to track", snd::proposeKsfMapping(sl, &pm).empty() &&
+             snd::buildFromKsfMapping(sl, "S", "S", pm, &x, &nt).empty() && has(nt, "loop too short to track"));
+    }
     {   // quality: a 6 dB quieter neighbour, a 5x brighter one, a rough loop seam, a one-cycle vibrato loop
         const fs::path ql = root / "quality";
         put(ql / "A.KSF", ksf({tone(48000, hz(60), 8000, 1), 48000, 0, 24000, 47999, 0x20}, nullptr, "A60"));

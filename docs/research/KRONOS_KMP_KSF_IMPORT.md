@@ -121,6 +121,11 @@ Evidence:
   - the same samples without tune: FAIL, 22.7 cents;
   - at C6 the peak reads -1.6 (a false pass) while the centre reads -10.8;
   - demo organ: PASS in both modes.
+- It also refuses a tone an octave above the requested note. Such a tone repeats at half the period, so the
+  narrow-lag search alone would read it as in tune. Round-2 review; `--self-test` runs in CTest.
+- Limit of the AIArranger estimator: on a loop shorter than about two analysis windows, most of the track is
+  interpolated across the seam (a C1, ±40-cent, one-cycle loop read -11). There the range widens to half the swing and
+  the report says "loop too short to track the vibrato". None of the owner's 18 samples hit this.
 
 ### Sound quality of the owner set (read-only, 2026-11-12)
 

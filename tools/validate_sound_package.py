@@ -86,10 +86,13 @@ def txprog(root):
 
 def centre_cents(x, a, n, f0, rate):
     """Mean pitch (cents re f0) of x[a:a+n] every 50 ms: per hop, the lag within +-1 semitone of the period that
-    minimises the squared difference over a window of 3 periods (512..2048 frames), refined by a parabola."""
+    minimises the squared difference over a window of 3 periods (512..2048 frames), refined by a parabola.
+    Also returns how unlike itself the tone is half a period on (squared difference / energy, mean over hops): about 2
+    for a fundamental at f0, near 0 for a tone an octave up, which repeats at half the period too and would otherwise
+    read as f0."""
     P = rate / f0; W = int(max(512, min(3 * P, 2048)))
     lo, hi = int(P * 2 ** (-100 / 1200)), int(math.ceil(P * 2 ** (100 / 1200))) + 1
-    out = []
+    out, half = [], []
     for p in range(a, a + n - W - hi, rate // 20):
         d = {}
         for t in range(lo - 1, hi + 2):
@@ -98,7 +101,10 @@ def centre_cents(x, a, n, f0, rate):
         den = d[t - 1] - 2 * d[t] + d[t + 1]
         tt = t + (0.5 * (d[t - 1] - d[t + 1]) / den if den > 0 else 0)
         out.append(1200 * math.log2(rate / tt / f0))
-    return sum(out) / len(out) if out else float("nan")
+        e = 2 * sum(x[p + i] ** 2 for i in range(W))
+        half.append(min(sum((x[p + i] - x[p + i + h]) ** 2 for i in range(W)) for h in range(lo // 2, hi // 2 + 1)) / e if e else 0)
+    if not out: return float("nan"), 0.0
+    return sum(out) / len(out), sum(half) / len(half)
 
 def render(sf2, layers=True, vibrato=False):
     tests = [(24, 60), (25, 60), (36, 60), (48, 110), (57, 60), (60, 60), (60, 110), (61, 110), (69, 60),
@@ -142,9 +148,10 @@ def render(sf2, layers=True, vibrato=False):
         a1 = dtft(seg, f, win); a5 = dtft(seg, 5 * f, win) if 5 * f < RATE / 2 else 0
         layer = "Bright" if a1 and a5 / a1 > 0.1 else "Soft"
         if vibrato:
-            c = centre_cents(x, a, N, f0, RATE); vworst = max(vworst, abs(c))
-            allgood &= abs(c) < 5.0 and a1 > 0
-            print(f"        note {n:3d} vel {v:3d}: vibrato centre {c:+.3f} cents (spectral peak {cents:+.3f})")
+            c, h = centre_cents(x, a, N, f0, RATE); vworst = max(vworst, abs(c))
+            allgood &= abs(c) < 5.0 and a1 > 0 and h >= 0.2   # 0.2: odd harmonics carry >= 10 % of the power
+            print(f"        note {n:3d} vel {v:3d}: vibrato centre {c:+.3f} cents (spectral peak {cents:+.3f})"
+                  + ("" if h >= 0.2 else f" OCTAVE HIGH? half-period difference {h:.2f} < 0.2"))
             continue
         allgood &= abs(cents) < (1.0 if layers else 5.0) and a1 > 0 and (not layers or layer == ("Bright" if v >= 90 else "Soft"))
         print(f"        note {n:3d} vel {v:3d}: {f:9.3f} Hz ({cents:+.3f} cents) layer {layer}")
@@ -154,7 +161,16 @@ def render(sf2, layers=True, vibrato=False):
     check(allgood, f"FluidSynth render: {len(tests)} notes within {'1 cent' if layers else '5 cents'} (worst {worst:.3f})"
           + (", velocity 89/90 switch layers" if layers else ""))
 
+def self_test():
+    rate, f0, n = 48000, 261.63, 24000
+    for mult, want in ((1, True), (2, False)):   # a tone at f0 passes; one an octave up must not (review round 2)
+        x = [int(8000 * math.sin(2 * math.pi * mult * f0 * i / rate)) for i in range(n)]
+        c, h = centre_cents(x, 0, n, f0, rate)
+        assert (abs(c) < 1 and h >= 0.2) == want, (mult, c, h)
+    print("self-test OK")
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]: self_test(); sys.exit(0)
     args = [a for a in sys.argv[1:] if a not in ("--pitch-only", "--vibrato")]
     if len(args) != 1: sys.exit("usage: validate_sound_package.py DIR [--pitch-only] [--vibrato]")
     d = args[0]

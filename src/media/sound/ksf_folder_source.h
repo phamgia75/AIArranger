@@ -66,16 +66,20 @@ inline std::vector<double> pitchPoints(const std::vector<int16_t>& x, uint32_t r
 }
 // Fills runs of at most maxRun NAN points by linear interpolation between their neighbours (circular: the run at the end
 // joins the start, as a loop does). Used for the few points next to a loop seam, whose windows would straddle it.
-inline void fillGaps(std::vector<double>& v, size_t maxRun, bool circular) {
+// Returns how many points were filled.
+inline size_t fillGaps(std::vector<double>& v, size_t maxRun, bool circular) {
     const size_t n = v.size();
     std::vector<size_t> ok;
     for (size_t i = 0; i < n; ++i) if (!std::isnan(v[i])) ok.push_back(i);
-    if (ok.size() < 2) return;
+    if (ok.size() < 2) return 0;
+    size_t filled = 0;
     for (size_t j = 0; j + (circular ? 0 : 1) < ok.size(); ++j) {
         const size_t a = ok[j], b = j + 1 < ok.size() ? ok[j + 1] : ok[0] + n, run = b - a - 1;
         if (run == 0 || run > maxRun) continue;
         for (size_t i = a + 1; i < b; ++i) v[i % n] = v[a] + (v[b % n] - v[a]) * double(i - a) / double(b - a);
+        filled += run;
     }
+    return filled;
 }
 
 struct PitchTrack { double mean = 0, sd = 0, p10 = 0, p90 = 0, vibHz = 0, cycleSe = 0; size_t n = 0; };
@@ -124,6 +128,8 @@ struct KsfInfo {
     double moveSd = 0, moveLo = 0, moveHi = 0, vibHz = 0;   // spread; 10th..90th percentile (cents re detected); cycles per s
     double confidence = 0;    // +- cents (about 95 %): 2 standard errors of the per-cycle means, plus 1 cent method bias
     double loopCents = NAN;   // the loop alone, repeated (what a long-held note settles to); NAN = no loop
+    bool sparse = false;      // vibrato, but over a quarter of the track was interpolated across loop seams (a loop too short
+                              // for the analysis window): confidence then covers half the swing, not just the averaging error
 };
 
 using txw::noteName;   // C-1 = 0, C4 = 60
@@ -194,7 +200,7 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
         for (size_t p = w0; p < w1; p += hop) held.push_back(at(p));
     }
     if (a.looped && LE <= w0) seg0 = LS;
-    fillGaps(held, seamRun, false);
+    const size_t filled = fillGaps(held, seamRun, false);
     fillGaps(loopOnly, seamRun, true);
     const PitchTrack t = summarise(held);
     double centre = 1200 * std::log2(f / ref);   // spectral peak of the steady part (above)
@@ -202,6 +208,9 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
         k.vibrato = true;
         centre = t.mean;
         k.confidence = 2 * t.cycleSe + 1;
+        // interpolated points are a straight line, not the vibrato: with many of them the mean can be off by a large part
+        // of the swing (review: C1, +-40 cents, one-cycle loop read -11), so the range widens to cover it
+        if (filled * 4 > held.size()) { k.sparse = true; k.confidence = std::max(k.confidence, (t.p90 - t.p10) / 2 + 1); }
     } else {   // steady: the spectral peak of the window's source audio (no seam), at most 2 s
         const size_t e = a.looped ? LE : n;
         if (e > seg0 + need)
@@ -381,6 +390,7 @@ inline std::string buildFromKsfMapping(const std::filesystem::path& dir, const s
                 std::snprintf(l, sizeof l, " (vibrato centre; swings %+.0f..%+.0f at %.1f Hz", k.moveLo, k.moveHi, k.vibHz);
                 rows += l;
                 if (!std::isnan(k.loopCents)) { std::snprintf(l, sizeof l, "; a long-held note settles to %+.1f", k.loopCents); rows += l; }
+                if (k.sparse) rows += "; loop too short to track the vibrato through it, so the range is wide: tune by ear";
                 rows += ")";
                 ++vib;
             } else {

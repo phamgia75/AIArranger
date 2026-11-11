@@ -245,6 +245,8 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_kst_test_samples.py --self-test)
     add_test(NAME test_make_synthetic_kst_library
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_synthetic_kst_library.py --self-test)
+    add_test(NAME test_validate_sound_package
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_sound_package.py --self-test)
 endif()
 
 # The Apple-only tests talk to the system CoreMIDI server. Under a full
