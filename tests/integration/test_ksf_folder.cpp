@@ -215,10 +215,41 @@ int main() {
         TEST("the proposal corrects the centre: tune +15", snd::proposeKsfMapping(vb, &pm).empty() && has(pm, "V64.KSF          E4    C-1   G9    +15") &&
              has(pm, "(vibrato centre)"));
         // the musician overrides root and tune: the report says so
-        TEST("overrides build", snd::buildFromKsfMapping(vb, "V", "V", "V64.KSF F4 C-1 G9 +3\n", &x, &nt).empty() && has(nt, "ROOT SET BY YOU") &&
+        TEST("overrides build; root and tune both named", snd::buildFromKsfMapping(vb, "V", "V", "V64.KSF F4 C-1 G9 +3\n", &x, &nt).empty() && has(nt, "ROOT SET BY YOU") &&
+             has(nt, "TUNE SET BY YOU (measured correction +15)") &&
              has(nt, "vibrato centre; swings"));
         TEST("a tune override is named, with the measured correction", snd::buildFromKsfMapping(vb, "V", "V", "V64.KSF E4 C-1 G9 +3\n", &x, &nt).empty() &&
              has(nt, "root as measured, TUNE SET BY YOU (measured correction +15)") && has(nt, "plays -12."));
+    }
+    std::printf("== quality review round 1 regressions\n");
+    {   // a 199 Hz sample rate made the 5 ms step (rate / 200) zero: the analysis never ended
+        const fs::path r = root / "rate199";
+        std::vector<int16_t> v(4000);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = int16_t(8000 * std::sin(2 * 3.14159265358979 * i / 4.0));
+        put(r / "R.KSF", ksf({v, 199, 0, 0, 3999, 0x20}, nullptr, "R60"));
+        std::string pm;
+        TEST("a 199 Hz rate is refused before the analysis", snd::analyseKsf(r / "R.KSF").refused == "rate outside 11025-48000 Hz" &&
+             !snd::proposeKsfMapping(r, &pm).empty());
+    }
+    {   // a steady tone whose loop is not a whole number of periods: seam windows must not make it "vibrato" or detune it
+        const fs::path sm = root / "seam";
+        put(sm / "S.KSF", ksf({tone(48000, hz(60), 9000, 3), 48000, 0, 45600, 47999, 0x20}, nullptr, "S60"));
+        const auto k = snd::analyseKsf(sm / "S.KSF");
+        TEST("steady C4 with a rough seam: steady, 0 +-1 cents (got " + std::to_string(k.cents) + ")", k.detected == 60 && !k.vibrato && std::fabs(k.cents) < 1);
+        TEST("its loop alone also reads 0 +-1.5", std::fabs(k.loopCents) < 1.5);
+    }
+    {   // vibrato around 0 for the first second, then a steady +20 cents loop: the loop's own centre is reported
+        const fs::path ls = root / "steadyloop";
+        std::vector<int16_t> v(72000);
+        double ph = 0;
+        for (size_t i = 0; i < v.size(); ++i) {
+            const double t = i / 48000.0, c = t < 1.0 ? 30 * std::sin(2 * 3.14159265358979 * 5 * t) : 20;
+            ph += 2 * 3.14159265358979 * hz(64, c) / 48000;
+            v[i] = int16_t(7000 * std::sin(ph));
+        }
+        put(ls / "L.KSF", ksf({v, 48000, 0, 52000, 71999, 0x20}, nullptr, "L64"));
+        const auto k = snd::analyseKsf(ls / "L.KSF");
+        TEST("a steady +20 loop after a moving sustain: loop reads +20 +-2 (got " + std::to_string(k.loopCents) + ")", std::fabs(k.loopCents - 20) < 2);
     }
     {   // quality: a 6 dB quieter neighbour, a 5x brighter one, a rough loop seam, a one-cycle vibrato loop
         const fs::path ql = root / "quality";

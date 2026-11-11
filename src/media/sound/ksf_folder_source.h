@@ -57,13 +57,27 @@ inline std::vector<double> pitchPoints(const std::vector<int16_t>& x, uint32_t r
     const double period = rate / refHz;
     const size_t W = std::clamp<size_t>(size_t(3 * period), 512, 2048), tMax = std::min<size_t>(rate / 25, size_t(2 * period) + 2);
     std::vector<double> c;
-    for (size_t p = 0; p + W + tMax <= x.size(); p += rate / 200) {
+    for (size_t p = 0; p + W + tMax <= x.size(); p += std::max<uint32_t>(1, rate / 200)) {
         const double f = yinHz(&x[p], rate, W, tMax);
         const double v = f > 0 ? 1200 * std::log2(f / refHz) : NAN;
         c.push_back(std::fabs(v) <= 150 ? v : NAN);
     }
     return c;
 }
+// Fills runs of at most maxRun NAN points by linear interpolation between their neighbours (circular: the run at the end
+// joins the start, as a loop does). Used for the few points next to a loop seam, whose windows would straddle it.
+inline void fillGaps(std::vector<double>& v, size_t maxRun, bool circular) {
+    const size_t n = v.size();
+    std::vector<size_t> ok;
+    for (size_t i = 0; i < n; ++i) if (!std::isnan(v[i])) ok.push_back(i);
+    if (ok.size() < 2) return;
+    for (size_t j = 0; j + (circular ? 0 : 1) < ok.size(); ++j) {
+        const size_t a = ok[j], b = j + 1 < ok.size() ? ok[j + 1] : ok[0] + n, run = b - a - 1;
+        if (run == 0 || run > maxRun) continue;
+        for (size_t i = a + 1; i < b; ++i) v[i % n] = v[a] + (v[b % n] - v[a]) * double(i - a) / double(b - a);
+    }
+}
+
 struct PitchTrack { double mean = 0, sd = 0, p10 = 0, p90 = 0, vibHz = 0, cycleSe = 0; size_t n = 0; };
 inline PitchTrack summarise(std::vector<double> c) {   // c: points 5 ms apart
     PitchTrack t;
@@ -137,6 +151,8 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
     Sample tmp;
     Sample& a = s ? *s : tmp;
     if (const auto e = readKsf(b, &k.head, &a); !e.empty()) { k.refused = e; return k; }
+    // the Pa5X range, and what the analysis below needs (its 5 ms step is rate / 200 frames)
+    if (a.rate < 11025 || a.rate > 48000) { k.refused = "rate outside 11025-48000 Hz"; return k; }
     korg::walk(b, [&](const std::string& id, size_t o, size_t) { if (id == "SMP1") k.name = printable(korg::text(b, o, 16)); return std::string(); });
     size_t d = k.name.size();
     while (d && std::isdigit(static_cast<unsigned char>(k.name[d - 1]))) --d;
@@ -160,13 +176,12 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
     if (std::fabs(1200 * std::log2(f / med)) > 50) { k.why = "spectrum and period disagree (unsure pitch)"; return k; }
     // The note as a held key plays it: the sample, then its loop repeated, 0.5-2.0 s after note-on (a one-shot: from a
     // quarter in to its end). The pitch is tracked on the source audio and looked up through the playback position, so
-    // no window straddles the loop seam.
+    // no window straddles the loop seam; the few points next to it (a window's length) are interpolated across it.
     const uint32_t R = a.rate;
     const size_t hop = R / 200, LS = a.loopStart, LE = a.loopEnd;
-    const double ref = 440 * std::pow(2.0, (note - 69) / 12.0);
-    // windows near the loop end read on into the loop start, as playback does (one more loop pass appended)
-    std::vector<int16_t> src(a.pcm.begin(), a.pcm.begin() + std::ptrdiff_t(a.looped ? LE : n));
-    if (a.looped) src.insert(src.end(), a.pcm.begin() + LS, a.pcm.begin() + LE);
+    const double ref = 440 * std::pow(2.0, (note - 69) / 12.0), per = R / ref;
+    const size_t seamRun = (std::clamp<size_t>(size_t(3 * per), 512, 2048) + std::min<size_t>(R / 25, size_t(2 * per) + 2)) / hop + 2;
+    const std::vector<int16_t> src(a.pcm.begin(), a.pcm.begin() + std::ptrdiff_t(a.looped ? LE : n));
     const auto pts = pitchPoints(src, R, ref);
     const auto at = [&](size_t q) { return q / hop < pts.size() ? pts[q / hop] : NAN; };
     std::vector<double> held, loopOnly;
@@ -179,6 +194,8 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
         for (size_t p = w0; p < w1; p += hop) held.push_back(at(p));
     }
     if (a.looped && LE <= w0) seg0 = LS;
+    fillGaps(held, seamRun, false);
+    fillGaps(loopOnly, seamRun, true);
     const PitchTrack t = summarise(held);
     double centre = 1200 * std::log2(f / ref);   // spectral peak of the steady part (above)
     if (t.n >= 20 && t.p90 - t.p10 >= 8) {   // percentiles: a few points at a rough loop seam do not make a tone "vibrato"
@@ -194,7 +211,7 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
     k.moveSd = t.sd;
     if (a.looped) {
         const PitchTrack tl = summarise(loopOnly);
-        if (tl.n >= 10) k.loopCents = tl.p90 - tl.p10 >= 8 ? tl.mean : centre;
+        if (tl.n >= 10) k.loopCents = tl.mean;
     }
     const double exact = note + centre / 100;
     k.detected = int(std::lround(exact));
@@ -371,7 +388,7 @@ inline std::string buildFromKsfMapping(const std::filesystem::path& dir, const s
             }
             const int correction = -int(std::lround(k.cents));
             rows += k.detected != m.root ? "; ROOT SET BY YOU" : "; root as measured";
-            if (k.detected == m.root) rows += m.tune == correction ? ", tune = the measured correction" : ", TUNE SET BY YOU (measured correction " +
+            rows += m.tune == correction ? ", tune = the measured correction" : ", TUNE SET BY YOU (measured correction " +
                                                                      std::string(correction < 0 ? "-" : "+") + std::to_string(std::abs(correction)) + ")";
             std::snprintf(l, sizeof l, "; plays %+.1f cents from %s", 100.0 * (k.detected - m.root) + k.cents + m.tune, noteName(m.root).c_str());
             rows += l;
