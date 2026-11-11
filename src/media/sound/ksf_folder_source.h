@@ -59,6 +59,9 @@ struct KsfInfo {
 };
 
 using txw::noteName;   // C-1 = 0, C4 = 60
+// Untrusted names go into the mapping text, whose lines are parsed: control characters become '?'.
+inline std::string printable(std::string t) { for (auto& c : t) if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) c = '?'; return t; }
+inline std::string padTo(std::string t, size_t w) { return t.size() < w ? t + std::string(w - t.size(), ' ') : t; }
 // "G#3", "C-1" (C4 = 60) or a number 0-127; -1 if neither.
 inline int parseNote(const std::string& t) {
     if (!t.empty() && t.size() <= 3 && t.find_first_not_of("0123456789") == std::string::npos) { const int v = std::stoi(t); return v <= 127 ? v : -1; }
@@ -80,7 +83,7 @@ inline KsfInfo analyseKsf(const std::string& file, const std::vector<uint8_t>& b
     Sample tmp;
     Sample& a = s ? *s : tmp;
     if (const auto e = readKsf(b, &k.head, &a); !e.empty()) { k.refused = e; return k; }
-    korg::walk(b, [&](const std::string& id, size_t o, size_t) { if (id == "SMP1") k.name = korg::text(b, o, 16); return std::string(); });
+    korg::walk(b, [&](const std::string& id, size_t o, size_t) { if (id == "SMP1") k.name = printable(korg::text(b, o, 16)); return std::string(); });
     size_t d = k.name.size();
     while (d && std::isdigit(static_cast<unsigned char>(k.name[d - 1]))) --d;
     if (d < k.name.size() && k.name.size() - d <= 3 && std::stoi(k.name.substr(d)) <= 127) k.hint = std::stoi(k.name.substr(d));
@@ -128,10 +131,18 @@ inline std::string proposeKsfMapping(const std::filesystem::path& dir, std::stri
     std::string skipped;
     std::map<int, std::string> byRoot;
     for (const auto& p : files) {
-        KsfInfo k = analyseKsf(p);
+        Sample a;
+        KsfInfo k = analyseKsf(p, &a);
         const std::string fn = k.file;
-        if (fn.empty() || fn.front() == ' ' || fn.front() == '#' || fn.back() == ' ' || fn.find(" #") != std::string::npos || fn.find_first_of("\t\r\n") != std::string::npos)
-            k.refused = "this file name cannot be written in a mapping line (leading/trailing space or '#', tab, or \" #\"); use a renamed copy";
+        if (fn.empty() || fn.front() == ' ' || fn.front() == '#' || fn.back() == ' ' || fn.find(" #") != std::string::npos || printable(fn) != fn)
+            k.refused = "this file name cannot be written in a mapping line (leading/trailing space or '#', control character, or \" #\"); use a renamed copy";
+        if (k.refused.empty()) {   // the Pa5X sample limits: a sample the build must refuse is not proposed
+            std::vector<std::string> lim;
+            a.name = "x";
+            validateSample(a, 0, lim);
+            if (!lim.empty()) k.refused = lim.front().substr(lim.front().find(": ") + 2);
+        }
+        k.file = printable(k.file);
         if (!k.refused.empty()) { skipped += "# " + k.file + "  NOT USED: " + k.refused + "\n"; continue; }
         std::string ev, hint = k.hint >= 0 ? "name " + k.name + " ends in " + std::to_string(k.hint) + " (" + noteName(k.hint) + ")" : "";
         int root = k.detected, tune = 0;
@@ -168,7 +179,7 @@ inline std::string proposeKsfMapping(const std::filesystem::path& dir, std::stri
     for (size_t i = 0; i < use.size(); ++i) {
         const int lo = i == 0 ? 0 : (use[i - 1].root + use[i].root - 1) / 2 + 1;
         const int hi = i + 1 == use.size() ? 127 : (use[i].root + use[i + 1].root - 1) / 2;
-        const auto pad = [](std::string t, size_t w) { return t.size() < w ? t + std::string(w - t.size(), ' ') : t; };   // no fixed buffer: long names stay whole
+        const auto pad = padTo;   // no fixed buffer: long names stay whole
         o += pad(use[i].k.file, 16) + " " + pad(noteName(use[i].root), 5) + " " + pad(noteName(lo), 5) + " " + pad(noteName(hi), 5) + " " +
              pad((use[i].tune < 0 ? "-" : "+") + std::to_string(std::abs(use[i].tune)), 4) + "  # " + use[i].ev + "\n";
     }
@@ -250,10 +261,9 @@ inline std::string buildFromKsfMapping(const std::filesystem::path& dir, const s
         Sample s;
         const KsfInfo k = analyseKsf(m.file, b, &s);
         if (!k.refused.empty()) return m.file + ": " + k.refused;
-        char l[300];
-        std::snprintf(l, sizeof l, "  %-16s %-16s root %-4s keys %s-%s tune %+d  ", m.file.c_str(), k.name.c_str(), noteName(m.root).c_str(),
-                      noteName(m.lo).c_str(), noteName(m.hi).c_str(), m.tune);
-        o += l;
+        char l[96];
+        o += "  " + padTo(printable(m.file), 16) + " " + padTo(k.name, 16) + " root " + padTo(noteName(m.root), 4) + " keys " + noteName(m.lo) + "-" +
+             noteName(m.hi) + " tune " + (m.tune < 0 ? "-" : "+") + std::to_string(std::abs(m.tune)) + "  ";
         if (k.detected >= 0) {
             std::snprintf(l, sizeof l, "measured %s %+.1f cents%s", noteName(k.detected).c_str(), k.cents, k.detected == m.root ? "" : " (ROOT DIFFERS)");
             o += l;

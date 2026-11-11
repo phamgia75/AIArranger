@@ -173,6 +173,25 @@ int main() {
         const std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         TEST("REPORT keeps the KSF measurements after the source files are removed", ok && !r.empty() && has(t, "WITHOUT a .KMP") && has(t, "measured C4"));
     }
+    std::printf("== review round 3 regressions\n");
+    {   // control characters in names must not start new mapping lines; samples over the Pa5X limits are not proposed
+        const fs::path cc = root / "ctrl";
+        put(cc / "bad\nBROKEN.KSF", ksf({c3, 48000, 0, 0, 39999, 0x20}, nullptr, "B48"));
+        put(cc / "OK.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "X\nBAD60"));
+        put(cc / "LONG.KSF", ksf({tone(1048577, hz(72), 9000, 5), 48000, 0, 0, 1048576, 0x20}, nullptr, "LONG72"));
+        put(cc / "SLOW.KSF", ksf({tone(40000, hz(84), 9000, 6), 8000, 0, 0, 39999, 0x20}, nullptr, "SLOW84"));
+        put(cc / "TINY.KSF", ksf({c5, 48000, 0, 39990, 39999, 0x00}, nullptr, "TINY72"));
+        std::string pm;
+        snd::Instrument x;
+        const auto e = snd::proposeKsfMapping(cc, &pm);
+        std::printf("%s", pm.c_str());
+        TEST("the folder still previews: only OK.KSF is used", e.empty() && snd::buildFromKsfMapping(cc, "C", "C", pm, &x).empty() && x.samples.size() == 1);
+        TEST("a newline in a file name is shown as '?', and listed NOT USED", has(pm, "# bad?BROKEN.KSF  NOT USED: this file name") && !has(pm, "\nBROKEN"));
+        TEST("a newline in a sample name is shown as '?'", has(pm, "name X?BAD60 ends in 60"));
+        TEST("over 1 048 576 frames: NOT USED with the Pa5X limit", has(pm, "# LONG.KSF  NOT USED: longer than 1 048 576 frames"));
+        TEST("8 kHz: NOT USED with the Pa5X limit", has(pm, "# SLOW.KSF  NOT USED: rate outside 11025-48000 Hz"));
+        TEST("a 10-frame loop: NOT USED", has(pm, "# TINY.KSF  NOT USED: loop shorter than 32 frames"));
+    }
     {   // the report describes the audio that was built, even if the file changes before Generate
         const fs::path ch = root / "changes";
         put(ch / "A.KSF", ksf({c4, 48000, 0, 0, 39999, 0x20}, nullptr, "A60"));
