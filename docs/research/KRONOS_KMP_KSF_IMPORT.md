@@ -56,6 +56,37 @@ Refused, with the file and the reason: compressed data, Reverse, 8-bit, more tha
 (SMF1), divided files (SPD1/SDD1), INTERNALnnnn, Non Transpose over several keys, any undocumented chunk, any chunk
 or value that does not fit the documented size.
 
+## KSF samples without a KMP (route B2, BUILT 2026-11-11)
+
+Loose `.KSF` files (for example a sample library shipped without its `.KMP`) are read with the same KSF reader:
+audio, rate, Start..End and loop are exact. A KSF holds no root, key range or velocity (they are in the KMP and
+Program), so `media/sound/ksf_folder_source.h`:
+
+- MEASURES each root: YIN on five windows of the loop (or of the sustain past the first quarter); the five must agree
+  within a semitone. Then the DTFT peak (`measurePitch`) gives the cents.
+- Reads a note number at the end of the sample name as a HINT only. It is shown as "agrees" or "DISAGREES, check by
+  ear". A name is used as the root only when no pitch is found, and then marked "NOT verified".
+- PROPOSES zones (each key plays the nearest root, ties to the higher, C-1..G9) and a tune column that corrects the
+  measured offset. This is plain text, editable in Convert Sound (or `--mapping FILE` in `aiarranger-sound ksf`).
+  What is built is exactly that text.
+- Makes one velocity layer. Two samples at one root are not guessed into layers; the second is listed NOT USED.
+- Lists every file it cannot use, with the reason (compressed, no pitch and no number, duplicate root).
+- REPORT.txt says what was RECOVERED, APPROXIMATED and NOT AVAILABLE. It re-measures each sample used, and records the
+  mapping used.
+
+Owner test (2026-11-11, an 18-sample solo violin KSF set from a third-party library; files not committed, source
+hashed unchanged before/after):
+- All 18 files are SMP1/SNO1/SMD1, uncompressed 16-bit mono 44.1 kHz, looped, no 2nd Start.
+- The 18 measured roots (G#3..F#6 in whole tones) all agree with the names' note numbers.
+- The measured offsets were -30..+26 cents.
+- The package passes `shasum -c` (40 files), and all 18 samples match the source bit for bit (audio Start..End and
+  loop points).
+- `validate_sound_package.py --pitch-only`: every structure check passes.
+- Its FluidSynth pitch check (5 cents) fails at 10.8 cents worst with the proposed tune, and at 23.4 cents without it.
+  The validator measures 0.5-2.0 s into the note (vibrato sustain); the proposal measures the loop. Not a mapping
+  error. The gate is unchanged.
+- Pa5X playback: not done (owner's step).
+
 ## Owner: what to save on the KRONOS (no Pa5X involved)
 
 1. Disk > page menu > **Save Sampling Data** > **One Multisample** (or All Multisamples) to a USB stick (p.855-856).

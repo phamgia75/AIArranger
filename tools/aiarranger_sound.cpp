@@ -5,16 +5,21 @@
 //   wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR
 //       a folder of <layer>_<OrgKey>_<LowKey>_<HighKey>.wav (route C, media/sound/wav_folder_source.h);
 //       SRC is only read.
+//   ksf --in SRC --name NAME [--mapping FILE] --out DIR
+//       .KSF samples without a .KMP (media/sound/ksf_folder_source.h): roots measured, zones proposed (printed first),
+//       or the mapping text in FILE (as the Convert Sound tab edits it);
 //   kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR
 //       a folder of KRONOS .KMP/.KSF multisamples (Save Sampling Data; media/sound/korg_kmp_source.h); SRC is only read.
 // Exit 0 = written, 1 = usage/IO/validation error.
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
 #include "media/sound/korg_kmp_source.h"
+#include "media/sound/ksf_folder_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
 #include <cstdio>
+#include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
@@ -26,6 +31,7 @@ static int usage() {
                          "       aiarranger-sound drums --out DIR\n"
                          "       aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
                          "       aiarranger-sound kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
+                         "       aiarranger-sound ksf --in SRC --name NAME [--mapping FILE] --out DIR\n"
                          "       (DIR must not exist)\n");
     return 1;
 }
@@ -51,6 +57,20 @@ int main(int argc, char** argv) {
         char buf[96];
         std::snprintf(buf, sizeof buf, "Source: original additive synthesis, looped; worst pitch error %.4f cents\n", worst);
         notes = buf;
+    } else if (cmd == "ksf" && opt.count("--in") && opt.count("--name")) {
+        std::string mapping, e;
+        if (opt.count("--mapping")) {
+            std::ifstream f(opt["--mapping"]);
+            if (!f) { std::fprintf(stderr, "cannot read %s\n", opt["--mapping"].c_str()); return 1; }
+            mapping.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        } else if (e = proposeKsfMapping(opt["--in"], &mapping); !e.empty()) {
+            std::fprintf(stderr, "%s\n", e.c_str());
+            return 1;
+        } else {
+            std::fputs(mapping.c_str(), stdout);
+        }
+        if (e = buildFromKsfMapping(opt["--in"], opt["--name"], opt["--name"], mapping, &in); !e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 1; }
+        notes = ksfFolderNotes(opt["--in"], mapping, in);
     } else if ((cmd == "wav" || cmd == "kronos") && opt.count("--in") && opt.count("--name")) {
         std::vector<std::string> layers;
         std::vector<uint8_t> splits;

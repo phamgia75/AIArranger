@@ -37,9 +37,9 @@ inline Bytes kmp(const std::string& name, const std::vector<Reg>& rs, bool withN
     return b;
 }
 struct Ksf { std::vector<int16_t> pcm; uint32_t rate = 48000, start = 0, loopStart = 0, end = 0; uint8_t attrs = 0, bits = 16, ch = 1; int8_t loopTune = 0; };
-inline Bytes ksf(const Ksf& k, const char* extra = nullptr) {
+inline Bytes ksf(const Ksf& k, const char* extra = nullptr, const std::string& name = "SYNTH") {
     Bytes b, smp, smd, sno;
-    str(smp, "SYNTH", 16); be32(smp, k.start); be32(smp, k.start); be32(smp, k.loopStart); be32(smp, k.end);
+    str(smp, name, 16); be32(smp, k.start); be32(smp, k.start); be32(smp, k.loopStart); be32(smp, k.end);
     chunk(b, "SMP1", smp);
     be32(smd, k.rate); smd.push_back(k.attrs); smd.push_back(uint8_t(k.loopTune)); smd.push_back(k.ch); smd.push_back(k.bits);
     be32(smd, uint32_t(k.pcm.size()));

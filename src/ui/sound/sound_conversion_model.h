@@ -9,6 +9,7 @@
 // writes to an instrument or sends MIDI.
 
 #include "media/sound/korg_kmp_source.h"
+#include "media/sound/ksf_folder_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
 #include "media/sound/wav_folder_source.h"
@@ -47,13 +48,29 @@ public:
     struct LayerInfo { std::string prefix; size_t files = 0; uint8_t lo = 127, hi = 0; };
 
     // Step 1: read the file names only (fast); proposes a layer order and even velocity splits.
-    // A folder holding .KMP files is a KRONOS folder (one layer per multisample); otherwise a WAV folder.
+    // A folder holding .KMP files is a KRONOS folder (one layer per multisample); .KSF files without a .KMP are one layer
+    // whose key map is proposed at Preview (ksf()); otherwise a WAV folder.
     bool inspect(const std::filesystem::path& dir, std::string* err) {
+        if (snd::isKsfFolder(dir)) {
+            dir_ = dir;
+            korg_ = false;
+            ksf_ = true;
+            built_ = false;
+            layers_.clear();
+            LayerInfo li{snd::korg::layerName(dir.filename().string()), 0, 0, 127};
+            if (li.prefix.empty()) li.prefix = "KSF";
+            std::error_code ec;
+            for (const auto& e : std::filesystem::directory_iterator(dir, ec)) li.files += snd::korg::lower(e.path().extension().string()) == ".ksf";
+            layers_.push_back(li);
+            return true;
+        }
+        ksf_ = false;
         if (snd::isKorgFolder(dir)) {
             std::vector<snd::KorgMultisample> ms;
             if (const auto e = snd::scanKorgFolder(dir, ms); !e.empty()) return fail(err, e);
             dir_ = dir;
             korg_ = true;
+            ksf_ = false;
             layers_.clear();
             built_ = false;
             for (const auto& m : ms) {
@@ -79,6 +96,7 @@ public:
     }
     const std::vector<LayerInfo>& layers() const { return layers_; }
     bool korg() const { return korg_; }
+    bool ksf() const { return ksf_; }   // KSF-only folder: the mapping text (proposed, editable) defines the zones
     // Softest first when every layer name is a dynamic (ppp..fff, soft/medium/hard) or ends in a
     // number (v1, vel2); otherwise alphabetical. The musician confirms either way.
     std::string proposedOrder() const {
@@ -106,11 +124,11 @@ public:
     }
 
     // Step 2: decode the WAVs with the given order and splits. On failure nothing is kept.
-    bool build(const std::string& name, const std::string& orderCsv, const std::string& splitsCsv, std::string* err) {
+    bool build(const std::string& name, const std::string& orderCsv, const std::string& splitsCsv, std::string* err, std::string* mapping = nullptr) {
         built_ = false;
         if (dir_.empty()) return fail(err, "choose a WAV folder first");
         snd::Instrument in;
-        if (!decode(dir_, name, orderCsv, splitsCsv, in, err)) return false;
+        if (!decode(dir_, name, orderCsv, splitsCsv, in, err, mapping)) return false;
         adopt(std::move(in));
         return true;
     }
@@ -126,8 +144,20 @@ public:
     std::shared_ptr<const snd::Instrument> snapshot() const { return in_; }
     void invalidate() { built_ = false; }   // a setting changed: the preview no longer describes what would be written
     const std::filesystem::path& folder() const { return dir_; }
+    // KSF-only folder: `mapping` is the mapping text; when it is empty it is proposed here and returned in it.
     static bool decode(const std::filesystem::path& dir, const std::string& name, const std::string& orderCsv, const std::string& splitsCsv,
-                       snd::Instrument& out, std::string* err) {
+                       snd::Instrument& out, std::string* err, std::string* mapping = nullptr) {
+        if (snd::isKsfFolder(dir)) {
+            if (!mapping) return fail(err, "a KSF folder needs a key mapping");
+            const auto layer = csv(orderCsv);
+            if (layer.size() != 1 || layer[0].empty())
+                return fail(err, "a KSF folder without a KMP makes one layer: name it (velocity layers cannot be recovered from KSF files)");
+            if (!csv(splitsCsv).empty()) return fail(err, "one layer has no velocity splits; leave the splits empty");
+            if (mapping->find_first_not_of(" \t\r\n") == std::string::npos)
+                if (const auto e = snd::proposeKsfMapping(dir, mapping); !e.empty()) return fail(err, e);
+            if (const auto e = snd::buildFromKsfMapping(dir, name, layer[0], *mapping, &out); !e.empty()) return fail(err, e);
+            return true;
+        }
         std::vector<std::string> order;
         std::vector<uint8_t> splits;
         for (const auto& t : csv(orderCsv)) order.push_back(t);
@@ -208,9 +238,12 @@ public:
     // Step 4: write the package to parent/<name>. Returns the summary, or "" with *err set.
     // shortcut: writing straight onto a mounted volume is refused while hardware writes are not
     // authorized for this project phase; write locally and copy the folder to the USB stick by hand.
-    static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err) {
+    static std::string generate(const snd::Instrument& in, const std::filesystem::path& sourceDir, const std::filesystem::path& out, std::string* err,
+                                const std::string& mapping = {}) {
         if (const auto r = snd::outputFolderRefusal(out); !r.empty()) { if (err) *err = r; return ""; }
-        const std::string notes = snd::isKorgFolder(sourceDir) ? snd::korgFolderNotes(sourceDir, in) : snd::wavFolderNotes(sourceDir.string(), in);
+        const std::string notes = snd::isKorgFolder(sourceDir) ? snd::korgFolderNotes(sourceDir, in)
+                                : snd::isKsfFolder(sourceDir)  ? snd::ksfFolderNotes(sourceDir, mapping, in)
+                                                               : snd::wavFolderNotes(sourceDir.string(), in);
         const std::string rep = snd::writePackage(in, out, notes, err);
         if (rep.empty()) return "";
         return writtenSummary(out) + rep;
@@ -257,6 +290,7 @@ private:
     std::shared_ptr<const snd::Instrument> in_;
     bool built_ = false;
     bool korg_ = false;
+    bool ksf_ = false;
 };
 
 } // namespace ai_arranger::ui

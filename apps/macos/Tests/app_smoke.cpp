@@ -300,6 +300,31 @@ int main() {
                      cv.model().built() && cv.previewText().contains("C-1 -B3    C3") && cv.previewText().contains("C4  -G9    C5") && cv.previewText().contains("24000-48000") &&
                      cv.model().instrument().samples.size() == 2 && cv.model().instrument().samples[0].channels == 2);
             }
+            {   // KSF samples without a KMP: roots measured, zones proposed into the editable mapping field
+                using namespace korgfix;
+                const auto k = root / "ksfonly";
+                put(k / "MS000000.KSF", ksf({tone(48000, 130.81, 7000, 1), 48000, 0, 24000, 47999, 0x20}, nullptr, "VLN48"));
+                put(k / "MS000001.KSF", ksf({tone(48000, 261.63, 7000, 2), 48000, 0, 24000, 47999, 0x20}, nullptr, "VLN60"));
+                TEST("Convert Sound: a KSF-only folder is accepted, the mapping editor appears empty",
+                     cv.inspectFolder(juce::File(k.string())) && cv.model().ksf() && cv.mappingField().isVisible() && cv.mappingField().isEmpty() &&
+                     cv.orderField().getText() == "ksfonly" && cv.splitsField().isEmpty());
+                cv.nameField().setText("KSF Strings");
+                pump(50);
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                TEST("Convert Sound: Preview fills the proposed mapping and builds it",
+                     cv.model().built() && cv.mappingField().getText().contains("MS000001.KSF     C4    F#3   G9") &&
+                     cv.previewText().contains("C-1 -F3    C3") && cv.model().instrument().samples.size() == 2);
+                cv.mappingField().setText("MS000000.KSF C3 C-1 B3\nMS000001.KSF C4 C4 G9 +7\n");   // the musician edits
+                pump(50);
+                TEST("Convert Sound: editing the mapping invalidates the preview", !cv.model().built());
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                TEST("Convert Sound: the edited mapping is what is built", cv.model().built() && cv.previewText().contains("C-1 -B3    C3") &&
+                     cv.model().instrument().layers[0].zones[1].tuneCents == 7);
+                TEST("Convert Sound: the mapping editor hides for other folders",
+                     cv.inspectFolder(juce::File(root.string() + "/kronos")) && !cv.mappingField().isVisible());
+            }
             TEST("Convert Sound: a folder of wrongly named files gets a clear message", !cv.inspectFolder(juce::File(root.string() + "/kst")));
             TEST("Convert Sound: inspect lists layers and proposes order and splits",
                  cv.inspectFolder(juce::File(root.string() + "/big")) && cv.orderField().getText() == "Soft,Hard" && cv.splitsField().getText() == "64");

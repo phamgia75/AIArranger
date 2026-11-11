@@ -49,11 +49,17 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
     : openInResources_(std::move(openInResources)) {
     for (auto* l : {&folder_, &status_, &pluginNote_, &nameLbl_, &orderLbl_, &splitsLbl_})
         { l->setColour(juce::Label::textColourId, juce::Colour(0xffb8b8c0)); addAndMakeVisible(*l); }
-    folder_.setText("No folder chosen. A KRONOS folder (.KMP + .KSF from Save Sampling Data) or WAVs named <layer>_<RootKey>_<LowKey>_<HighKey>.wav.",
+    folder_.setText("No folder chosen. A KRONOS folder (.KMP + .KSF from Save Sampling Data), .KSF samples alone, or WAVs named <layer>_<RootKey>_<LowKey>_<HighKey>.wav.",
                     juce::dontSendNotification);
     pluginNote_.setText("AU/VST instruments: use the Sample Plugin tab.",
                         juce::dontSendNotification);
-    for (auto* t : {&name_, &order_, &splits_}) {
+    mapping_.setMultiLine(true);
+    mapping_.setReturnKeyStartsNewLine(true);
+    mapping_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
+    mapping_.setTitle("Key mapping (proposed; edit and press Preview)");
+    mapping_.setTextToShowWhenEmpty("Press Preview: AIArranger measures each sample's pitch and proposes a key map here.", juce::Colour(0xff9090a0));
+    addChildComponent(mapping_);
+    for (auto* t : {&name_, &order_, &splits_, &mapping_}) {
         addAndMakeVisible(*t);
         t->onTextChange = [this] {   // the preview no longer matches the settings: Generate must not write it
             ++generation_;
@@ -102,15 +108,22 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
         status_.setText("Cannot use this folder: " + juce::String(err), juce::dontSendNotification);
         return false;
     }
+    mapping_.setText({}, false);
+    mapping_.setVisible(model_.ksf());
+    resized();
     juce::String s = dir.getFullPathName() + "  -  " + (model_.korg() ? "KRONOS multisamples, " : "") + juce::String(model_.layers().size()) + " layer(s): ";
-    for (const auto& l : model_.layers())
+    if (model_.ksf())
+        s = dir.getFullPathName() + "  -  " + juce::String(model_.layers().front().files) +
+            " Korg .KSF samples without a .KMP: Preview measures each root and proposes key zones (not the original map).";
+    else for (const auto& l : model_.layers())
         s += juce::String(l.prefix) + " (" + juce::String(l.files) + (model_.korg() ? " zones, " : " files, ") + SoundConversionModel::key(l.lo) + "-" + SoundConversionModel::key(l.hi) + ")  ";
     folder_.setText(s, juce::dontSendNotification);
     // Programmatic: no change notification (JUCE delivers it later and it would invalidate the next preview).
     if (name_.isEmpty()) name_.setText(dir.getFileName().substring(0, 20), false);
     order_.setText(model_.proposedOrder(), false);
     splits_.setText(model_.proposedSplits(), false);
-    status_.setText("Put the layers in order from softest to loudest, check the splits, then press Preview.", juce::dontSendNotification);
+    status_.setText(model_.ksf() ? "Name the layer, then press Preview to propose the key map."
+                                 : "Put the layers in order from softest to loudest, check the splits, then press Preview.", juce::dontSendNotification);
     return true;
 }
 
@@ -124,11 +137,12 @@ void SoundConversionComponent::buildPreview() {
     std::weak_ptr<bool> alive = alive_;
     const auto gen = ++generation_;
     std::thread([this, alive, gen, dir = model_.folder(), name = name_.getText().trim().toStdString(),
-                 order = order_.getText().toStdString(), splits = splits_.getText().toStdString()] {
+                 order = order_.getText().toStdString(), splits = splits_.getText().toStdString(),
+                 mapping = std::make_shared<std::string>(mapping_.getText().toStdString())] {
         auto in = std::make_shared<media::sound::Instrument>();
         auto texts = std::make_shared<std::array<std::string, 2>>();   // checks + preview, recipe
         std::string err;
-        const bool ok = SoundConversionModel::decode(dir, name, order, splits, *in, &err);
+        const bool ok = SoundConversionModel::decode(dir, name, order, splits, *in, &err, mapping.get());
         if (ok) {   // text building is slow on big Sounds too: keep it off the message thread
             const auto checks = SoundConversionModel::checksOf(*in);
             std::string c = checks.empty() ? "Checks: nothing to report.\n\n" : "Checks (" + std::to_string(checks.size()) + "):\n";
@@ -136,17 +150,20 @@ void SoundConversionComponent::buildPreview() {
             (*texts)[0] = c + "\n" + SoundConversionModel::previewOf(*in);
             (*texts)[1] = media::sound::formatRecipe(media::sound::recipeFromSamples(*in));
         }
-        juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err] {
+        juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err, mapping] {
             if (alive.expired()) return;
             --jobs_;
             previewBtn_.setEnabled(true);
             if (gen != generation_) return;   // another folder was chosen meanwhile
-            showPreview(ok ? in.get() : nullptr, *texts, err);
+            showPreview(ok ? in.get() : nullptr, *texts, err, *mapping);
         });
     }).detach();
 }
 
-void SoundConversionComponent::showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err) {
+void SoundConversionComponent::showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err,
+                                           const std::string& mapping) {
+    if (model_.ksf() && mapping_.getText().toStdString() != mapping)
+        mapping_.setText(mapping, false);   // the proposal (no change notification: it is what the preview was built from)
     if (!in) {
         preview_.clear(); recipe_.clear();
         status_.setText("Cannot build: " + juce::String(err), juce::dontSendNotification);
@@ -169,9 +186,9 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     auto in = model_.snapshot();   // shared, immutable: no audio copy on the message thread
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
-    std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder()] {
+    std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder(), mapping = mapping_.getText().toStdString()] {
         std::string err;
-        const std::string sum = SoundConversionModel::generate(*in, src, out, &err);
+        const std::string sum = SoundConversionModel::generate(*in, src, out, &err, mapping);
         juce::MessageManager::callAsync([this, alive, gen, sum, err, out] {
             if (alive.expired()) return;
             --jobs_;
@@ -205,7 +222,9 @@ void SoundConversionComponent::resized() {
     bottom.removeFromLeft(8);
     status_.setBounds(bottom);
     pluginNote_.setBounds(r.removeFromBottom(22));
-    preview_.setBounds(r.removeFromLeft(r.getWidth() * 3 / 5));
+    auto left = r.removeFromLeft(r.getWidth() * 3 / 5);
+    if (mapping_.isVisible()) { mapping_.setBounds(left.removeFromTop(left.getHeight() / 2)); left.removeFromTop(6); }
+    preview_.setBounds(left);
     r.removeFromLeft(6);
     recipe_.setBounds(r);
 }
