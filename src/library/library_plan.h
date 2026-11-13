@@ -185,6 +185,8 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
                 if (S.format != Format::PaSet) {   // a KST/folder item is a file: the rename renames it
                     const std::string to = (fs::path(it.file).parent_path() / (trimmed(st.text) + fs::path(it.file).extension().string())).generic_string();
                     for (const auto& o : S.items) if (&o != &it && !o.gone && detail::same(o.file, to)) conflict("the file " + to + " already exists in " + std::string(1, st.side));
+                    if (to != it.file && detail::same(to, it.file))
+                        conflict("the new name differs only in letter case: one name on a FAT/exFAT stick (and on a case-insensitive disk)");
                     if (c.conflicts.empty() && to != it.file) c.ops.push_back({FileOp::Rename, it.file, to, "", false});
                     if (c.conflicts.empty()) it.file = to;
                 }
@@ -198,6 +200,9 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             if (S.format != D.format) conflict(std::string("formats differ (") + formatName(S.format) + " -> " + formatName(D.format) + "): converting is not available");
             else if (S.format == Format::PaSet && S.layout != D.layout)
                 conflict("SET generations differ (" + S.layout + " -> " + D.layout + "): their files are not known to be interchangeable");
+            else if (S.format == Format::PaSet && st.wholeFile && S.layout != media::kLayoutPa700)   // equal labels, but no generation known
+                conflict("SET generation not determined (" + S.layout + "): bank files move only between SETs whose generation is positively "
+                         "determined and equal (Pa700/Pa1000 markers)");
             std::string btype;
             std::set<int> used;
             bool unknownOccupancy = false;   // an undecoded SET bank file: which slots are taken is UNKNOWN

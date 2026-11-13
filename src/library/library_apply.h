@@ -185,6 +185,7 @@ inline std::string copyChecked(int src, const std::string& srcName, const std::s
     if (got != sha) return srcName + "/" + from + " changed since its library was opened (SHA-256 differs): open both libraries again";
     return "";
 }
+inline std::function<void(const std::string& rel)> hashWalkHook;   // tests only: runs after each file hashTree() hashes
 // SHA-256 of every file below the open folder `dir`, walked by descriptor only (openat O_NOFOLLOW per component): rel ->
 // hash, folders as "rel/" -> "". Any link or special file is an error, never followed. Bounded by kLibraryLimits.
 inline std::string hashTree(int dir, const std::string& prefix, std::map<std::string, std::string>& m, int depth = 0) {
@@ -214,6 +215,7 @@ inline std::string hashTree(int dir, const std::string& prefix, std::map<std::st
             m[rel] = media::detail::sha256Stream(in, nullptr, {}, &c, &err, rel);
             std::fclose(in);
             if (m[rel].empty()) return err;
+            if (hashWalkHook) hashWalkHook(rel);
         } else return rel + " is a link or special file (never followed)";
     }
     return "";
@@ -263,11 +265,13 @@ inline void pin(const fs::path& out, Pinned& p) {
 inline std::string recheckPinned(const Pinned& p, const fs::path& staged) {
     if (p.dir < 0 || !p.error.empty()) return "the staged output was not verified (" + p.error + ")";
     const std::string leaf = staged.filename().string();
-    struct stat a {}, b {};
-    const detail::Fd par(::open(staged.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-    if (par.v < 0 || ::fstat(par.v, &a) != 0 || ::fstat(p.parent, &b) != 0 || a.st_dev != b.st_dev || a.st_ino != b.st_ino ||
-        ::fstatat(p.parent, leaf.c_str(), &a, AT_SYMLINK_NOFOLLOW) != 0 || a.st_dev != p.dev || a.st_ino != p.ino)
-        return "the staged output folder was replaced after it was verified";
+    const auto same = [&] {   // the staged PATHNAME still names the pinned folder, reached from the pinned parent
+        struct stat a {}, b {};
+        const detail::Fd par(::open(staged.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        return par.v >= 0 && ::fstat(par.v, &a) == 0 && ::fstat(p.parent, &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino &&
+               ::fstatat(p.parent, leaf.c_str(), &a, AT_SYMLINK_NOFOLLOW) == 0 && a.st_dev == p.dev && a.st_ino == p.ino;
+    };
+    if (!same()) return "the staged output folder was replaced after it was verified";
     std::map<std::string, std::string> now;
     if (const auto e = detail::hashTree(p.dir, "", now); !e.empty()) return "the staged output changed after it was verified: " + e;
     for (const auto& [rel, h] : p.tree) {
@@ -277,6 +281,8 @@ inline std::string recheckPinned(const Pinned& p, const fs::path& staged) {
     }
     for (const auto& [rel, h] : now) if (!p.tree.count(rel)) return "the staged output changed after it was verified: unexpected " + rel;
     if (detail::manifestSha(p.parent, leaf) != p.manifest) return "the manifest beside the staged output changed after it was verified";
+    // last: the walk above read the pinned folder; the job renames by NAME, so that name must still be this folder (Codex E8 r3)
+    if (!same()) return "the staged output folder was replaced while it was being re-checked";
     return "";
 }
 

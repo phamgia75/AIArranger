@@ -158,6 +158,14 @@ int main() {
     refused({{Op::Copy, 'A', item(SA, "Jazz"), "STYLE/USER03", -1, "", true}}, "SET generations differ", "SET cross-generation", SA, S4);
     refused({{Op::Copy, 'A', item(A, "Swing"), "STYLE/USER03", -1, "", true}}, "formats differ", "KST to SET", A, SB);
     refused({{Op::Copy, 'A', item(SA, "Jazz"), "STYLE/USER04", -1, "", true}}, "conflict", "SET bank file exists", SA, SB);
+    {   // Codex r3 P2: two SETs whose generation is NOT determined (Pa4X-family label) do not exchange bank files
+        const fs::path s5 = root / "OTHER.SET";
+        put(s5 / "SOUND/USERDK.PCG", build({{0x10000030, 4, 9, 0, "Kit", "d"}}, 1));
+        put(s5 / "STYLE/USER02.STY", build({{0x06000030, 2, 18, 0, "Mambo", "m"}}, 1));
+        const auto S5 = open(s5);
+        TEST("both SETs carry the undetermined Pa4X-family layout", S5->ok && S5->layout == media::kLayoutPa4x && S4->layout == media::kLayoutPa4x);
+        refused({{Op::Copy, 'A', item(S5, "Mambo"), "STYLE/USER03", -1, "", true}}, "generation not determined", "SET undetermined generations", S5, S4);
+    }
     TEST("refusals: every source byte-identical", untouched() && setsUntouched());
 
     // ── interruption: cancel inside the write, and at verify: only NAME.INCOMPLETE stays ──
@@ -295,6 +303,25 @@ int main() {
         TEST(("staged output changed after verify (" + how + "): not published, job fails at publish").c_str(),
              hit && st.phase == Phase::Failed && st.stoppedAt == Phase::Publish && !fs::exists(dest) && has(st.reason, "after it was verified") && untouched());
     }
+    // ── Codex r3 P1: the staged folder replaced WHILE the pre-publish re-check hashes it is never published ──
+    {
+        const fs::path dest = out / "swapped-while-hashing.KST";
+        const fs::path work = media::incompletePath(dest), staged = work / dest.filename();
+        JobState st;
+        bool armed = false, hit = false;
+        library::detail::hashWalkHook = [&](const std::string&) {   // after each file the walk hashes
+            if (!armed || hit) return;
+            hit = true;   // same bytes in a new folder: only an identity check AFTER the walk can tell
+            fs::rename(staged, work / "aside");
+            fs::copy(work / "aside", staged, fs::copy_options::recursive);
+        };
+        runExport(libraryApply(A, B, one, dest), st, [] { return false; }, [&](const JobState& s) { armed = armed || s.phase == Phase::Publish; });
+        library::detail::hashWalkHook = nullptr;
+        TEST("staged folder replaced during the re-check's hash walk: refused, nothing published",
+             hit && st.phase == Phase::Failed && st.stoppedAt == Phase::Publish && has(st.reason, "replaced") && !fs::exists(dest) && untouched());
+    }
+    // ── Codex r3 P2: a rename that only changes letter case (one name on FAT/exFAT and on this temp folder) ──
+    refused({{Op::Rename, 'B', item(B, "Waltz"), "", -1, "waltz"}}, "letter case", "case-only rename");
     // ── Codex r2 P2: a source folder swapped for a symlink to an outside folder is never read through ──
     {
         const fs::path outside = root / "outside";
