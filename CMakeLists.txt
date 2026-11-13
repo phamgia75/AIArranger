@@ -312,6 +312,7 @@ target_include_directories(aiarranger-sound PRIVATE src)
 add_test(NAME test_kmp_cli   # EXPERIMENTAL KMP/KSF writer: demo -> KMP folder -> back through the kronos route; drums refused
          COMMAND sh -c "rm -rf kmp-demo kmp-back && $<TARGET_FILE:aiarranger-sound> kmp --source demo --out kmp-demo | grep -q 'EXPERIMENTAL. Verification level L1' && $<TARGET_FILE:aiarranger-sound> kronos --in kmp-demo --name 'AIA Demo Organ' --layers 'AIA Organ Soft,AIA Organ Bright' --splits 90 --out kmp-back >/dev/null && ! $<TARGET_FILE:aiarranger-sound> kmp --source drums --out kmp-drums 2>/dev/null && test ! -e kmp-drums"
          WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME test_sound_cli_volumes COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_sound_cli_volumes.sh ${CMAKE_BINARY_DIR})   # mounted volumes refused by every writer
 if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit package (docs/research/TXPERF_DRUMKIT_NOTES.md)
     add_test(NAME test_drumkit_package_independent
              COMMAND sh -c "rm -rf drumkit-pkg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-pkg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_drumkit_package.py drumkit-pkg"
