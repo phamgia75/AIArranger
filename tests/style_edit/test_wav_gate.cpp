@@ -9,6 +9,9 @@
 
 #include "jobs/export_specs.h"
 #include "media/samplelab/drum_builder.h"
+#include "media/sound/additive_source.h"
+#include <cfenv>
+#include <cfloat>
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
@@ -217,6 +220,69 @@ int main() {
         const auto r = lab::runBatch(root / "badloop", {}, o);
         TEST("batch convert: a source loop past the audio is refused (not clamped to the resampled end)",
              r.items.size() == 1 && has(r.items[0].error, "loop"));
+    }
+
+    // ── Codex r3 P2: float bounded before rounding; non-finite floats refused, not zeroed ──
+    {
+        Fmt ff; ff.tag = 3; ff.bits = 32;
+        auto floats = [](std::vector<float> v) { std::vector<uint8_t> o(v.size() * 4); std::memcpy(o.data(), v.data(), o.size()); return o; };
+        lab::Sample s;
+        std::feclearexcept(FE_ALL_EXCEPT);
+        const auto e = decode(wav(ff, floats({FLT_MAX, -FLT_MAX, 1e30f, -1e30f, 2.0f, -2.0f})), &s);
+        const bool invalid = std::fetestexcept(FE_INVALID);
+        TEST("float: huge finite values saturate to full scale with the right polarity, no FE_INVALID from rounding",
+             e.empty() && s.pcm == std::vector<int16_t>({32767, -32768, 32767, -32768, 32767, -32768}) && !invalid);
+        const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+        TEST("float: NaN refused with a reason (not silently zeroed)", has(decodeErr(wav(ff, floats({0.1f, nan}))), "not finite"));
+        TEST("float: infinity refused with a reason", has(decodeErr(wav(ff, floats({-inf, 0.1f}))), "not finite"));
+    }
+
+    // ── Codex r3 P2: an invalid source loop is refused at an unchanged rate too ──
+    {
+        auto loopWav = [&](uint32_t rate) {   // 10 000 frames, smpl loop [9000, 15000)
+            Fmt f; f.rate = rate;
+            auto w = wav(f, words(std::vector<int64_t>(10000, 100), 2));
+            const size_t at = 12 + 8 + 16;
+            const uint32_t loops = 1, a0 = 9000, a1 = 15000 - 1, smplLen = 36 + 24;
+            std::vector<uint8_t> rec(24, 0);
+            std::memcpy(&rec[8], &a0, 4); std::memcpy(&rec[12], &a1, 4);
+            std::memcpy(&w[at + 8 + 28], &loops, 4);
+            std::memcpy(&w[at + 4], &smplLen, 4);
+            w.insert(w.begin() + long(at + 8 + 36), rec.begin(), rec.end());
+            const uint32_t riff = uint32_t(w.size() - 8);
+            std::memcpy(&w[4], &riff, 4);
+            return w;
+        };
+        putBytes(root / "loop48/hit.wav", loopWav(48000));
+        sound::DrumKit k;
+        TEST("drum kit: a 48 kHz WAV with a loop past its audio is refused (not cleared)",
+             has(lab::buildDrumKit(root / "loop48", "K", "36 hit.wav\n", &k), "loop"));
+        lab::BatchOptions o;
+        o.convert = true;
+        const auto r = lab::runBatch(root / "loop48", {}, o);
+        TEST("batch convert at an unchanged rate: the same loop is refused", r.items.size() == 1 && has(r.items[0].error, "loop"));
+    }
+
+    // ── Codex r3 P2: velocity layers are MISSING in a KMP report, EXACT where SF2/TXPROG carry them ──
+    {
+        const auto organ = std::make_shared<const sound::Instrument>(sound::buildDemoOrgan());   // two velocity layers
+        const auto k = run(kmpFolder(organ, root / "organ-kmp"));
+        bool exactVel = false, missingVel = false;
+        for (const auto& [cls, item] : k.conversion) { exactVel |= cls == "EXACT" && has(item, "velocity"); missingVel |= cls == "MISSING" && has(item, "velocity layer"); }
+        TEST("KMP report: velocity layers and ranges MISSING, never EXACT", k.phase == Phase::Done && !exactVel && missingVel);
+        const auto p = run(soundPackage(organ, {}, "", root / "organ-pkg"));
+        bool pkgVel = false;
+        for (const auto& [cls, item] : p.conversion) pkgVel |= cls == "EXACT" && has(item, "velocity layer");
+        TEST("Sound package (SF2 + TXPROG) report: velocity layers stay EXACT", p.phase == Phase::Done && pkgVel);
+        // converted drum audio (96 kHz 24-bit) is not EXACT
+        Fmt h; h.rate = 96000; h.bits = 24;
+        std::vector<int64_t> v;
+        for (int i = 0; i < 9600; ++i) v.push_back(int64_t(std::lround(1e6 * std::sin(i * 0.05))));
+        putBytes(root / "conv-kit/c.wav", wav(h, words(v, 3)));
+        const auto d = run(drumKitFromFolder(root / "conv-kit", "Conv Kit", "36 c.wav\n", false, root / "conv-kit-out"));
+        bool audioExact = false;
+        for (const auto& [cls, item] : d.conversion) audioExact |= cls == "EXACT" && has(item, "audio");
+        TEST("Drum Kit report: converted (resampled/dithered) audio is not called EXACT", d.phase == Phase::Done && !audioExact);
     }
 
     // ── KMP Drum Kit report: nothing dropped or clamped is EXACT ──

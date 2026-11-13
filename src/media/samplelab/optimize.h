@@ -76,6 +76,12 @@ inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in
     const unsigned bytes = bits / 8;
     if (dataLen % (bytes * ch)) return fail("data chunk does not hold whole frames");
     in->frames = dataLen / (bytes * ch);
+    if (tag == 3)   // a NaN or infinity has no 16-bit value: refused, never written as silence (Codex r3)
+        for (size_t i = 0; i < in->frames * ch; ++i) {
+            float f;
+            std::memcpy(&f, &b[dataAt + i * 4], 4);
+            if (!std::isfinite(f)) return fail("float sample " + std::to_string(i) + " is not finite (NaN or infinity)");
+        }
     if (u16(fmtAt) == 1 && bits == 16) return b;   // plain 16-bit PCM: already what the pipeline reads
     const uint32_t keep = valid >= 32 ? 0xFFFFFFFFu : ~((1u << (32 - valid)) - 1);   // the valid top bits of a left-justified 32-bit word
 
@@ -98,7 +104,8 @@ inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in
                 if (in->isFloat) {
                     float f;
                     std::memcpy(&f, &b[p], 4);
-                    v = std::lround((std::isfinite(f) ? double(f) * 32768.0 : 0.0) + rnd() + rnd());
+                    const double d = double(f) * 32768.0 + rnd() + rnd();   // finite (checked above)
+                    v = std::lround(std::clamp(d, -32768.0, 32767.0));       // bounded BEFORE rounding: lround(FLT_MAX * 32768) is undefined
                 } else {   // the container value, left-justified in 32 bits, padding bits cleared
                     const uint32_t w = bits == 8 ? uint32_t(uint8_t(b[p] - 128)) << 24 : bits == 16 ? u16(p) << 16
                                      : bits == 24 ? uint32_t(b[p]) << 8 | uint32_t(b[p + 1]) << 16 | uint32_t(b[p + 2]) << 24 : u32(p);
@@ -139,10 +146,11 @@ inline uint32_t pa5xRate(uint32_t r) {
 inline constexpr uint64_t kMaxFrames = 1048576;
 inline constexpr uint64_t kResampleBudgetBytes = kMaxFrames * 2 * 2;   // stereo 16-bit at the frame limit: 4 MiB
 inline std::string resample(sound::Sample& s, uint32_t to) {
-    if (to == s.rate || !s.channels) return "";
-    // The SOURCE loop must lie inside the source audio: an invalid one is refused here, never clamped or dropped (Codex r2).
+    // The SOURCE loop must lie inside the source audio: an invalid one is refused here, never clamped or dropped (Codex r2),
+    // also when the rate is unchanged (Codex r3: callers may clear the loop after this returns).
     if (s.looped && !(s.loopStart < s.loopEnd && s.loopEnd <= s.frames()))
         return "smpl loop " + std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd) + " lies outside the " + std::to_string(s.frames()) + " frames";
+    if (to == s.rate || !s.channels) return "";
     for (uint32_t r : {s.rate, to})
         if (r < kMinInputRate || r > kMaxInputRate)
             return "sample rate " + std::to_string(r) + " Hz outside " + std::to_string(kMinInputRate) + "-" + std::to_string(kMaxInputRate) + " Hz";
