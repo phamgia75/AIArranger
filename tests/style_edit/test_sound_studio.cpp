@@ -142,6 +142,12 @@ int main() {
             tiny.pcm.assign(1000, 100);
             TEST("resample refuses a 1 Hz source (outside the input range), sample unchanged",
                  has(lab::resample(tiny, 11025), "sample rate 1 Hz outside") && tiny.rate == 1 && tiny.frames() == 1000);
+            lab::Sample bad;
+            bad.rate = 96000;
+            bad.pcm.assign(10000, 100);
+            bad.looped = true; bad.loopStart = 9000; bad.loopEnd = 15000;
+            TEST("resample refuses a source loop past the audio, sample and loop unchanged (Codex r2)",
+                 has(lab::resample(bad, 48000), "lies outside the 10000 frames") && bad.rate == 96000 && bad.loopEnd == 15000 && bad.frames() == 10000);
             lab::Sample slow;
             slow.rate = 4000;
             slow.pcm.assign(400000, 100);
@@ -316,7 +322,7 @@ int main() {
                                                                                   kit.samples[0].root == 36 && kit.samples[1].root == 42 &&
                                                                                   has(notes, "Kick: 96000 Hz 24-bit 1 ch 9600 frames -> 48000 Hz 16-bit"));
         auto bad = [&](const std::string& t) { sound::DrumKit x; return lab::buildDrumKit(dk, "K", t, &x); };
-        TEST("refused: two lines on one key", has(bad("36 Kick 1.wav\n36 HH Open.wav\n"), "key already assigned"));
+        TEST("refused: two lines on one key (on the second line, before reading it)", has(bad("36 Kick 1.wav\n36 HH Open.wav\n"), "line 2: key 36 (C2) is already on line 1"));
         TEST("refused: one group, two chokes", has(bad("36 Kick 1.wav group=G choke=1\n38 HH Open.wav group=G choke=2\n"), "already has choke"));
         TEST("refused: level above +6 dB", has(bad("36 Kick 1.wav level=7\n"), "level"));
         TEST("refused: missing file", has(bad("36 Nope.wav\n"), "not a regular file"));

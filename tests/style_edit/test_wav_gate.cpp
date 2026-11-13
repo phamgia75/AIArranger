@@ -179,6 +179,46 @@ int main() {
         TEST("batch convert: output over 1 048 576 frames refused before resampling", l.items.size() == 1 && has(l.items[0].error, "1102500 frames"));
     }
 
+    // ── Codex r2 P2: the drum map is bounded BEFORE audio is read ──
+    {
+        Fmt st; st.channels = 2;
+        putBytes(root / "hits/hit.wav", wav(st, words(std::vector<int64_t>(2 * 1048576, 50), 2)));   // 1 048 576 stereo frames, 4 MiB
+        std::string dup;
+        for (int i = 0; i < 3; ++i) dup += "36 hit.wav\n";
+        sound::DrumKit k;
+        const auto e = lab::buildDrumKit(root / "hits", "K", dup, &k);
+        TEST("drum map: a repeated key is refused on its own line, before its audio is read (" + e + ")",
+             has(e, "drum map line 2: key 36 (C2) is already on line 1"));
+        std::string many;   // 4 MiB of audio + its header per file: line 32 passes the 128 MiB kit budget
+        for (int i = 0; i < 33; ++i) many += std::to_string(36 + i) + " hit.wav name=hit" + std::to_string(i) + "\n";
+        const auto b = lab::buildDrumKit(root / "hits", "K", many, &k);
+        TEST("drum map: the cumulative audio budget is refused at the line that passes it, before reading it (" + b + ")",
+             has(b, "drum map line 32: ") && has(b, "budget"));
+    }
+
+    // ── Codex r2 P2: an invalid source loop is refused, never repaired by the resampler ──
+    {
+        Fmt hi96; hi96.rate = 96000;
+        auto w = wav(hi96, words(std::vector<int64_t>(10000, 100), 2));
+        // add a smpl loop [9000, 15000): its end lies past the 10 000 frames
+        const size_t at = 12 + 8 + 16;   // the smpl chunk follows a 16-byte fmt chunk
+        const uint32_t loops = 1, a0 = 9000, a1 = 15000 - 1;
+        std::vector<uint8_t> rec(24, 0);
+        std::memcpy(&rec[8], &a0, 4); std::memcpy(&rec[12], &a1, 4);
+        std::memcpy(&w[at + 8 + 28], &loops, 4);
+        const uint32_t smplLen = 36 + 24;
+        std::memcpy(&w[at + 4], &smplLen, 4);
+        w.insert(w.begin() + long(at + 8 + 36), rec.begin(), rec.end());
+        const uint32_t riff = uint32_t(w.size() - 8);
+        std::memcpy(&w[4], &riff, 4);
+        putBytes(root / "badloop/loop.wav", w);
+        lab::BatchOptions o;
+        o.convert = true;
+        const auto r = lab::runBatch(root / "badloop", {}, o);
+        TEST("batch convert: a source loop past the audio is refused (not clamped to the resampled end)",
+             r.items.size() == 1 && has(r.items[0].error, "loop"));
+    }
+
     // ── KMP Drum Kit report: nothing dropped or clamped is EXACT ──
     {
         Fmt m;

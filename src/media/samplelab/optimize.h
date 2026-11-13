@@ -140,6 +140,9 @@ inline constexpr uint64_t kMaxFrames = 1048576;
 inline constexpr uint64_t kResampleBudgetBytes = kMaxFrames * 2 * 2;   // stereo 16-bit at the frame limit: 4 MiB
 inline std::string resample(sound::Sample& s, uint32_t to) {
     if (to == s.rate || !s.channels) return "";
+    // The SOURCE loop must lie inside the source audio: an invalid one is refused here, never clamped or dropped (Codex r2).
+    if (s.looped && !(s.loopStart < s.loopEnd && s.loopEnd <= s.frames()))
+        return "smpl loop " + std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd) + " lies outside the " + std::to_string(s.frames()) + " frames";
     for (uint32_t r : {s.rate, to})
         if (r < kMinInputRate || r > kMaxInputRate)
             return "sample rate " + std::to_string(r) + " Hz outside " + std::to_string(kMinInputRate) + "-" + std::to_string(kMaxInputRate) + " Hz";
@@ -152,6 +155,10 @@ inline std::string resample(sound::Sample& s, uint32_t to) {
     if (outFrames * s.channels * 2 > kResampleBudgetBytes) return "resampling: output over the " + std::to_string(kResampleBudgetBytes) + "-byte budget";
     const double ratio = double(to) / s.rate, fc = 0.5 * std::min(1.0, ratio) * 0.97;   // cut-off in input cycles/frame
     const double want = double(outFrames);
+    // the loop scaled with the rate (rounded); a loop with no frames left is refused, before any work
+    const uint32_t loopA = uint32_t(std::llround(s.loopStart * ratio)), loopB = uint32_t(std::llround(s.loopEnd * ratio));
+    if (s.looped && !(loopA < loopB && loopB <= want))
+        return "smpl loop " + std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd) + " has no frames left at " + std::to_string(to) + " Hz";
     const long H = long(std::ceil(16 / fc));                                               // half width: 16 zero crossings
     const size_t n = s.frames(), m = size_t(want), ch = s.channels;
     const double kPi = 3.14159265358979323846;
@@ -170,11 +177,7 @@ inline std::string resample(sound::Sample& s, uint32_t to) {
         }
         for (size_t q = 0; q < ch; ++q) out[j * ch + q] = int16_t(std::clamp(std::lround(acc[q]), -32768L, 32767L));
     }
-    if (s.looped) {
-        s.loopStart = uint32_t(std::llround(s.loopStart * ratio));
-        s.loopEnd = std::min<uint32_t>(uint32_t(std::llround(s.loopEnd * ratio)), uint32_t(m));
-        if (s.loopEnd <= s.loopStart) s.looped = false;
-    }
+    if (s.looped) { s.loopStart = loopA; s.loopEnd = loopB; }
     s.pcm = std::move(out);
     s.rate = to;
     return "";

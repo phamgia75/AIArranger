@@ -51,11 +51,17 @@ inline std::string proposeDrumMap(const fs::path& dir, std::string* text, uint8_
     return "";
 }
 
+// Bounds checked per line BEFORE its audio is read (Codex r2): one line per key, and the WAV files of the whole map at
+// most kDrumKitBudgetBytes, so a pasted map cannot make the job load thousands of samples it must then refuse.
+inline constexpr uint64_t kDrumKitBudgetBytes = 128ull << 20;
+
 // The kit from `dir` and the drum map. notes (optional): the per-file format conversion (before -> after).
 inline std::string buildDrumKit(const fs::path& dir, const std::string& kitName, const std::string& map, sound::DrumKit* out, std::string* notes = nullptr) {
     sound::DrumKit kit;
     kit.name = kitName;
     std::map<std::string, size_t> group;   // name -> instruments index
+    std::map<int, int> keyLine;            // key -> the map line that took it
+    uint64_t budget = 0;                   // WAV bytes of the lines read so far
     std::istringstream is(map);
     int n = 0;
     std::string conv;
@@ -71,6 +77,8 @@ inline std::string buildDrumKit(const fs::path& dir, const std::string& kitName,
         const std::string at = "drum map line " + std::to_string(n) + ": ";
         const int key = sound::parseNote(t[0]);
         if (key < 0) return at + "starts with a key (C-1..G9, C4 = 60, or 0-127)";
+        if (auto [k, fresh] = keyLine.emplace(key, n); !fresh)
+            return at + "key " + std::to_string(key) + " (" + sound::noteName(key) + ") is already on line " + std::to_string(k->second) + " (one sample per key)";
         std::map<std::string, std::string> opt;
         size_t end = t.size();
         while (end > 1 && t[end - 1].find('=') != std::string::npos) {
@@ -108,6 +116,8 @@ inline std::string buildDrumKit(const fs::path& dir, const std::string& kitName,
         std::error_code ec;
         if (!fs::is_regular_file(fs::symlink_status(path, ec)) || fs::file_size(path, ec) > (16u << 20) || ec)
             return at + file + " is not a regular file of at most 16 MiB in " + dir.string();
+        if ((budget += fs::file_size(path, ec)) > kDrumKitBudgetBytes)
+            return at + "the kit's WAV files pass the " + std::to_string(kDrumKitBudgetBytes >> 20) + " MiB budget here; use fewer or shorter samples";
         std::ifstream f(path, std::ios::binary);
         const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         sound::Sample s;
