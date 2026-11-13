@@ -1111,6 +1111,11 @@ int main() {
             const auto mineBefore = bytesOf(root / "Mine.KST"), otherBefore = bytesOf(root / "Other.KST");
             lm.selectRow('A', 0);   // Hit.PDC: B has no PAD/USER01, so the copy makes that bank in B's copy
             lm.addStep(A::Copy);
+            lm.selectRow('B', 0);   // Kick.PDC: a rename staged, then undone; Execute must not run it (#55)
+            lm.value().setText("Kick2", true);
+            lm.addStep(A::Rename);
+            lm.value().setText("", true);
+            TEST("library history #55: the rename is staged, then undone before Execute", lm.plan().size() == 2 && (lm.undo(), lm.plan().size() == 1));
             waitLm(5000);
             TEST("library manager E8: a conflict-free plan is ready to execute", lm.plan().size() == 1 && lm.reportText().contains("Execute Plan: ready") &&
                  lm.unavailable(A::Execute).isEmpty());
@@ -1126,6 +1131,8 @@ int main() {
             TEST("library manager E8: result shown with its label and checks; Reveal available",
                  lm.reportText().contains("Plan executed into a NEW library") && lm.reportText().contains("file-level operation; not verified on a keyboard") &&
                  lm.reportText().contains("PASS  plan re-check") && lm.progressText().startsWith("Executed: ") && lm.unavailable(A::Reveal).isEmpty());
+            TEST("library history #55: the executed library is the plan shown after the undo (the undone rename is not in it)",
+                 !fs::exists(outLib / "PAD/USER09/Kick2.PDC") && lm.reportText().contains("1. copy A:PAD/USER01") && !lm.reportText().contains("2. rename"));
             TEST("library manager E8: both sources byte-identical after the execution", bytesOf(root / "Mine.KST") == mineBefore &&
                  bytesOf(root / "Other.KST") == otherBefore);
             lm.clearPlan();
