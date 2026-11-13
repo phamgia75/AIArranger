@@ -93,6 +93,12 @@ int main() {
     TEST("unknown op -> 2", run("edit " + q(in) + " --out " + q(bad) + " --op frobnicate") == 2);
     TEST("non-numeric value -> 2", run("edit " + q(in) + " --out " + q(bad) + " --op tempo --bpm fast") == 2);
 
+    TEST("single-element op without --section -> 2", run("edit " + q(in) + " --out " + q(bad) + " --op meter --num 3 --den 4") == 2);
+    const fs::path blocked = dir / "blocked.uasf";
+    writeBytes(dir / "blocked.uasf.tmp", {1, 2, 3});
+    TEST("existing temp path refused -> 1", run("edit " + q(in) + " --out " + q(blocked) + " --op tempo --bpm 90") == 1);
+    TEST("existing temp file left as it was", readBytes(dir / "blocked.uasf.tmp") == std::vector<uint8_t>({1, 2, 3}));
+
     const fs::path qz = dir / "q.uasf";
     TEST("edit quantize -> 0", run("edit " + q(in) + " --out " + q(qz) + " --op quantize --section 0 --track 1 --grid 1/16") == 0);
     TEST("quantized to the grid", load(qz).sections[0].tracks[1].events[0].tick == 0);

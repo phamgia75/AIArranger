@@ -91,8 +91,9 @@ bool loadStyle(const std::string& path, uasf::StyleDefinition& out) {
 
 // Never overwrites: refuses an existing path, writes a sibling temp file, renames.
 bool writeNew(const std::string& path, const std::vector<uint8_t>& bytes) {
-    if (fs::exists(path)) { std::cerr << path << " exists; refusing to overwrite\n"; return false; }
     const std::string tmp = path + ".tmp";
+    for (const auto& p : {path, tmp})
+        if (fs::exists(p)) { std::cerr << p << " exists; refusing to overwrite\n"; return false; }
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
@@ -153,6 +154,10 @@ EditResult runOp(StyleEditor& ed, const std::string& op, Args& a) {
     auto bad = [](std::string m) { return EditResult{false, std::move(m)}; };
     const size_t sec = static_cast<size_t>(a.num("section")), trk = static_cast<size_t>(a.num("track"));
     if (a.bad) return bad("bad option value");
+    // Ops on one element / track must name it (no silent default to 0).
+    for (const char* o : {"meter", "insert-note", "delete", "move", "copy-paste", "import-smf"})
+        if (op == o && (!a.has("section") || (op != "meter" && !a.has("track"))))
+            return bad(op + " needs --section" + (op == "meter" ? "" : " and --track"));
     if (op == "quantize") {
         if (!a.has("section")) return bad("quantize needs --section");
         if (sec >= ed.style().sections.size()) return bad("no section " + std::to_string(sec));

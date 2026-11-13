@@ -144,6 +144,26 @@ static void testQuantize() {
     Selection b; b.section = 0; b.track = 1;
     TEST("near-end quantize ok", end.quantize(b, 480, 100).ok);
     TEST("near-end note to 3360, not 3840", firstOn(end.style().sections[0].tracks[1], 45)->tick == 3360);
+
+    // Regression: a track the op does not change is left exactly as it was, even
+    // when it holds data an edit could not produce (a CC at the element end).
+    auto odd = makeStyle();
+    odd.sections[0].tracks[0].events.push_back({MidiEventType::ControlChange, 9, 7, 100, 3840});   // drum: on grid
+    StyleEditor oe(odd);
+    Selection whole; whole.section = 0;
+    TEST("quantize of a section keeps an unchanged track's odd CC",
+         oe.quantize(whole, 120, 100).ok && oe.style().sections[0].tracks[0].events.back().tick == 3840);
+    TEST("transpose skips the drum track and keeps its CC", oe.transpose(whole, 1).ok &&
+                                                            oe.style().sections[0].tracks[0].events.size() == 17);
+    auto odd2 = makeStyle();
+    odd2.sections[0].tracks[2].events.push_back({MidiEventType::ControlChange, 11, 7, 100, 3840});
+    StyleEditor oe2(odd2);
+    auto rq = oe2.quantize(whole, 120, 100);   // the chord track changes and holds the odd CC
+    TEST("a changed track with an event past the end is refused, not silently fixed",
+         !rq.ok && rq.error.find("past the element end") != std::string::npos);
+    StyleEditor ev(makeStyle());
+    TEST("non channel-voice event refused",
+         !ev.replaceTrackEvents(0, 1, {{MidiEventType::TimingClock, 0, 0, 0, 0}}, "x").ok);
 }
 
 static void testTranspose() {

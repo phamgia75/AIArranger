@@ -52,6 +52,8 @@ std::string finishTrack(std::vector<MidiEvent>& ev, uint64_t len) {
     for (size_t i = 0; i < ev.size(); ++i)
         if (isOn(ev[i]) && p[i] >= 0 && ev[p[i]].tick <= ev[i].tick) ev[p[i]].tick = ev[i].tick + 1;
     for (auto& e : ev) {
+        const auto type = static_cast<uint8_t>(e.type);
+        if (type < 0x80 || type >= 0xF0) return "not a channel voice event";
         if (e.data1 > 127 || e.data2 > 127) return "data byte above 127";
         if (isOff(e)) e.tick = std::min(e.tick, len);
         else if (e.tick >= len)
@@ -170,12 +172,14 @@ EditResult StyleEditor::quantize(const Selection& sel, uint32_t grid, uint32_t s
                 delta[i] = d;
                 if (p[i] >= 0) delta[p[i]] = d;
             }
+            bool touched = false;
             for (size_t i = 0; i < ev.size(); ++i) {
                 if (!delta[i]) continue;
                 ev[i].tick = static_cast<uint64_t>(static_cast<int64_t>(ev[i].tick) + delta[i]);
                 if (isOn(ev[i])) ++r.changed;
+                touched = true;
             }
-            return finishTrack(ev, len);
+            return touched ? finishTrack(ev, len) : std::string();   // untouched tracks stay as they are
         });
     });
 }
@@ -201,7 +205,8 @@ EditResult StyleEditor::transpose(const Selection& sel, int semis) {
                 ev[i].data1 = static_cast<uint8_t>(n);
                 if (isOn(ev[i])) ++r.changed;
             }
-            return finishTrack(ev, sectionLengthTicks(sec));
+            const bool touched = std::find(hit.begin(), hit.end(), true) != hit.end();
+            return touched ? finishTrack(ev, sectionLengthTicks(sec)) : std::string();
         });
     });
 }
