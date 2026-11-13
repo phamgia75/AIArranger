@@ -201,7 +201,8 @@ Only documented behaviour is used, with no PA Manager code and no decoding of pr
    ```
 
    Rules: no mutating calls; every edge carries its `Source`; `closure()` defaults to PA Manager's observed Copy Options defaults; dedup against a target (PA Manager's "reMap to an existing Sound if a Duplicate is found") is a separate, later merge-*plan* step, not part of the graph; `closure()` feeds a future memory estimate over **unique** samples and a future merge *plan* (no writes). Implementation waits for P1.10; writing this code now would only produce an empty graph.
-4. **Write / merge:** not planned. If it ever is, it must reproduce the §4 semantics (grid positions, Replace All vs merge, the User Sample deletion rule).
+4. **Write / merge:** superseded by owner decision D13 (2026-11-13): native KST writing is a strategic objective, built
+   only on documented or owner-observed semantics; staged plan in `docs/research/pa-studio/PA5X_KST_WRITER_ROADMAP.md` §2. In any case it must reproduce the §4 semantics (grid positions, Replace All vs merge, the User Sample deletion rule).
 
 Parser feasibility plan, gates and oracle: `KST_PARSER_FEASIBILITY.md`.
 
