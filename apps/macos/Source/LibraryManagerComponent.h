@@ -3,11 +3,12 @@
 // Library Workspace > Library Manager (E7): two read-only libraries side by side (a Pa5X KST folder or a Pa-family SET
 // folder each), one search box over both, and four views: item Details (with evidenced dependencies only), Compare
 // (file level), Duplicates (SHA-256 files; names flagged as name-only) and Plan (staged copy / move / rename / bank
-// swap steps with their conflicts and warnings). Plans are EXPORT-ONLY documents written as a new local folder; no
-// keyboard file is ever written. Every unavailable action shows its reason next to it. Loading, comparing and
+// swap steps with their conflicts and warnings). Plans are EXPORT-ONLY documents written as a new local folder by an
+// export job (E6: the studio's queue, both libraries as its sources); no keyboard file is ever written. Every unavailable action shows its reason next to it. Loading, comparing and
 // exporting run on worker threads; nothing here touches MIDI or audio.
 
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "jobs/export_job.h"
 #include "library/latest_worker.h"
 #include "library/library_plan.h"
 
@@ -24,13 +25,16 @@ public:
 
     // What the buttons do; also driven by the UI smoke test.
     void openLibrary(char side, const juce::File& dir);   // asynchronous, read-only; busy() until it lands
-    bool busy() const { return jobs_ > 0; }
+    bool busy() const { return working(); }
+    void stopWork();                                       // quit: a running library scan and the view report stop early
     uint64_t reportRequests() const { return reportGen_; }   // report requests so far (each recompute or drop counts one)
     bool computing() const { return deliveredGen_ != reportGen_; }   // the visible view's report is still being computed off the message thread
     void selectRow(char side, int row);                    // a row of that pane's (filtered) list
     void showView(View v);                                 // Compare is asynchronous
     void addStep(Action a);                                // Copy, Move, Rename or SwapBanks from the current selection
-    void exportPlan(const juce::File& dest);               // asynchronous: a NEW local folder (plan.json, PLAN.txt)
+    void exportPlan(const juce::File& dest);               // an export job: a NEW local folder (plan.json, PLAN.txt)
+    // Set by the studio: queues an export job, `done` runs on the message thread once it has finished. Returns its id.
+    std::function<uint64_t(jobs::ExportSpec, std::function<void(const jobs::JobState&)> done)> enqueueJob;
     juce::String unavailable(Action a) const;              // "" when it can run now
 
     juce::TextEditor& search() { return search_; }
@@ -77,7 +81,10 @@ private:
     juce::TextButton *openA_ = nullptr, *openB_ = nullptr, *details_ = nullptr;
     juce::TextEditor search_, value_, report_;
     juce::Label hint_;
+    bool working() const { return jobs_ > 0 || planJob_ != 0; }
     int jobs_ = 0;   // message thread only
+    uint64_t planJob_ = 0;   // the plan export job in the studio's queue, until it has landed (message thread)
+    std::shared_ptr<std::atomic<bool>> stop_ = std::make_shared<std::atomic<bool>>(false);   // stopWork(): the running scan
     uint64_t reportGen_ = 0, deliveredGen_ = 0;   // newest report request / the one shown; older results are dropped (message thread)
     uint64_t planRev_ = 0;       // bumped on every plan edit: the Plan view's input
     std::string shownKey_;       // inputs of the report on screen; the same inputs are not recomputed

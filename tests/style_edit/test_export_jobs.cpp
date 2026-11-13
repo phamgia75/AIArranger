@@ -364,6 +364,33 @@ int main() {
         TEST("queue: the job cancelled by destruction published nothing", !fs::exists(root / "q4.uasf"));
     }
 
+    // ── Library Manager plan (E7) as a job: D18 covers both libraries, EXPORT-ONLY, L1 only ──
+    {
+        put(root / "LibA.KST/STYLE/USER01/Ballad.STG", "s");
+        put(root / "LibB.KST/STYLE/USER02/Waltz.STG", "w");
+        const auto A = std::make_shared<const library::Library>(library::load(root / "LibA.KST"));
+        const auto B = std::make_shared<const library::Library>(library::load(root / "LibB.KST"));
+        const std::vector<library::Step> plan = {{library::Op::Copy, 'A', 0, "", -1, ""}};
+        TEST("plan job: both libraries loaded", A->ok && B->ok && A->items.size() == 1);
+        const auto stamp = fs::last_write_time(root / "LibA.KST/STYLE/USER01/Ballad.STG");
+        for (const auto& [lib, where] : {std::pair{"A", root / "LibA.KST/plans/p"}, std::pair{"B", root / "LibB.KST/STYLE/new/p"}}) {
+            const auto st = run(libraryPlan(A, B, plan, where));
+            TEST((std::string("plan export into a folder inside library ") + lib + " is refused").c_str(),
+                 st.phase == Phase::Failed && st.stoppedAt == Phase::Destination && has(st.reason, "overlaps the job's source") &&
+                 !fs::exists(where) && !fs::exists(media::incompletePath(where)) && !fs::exists(where.parent_path()));
+        }
+        const auto st = run(libraryPlan(A, B, plan, root / "My Plan"));
+        TEST("plan job: published with plan.json + PLAN.txt, report beside it", st.phase == Phase::Done && fs::is_regular_file(root / "My Plan/plan.json") &&
+             fs::is_regular_file(root / "My Plan/PACKAGE.sha256") && fs::is_regular_file(root / "My Plan.export.md") && !fs::exists(root / "My Plan.INCOMPLETE"));
+        TEST("plan job: L1 passed, L2 not applicable, never L3", st.level.l1.state == Check::Passed && st.level.l2.state == Check::NotRun &&
+             has(st.level.l2.detail, "plan document") && st.level.l3.state == Check::NotRun);
+        TEST("plan job: the writer report says EXPORT-ONLY", has(st.writerText, "EXPORT-ONLY"));
+        TEST("plan job: an existing plan folder is refused", run(libraryPlan(A, B, plan, root / "My Plan")).phase == Phase::Failed);
+        TEST("plan job: an empty plan is refused", has(run(libraryPlan(A, B, {}, root / "Empty Plan")).reason, "no steps"));
+        TEST("plan job: the libraries are unchanged", fs::last_write_time(root / "LibA.KST/STYLE/USER01/Ballad.STG") == stamp &&
+             !fs::exists(root / "LibA.KST/plans"));
+    }
+
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

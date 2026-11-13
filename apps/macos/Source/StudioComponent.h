@@ -46,8 +46,9 @@ public:
     void runValidator(Validator v);               // asynchronous; busy() until it lands
     void attachL3Record(const juce::File& record);
     juce::String validatorUnavailable(Validator v) const;   // "" when it can run now
-    bool busy() const {   // a finished export job counts until it has landed on its page (message thread)
-        return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; });
+    bool busy() const {   // a finished export job counts until it has landed on its page (message thread); also the Library Manager
+        return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; }) ||
+               manager_.busy() || manager_.computing();
     }
 
     // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.
@@ -78,6 +79,12 @@ public:
     // The app's quit request: with unwritten Style edits it shows the same choice on the Style page and returns false
     // (quit runs later, after Save or Discard; Cancel aborts it). Clean: quit runs now and it returns true.
     bool requestQuit(std::function<void()> quit);
+    // Quit while work runs (export jobs running or queued, a read or check, a Library Manager scan or report): the Import /
+    // Export page asks. Wait quits once everything has finished; Cancel Jobs and Quit cancels every job (a cancelled job
+    // leaves only NAME.INCOMPLETE, D17) and stops the library work, then quits once all has stopped; Keep Working aborts.
+    enum class WorkChoice { Wait, CancelJobsAndQuit, KeepWorking };
+    void resolveRunningWork(WorkChoice c);
+    bool workPromptShown() const { return pendingWorkQuit_ != nullptr; }
     bool styleUndo();
     bool styleRedo();
     void importSmfTrack(const juce::File& mid);
@@ -188,6 +195,12 @@ private:
     ui::studio::StyleStudioModel style_;
     std::string sff1Report_;
     juce::File pendingStyle_;   // asked to open while the open Style has unwritten edits
+    std::function<void()> pendingWorkQuit_;   // the app asked to quit while work runs (workPromptShown)
+    bool quitWhenIdle_ = false;               // Wait or Cancel Jobs and Quit chosen: polled until busy() is false
+    juce::Label* workStatus_ = nullptr;
+    juce::TextButton *waitQuitBtn_ = nullptr, *cancelQuitBtn_ = nullptr, *keepWorkingBtn_ = nullptr;
+    bool quitIfStyleWritten(std::function<void()> quit);   // the unwritten-Style check (b80f49a)
+    void quitWhenIdle();
     std::function<void()> pendingQuit_;   // the app asked to quit while the open Style has unwritten edits
     void askUnsaved(const juce::String& what, const juce::String& then);
     juce::TextButton *pendSave_ = nullptr, *pendDiscard_ = nullptr, *pendCancel_ = nullptr;

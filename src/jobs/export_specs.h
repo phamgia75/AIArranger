@@ -8,6 +8,7 @@
 // by value or as immutable snapshots, so a job never touches state the UI keeps editing.
 
 #include "jobs/export_job.h"
+#include "library/library_plan.h"
 #include "media/sound/package_graph.h"
 #include "ui/sound/sound_conversion_model.h"
 #include "ui/studio/studio_tools.h"
@@ -254,6 +255,40 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
                            : ui::studio::Level{Check::Failed, "files do not match the backup manifest"};
         v.l2 = {Check::NotRun, "not applicable: no Pa5X KST reader (container UNKNOWN)"};
         return std::pair<Verification, std::string>{v, bad.empty() ? "Backup verified against " + media::backupManifestPath(out).string() : bad};
+    };
+    return s;
+}
+
+// Library Manager plan (E7, EXPORT-ONLY): plan.json + PLAN.txt as a new folder. Both libraries are sources, so the D18
+// overlap check refuses a plan folder that is, contains or lies inside either one before anything is created.
+inline ExportSpec libraryPlan(std::shared_ptr<const library::Library> A, std::shared_ptr<const library::Library> B, std::vector<library::Step> plan,
+                              fs::path dest) {
+    ExportSpec s;
+    s.type = "Library plan (EXPORT-ONLY)";
+    s.source = "A: " + (A ? A->root : std::string()) + ", B: " + (B ? B->root : std::string());
+    if (A && B) s.sources = {A->root, B->root};
+    s.dest = std::move(dest);
+    s.validate = [A, B, n = plan.size()] {
+        if (!A || !B || !A->ok || !B->ok) return std::string("refusing: a plan needs a library open on both sides");
+        return n ? std::string() : std::string("refusing: the plan has no steps");
+    };
+    s.dependencies = [](auto& notes, auto&) {
+        notes.push_back("EXPORT-ONLY: a plan document; both libraries are only read and no keyboard file is written");
+        return std::vector<std::string>{};
+    };
+    s.preview = [] { return std::vector<OutFile>{{"plan.json, PLAN.txt, PACKAGE.sha256", 65536, "", false}}; };
+    s.write = [A, B, plan](const fs::path& out, auto&) {
+        const auto e = library::exportPlan(*A, *B, plan, out);
+        return e.empty() ? WriteResult{"", library::planReport(*A, *B, plan, library::evaluate(*A, *B, plan))} : WriteResult{"Plan NOT written: " + e, ""};
+    };
+    s.verify = [](const fs::path& out) {
+        const auto c = snd::verifyPackage(out);
+        Verification v;
+        v.l1 = st::fromPackageCheck(c).l1;
+        v.l2 = {Check::NotRun, "not applicable: a plan document"};
+        return std::pair<Verification, std::string>{v, v.l1.state == Check::Passed ? "L1: plan.json and PLAN.txt match PACKAGE.sha256. L2 not applicable "
+                                                                                     "(a plan document). L3 never: nothing for the keyboard was written."
+                                                                                   : c.text};
     };
     return s;
 }

@@ -1,4 +1,5 @@
 #include "LibraryManagerComponent.h"
+#include "jobs/export_specs.h"
 #include <thread>
 
 namespace ai_arranger::app {
@@ -134,14 +135,14 @@ void LibraryManagerComponent::chooseFolder(const juce::String& title, std::funct
 }
 
 void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
-    if (jobs_ > 0) return;
+    if (working()) return;
     ++jobs_;
     auto& p = pane(side);
     p.header.setText(juce::String("Library ") + side + ": reading " + dir.getFullPathName() + " (read-only)...", juce::dontSendNotification);
     refresh();
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, side, d = dir.getFullPathName().toStdString()] {
-        auto L = std::make_shared<const lib::Library>(lib::load(d, [alive] { return !alive.expired(); }));
+    std::thread([this, alive, stop = stop_, side, d = dir.getFullPathName().toStdString()] {
+        auto L = std::make_shared<const lib::Library>(lib::load(d, [alive, stop] { return !alive.expired() && !*stop; }));
         juce::MessageManager::callAsync([this, alive, side, L] {
             if (alive.expired()) return;
             --jobs_;
@@ -187,7 +188,7 @@ juce::String LibraryManagerComponent::paneText(char side) const {
 juce::String LibraryManagerComponent::headerText(char side) const { return pane(side).header.getText(); }
 
 juce::String LibraryManagerComponent::unavailable(Action a) const {
-    if (jobs_ > 0) return "Needs: the running job to finish";
+    if (working()) return "Needs: the running job to finish";
     const auto& act = pane(active_);
     const auto& other = pane(active_ == 'A' ? 'B' : 'A');
     switch (a) {
@@ -254,25 +255,37 @@ void LibraryManagerComponent::showView(View v) {
 
 void LibraryManagerComponent::exportPlan(const juce::File& dest) {
     if (unavailable(Action::Export).isNotEmpty() || !a_.lib || !b_.lib) return;
-    ++jobs_;
     view_ = View::Plan;
-    report_.setText("Writing the plan folder " + dest.getFullPathName() + "...", false);
-    refresh();
+    if (!enqueueJob) { report_.setText("Plan NOT written: no export job queue.\nNothing was written to either library.", false); return; }
+    const juce::String d = dest.getFullPathName();
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, A = a_.lib, B = b_.lib, plan = plan_, d = dest.getFullPathName().toStdString()] {
-        const auto err = lib::exportPlan(*A, *B, plan, d);
-        auto text = std::make_shared<std::string>(
-            err.empty() ? "Plan written: " + d + "\n\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3   L1: plan.json and PLAN.txt match PACKAGE.sha256. "
-                          "L2 not applicable (a plan document). L3 never: nothing for the keyboard was written.\n"
-                          "EXPORT-ONLY: carry the steps out on the keyboard, then check with Compare.\n\n" + lib::planReport(*A, *B, plan, lib::evaluate(*A, *B, plan))
-                        : "Plan NOT written: " + err + "\nNothing was written to either library.");
-        juce::MessageManager::callAsync([this, alive, text] {
-            if (alive.expired()) return;
-            --jobs_;
-            refresh(false);   // keep the export result: no view report replaces it
-            report_.setText(u8(*text), false);
-        });
-    }).detach();
+    // E6 job: D18 refuses an output in or around either library, staged + verified before one publish, report beside it
+    planJob_ = UINT64_MAX;   // queued; `done` may already run inside enqueueJob when the job finishes at once
+    const auto id = enqueueJob(jobs::libraryPlan(a_.lib, b_.lib, plan_, d.toStdString()), [this, alive](const jobs::JobState& j) {
+        if (alive.expired()) return;
+        if (j.id == planJob_ || planJob_ == UINT64_MAX) planJob_ = 0;
+        refresh(false);   // keep the export result: no view report replaces it
+        const auto badge = u8(ui::studio::badgeLine(j.level));
+        report_.setText(j.phase == jobs::Phase::Done
+                            ? "Plan written: " + u8(j.dest) + "\n" + badge + "   " + u8(j.verifyText) + "\nExport job #" + juce::String(j.id) +
+                                  ", report: " + u8(j.reportPath) + "\nEXPORT-ONLY: carry the steps out on the keyboard, then check with Compare.\n\n" + u8(j.writerText)
+                            : "Plan NOT written: " + u8(j.reason) + "\n(export job #" + juce::String(j.id) + " " + jobs::phaseName(j.phase) + " at " +
+                                  jobs::phaseName(j.stoppedAt) + ")\nNothing was written to either library.",
+                        false);
+    });
+    if (planJob_ == 0) return;   // already landed
+    planJob_ = id;
+    report_.setText("Plan export queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + d, false);
+    refresh(false);
+}
+
+void LibraryManagerComponent::stopWork() {
+    stop_->store(true);   // the running scan stops at its next check and lands as "not opened"
+    stop_ = std::make_shared<std::atomic<bool>>(false);
+    ++reportGen_;         // the view report in flight is dropped; an empty job makes it stale so its loops stop
+    deliveredGen_ = reportGen_;
+    shownKey_.clear();
+    reports_.submit([](const std::function<bool()>&) {});
 }
 
 // The report text of the Details, Duplicates and Plan views, from immutable snapshots: runs on a worker thread.
@@ -304,9 +317,9 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
 
 void LibraryManagerComponent::refresh(bool report) {
     for (auto& [a, b] : actions_) setUnavailable(*b, unavailable(a));
-    setUnavailable(*openA_, jobs_ > 0 ? "Needs: the running job to finish" : "");
-    setUnavailable(*openB_, jobs_ > 0 ? "Needs: the running job to finish" : "");
-    if (jobs_ > 0 || !report || view_ == View::Compare) {   // a job (or Compare) writes the report when it lands
+    setUnavailable(*openA_, working() ? "Needs: the running job to finish" : "");
+    setUnavailable(*openB_, working() ? "Needs: the running job to finish" : "");
+    if (working() || !report || view_ == View::Compare) {   // a job (or Compare) writes the report when it lands
         ++reportGen_;               // drop any report still in flight
         deliveredGen_ = reportGen_;
         shownKey_.clear();          // the text no longer shows a view report: the next one is recomputed

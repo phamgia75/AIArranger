@@ -181,6 +181,12 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     rerunBtn_ = &button("Move Leftover Aside and Re-run", [this] { rerunJobCleaning(); });
     ioPage_.rows.push_back({{&label("JOBS  (run one at a time in the order added; this window never waits for them)", kAccent), 0}});
     ioPage_.rows.push_back({{&jobPick_, 300}, {cancelJobBtn_, 100}, {reportBtn_, 110}, {rerunBtn_, 200}});
+    workStatus_ = &label("", kPending);
+    waitQuitBtn_ = &button("Wait, then Quit", [this] { resolveRunningWork(WorkChoice::Wait); });
+    cancelQuitBtn_ = &button("Cancel Jobs and Quit", [this] { resolveRunningWork(WorkChoice::CancelJobsAndQuit); });
+    keepWorkingBtn_ = &button("Keep Working", [this] { resolveRunningWork(WorkChoice::KeepWorking); });
+    ioPage_.rows.push_back({{workStatus_, 0}});
+    ioPage_.rows.push_back({{waitQuitBtn_, 150}, {cancelQuitBtn_, 170}, {keepWorkingBtn_, 120}});
     ioPage_.fill = &jobView_;
     ioPage_.addAndMakeVisible(jobView_);
     queue_ = std::make_unique<jobs::JobQueue>([this, alive = std::weak_ptr<bool>(alive_), posted = jobsPosted_] {
@@ -191,6 +197,8 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         });
     });
     for (auto& row : ioPage_.rows) for (auto& [c, w] : row) ioPage_.addAndMakeVisible(c);
+    for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
+    manager_.enqueueJob = [this](jobs::ExportSpec spec, std::function<void(const jobs::JobState&)> done) { return enqueue(std::move(spec), nullptr, std::move(done)); };
 
     // ── Sample Lab › Quality Report (the Convert Sound recipe with its measured QUALITY section) ──
     styleText(quality_);
@@ -525,6 +533,61 @@ void StudioComponent::openStyle(const juce::File& sty) {
 }
 
 bool StudioComponent::requestQuit(std::function<void()> quit) {
+    if (pendingWorkQuit_) { pendingWorkQuit_ = std::move(quit); return false; }   // already asking (or waiting)
+    if (!busy()) return quitIfStyleWritten(std::move(quit));
+    int n = 0;
+    for (const auto& j : queue_->snapshot()) n += !jobs::finished(j.phase);
+    juce::StringArray what;
+    if (n) what.add(juce::String(n) + " export job(s) running or queued");
+    if (manager_.busy() || manager_.computing()) what.add("a Library Manager scan, report or plan");
+    if (jobs_ > 0 || what.isEmpty()) what.add("a read or check in progress");
+    pendingWorkQuit_ = std::move(quit);
+    showDomain(Domain::ImportExport);
+    workStatus_->setText("Still running: " + what.joinIntoString(", ") + ". Quit AI Arranger anyway? Wait for it, cancel the jobs, or keep working.",
+                         juce::dontSendNotification);
+    for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(true);
+    return false;
+}
+
+void StudioComponent::resolveRunningWork(WorkChoice c) {
+    if (!pendingWorkQuit_) return;
+    if (c == WorkChoice::KeepWorking) {
+        pendingWorkQuit_ = nullptr;
+        quitWhenIdle_ = false;
+        for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
+        workStatus_->setText("Quit cancelled: the work keeps running.", juce::dontSendNotification);
+        return;
+    }
+    if (c == WorkChoice::CancelJobsAndQuit) {
+        const auto all = queue_->snapshot();   // newest first: a queued job is cancelled before the running one can end and free the worker
+        for (auto j = all.rbegin(); j != all.rend(); ++j) if (!jobs::finished(j->phase)) queue_->cancel(j->id);
+        manager_.stopWork();
+        workStatus_->setText("Cancelling: a cancelled job stops at its next check and leaves only NAME.INCOMPLETE (never deleted); nothing is "
+                             "published half-way. The app quits once everything has stopped.", juce::dontSendNotification);
+    } else {
+        workStatus_->setText("Waiting for the running work to finish; the app quits then.", juce::dontSendNotification);
+    }
+    waitQuitBtn_->setVisible(false);
+    const bool polling = quitWhenIdle_;
+    quitWhenIdle_ = true;
+    if (!polling) quitWhenIdle();
+}
+
+void StudioComponent::quitWhenIdle() {
+    if (!quitWhenIdle_ || !pendingWorkQuit_) return;
+    if (busy()) {
+        juce::Timer::callAfterDelay(50, [this, alive = std::weak_ptr<bool>(alive_)] { if (!alive.expired()) quitWhenIdle(); });
+        return;
+    }
+    auto quit = std::move(pendingWorkQuit_);
+    pendingWorkQuit_ = nullptr;
+    quitWhenIdle_ = false;
+    for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
+    workStatus_->setText("", juce::dontSendNotification);
+    quitIfStyleWritten(std::move(quit));
+}
+
+bool StudioComponent::quitIfStyleWritten(std::function<void()> quit) {
     if (!style_.dirty()) { quit(); return true; }
     pendingStyle_ = juce::File();
     pendingQuit_ = std::move(quit);

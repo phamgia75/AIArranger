@@ -900,6 +900,12 @@ int main() {
             waitLm(5000);
             TEST("library manager: a conflicting step is shown as a conflict", lm.plan().size() == 2 && lm.reportText().contains("CONFLICT") &&
                  lm.reportText().contains("BLOCKED"));
+            for (const auto& lib : {"Mine.KST", "Other.KST"}) {   // D18 through the job: both libraries are the plan job's sources
+                lm.exportPlan(juce::File((root / lib / "plans/p").string()));
+                waitLm(5000);
+                TEST((std::string("library manager: plan export into a folder inside library ") + (lib[0] == 'M' ? "A" : "B") + " is refused").c_str(),
+                     lm.reportText().contains("Plan NOT written") && lm.reportText().contains("overlaps the job's source") && !fs::exists(root / lib / "plans"));
+            }
             lm.exportPlan(juce::File("/Volumes/AIA-NO-SUCH-STICK/plan"));
             waitLm(5000);
             TEST("library manager: export onto a mounted volume refused", lm.reportText().contains("Plan NOT written") && lm.reportText().contains("mounted volume"));
@@ -909,6 +915,13 @@ int main() {
             TEST("library manager: plan folder written at L1 only, EXPORT-ONLY", fs::is_regular_file(root / "My Plan/plan.json") &&
                  fs::is_regular_file(root / "My Plan/PACKAGE.sha256") && lm.reportText().contains(juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3")) &&
                  lm.reportText().contains("EXPORT-ONLY"));
+            {
+                const auto all = st.jobList();
+                TEST("library manager: the plan export ran as an export job (E6 queue, report beside it)",
+                     std::any_of(all.begin(), all.end(), [&](const jobs::JobState& j) {
+                         return j.type == "Library plan (EXPORT-ONLY)" && j.phase == jobs::Phase::Done && j.dest == (root / "My Plan").string(); }) &&
+                     fs::is_regular_file(root / "My Plan.export.md") && !fs::exists(root / "My Plan.INCOMPLETE"));
+            }
             lm.exportPlan(juce::File((root / "My Plan").string()));
             waitLm(5000);
             TEST("library manager: an existing plan folder is never overwritten", lm.reportText().contains("already exists"));
@@ -1224,6 +1237,57 @@ int main() {
             st.openStyle(juce::File((root / "invalid.uasf").string()));
             TEST("C3 studio: invalid Style not editable, validator named, the open Style unchanged",
                  st.styleStatus().startsWith("Not editable") && st.styleStatus().contains("UASF validator") && fs::equivalent(st.styleModel().path(), root / "kept.uasf"));
+
+            {   // Quit while work runs (export jobs, Library Manager scans/reports): Wait / Cancel Jobs and Quit / Keep Working
+                using W = app::StudioComponent::WorkChoice;
+                using EJ = app::StudioComponent::ExportJob;
+                auto job = [&](uint64_t id) { for (const auto& j : st.jobList()) if (j.id == id) return j; return jobs::JobState{}; };
+                int wq = 0;
+                auto wfn = [&wq] { ++wq; };
+                auto& io = st.page(D::ImportExport);
+                st.manager().openLibrary('A', juce::File((root / "Mine.KST").string()));
+                TEST("quit: a library scan running counts as busy", st.busy() && st.manager().busy());
+                TEST("quit: work running -> deferred, the job page asks Wait / Cancel Jobs and Quit / Keep Working",
+                     !st.requestQuit(wfn) && wq == 0 && st.workPromptShown() && st.domain() == D::ImportExport &&
+                     find<juce::Button>(io, "Wait, then Quit")->isVisible() && find<juce::Button>(io, "Cancel Jobs and Quit")->isVisible() &&
+                     find<juce::Button>(io, "Keep Working")->isVisible());
+                st.resolveRunningWork(W::KeepWorking);
+                waitIdle(5000);
+                pump(200);
+                TEST("quit: Keep Working aborts the quit; the work still finishes", wq == 0 && !st.workPromptShown() && !st.busy() &&
+                     !find<juce::Button>(io, "Keep Working")->isVisible());
+                st.manager().openLibrary('A', juce::File((root / "Mine.KST").string()));
+                st.requestQuit(wfn);
+                st.resolveRunningWork(W::Wait);
+                TEST("quit: Wait does not quit while the work runs", wq == 0 && st.workPromptShown());
+                waitIdle(5000);
+                pump(300);
+                TEST("quit: Wait quits once the work has finished", wq == 1 && !st.workPromptShown() && st.manager().headerText('A').contains("2 items"));
+                // a job that runs until it is cancelled (its writer polls the job's cancel check), and a job queued behind it
+                jobs::ExportSpec slow;
+                slow.type = "test: runs until cancelled";
+                slow.dest = root / "quit-slow";
+                slow.write = [](const fs::path& out, const std::function<bool(double)>& progress) {
+                    fs::create_directories(out);
+                    while (progress(0.5)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    return jobs::WriteResult{"stopped: cancelled", ""};
+                };
+                const auto j1 = st.manager().enqueueJob(slow, {});
+                const auto j2 = st.exportJob(EJ::SoundPackage, juce::File((root / "quit-pkg2").string()));
+                pump(100);
+                TEST("quit: export jobs running or queued -> deferred", j1 > 0 && j2 > 0 && job(j1).phase == jobs::Phase::Run &&
+                     job(j2).phase == jobs::Phase::Queued && !st.requestQuit(wfn) && wq == 1);
+                st.resolveRunningWork(W::CancelJobsAndQuit);
+                TEST("quit: Cancel Jobs and Quit waits for the jobs to stop", wq == 1);
+                waitIdle(30000);
+                pump(300);
+                TEST("quit: Cancel Jobs and Quit cancels every job, then quits", wq == 2 && !st.workPromptShown() &&
+                     job(j1).phase == jobs::Phase::Cancelled && job(j2).phase == jobs::Phase::Cancelled);
+                TEST("quit: a cancelled job leaves only NAME.INCOMPLETE, nothing published (D17)", !fs::exists(root / "quit-slow") &&
+                     fs::is_directory(root / "quit-slow.INCOMPLETE") && !fs::exists(root / "quit-pkg2") && !fs::exists(root / "quit-pkg2.INCOMPLETE"));
+                TEST("quit: idle -> quits at once, no work prompt", !st.busy() && st.requestQuit(wfn) && wq == 3 && !st.workPromptShown());
+                st.setValidationTarget(juce::File());   // the quit jobs' output is not a target the Validation checks below expect
+            }
 
             // App quit (Cmd-Q / menu Quit / main window close): clean quits at once; unwritten edits ask first, Cancel aborts
             int quits = 0;
