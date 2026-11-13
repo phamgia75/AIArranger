@@ -11,6 +11,7 @@
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/serializer.h"
 #include "jobs/export_specs.h"
+#include "jobs/import_kit.h"
 #include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
@@ -1189,6 +1190,22 @@ int main() {
                  fs::is_regular_file(pkgDest / "PACKAGE.sha256") && fs::is_regular_file(root / "pkg-job.export.md") &&
                  fs::is_regular_file(root / "pkg-job.export.json") && !fs::exists(root / "pkg-job.INCOMPLETE") &&
                  pj.level.l1.state == ui::studio::Check::Passed && pj.level.l2.state == ui::studio::Check::Passed && pj.level.l3.state == ui::studio::Check::NotRun);
+            {   // E9: the Pa5X Import Kit from a folder of outputs, as an export job
+                fs::create_directories(root / "kit-src");
+                fs::copy(pkgDest, root / "kit-src" / "pkg-job", fs::copy_options::recursive);
+                TEST("kit: the Pa5X Import Kit route is offered", find<juce::Button>(io, "Pa5X Import Kit...") != nullptr &&
+                     find<juce::Label>(io, "Sound/Drum Kit packages, KMP folders and Style SMFs in one USB folder") != nullptr);
+                const auto kid = st.importKitJob(juce::File((root / "kit-src").string()), juce::File((root / "kit-job").string()));
+                waitIdle(30000);
+                const auto kj = job(kid);
+                std::ifstream md(root / "kit-job/KIT.md");
+                const std::string kitMd{std::istreambuf_iterator<char>(md), {}};
+                TEST("kit: done off the message thread, member in SOUNDS, KIT.md labelled, L1 passed, never L3", kid > 0 && kj.phase == P::Done &&
+                     kj.writerThread != jobs::thisThread() && fs::is_directory(root / "kit-job/SOUNDS/pkg-job") &&
+                     jobs::kit::lastListingThread.load() == kj.writerThread &&   // the outputs folder was listed by the job's worker, not the UI
+                     kitMd.find("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X") != std::string::npos && kj.level.l1.state == ui::studio::Check::Passed &&
+                     kj.level.l3.state == ui::studio::Check::NotRun && !fs::exists(root / "kit-job.INCOMPLETE"));
+            }
             TEST("jobs: the job list shows the job, its level and its report path", st.jobListText().contains("#" + juce::String(int(id)) + "  Sound package  done") &&
                  st.jobListText().contains("pkg-job.export.md") && st.jobsText().contains("Sound package  done"));
             st.selectJob(id);

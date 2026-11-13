@@ -333,6 +333,9 @@ add_test(NAME test_kmp_cli   # EXPERIMENTAL KMP/KSF writer: demo -> KMP folder -
          COMMAND sh -c "rm -rf kmp-demo kmp-back && $<TARGET_FILE:aiarranger-sound> kmp --source demo --out kmp-demo | grep -q 'EXPERIMENTAL. Verification level L1' && $<TARGET_FILE:aiarranger-sound> kronos --in kmp-demo --name 'AIA Demo Organ' --layers 'AIA Organ Soft,AIA Organ Bright' --splits 90 --out kmp-back >/dev/null && ! $<TARGET_FILE:aiarranger-sound> kmp --source drums --out kmp-drums 2>/dev/null && test ! -e kmp-drums"
          WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 add_test(NAME test_sound_cli_volumes COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_sound_cli_volumes.sh ${CMAKE_BINARY_DIR})   # mounted volumes refused by every writer
+add_executable(aiarranger-kit tools/aiarranger_kit.cpp)   # Pa5X Import Kit E9: documented imports into a new folder
+target_link_libraries(aiarranger-kit style-edit importer-sff1)
+add_test(NAME test_kit_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_kit_cli.sh ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
 add_executable(aiarranger-samplelab tools/aiarranger_samplelab.cpp)   # Sample Lab E4, offline; writes only to a new folder
 target_include_directories(aiarranger-samplelab PRIVATE src)
 add_test(NAME test_samplelab_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_samplelab_cli.sh ${CMAKE_BINARY_DIR})
