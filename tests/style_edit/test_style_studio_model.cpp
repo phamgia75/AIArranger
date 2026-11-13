@@ -52,7 +52,8 @@ int main() {
     // ── SMF track import ──
     const fs::path mid = root / "ours.mid";
     Verification lvl;
-    TEST("Style SMF export written", m.exportSmf(mid, &lvl).empty() && fs::is_regular_file(mid) && !m.dirty());
+    // Codex r4 #1: an SMF does not keep every edit (element names, track roles): the edits stay unwritten until Save UASF
+    TEST("Style SMF export written; the edits stay unwritten (SMF is lossy)", m.exportSmf(mid, &lvl).empty() && fs::is_regular_file(mid) && m.dirty());
     TEST("Style SMF real level: L1 only (validator), L2 not applicable, no L3",
          lvl.l1.state == Check::Passed && lvl.l2.state == Check::NotRun && lvl.l3.state == Check::NotRun && has(lvl.l1.detail, "validator"));
     TEST("existing SMF never overwritten", has(m.exportSmf(mid, &lvl), "already exists"));
@@ -167,6 +168,9 @@ int main() {
             TEST("r1#1: the reloaded Style exports the same SMF", back2.smfExport().bytes == g.smfExport().bytes);
             Verification l;
             TEST("r1#1: export after reload", back2.exportSmf(root / "r1.mid", &l).empty() && l.l1.state == Check::Passed);
+            TEST("r4#1: rename -> Export Pa5X SMF keeps the rename unwritten; opening another Style is still refused",
+                 back2.apply(Op::ElementRename, 1, {}, "Renamed again").empty() && back2.exportSmf(root / "r4.mid", &l).empty() &&
+                 back2.dirty() && !back2.load(root / "edited.uasf", &why) && has(why, "not written"));
             StyleStudioModel back3;
             TEST("r1#1: reopening the SMF restores the sounds, element sound included", back3.load(root / "r1.mid", &why) &&
                  back3.smfExport().bytes == back2.smfExport().bytes);

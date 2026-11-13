@@ -29,7 +29,8 @@ public:
     // The ops the Style Studio offers, in menu order, with what their value field holds.
     // Element ops act on the chosen element; Track ops on the chosen track's channel, style-wide (a Pa track). Part and
     // Sound are the Pa5X export settings (CASM route, user bank/program) kept in the Style (UASF 'KEXP'): undo, save,
-    // unwritten-edit prompt as any edit. Element sound sets the chosen track's sound in the chosen element only.
+    // unwritten-edit prompt as any edit. Element sound sets the chosen track's sound in the chosen element only; Track sound
+    // sets it in every element and removes that track's element sounds.
     enum class Op { Quantize, Transpose, VelocitySet, VelocityOffset, VelocityScale, Tempo, Meter,
                     ElementCopy, ElementClear, ElementRename, ElementLength, TrackRole, TrackPart, TrackSound, ElementSound };
     static constexpr int kOps = 15;
@@ -44,7 +45,7 @@ public:
                                   "percent, e.g. 90", "BPM 20-400 (whole style)", "num/den, e.g. 6/8 (element only)",
                                   "Intro 1-3, Variation 1-4, Fill 1-4, Break, Ending 1-3", "(no value)", "new name", "bars 1-256",
                                   "drum, percussion, bass, chord, pad, phrase1, phrase2, melody, accompaniment",
-                                  "bass, drum, perc, acc1-acc5 or none", "MSB LSB PC (your Pa5X values) or unresolved",
+                                  "bass, drum, perc, acc1-acc5 or none", "MSB LSB PC (your Pa5X values) or unresolved; replaces this track's element sounds",
                                   "MSB LSB PC for this element only, or unresolved"};
         return h[int(o)];
     }
@@ -56,7 +57,7 @@ public:
     bool load(const std::filesystem::path& path, std::string* error, bool discard = false,
               style_edit::SoundLoss policy = style_edit::SoundLoss::Refuse) {
         if (dirty() && !discard)
-            return fail(error, "the open Style has edits not written yet: Save UASF... or Export Pa5X SMF..., or Discard them first");
+            return fail(error, "the open Style has edits not written yet: Save UASF... (a Pa5X SMF does not keep them all), or Discard them first");
         uasf::StyleDefinition s;
         std::vector<std::string> notes;
         std::string ext = path.extension().string();
@@ -110,7 +111,7 @@ public:
     bool loaded() const { return ed_ != nullptr; }
     const uasf::StyleDefinition& style() const { return ed_->style(); }
     const std::filesystem::path& path() const { return path_; }
-    // The studio's staged changes: the model differs from what was opened or last written (Save UASF / Export SMF).
+    // The studio's staged changes: the model differs from what was opened or last saved as UASF (a Pa5X SMF is lossy).
     // Compared by content, so save + undo is dirty and redo back to the written state is not.
     bool dirty() const {
         if (!ed_) return false;
@@ -258,8 +259,7 @@ public:
         if (!x.ok) return "export refused: " + x.error;
         if (auto e = media::writeNewFile(out, x.bytes); !e.empty()) return e;
         if (level) *level = checkStyleSmf(out);
-        saved_ = bytes();
-        return "";
+        return "";   // the edits stay unwritten: an SMF does not keep element names or track roles (only Save UASF does)
     }
     // UASF (our own format) of the edited Style. Written only when the UASF validator has no ERROR.
     std::string saveUasf(const std::filesystem::path& out) {
@@ -284,7 +284,7 @@ public:
     }
 
     // For an export job (jobs/export_specs.h): the UASF bytes of the Style now, and, once the job has written them,
-    // marking them as written (dirty() stays true when the Style was edited after the job was made).
+    // marking them as written (dirty() stays true when the Style was edited after the job was made). UASF jobs only.
     std::vector<uint8_t> uasfBytes() const { return bytes(); }
     void markWritten(std::vector<uint8_t> uasf) { saved_ = std::move(uasf); }
 

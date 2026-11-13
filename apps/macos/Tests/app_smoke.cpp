@@ -1429,6 +1429,12 @@ int main() {
                 for (const auto& j : st.jobList()) if (j.id == bad) jb = j;
                 TEST("D17 jobs: a failed Style job leaves the Style dirty (only Done marks edits written)", jb.phase == jobs::Phase::Failed &&
                      st.styleModel().dirty());
+                const auto lossy = st.exportJob(EJ::StyleSmf, juce::File((root / "waltz-job2.mid").string()));
+                waitIdle(10000);
+                jobs::JobState jl;
+                for (const auto& j : st.jobList()) if (j.id == lossy) jl = j;
+                TEST("r4#1 jobs: a Done Style SMF job leaves the edits unwritten (SMF is lossy; only UASF clears them)",
+                     jl.phase == jobs::Phase::Done && st.styleModel().dirty());
             }
             {   // P1: element op from the page, then the Korg Style SMF reopens for editing (no SFF1 report for a .mid)
                 st.styleElement().setSelectedId(2, juce::sendNotificationSync);   // [0]

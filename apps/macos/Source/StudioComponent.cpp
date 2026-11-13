@@ -1081,7 +1081,8 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
         case ExportJob::KstBackup: return enqueue(jobs::kstBackup(source_->path, d), nullptr);
         case ExportJob::StyleSmf:
         case ExportJob::StyleUasf: {
-            // The Style as it is now (the editor keeps working); once written, these bytes count as written (staged -> 0)
+            // The Style as it is now (the editor keeps working); once a UASF is written, these bytes count as written (staged -> 0).
+            // A Pa5X SMF does not keep element names or track roles, so after it the edits stay staged.
             const auto uasf = style_.uasfBytes();
             const auto path = style_.path();
             auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_.smfExport(), d, path)
@@ -1092,7 +1093,7 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
                 styleStatus_.setText(ok ? "Wrote " + juce::String(s.dest) + "  " + juce::String::fromUTF8(st::badgeLine(s.level).c_str()) + (smf ? " (EXPERIMENTAL)" : "")
                                         : "Not written: " + juce::String(s.reason),
                                      juce::dontSendNotification);
-                if (ok && style_.path() == path) style_.markWritten(uasf);
+                if (ok && !smf && style_.path() == path) style_.markWritten(uasf);
                 refreshStyle();
             });
         }
@@ -1264,14 +1265,14 @@ void StudioComponent::refreshInspector() {
         t << "No output of this page checked yet. The last check is in Validation & Reports.";
     const bool dirty = style_.dirty();
     t << "\n\nSTAGED CHANGES\n"
-      << (dirty ? juce::String("Style Studio edits not written yet. Export Pa5X SMF... or Save UASF... writes a NEW file; the source Style is "
-                               "never changed.")
+      << (dirty ? juce::String("Style Studio edits not written yet. Save UASF... writes them all to a NEW file (Export Pa5X SMF... "
+                               "does not keep element names or track roles); the source Style is never changed.")
                 : juce::String("0. Nothing is written until an export job runs, always into a new local folder."))
       << "\n\nNOT VERIFIED\nLoading on a Pa5X. L3 comes only from an owner's recorded hardware test.";
     inspector_.setText(t, false);
     staged_->setText(juce::String("STAGED CHANGES: ") + (dirty ? "Style Studio edits not written yet" : "0") +
-                         ". Sources are never changed in place; Style Studio edits are staged until Export Pa5X SMF... or Save UASF... "
-                         "writes a new file.", juce::dontSendNotification);
+                         ". Sources are never changed in place; Style Studio edits are staged until Save UASF... "
+                         "writes a new file (a Pa5X SMF does not keep them all).", juce::dontSendNotification);
     badges_.setTitle(st::spokenBadges(verification_));   // VoiceOver reads the meaning, not the glyphs
 }
 
