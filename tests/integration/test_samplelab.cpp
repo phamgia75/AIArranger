@@ -326,6 +326,11 @@ int main() {
         for (size_t i = 0; i <= kMaxBatchFiles; ++i) put(many / ("s" + std::to_string(i) + ".wav"), {});
         TEST("batch: more than kMaxBatchFiles WAVs refused up front", runBatch(many, root / "many-out", o).error.find("at most 512 files") != std::string::npos &&
                                                                         !fs::exists(root / "many-out.INCOMPLETE"));
+        for (size_t i = kMaxBatchFiles + 1; i < kMaxBatchFiles + 100; ++i) put(many / ("s" + std::to_string(i) + ".wav"), {});
+        std::vector<fs::path> listed;
+        TEST("batch: enumeration stops at the first entry past the limit (Codex re-check)",
+             !listBatchWavs(many, listed).empty() && listed.size() == kMaxBatchFiles + 1);
+        TEST("batch: a folder within the limits lists completely", listBatchWavs(in, listed).empty() && listed.size() == 5);
         const fs::path huge = root / "batch-huge";
         fs::create_directories(huge);
         put(huge / "big.wav", {});

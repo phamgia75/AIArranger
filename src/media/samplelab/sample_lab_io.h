@@ -234,6 +234,29 @@ struct BatchItem {
 
 struct BatchResult { std::string error; std::vector<BatchItem> items; std::vector<DuplicatePair> duplicates; std::string report; };
 
+// The .wav entries directly in `in`, in `paths`. Enumeration stops at the first entry past kMaxBatchFiles or
+// kMaxBatchBytes (sizes from the listing; nothing is read), so a huge folder is refused without listing it all.
+// "" or the reason.
+inline std::string listBatchWavs(const fs::path& in, std::vector<fs::path>& paths) {
+    std::error_code ec;
+    uint64_t bytes = 0;
+    paths.clear();
+    for (fs::directory_iterator it(in, ec), end; !ec && it != end; it.increment(ec)) {
+        std::string ext = it->path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        if (ext != ".wav") continue;
+        paths.push_back(it->path());
+        std::error_code se;
+        if (fs::is_regular_file(fs::symlink_status(it->path(), se))) { const auto n = fs::file_size(it->path(), se); if (!se) bytes += n; }
+        if (paths.size() > kMaxBatchFiles || bytes > kMaxBatchBytes)
+            return in.string() + " holds more than " + std::to_string(paths.size() > kMaxBatchFiles ? kMaxBatchFiles : paths.size() - 1) + " .wav files or " +
+                   std::to_string(kMaxBatchBytes >> 20) + " MiB: a batch takes at most " + std::to_string(kMaxBatchFiles) + " files and " +
+                   std::to_string(kMaxBatchBytes >> 20) + " MiB; split the folder";
+    }
+    if (ec) return "cannot read " + in.string();
+    return "";
+}
+
 // Processes every .wav directly in `in` (sorted by name; `in` is only read): trim, then normalize, as `o` says.
 // Duplicates are found on the input audio. `out` empty = analysis only, nothing is written; otherwise the new folder
 // holds wav/<same file names>, REPORT.txt and PACKAGE.sha256, and may not lie inside `in` (nor `in` inside it). Files
@@ -242,21 +265,7 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
     BatchResult r;
     std::error_code ec;
     std::vector<fs::path> paths;
-    uint64_t bytes = 0;
-    for (const auto& e : fs::directory_iterator(in, ec)) {
-        std::string ext = e.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext != ".wav") continue;
-        paths.push_back(e.path());
-        std::error_code se;
-        if (fs::is_regular_file(fs::symlink_status(e.path(), se))) { const auto n = fs::file_size(e.path(), se); if (!se) bytes += n; }
-    }
-    if (ec) { r.error = "cannot read " + in.string(); return r; }
-    if (paths.size() > kMaxBatchFiles || bytes > kMaxBatchBytes) {
-        r.error = in.string() + " holds " + std::to_string(paths.size()) + " .wav files, " + std::to_string(bytes >> 20) + " MiB: a batch takes at most " +
-                  std::to_string(kMaxBatchFiles) + " files and " + std::to_string(kMaxBatchBytes >> 20) + " MiB; split the folder";
-        return r;
-    }
+    if (const auto e = listBatchWavs(in, paths); !e.empty()) { r.error = e; return r; }
     if (!out.empty()) {
         if (sameOrBelow(folderPath(out), in) || sameOrBelow(in, folderPath(out))) { r.error = "refusing: the output folder may not be inside the input folder, or contain it"; return r; }
         if (const auto why = outputFolderRefusal(folderPath(out)); !why.empty()) { r.error = why; return r; }
