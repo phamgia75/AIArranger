@@ -1,5 +1,6 @@
 #include "LiveHostComponent.h"
 #include "ResourcesComponent.h"
+#include "StudioComponent.h"
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/chord_input.h"
@@ -98,9 +99,28 @@ LiveHostComponent::LiveHostComponent() {
         resourcesWindow_->toFront(true);
     };
 
+    studioBtn_.onClick = [this] {
+        if (!studioWindow_) {
+            struct Window : juce::DocumentWindow {
+                explicit Window(std::function<void()> showHost)
+                    : DocumentWindow("AI Music Studio", juce::Colours::black, DocumentWindow::allButtons) {
+                    setUsingNativeTitleBar(true);
+                    setContentOwned(new StudioComponent(std::move(showHost)), true);
+                    setResizable(true, true);
+                    setResizeLimits(1100, 700, 4096, 4096);
+                    centreWithSize(getWidth(), getHeight());
+                }
+                void closeButtonPressed() override { setVisible(false); }
+            };
+            studioWindow_ = std::make_unique<Window>([this] { if (auto* w = getTopLevelComponent()) w->toFront(true); });
+        }
+        studioWindow_->setVisible(true);
+        studioWindow_->toFront(true);
+    };
+
     panicBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
 
-    for (auto* b : {&refreshBtn_, &loadBtn_, &resourcesBtn_, &startBtn_, &stopBtn_, &syncBtn_,
+    for (auto* b : {&refreshBtn_, &loadBtn_, &resourcesBtn_, &studioBtn_, &startBtn_, &stopBtn_, &syncBtn_,
                     &introBtn_, &varA_, &varB_, &varC_, &varD_, &fillBtn_,
                     &breakBtn_, &endingBtn_, &panicBtn_})
         addAndMakeVisible(*b);
@@ -226,6 +246,8 @@ void LiveHostComponent::resized() {
     refreshBtn_.setBounds(styleRow.removeFromLeft(90));
     styleRow.removeFromLeft(8);
     resourcesBtn_.setBounds(styleRow.removeFromRight(110));
+    styleRow.removeFromRight(6);
+    studioBtn_.setBounds(styleRow.removeFromRight(80));
     styleRow.removeFromLeft(4);
     styleLabel_.setBounds(styleRow);
     area.removeFromTop(10);

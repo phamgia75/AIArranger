@@ -7,6 +7,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "../Source/LiveHostComponent.h"
 #include "../Source/ResourcesComponent.h"
+#include "../Source/StudioComponent.h"
 #include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
@@ -712,6 +713,241 @@ int main() {
                          m.size() < 3 || m.back() - m[1] < 20);
                 }
             }
+        }
+        fs::remove_all(root);
+    }
+
+    // ── AI Music Studio window (E2): sidebar | content | inspector over the same tools; nothing written to a source ──
+    {
+        namespace fs = std::filesystem;
+        using namespace ai_arranger;
+        using D = app::StudioComponent::Domain;
+        auto host = std::make_unique<app::LiveHostComponent>();
+        TEST("studio: button present: Studio...", find<juce::Button>(*host, "Studio...") != nullptr);
+        TEST("studio: the existing Sound Tools... window stays reachable", find<juce::Button>(*host, "Sound Tools...") != nullptr);
+        host.reset();
+        const fs::path root = fs::temp_directory_path() / ("aia-smoke-studio-" + std::to_string(::getpid()));
+        fs::remove_all(root);
+        bool hostShown = false;
+        app::StudioComponent st([&] { hostShown = true; });
+        pump(100);
+        TEST("studio: spec default size 1440x900", st.getWidth() == 1440 && st.getHeight() == 900);
+        auto waitIdle = [&](int ms) { for (int i = 0; i < ms / 20 && (st.busy() || st.resources().loading()); ++i) pump(20); };
+        auto visibleIn = [](juce::Component* c, juce::Component* top) {
+            for (; c && c != top; c = c->getParentComponent()) if (!c->isVisible()) return false;
+            return c == top;
+        };
+        // Spec rule: every unavailable control on screen shows its reason inline (a visible label with the tooltip text).
+        auto reasonsShown = [&]() {
+            std::vector<juce::Component*> all, labels;
+            std::function<void(juce::Component*)> walk = [&](juce::Component* c) {
+                if (c == &st.resources()) return;   // the existing tabs keep their own conventions
+                all.push_back(c);
+                for (auto* ch : c->getChildren()) walk(ch);
+            };
+            walk(&st);
+            for (auto* c : all) if (auto* l = dynamic_cast<juce::Label*>(c); l && visibleIn(l, &st) && l->getText().isNotEmpty()) labels.push_back(l);
+            bool ok = true;
+            for (auto* c : all)
+                if (auto* b = dynamic_cast<juce::Button*>(c); b && !b->isEnabled() && visibleIn(b, &st)) {
+                    const bool shown = b->getTooltip().isNotEmpty() && std::any_of(labels.begin(), labels.end(), [&](juce::Component* l) {
+                        return static_cast<juce::Label*>(l)->getText() == b->getTooltip(); });
+                    if (!shown) { std::printf("  info: no inline reason for '%s'\n", b->getButtonText().toRawUTF8()); ok = false; }
+                }
+            return ok;
+        };
+        for (const char* name : {"Library Workspace", "Sample Lab", "Style Studio", "Import / Export Center", "Validation & Reports", "Live Arranger"})
+            TEST((juce::String("studio sidebar entry: ") + name).toRawUTF8(), find<juce::Button>(st.sidebar(), name) != nullptr);
+        bool domainsOk = true, reasonsOk = true;
+        for (const char* name : {"Library Workspace", "Sample Lab", "Style Studio", "Import / Export Center", "Validation & Reports"}) {
+            click(st.sidebar(), name);
+            pump(20);
+            domainsOk &= juce::String(app::StudioComponent::domainName(st.domain())) == name && st.segment() == 0;
+            for (int i = 0; i < st.segmentNames(st.domain()).size(); ++i) { st.showDomain(st.domain(), i); reasonsOk &= reasonsShown(); }
+        }
+        TEST("studio: each sidebar entry opens its domain", domainsOk);
+        TEST("studio: every unavailable control in every domain view shows its reason inline", reasonsOk);
+        click(st.sidebar(), "Live Arranger");
+        TEST("studio: Live Arranger entry brings the live host forward", hostShown);
+        st.keyPressed(juce::KeyPress('2', juce::ModifierKeys::commandModifier, 0));
+        TEST("studio: Cmd-2 jumps to the second sidebar domain", st.domain() == D::SampleLab);
+
+        // Library Workspace: the existing pages are segments of the shared Sounds & Resources view
+        TEST("studio: Library segments wrap Resource Graph, KST Library, Memory Check",
+             st.segmentNames(D::Library).joinIntoString("|") == "Sources|Resource Graph|KST Library|Memory Check");
+        st.showDomain(D::Library, 2);
+        TEST("studio: KST Library segment shows the existing tab", st.resources().isVisible() && st.resources().tabs().getCurrentTabIndex() == 1);
+        st.showDomain(D::SampleLab, 1);
+        TEST("studio: Sample Lab > Sample Plugin shows the existing tab", st.resources().isVisible() && st.resources().tabs().getCurrentTabIndex() == 4);
+        st.showDomain(D::SampleLab, 3);
+        juce::Button* writerSeg = nullptr;
+        std::function<void(juce::Component&)> deep = [&](juce::Component& c) {
+            for (auto* ch : c.getChildren()) {
+                if (auto* b = dynamic_cast<juce::Button*>(ch); b && b->getButtonText() == "KMP / KSF Writer") writerSeg = b;
+                deep(*ch);
+            }
+        };
+        deep(st);
+        TEST("studio: the KMP/KSF writer segment is unavailable (falls back, says why)", st.segment() == 0 &&
+             writerSeg && !writerSeg->isEnabled() && writerSeg->getTooltip().contains("E1"));
+        st.resources().tabs().setCurrentTabIndex(0);   // what Convert Sound does when a package is written
+        pump(60);                                      // the tab bar announces the change asynchronously
+        TEST("studio: a Resource Graph hand-off moves the studio to Library > Resource Graph", st.domain() == D::Library && st.segment() == 1);
+        st.showDomain(D::Library, 2);                  // our own tab switch, announced later, must not move the studio
+        st.showDomain(D::StyleStudio);
+        pump(60);
+        TEST("studio: a stale tab announcement of its own switch is ignored", st.domain() == D::StyleStudio);
+        st.showDomain(D::SampleLab, 2);
+        TEST("studio: Quality Report says what to do when nothing is built", st.qualityText().startsWith("Nothing built yet"));
+
+        // Sources: recognition + read-only library view; nothing in the source changes
+        auto put = [](const fs::path& p, const std::string& b) { fs::create_directories(p.parent_path()); std::ofstream(p, std::ios::binary) << b; };
+        put(root / "Mine.KST/STYLE/USER01/Ballad.STG", "s");
+        put(root / "Mine.KST/PAD/USER01/Hit.PDC", "pp");
+        const auto stamp = fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG");
+        st.showDomain(D::Library, 0);
+        st.openSource(juce::File((root / "Mine.KST").string()));
+        TEST("studio: a source is read off the message thread", st.busy());
+        waitIdle(5000);
+        TEST("studio: KST folder recognised by layout, content not claimed, zero rows visible",
+             st.libraryText().contains("Pa5X user data (folder layout)") && st.libraryText().contains(juce::String::fromUTF8("content \xE2\x97\x87")) &&
+             st.libraryText().contains("Keyboard Sets     none in this source") && st.libraryText().contains("STYLE/USER01: 1"));
+        TEST("studio: the inspector shows the open source as read-only", st.inspectorText().contains("Mine.KST") && st.inspectorText().contains("Read-only source"));
+        TEST("studio: the source is unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
+        auto* toLab = find<juce::Button>(st.page(D::Library), "Send to Sample Lab");
+        TEST("studio: Send to Sample Lab unavailable for a KST, with its reason", toLab && !toLab->isEnabled() && toLab->getTooltip().startsWith("Needs:"));
+        {
+            media::sound::Sample sm;
+            sm.root = 60; sm.rate = 44100; sm.channels = 1;
+            for (int i = 0; i < 44100; ++i) sm.pcm.push_back(int16_t(6000 * std::sin(2 * M_PI * 261.63 * i / 44100)));
+            const auto b = media::sound::writeWav(sm);
+            fs::create_directories(root / "wavs");
+            std::ofstream(root / "wavs/Soft_60_60_60.wav", std::ios::binary).write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+        }
+        st.openSource(juce::File((root / "wavs").string()));
+        waitIdle(5000);
+        TEST("studio: a WAV folder is offered to Sample Lab", toLab && toLab->isEnabled());
+        if (toLab) toLab->triggerClick();
+        pump(60);
+        TEST("studio: Send to Sample Lab opens Convert Sound on that folder", st.domain() == D::SampleLab && st.segment() == 0 &&
+             st.resources().converter().orderField().getText() == "Soft");
+        std::string err;
+        media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ", "", &err);
+        st.openSource(juce::File((root / "organ").string()));
+        waitIdle(10000);
+        TEST("studio: a package source also opens in Resource Graph", st.resources().model().packages().size() == 1 &&
+             st.libraryText().contains("AIArranger Sound / Drum Kit package"));
+
+        // Import / Export Center: routes into the existing flows; unbuilt exports say why
+        st.showDomain(D::ImportExport);
+        click(st.page(D::ImportExport), "AU / VST3 instrument");
+        TEST("studio: import route AU / VST3 -> Sample Lab > Sample Plugin", st.domain() == D::SampleLab && st.segment() == 1);
+        st.showDomain(D::ImportExport);
+        click(st.page(D::ImportExport), "Verified KST backup");
+        TEST("studio: export route KST backup -> Library > KST Library", st.domain() == D::Library && st.segment() == 2 &&
+             st.resources().tabs().getCurrentTabIndex() == 1);
+        auto* kstExport = find<juce::Button>(st.page(D::ImportExport), "Pa5X KST export");
+        auto* kmpExport = find<juce::Button>(st.page(D::ImportExport), "KMP / KSF export");
+        TEST("studio: Pa5X KST export unavailable: no writer, no L1 validator", kstExport && !kstExport->isEnabled() && kstExport->getTooltip().contains("KST writer"));
+        TEST("studio: KMP/KSF export left out of this milestone, says so", kmpExport && !kmpExport->isEnabled() && kmpExport->getTooltip().contains("E1"));
+        TEST("studio: staged change set and write rules stated", find<juce::Label>(st.page(D::ImportExport), "STAGED CHANGES: 0") != nullptr &&
+             find<juce::Label>(st.page(D::ImportExport), "WRITE RULES: every write goes to NAME.INCOMPLETE") != nullptr);
+
+        // Style Studio: read-only report of an own synthetic style
+        st.showDomain(D::StyleStudio);
+        st.openStyle(juce::File(AIARR_REPO_TOOLS_DIR "/../fixtures/synthetic/SYNTH_WALTZ_68.sty"));
+        TEST("studio: Style Studio reports the style's sections, read-only", st.styleText().contains("SYNTH_WALTZ_68.sty") &&
+             st.styleText().contains("Parse: SUCCESS") && st.styleText().contains("Main A") && st.styleText().contains("nothing is written"));
+        auto* edit = find<juce::Button>(st.page(D::StyleStudio), "Edit Style");
+        TEST("studio: Style editing unavailable with its reason", edit && !edit->isEnabled() && edit->getTooltip().contains("later phase"));
+
+        // Validation & Reports: badges from the shared verifiers; L3 only from a matching owner record
+        st.showDomain(D::Validation);
+        TEST("studio: no target -> checks unavailable with a reason", st.validatorUnavailable(app::StudioComponent::Validator::VerifyPackage).startsWith("Needs:"));
+        const auto pkg = root / "organ";
+        st.setValidationTarget(juce::File(pkg.string()));
+        st.runValidator(app::StudioComponent::Validator::VerifyPackage);
+        waitIdle(20000);
+        const auto filled = juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x86\xE2\x97\x86 L2  \xE2\x97\x87 L3");
+        TEST("studio: Verify Package -> L1 and L2 reached, L3 hollow", st.badgeText() == filled && st.inspectorText().contains("Level 3 hardware test not recorded"));
+        bool c = false;
+        const auto manHash = media::detail::sha256File(pkg / "PACKAGE.sha256", [](size_t) { return true; }, &c, &err);
+        auto record = [&](const std::string& hash) {
+            put(root / "L3.txt", "aiarranger-l3-record 1\nmanifest-sha256 " + hash + "\ndevice Pa5X\ndate 2026-11-20\ntester owner\nresult pass\n");
+            st.attachL3Record(juce::File((root / "L3.txt").string()));
+            TEST("studio: an L3 record is applied in a background job", st.busy());
+            waitIdle(20000);
+            return st.verification().l3.state;
+        };
+        TEST("studio: an L3 record for another output gives no L3", record(std::string(64, '0')) == ui::studio::Check::NotRun && st.badgeText() == filled);
+        TEST("studio: the owner's record for this output gives L3", record(manHash) == ui::studio::Check::Passed &&
+             st.badgeText().endsWith(juce::String::fromUTF8("\xE2\x97\x86\xE2\x97\x86\xE2\x97\x86 L3")));
+        {   // review finding: L1 from an earlier Verify Package must not carry L3 onto files changed since
+            const auto keep = fs::path(pkg / "RESOURCES.tsv");
+            std::ifstream in(keep, std::ios::binary);
+            const std::string orig((std::istreambuf_iterator<char>(in)), {});
+            st.runValidator(app::StudioComponent::Validator::VerifyPackage);
+            waitIdle(20000);
+            put(keep, "changed after Verify Package\n");
+            TEST("studio: a record attached after the files changed gives no L3 (L1 re-checked)",
+                 record(manHash) == ui::studio::Check::NotRun && st.verification().l1.state == ui::studio::Check::Failed);
+            put(keep, orig);
+        }
+        put(pkg / "RESOURCES.tsv", "changed after the test\n");
+        st.setValidationTarget(juce::File(pkg.string()));
+        st.runValidator(app::StudioComponent::Validator::VerifyPackage);
+        waitIdle(20000);
+        TEST("studio: changed files -> L1 failed, and the old record no longer gives L3",
+             st.verification().l1.state == ui::studio::Check::Failed && record(manHash) == ui::studio::Check::NotRun);
+        st.setValidationTarget(juce::File((root / "Mine.KST").string()));
+        st.runValidator(app::StudioComponent::Validator::KstInventory);
+        waitIdle(5000);
+        TEST("studio: KST Inventory runs in-process and sets no badge", st.jobsText().contains("File level only") &&
+             st.badgeText() == juce::String::fromUTF8("\xE2\x97\x87 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3"));
+        media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ2", "", &err);
+        juce::File sf2;
+        for (const auto& e : fs::directory_iterator(root / "organ2")) if (e.path().extension() == ".sf2") sf2 = juce::File(e.path().string());
+        st.setValidationTarget(sf2);
+        st.runValidator(app::StudioComponent::Validator::Sf2Check);
+        waitIdle(5000);
+        TEST("studio: SF2 Check -> L1 only", st.verification().l1.state == ui::studio::Check::Passed && st.verification().l2.state == ui::studio::Check::NotRun);
+        st.setValidationTarget(juce::File((root / "organ2").string()));
+        const auto pyWhy = st.validatorUnavailable(app::StudioComponent::Validator::SoundPy);
+        if (pyWhy.isEmpty()) {
+            st.runValidator(app::StudioComponent::Validator::SoundPy);
+            waitIdle(120000);
+            TEST("studio: the Python sound validator runs as a child process and leaves the badges alone",
+                 st.jobsText().contains("exit code 0") && st.verification().l1.state == ui::studio::Check::NotRun);
+        } else {
+            std::printf("  info: Python sound validator not available here: %s\n", pyWhy.toRawUTF8());
+            TEST("studio: an unavailable Python validator names what it needs", pyWhy.startsWith("Needs:"));
+        }
+        TEST("studio: nothing is labelled Pa5X-compatible", !st.inspectorText().containsIgnoreCase("compatible") &&
+             !st.jobsText().containsIgnoreCase("Pa5X-compatible") && !st.libraryText().containsIgnoreCase("compatible"));
+
+        if (const char* dir = std::getenv("AIARR_SNAPSHOT_DIR"); dir && *dir) {   // offscreen renders for a later look; not a hands-on check
+            st.setValidationTarget(juce::File(pkg.string()));
+            fs::remove_all(pkg);
+            media::sound::writePackage(media::sound::buildDemoOrgan(), pkg, "", &err);
+            st.runValidator(app::StudioComponent::Validator::VerifyPackage);
+            waitIdle(20000);
+            st.openSource(juce::File((root / "Mine.KST").string()));
+            waitIdle(5000);
+            int n = 0;
+            for (D d : {D::Library, D::ImportExport, D::SampleLab, D::StyleStudio, D::Validation})
+                for (int i = 0; i < st.segmentNames(d).size(); ++i) {
+                    st.showDomain(d, i);
+                    if (st.segment() != i) continue;   // an unavailable segment
+                    pump(50);
+                    const auto img = st.createComponentSnapshot(st.getLocalBounds(), true, 1.0f);
+                    auto name = juce::String(app::StudioComponent::domainName(d)) + " - " + st.segmentNames(d)[i];
+                    name = name.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -").replace(" ", "-").toLowerCase();
+                    juce::File out = juce::File(dir).getChildFile(juce::String(++n).paddedLeft('0', 2) + "-" + name + ".png");
+                    out.deleteFile();
+                    juce::FileOutputStream os(out);
+                    juce::PNGImageFormat().writeImageToStream(img, os);
+                    std::printf("  info: offscreen snapshot written to %s\n", out.getFullPathName().toRawUTF8());
+                }
         }
         fs::remove_all(root);
     }
