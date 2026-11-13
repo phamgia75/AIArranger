@@ -71,6 +71,14 @@ struct FileSet {
     // "" when the folder holds exactly these files, each with its length and SHA-256, and the package loads back
     // with the reader every other tool uses (loadPackage: WAVs against RESOURCES.tsv, TX references). Read-only.
     std::string check() const {
+        if (const auto e = checkFiles(); !e.empty()) return e;
+        graph::Graph g;
+        std::string err, pkg;
+        if (!loadPackage(root, g, pkg, &err)) return "it does not load back: " + err;
+        return "";
+    }
+    // The file half of check(): exactly these files, each with its length and SHA-256. Read-only.
+    std::string checkFiles() const {
         detail::Listing L;
         std::string err;
         if (!detail::listFiles(root, L, err)) return "cannot list it: " + err;
@@ -86,9 +94,6 @@ struct FileSet {
             while (f.read(buf, sizeof buf) || f.gcount() > 0) { h.update(buf, static_cast<size_t>(f.gcount())); if (!f) break; }
             if (!f.eof() || h.hex() != w.second) return rel + " does not read back as written";
         }
-        graph::Graph g;
-        std::string pkg;
-        if (!loadPackage(root, g, pkg, &err)) return "it does not load back: " + err;
         return "";
     }
 };

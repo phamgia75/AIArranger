@@ -10,10 +10,14 @@
 //       or the mapping text in FILE (as the Convert Sound tab edits it);
 //   kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR
 //       a folder of KRONOS .KMP/.KSF multisamples (Save Sampling Data; media/sound/korg_kmp_source.h); SRC is only read.
+//   kmp --source demo|wav|kronos|ksf [that source's options] --out DIR
+//       EXPERIMENTAL, L1: the same instrument written as Korg-format .KMP + .KSF files instead of the Pa5X package
+//       (media/sound/korg_kmp_writer.h), read back before it is published.
 // Exit 0 = written, 1 = usage/IO/validation error.
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
 #include "media/sound/korg_kmp_source.h"
+#include "media/sound/korg_kmp_writer.h"
 #include "media/sound/ksf_folder_source.h"
 #include "media/sound/package_writer.h"
 #include "media/sound/sound_recipe.h"
@@ -32,16 +36,24 @@ static int usage() {
                          "       aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
                          "       aiarranger-sound kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR\n"
                          "       aiarranger-sound ksf --in SRC --name NAME [--mapping FILE] --out DIR\n"
+                         "       aiarranger-sound kmp --source demo|wav|kronos|ksf [those options] --out DIR\n"
+                         "       (kmp: EXPERIMENTAL Korg-format .KMP/.KSF folder, verification L1 only)\n"
                          "       (DIR must not exist)\n");
     return 1;
 }
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc % 2) return usage();
-    const std::string cmd = argv[1];
+    std::string cmd = argv[1];
     std::map<std::string, std::string> opt;
     for (int i = 2; i + 1 < argc; i += 2) opt[argv[i]] = argv[i + 1];
     if (!opt.count("--out")) return usage();
+    const bool kmpOut = cmd == "kmp";
+    if (kmpOut) {
+        cmd = opt["--source"];
+        opt.erase("--source");
+        if (cmd == "drums" || cmd == "kmp") return usage();
+    }
     Instrument in;
     std::string notes;
     if (cmd == "drums" && opt.size() == 1) {
@@ -89,7 +101,7 @@ int main(int argc, char** argv) {
         return usage();
     }
     std::string err;
-    const std::string rep = writePackage(in, opt["--out"], notes, &err);
+    const std::string rep = kmpOut ? writeKorgFolder(in, opt["--out"], notes, &err) : writePackage(in, opt["--out"], notes, &err);
     if (rep.empty()) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
     std::fputs(rep.c_str(), stdout);
     return 0;
