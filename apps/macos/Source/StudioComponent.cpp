@@ -1024,9 +1024,10 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
     return 0;
 }
 
-// E9: every visible entry of `outputs` (packages, KMP folders, Style .mid files) into the new kit `dest`, as a job
+// E9: every visible entry of `outputs` (packages, KMP folders, Style .mid files) into the new kit `dest`, as a job. The
+// folder is listed by the job on its worker thread, never here on the message thread.
 uint64_t StudioComponent::importKitJob(const juce::File& outputs, const juce::File& dest) {
-    return enqueue(jobs::kit::importKit(jobs::kit::outputsIn(outputs.getFullPathName().toStdString()), dest.getFullPathName().toStdString()), nullptr);
+    return enqueue(jobs::kit::importKit({}, dest.getFullPathName().toStdString(), outputs.getFullPathName().toStdString()), nullptr);
 }
 
 // shortcut: lists the recorded output folders (at most jobs::kRecordedFolders) on the message thread (fast on a local

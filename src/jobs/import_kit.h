@@ -23,7 +23,10 @@
 #include "media/sound/korg_kmp_source.h"
 #include "media/sound/package_verify.h"
 #include "ui/studio/style_studio_model.h"
+#include <atomic>
+#include <fcntl.h>
 #include <set>
+#include <unistd.h>
 
 namespace ai_arranger::jobs::kit {
 
@@ -174,35 +177,88 @@ inline std::string checkMember(Kind k, const fs::path& p, std::string* detail) {
     return "not an AIArranger output the kit takes (a Sound or Drum Kit package folder, a KMP/KSF folder, or a Style .mid)";
 }
 
-// Every file of a member: (source file, kit-relative path). Refuses links and special files; Finder litter is not copied.
-inline std::string memberFiles(const Item& it, std::vector<std::pair<fs::path, std::string>>* out) {
-    if (it.kind == Kind::Style) { out->push_back({it.source, it.kitPath()}); return ""; }
+// One file to copy: `from` is relative to the member's pinned source folder (a Style: the folder holding the .mid).
+struct Planned { size_t item = 0; std::string from, to; uint64_t bytes = 0; };
+inline constexpr uint64_t kFat32MaxFile = (uint64_t(1) << 32) - 1;   // FAT32: a file is at most 4 GiB - 1 byte
+
+// Every file of a member. Refuses links and special files; Finder litter is not copied.
+inline std::string memberFiles(const Item& it, size_t idx, std::vector<Planned>* out) {
+    std::error_code ec;
+    if (it.kind == Kind::Style) {
+        const auto n = fs::file_size(it.source, ec);
+        if (ec) return "cannot read the size of " + it.source.string();
+        out->push_back({idx, it.source.filename().string(), it.kitPath(), n});
+        return "";
+    }
     media::detail::Listing L;
     std::string err;
     if (!media::detail::listFiles(it.source, L, err)) return it.source.string() + ": " + err;
     if (!L.skipped.empty()) return it.source.string() + ": refusing the link or special file " + L.skipped.front();
-    for (const auto& [rel, e] : L.files) if (!detail::finderLitter(rel)) out->push_back({e.abs, it.kitPath() + "/" + rel});
+    for (const auto& [rel, e] : L.files) if (!detail::finderLitter(rel)) out->push_back({idx, rel, it.kitPath() + "/" + rel, e.size});
+    return "";
+}
+
+// The folder every file of a member is read from, opened once and kept open (P1, Codex r1): a member folder itself
+// (no symlink), or for a Style the folder holding the .mid. Files are later opened below this descriptor one component
+// at a time without following any link, so a file or folder swapped for a link after validation cannot be read.
+inline std::string pinRoot(const Item& it, std::shared_ptr<media::detail::Fd>* fd) {
+    const fs::path dir = it.kind == Kind::Style ? (it.source.has_parent_path() ? it.source.parent_path() : fs::path(".")) : it.source;
+    *fd = std::make_shared<media::detail::Fd>(::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | (it.kind == Kind::Style ? 0 : O_NOFOLLOW)));
+    struct stat a {}, b {};
+    if ((*fd)->v < 0 || ::fstat((*fd)->v, &a) != 0) return "cannot open " + dir.string() + " (missing, or a link)";
+    // the member folder itself must not be a link; the folder holding a Style may be reached through one (e.g. /tmp)
+    if ((it.kind == Kind::Style ? ::stat(dir.c_str(), &b) : ::lstat(dir.c_str(), &b)) != 0 || a.st_dev != b.st_dev || a.st_ino != b.st_ino) return dir.string() + " changed while it was opened";
+    return "";
+}
+
+// Copies `from` (below the pinned folder `root`, no link followed at any level) to the new file `to` with a bounded
+// buffer, hashing exactly the bytes read. Refuses a file above the FAT32 limit. "" = copied; *bytes and *sha256 set.
+inline std::string copyPinned(int root, const std::string& from, const fs::path& to, uint64_t* bytes, std::string* sha256) {
+    const auto [dir, leaf] = media::detail::splitRel(from);
+    media::detail::Fd d(dir.empty() ? ::dup(root) : media::detail::openDirBelow(root, dir));
+    std::FILE* in = d.v < 0 ? nullptr : media::detail::openRegular(d.v, leaf.c_str());
+    if (!in) return from + ": cannot open it without following a link (missing, swapped for a link, or not a regular file)";
+    std::error_code ec;
+    fs::create_directories(to.parent_path(), ec);
+    media::detail::Fd out(::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644));
+    if (out.v < 0) { std::fclose(in); return "cannot create " + to.string(); }
+    media::Sha256 h;
+    std::vector<char> buf(1 << 20);
+    uint64_t n = 0;
+    std::string why;
+    for (size_t got; why.empty() && (got = std::fread(buf.data(), 1, buf.size(), in)) > 0;) {
+        if ((n += got) > kFat32MaxFile) { why = from + " is 4 GiB or more, above the FAT32 file size limit"; break; }
+        h.update(buf.data(), got);
+        for (size_t w = 0; w < got;) {
+            const ssize_t k = ::write(out.v, buf.data() + w, got - w);
+            if (k <= 0) { why = "write failed for " + to.string(); break; }
+            w += size_t(k);
+        }
+    }
+    if (why.empty() && std::ferror(in)) why = "read error in " + from;
+    std::fclose(in);
+    if (!why.empty()) return why;
+    *bytes = n;
+    *sha256 = h.hex();
     return "";
 }
 
 // Every kit-relative path the kit will hold, checked for the stick: FAT names, the FAT32 4 GiB file limit, and two
 // names equal without case in one folder (FAT ignores case). "" or the first refusal.
-inline std::string layoutRefusal(const std::vector<Item>& items, std::vector<std::pair<fs::path, std::string>>* files, uint64_t* bytes) {
+inline std::string layoutRefusal(const std::vector<Item>& items, std::vector<Planned>* files, uint64_t* bytes) {
     std::set<std::string> seen;
     for (const auto* top : {"KIT.md", "manifest.json", "PACKAGE.sha256"}) seen.insert(detail::lower(top));
-    for (const auto& it : items) {
+    for (size_t i = 0; i < items.size(); ++i) {
+        const Item& it = items[i];
         if (const auto e = detail::fatName(it.name); !e.empty()) return "'" + it.name + "' has " + e;
         if (!seen.insert(detail::lower(it.kitPath())).second) return "two outputs would both be " + it.kitPath() + " (FAT ignores case): rename one";
-        std::vector<std::pair<fs::path, std::string>> f;
-        if (const auto e = memberFiles(it, &f); !e.empty()) return e;
-        for (const auto& [src, rel] : f) {
-            if (const auto e = detail::fatPath(rel); !e.empty()) return e;
-            if (it.kind != Kind::Style && !seen.insert(detail::lower(rel)).second) return "two files would both be " + rel + " (FAT ignores case)";
-            std::error_code ec;
-            const auto n = fs::file_size(src, ec);
-            if (ec) return "cannot read the size of " + src.string();
-            if (n >= (uint64_t(1) << 32)) return rel + " is 4 GiB or more, above the FAT32 file size limit";
-            *bytes += n;
+        std::vector<Planned> f;
+        if (const auto e = memberFiles(it, i, &f); !e.empty()) return e;
+        for (const auto& x : f) {
+            if (const auto e = detail::fatPath(x.to); !e.empty()) return e;
+            if (it.kind != Kind::Style && !seen.insert(detail::lower(x.to)).second) return "two files would both be " + x.to + " (FAT ignores case)";
+            if (x.bytes > kFat32MaxFile) return x.to + " is 4 GiB or more, above the FAT32 file size limit";
+            *bytes += x.bytes;
         }
         files->insert(files->end(), f.begin(), f.end());
     }
@@ -328,6 +384,190 @@ inline std::string manifestJson(const std::string& kitName, const std::vector<It
     return o + "\n  ]\n}\n";
 }
 
+// ── a small strict JSON reader for manifest.json (the repo has no general JSON parser; P2, Codex r1) ──
+// RFC 8259 values; strings with every escape (\uXXXX to UTF-8, surrogate pairs joined); nesting at most 16; trailing
+// bytes other than white space refused. Numbers are kept as their text. Bounded by the caller's file size limit.
+struct Json {
+    enum class T { Null, Bool, Num, Str, Arr, Obj } t = T::Null;
+    bool b = false;
+    std::string s;                                    // Str, or the text of a Num
+    std::vector<Json> a;                              // Arr
+    std::vector<std::pair<std::string, Json>> o;      // Obj, in file order (duplicate keys refused)
+    const Json* get(const std::string& k) const { for (const auto& [n, v] : o) if (n == k) return &v; return nullptr; }
+};
+namespace detail {
+struct JsonIn {
+    const std::string& x;
+    size_t i = 0;
+    std::string err;
+    void ws() { while (i < x.size() && (x[i] == ' ' || x[i] == '\t' || x[i] == '\n' || x[i] == '\r')) ++i; }
+    bool fail(const std::string& m) { if (err.empty()) err = m + " at byte " + std::to_string(i); return false; }
+    bool lit(const char* w) { const size_t n = std::strlen(w); if (x.compare(i, n, w) != 0) return fail("bad literal"); i += n; return true; }
+    bool hex4(uint32_t* v) {
+        if (i + 4 > x.size()) return fail("short \\u escape");
+        *v = 0;
+        for (int k = 0; k < 4; ++k) {
+            const char c = x[i++];
+            if (!std::isxdigit(static_cast<unsigned char>(c))) return fail("bad \\u escape");
+            *v = *v * 16 + uint32_t(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+        }
+        return true;
+    }
+    bool str(std::string* out) {
+        if (i >= x.size() || x[i] != '"') return fail("string expected");
+        for (++i; i < x.size();) {
+            const unsigned char c = static_cast<unsigned char>(x[i++]);
+            if (c == '"') return true;
+            if (c < 0x20) return fail("control character in a string");
+            if (c != '\\') { *out += char(c); continue; }
+            if (i >= x.size()) break;
+            const char e = x[i++];
+            uint32_t cp = 0;
+            switch (e) {
+                case '"': case '\\': case '/': *out += e; continue;
+                case 'b': *out += '\b'; continue;
+                case 'f': *out += '\f'; continue;
+                case 'n': *out += '\n'; continue;
+                case 'r': *out += '\r'; continue;
+                case 't': *out += '\t'; continue;
+                case 'u': if (!hex4(&cp)) return false; break;
+                default: return fail("bad escape");
+            }
+            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                uint32_t lo = 0;
+                if (x.compare(i, 2, "\\u") != 0) return fail("lone surrogate");
+                i += 2;
+                if (!hex4(&lo) || lo < 0xDC00 || lo > 0xDFFF) return fail("lone surrogate");
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) return fail("lone surrogate");
+            if (cp < 0x80) *out += char(cp);
+            else if (cp < 0x800) { *out += char(0xC0 | cp >> 6); *out += char(0x80 | (cp & 0x3F)); }
+            else if (cp < 0x10000) { *out += char(0xE0 | cp >> 12); *out += char(0x80 | (cp >> 6 & 0x3F)); *out += char(0x80 | (cp & 0x3F)); }
+            else { *out += char(0xF0 | cp >> 18); *out += char(0x80 | (cp >> 12 & 0x3F)); *out += char(0x80 | (cp >> 6 & 0x3F)); *out += char(0x80 | (cp & 0x3F)); }
+        }
+        return fail("unterminated string");
+    }
+    bool num(Json* v) {
+        const size_t from = i;
+        const auto digits = [&] { const size_t k = i; while (i < x.size() && std::isdigit(static_cast<unsigned char>(x[i]))) ++i; return i > k; };
+        if (i < x.size() && x[i] == '-') ++i;
+        if (i < x.size() && x[i] == '0') ++i;
+        else if (!digits()) return fail("bad number");
+        if (i < x.size() && x[i] == '.') { ++i; if (!digits()) return fail("bad number"); }
+        if (i < x.size() && (x[i] == 'e' || x[i] == 'E')) { ++i; if (i < x.size() && (x[i] == '+' || x[i] == '-')) ++i; if (!digits()) return fail("bad number"); }
+        v->t = Json::T::Num;
+        v->s = x.substr(from, i - from);
+        return true;
+    }
+    bool value(Json* v, int depth) {
+        if (depth > 16) return fail("nested too deeply");
+        ws();
+        if (i >= x.size()) return fail("value expected");
+        const char c = x[i];
+        if (c == '{') {
+            v->t = Json::T::Obj;
+            ++i;
+            ws();
+            if (i < x.size() && x[i] == '}') { ++i; return true; }
+            for (;;) {
+                std::string k;
+                ws();
+                if (!str(&k)) return false;
+                if (v->get(k)) return fail("duplicate key " + k);
+                ws();
+                if (i >= x.size() || x[i++] != ':') return fail("':' expected");
+                Json m;
+                if (!value(&m, depth + 1)) return false;
+                v->o.emplace_back(std::move(k), std::move(m));
+                ws();
+                if (i < x.size() && x[i] == ',') { ++i; continue; }
+                if (i < x.size() && x[i] == '}') { ++i; return true; }
+                return fail("',' or '}' expected");
+            }
+        }
+        if (c == '[') {
+            v->t = Json::T::Arr;
+            ++i;
+            ws();
+            if (i < x.size() && x[i] == ']') { ++i; return true; }
+            for (;;) {
+                Json m;
+                if (!value(&m, depth + 1)) return false;
+                v->a.push_back(std::move(m));
+                ws();
+                if (i < x.size() && x[i] == ',') { ++i; continue; }
+                if (i < x.size() && x[i] == ']') { ++i; return true; }
+                return fail("',' or ']' expected");
+            }
+        }
+        if (c == '"') { v->t = Json::T::Str; return str(&v->s); }
+        if (c == 't') { v->t = Json::T::Bool; v->b = true; return lit("true"); }
+        if (c == 'f') { v->t = Json::T::Bool; return lit("false"); }
+        if (c == 'n') return lit("null");
+        return num(v);
+    }
+};
+}  // namespace detail
+// "" and *out set, or why `text` is not one JSON value.
+inline std::string parseJson(const std::string& text, Json* out) {
+    detail::JsonIn in{text};
+    if (!in.value(out, 0)) return in.err;
+    in.ws();
+    return in.i == text.size() ? "" : "trailing bytes after the JSON value at byte " + std::to_string(in.i);
+}
+
+// manifest.json against the members found in the kit: the schema, the label, "hardwareVerified": false, and exactly one
+// entry per member (no extra, none missing) whose kind, name, path, format, pages, status and selected files are what
+// this kit holds. "" = it matches.
+inline std::string manifestRefusal(const fs::path& dir, const std::vector<Item>& found) {
+    std::error_code ec;
+    const auto size = fs::file_size(dir / "manifest.json", ec);
+    if (ec || size > (1u << 20)) return "manifest.json is missing or larger than 1 MiB";
+    std::FILE* f = media::detail::openRegular(AT_FDCWD, (dir / "manifest.json").c_str());
+    if (!f) return "manifest.json is not a regular file";
+    std::string text(size, '\0');
+    const size_t got = std::fread(text.data(), 1, text.size(), f);
+    std::fclose(f);
+    if (got != text.size()) return "cannot read manifest.json";
+    Json j;
+    if (const auto e = parseJson(text, &j); !e.empty()) return "manifest.json is not valid JSON: " + e;
+    const auto str = [](const Json* v, const std::string& want) { return v && v->t == Json::T::Str && v->s == want; };
+    if (j.t != Json::T::Obj) return "manifest.json is not an object";
+    if (!str(j.get("schema"), kSchema)) return std::string("manifest.json: schema is not ") + kSchema;
+    if (!str(j.get("label"), kLabel)) return "manifest.json: the label is missing or different";
+    if (const Json* h = j.get("hardwareVerified"); !h || h->t != Json::T::Bool || h->b) return "manifest.json: hardwareVerified must be false";
+    const Json* kit = j.get("kit");
+    const Json* items = j.get("items");
+    if (!kit || kit->t != Json::T::Str || !items || items->t != Json::T::Arr) return "manifest.json: kit or items missing";
+    std::map<std::string, const Item*> byPath;
+    for (const auto& it : found) byPath[it.kitPath()] = &it;
+    if (items->a.size() != found.size()) return "manifest.json lists " + std::to_string(items->a.size()) + " members, the kit holds " + std::to_string(found.size());
+    std::set<std::string> listed;
+    static const std::set<std::string> keys = {"step", "kind", "name", "path", "importFormat", "select", "alternative", "manual", "status", "checks"};
+    for (size_t n = 0; n < items->a.size(); ++n) {
+        const Json& e = items->a[n];
+        if (e.t != Json::T::Obj || e.o.size() != keys.size()) return "manifest.json: entry " + std::to_string(n + 1) + " does not have exactly the member fields";
+        for (const auto& [k, v] : e.o) if (!keys.count(k)) return "manifest.json: entry " + std::to_string(n + 1) + " has the unknown field " + k;
+        const Json* path = e.get("path");
+        if (!path || path->t != Json::T::Str || !byPath.count(path->s)) return "manifest.json: entry " + std::to_string(n + 1) + " names no member of the kit";
+        if (!listed.insert(path->s).second) return "manifest.json lists " + path->s + " twice";
+        const Item& it = *byPath[path->s];
+        const Json* step = e.get("step");
+        if (!step || step->t != Json::T::Num || step->s != std::to_string(n + 1)) return "manifest.json: " + path->s + " has the wrong step";
+        if (!str(e.get("kind"), typeFolder(it.kind)) || !str(e.get("name"), it.name) || !str(e.get("importFormat"), formatFor(it.kind)) ||
+            !str(e.get("manual"), pagesFor(it.kind)) || !str(e.get("status"), kValid))
+            return "manifest.json: " + path->s + " does not match the member (kind, name, format, pages or status)";
+        if (const Json* c = e.get("checks"); !c || c->t != Json::T::Str || c->s.empty()) return "manifest.json: " + path->s + " has no checks";
+        for (const auto& [field, want] : {std::pair<const char*, const std::vector<std::string>*>{"select", &it.select}, {"alternative", &it.alt}}) {
+            const Json* a = e.get(field);
+            if (!a || a->t != Json::T::Arr || a->a.size() != want->size()) return "manifest.json: " + path->s + " " + field + " does not match the member";
+            for (size_t k = 0; k < want->size(); ++k)
+                if (!str(&a->a[k], it.kitPath() + ((*want)[k].empty() ? "" : "/" + (*want)[k]))) return "manifest.json: " + path->s + " " + field + " does not match the member";
+        }
+    }
+    return "";
+}
+
 // ── checking a written kit (the staged one, or a copy on a stick) ──
 // Re-reads the whole kit: every file against PACKAGE.sha256 (nothing missing or extra), only the known top-level entries,
 // every member through its reader, and KIT.md/manifest.json carrying the label and every member. `expect` (optional):
@@ -356,11 +596,10 @@ inline std::string verifyKit(const fs::path& dir, const std::vector<Item>* expec
     }
     if (ec) return "cannot list " + dir.string() + ": " + ec.message();
     if (found.empty()) return "the kit holds no member";
-    std::ifstream mdf(dir / "KIT.md", std::ios::binary), jsf(dir / "manifest.json", std::ios::binary);
-    const std::string md{std::istreambuf_iterator<char>(mdf), {}}, js{std::istreambuf_iterator<char>(jsf), {}};
-    if (md.find(kLabel) == std::string::npos || js.find(kLabel) == std::string::npos) return "KIT.md or manifest.json lacks the label";
-    for (const auto& it : found)
-        if (js.find("\"path\": \"" + media::graph::jsonEscape(it.kitPath()) + "\"") == std::string::npos) return "manifest.json does not list " + it.kitPath();
+    std::ifstream mdf(dir / "KIT.md", std::ios::binary);
+    const std::string md{std::istreambuf_iterator<char>(mdf), {}};
+    if (md.find(kLabel) == std::string::npos) return "KIT.md lacks the label";
+    if (const auto e = manifestRefusal(dir, found); !e.empty()) return e;
     if (expect) {
         std::set<std::string> want, got;
         for (const auto& it : *expect) want.insert(it.kitPath());
@@ -382,23 +621,39 @@ inline std::vector<fs::path> outputsIn(const fs::path& folder) {
     return r;
 }
 
-// The kit as an E6 export job. `inputs`: AIArranger outputs (package folders, KMP folders, Style .mid files).
-inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest) {
+// Test hook (smoke): the thread that last listed a folder of outputs for a kit job; it must be the job's worker.
+inline std::atomic<size_t> lastListingThread{0};
+
+// The kit as an E6 export job. `inputs`: AIArranger outputs (package folders, KMP folders, Style .mid files). With
+// `outputsFolder` set instead, its visible entries are the inputs, listed by the job itself (off the UI thread), and the
+// folder is the job's source.
+inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::path outputsFolder = {}) {
     ExportSpec s;
     s.type = "Pa5X Import Kit (documented imports)";
     for (const auto& p : inputs) s.source += (s.source.empty() ? "" : ", ") + p.string();
     s.sources = inputs;
+    if (!outputsFolder.empty()) { s.source = outputsFolder.string(); s.sources = {outputsFolder}; }
     s.dest = std::move(dest);
+    auto in = std::make_shared<std::vector<fs::path>>(std::move(inputs));
     auto items = std::make_shared<std::vector<Item>>();
-    auto files = std::make_shared<std::vector<std::pair<fs::path, std::string>>>();
+    auto roots = std::make_shared<std::vector<std::shared_ptr<media::detail::Fd>>>();   // pinned per member, in item order
+    auto files = std::make_shared<std::vector<Planned>>();
     auto bytes = std::make_shared<uint64_t>(0);
-    s.validate = [inputs, items, files, bytes, kitName = media::folderPath(s.dest).filename().string()] {
-        if (inputs.empty()) return std::string("refusing: no outputs chosen for the kit");
+    s.validate = [in, outputsFolder, items, roots, files, bytes, kitName = media::folderPath(s.dest).filename().string()] {
+        if (!outputsFolder.empty()) {
+            lastListingThread = thisThread();
+            *in = outputsIn(outputsFolder);
+        }
+        if (in->empty()) return std::string("refusing: no outputs chosen for the kit");
         if (const auto e = detail::fatName(kitName); !e.empty()) return "refusing: the kit name '" + kitName + "' has " + e;
         items->clear();
-        for (const auto& p : inputs) {
+        roots->clear();
+        for (const auto& p : *in) {
             auto it = classify(p);
             if (it.kind == Kind::Unknown) return "refusing: " + p.string() + " is not an AIArranger output the kit takes (a Sound or Drum Kit package folder, a KMP/KSF folder, or a Style .mid)";
+            std::shared_ptr<media::detail::Fd> fd;
+            if (const auto e = pinRoot(it, &fd); !e.empty()) return "refusing: " + e;
+            roots->push_back(std::move(fd));
             items->push_back(std::move(it));
         }
         files->clear();
@@ -426,24 +681,26 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest) {
         r.front().bytes = *bytes;   // shortcut: the members' total is shown on the first line, sizes per member are not split
         return r;
     };
-    s.write = [items, files](const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
+    s.write = [items, roots, files](const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
         std::error_code ec;
         if (!fs::create_directory(out, ec)) return {"cannot create " + out.string(), ""};
         media::sound::pkgio::FileSet set{out};
+        // Every file read once, from the pinned member folders without following a link, streamed and hashed as it is read
         for (size_t i = 0; i < files->size(); ++i) {
             if (!progress(double(i) / double(files->size() + 1))) return {"cancelled by the user while copying; nothing was published", ""};
-            const auto& [src, rel] = (*files)[i];
-            std::string err;
-            // shortcut: one member file is held in memory while it is copied (samples are MB, not GB); stream it if kits get large
-            const auto b = media::sound::korg::slurp(src, &err);
-            if (!err.empty()) return {"cannot read " + src.string() + ": " + err, ""};
-            set.save(rel, b);
+            const auto& f = (*files)[i];
+            uint64_t n = 0;
+            std::string sha;
+            if (const auto e = copyPinned((*roots)[f.item]->v, f.from, out / f.to, &n, &sha); !e.empty())
+                return {"cannot copy " + (*items)[f.item].kitPath() + ": " + e, ""};
+            set.want[f.to] = {n, sha};
         }
-        // Round trip: each copied member through the same reader that passed its source (fail closed on any difference)
+        // The copy against the SHA-256 of the bytes read from the sources (exactly these files, nothing extra) ...
+        if (const auto e = set.checkFiles(); !e.empty()) return {"the copy does not match the bytes read from the sources: " + e, ""};
+        // ... and each copied member through the readers that passed its source
         for (const auto& it : *items) {
             std::string d;
             if (const auto e = checkMember(it.kind, out / it.kitPath(), &d); !e.empty()) return {"the copy of " + it.kitPath() + " does not re-read: " + e, ""};
-            if (d != it.detail) return {"the copy of " + it.kitPath() + " reads differently from its source (" + d + " vs " + it.detail + ")", ""};
         }
         const auto name = out.filename().string();
         set.save("KIT.md", kitMd(name, *items));

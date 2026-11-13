@@ -46,6 +46,25 @@ static std::map<std::string, std::string> hashes(const fs::path& root) {
     }
     return r;
 }
+// Rewrites dir/PACKAGE.sha256 for the files now in dir (what someone re-signing a tampered folder would do).
+static void resign(const fs::path& dir) {
+    std::string man;
+    int n = 0;
+    for (const auto& f : listFiles(dir))
+        if (f.rel != "PACKAGE.sha256" && !k::detail::finderLitter(f.rel)) {
+            bool c = false;
+            std::string e;
+            man += media::detail::sha256File(dir / f.rel, [](size_t) { return true; }, &c, &e) + "  " + f.rel + "\n";
+            ++n;
+        }
+    put(dir / "PACKAGE.sha256", man + "# " + std::to_string(n) + " files\n");
+}
+static void replaceIn(const fs::path& p, const std::string& from, const std::string& to) {
+    auto t = slurp(p);
+    const auto at = t.find(from);
+    if (at != std::string::npos) t.replace(at, from.size(), to);
+    put(p, t);
+}
 static size_t countOf(const std::string& s, const std::string& w) { size_t n = 0; for (size_t p = 0; (p = s.find(w, p)) != std::string::npos; ++p) ++n; return n; }
 static std::vector<std::string> named(const fs::path& dir, const std::string& stem) {
     std::vector<std::string> r;
@@ -152,19 +171,125 @@ int main() {
         TEST("stick copy with a changed byte fails", has(k::verifyKit(stick, nullptr, &text), "PACKAGE.sha256"));
         // a member that matches a re-signed kit manifest but is not a Style SMF: only the member's reader can catch it
         put(stick / "STYLES/Waltz.mid", "MThd not a style");
-        std::string man;
-        for (const auto& f : listFiles(stick))
-            if (f.rel != "PACKAGE.sha256" && !k::detail::finderLitter(f.rel)) {
-                bool c = false;
-                std::string e;
-                man += media::detail::sha256File(stick / f.rel, [](size_t) { return true; }, &c, &e) + "  " + f.rel + "\n";
-            }
-        int n = 0;
-        for (const auto& f : listFiles(stick)) n += f.rel != "PACKAGE.sha256" && !k::detail::finderLitter(f.rel);
-        put(stick / "PACKAGE.sha256", man + "# " + std::to_string(n) + " files\n");
+        resign(stick);
         TEST("re-signed kit with a broken Style: the Style SMF reader fails it", has(k::verifyKit(stick, nullptr, &text), "STYLES/Waltz.mid: Korg Style SMF reader"));
+
+        // ── Codex r1 P2: manifest.json is parsed and must match the members exactly (each case re-signed) ──
+        const auto tamper = [&](const char* what, const std::function<void(const fs::path&)>& edit) {
+            const fs::path t = root / "tamper" / what / "AIA Kit";
+            fs::create_directories(t.parent_path());
+            fs::copy(kit, t, fs::copy_options::recursive);
+            edit(t / "manifest.json");
+            resign(t);
+            std::string tx;
+            return k::verifyKit(t, nullptr, &tx);
+        };
+        TEST("manifest.json untouched copy verifies", tamper("none", [](const fs::path&) {}).empty());
+        TEST("manifest.json invalid JSON fails verify", has(tamper("invalid", [](const fs::path& m) { auto t = slurp(m); t.erase(t.rfind('}')); put(m, t); }), "not valid JSON"));
+        TEST("manifest.json hardwareVerified true fails verify",
+             has(tamper("hw", [](const fs::path& m) { replaceIn(m, "\"hardwareVerified\": false", "\"hardwareVerified\": true"); }), "hardwareVerified must be false"));
+        TEST("manifest.json with an extra entry fails verify", !tamper("extra", [](const fs::path& m) {
+            auto t = slurp(m);
+            const auto a = t.find("\n    {\"step\": 1"), b = t.find(",\n    {\"step\": 2");
+            t.insert(t.rfind("\n  ]"), "," + t.substr(a, b - a));
+            put(m, t);
+        }).empty());
+        TEST("manifest.json with a missing entry fails verify", has(tamper("missing", [](const fs::path& m) {
+            auto t = slurp(m);
+            const auto a = t.find(",\n    {\"step\": 4"), b = t.rfind("\n  ]");
+            t.erase(a, b - a);
+            put(m, t);
+        }), "lists 3 members"));
+        TEST("manifest.json with another label or schema fails verify",
+             has(tamper("label", [](const fs::path& m) { replaceIn(m, " — NOT VERIFIED ON A PA5X", ""); }), "label") &&
+             has(tamper("schema", [](const fs::path& m) { replaceIn(m, "import-kit/1", "import-kit/2"); }), "schema"));
+        TEST("manifest.json with a wrong selected file fails verify",
+             has(tamper("select", [](const fs::path& m) { replaceIn(m, "AIA Demo Organ.txprog", "Other.txprog"); }), "select does not match"));
+        TEST("manifest.json with an unknown field fails verify",
+             has(tamper("field", [](const fs::path& m) { replaceIn(m, "\"step\": 1,", "\"step\": 1, \"slot\": \"U1\","); }), "manifest.json"));
+    }
+    // ── the strict JSON reader ──
+    {
+        k::Json j;
+        TEST("JSON: escapes and a surrogate pair decode", k::parseJson("{\"a\": \"x\\n\\u00e9\\ud83c\\udfb9\\/\", \"b\": [1, -2.5e3, true, null]}", &j).empty() &&
+             j.get("a") && j.get("a")->s == "x\n\xC3\xA9\xF0\x9F\x8E\xB9/" && j.get("b")->a.size() == 4 && j.get("b")->a[1].s == "-2.5e3");
+        for (const char* bad : {"{\"a\": 1,}", "{\"a\": 1} x", "{\"a\": 1, \"a\": 2}", "[01]", "\"\\ud800\"", "\"\\uZZ00\"", "\"a\x01\"", "{\"a\" 1}", "[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]", ""}) {
+            k::Json x;
+            TEST((std::string("JSON: refused: ") + bad).c_str(), !k::parseJson(bad, &x).empty());
+        }
     }
     TEST("sources unchanged by the kit", hashes(out) == before);
+
+    // ── Codex r1 P1: a validated source file swapped for a link before the copy is never read through it ──
+    for (const char* which : {"STYLES", "SOUNDS"}) {
+        const fs::path src = root / ("swap-" + std::string(which)), outside = root / ("outside-" + std::string(which));
+        fs::create_directories(src);
+        fs::create_directories(outside);
+        const bool style = std::string(which) == "STYLES";
+        const fs::path member = style ? src / "Waltz.mid" : src / "AIA Demo Organ";
+        fs::copy(style ? inputs[3] : inputs[0], member, fs::copy_options::recursive);
+        const fs::path victim = style ? member : member / "REPORT.txt";
+        auto s = k::importKit({member}, root / ("Swap Kit " + std::string(which)));
+        const auto real = s.dependencies;   // runs after validate, before the copy: the swap happens in between
+        s.dependencies = [&, real](std::vector<std::string>& notes, uint64_t& b) {
+            auto r = real(notes, b);
+            fs::copy_file(victim, outside / victim.filename());   // the same bytes, outside the source root
+            fs::remove(victim);
+            fs::create_symlink(outside / victim.filename(), victim);
+            return r;
+        };
+        const auto st = run(s);
+        TEST(("swap for a link after validation (" + std::string(which) + "): FAILED at write, nothing published").c_str(),
+             st.phase == Phase::Failed && st.stoppedAt == Phase::Run && has(st.reason, "without following a link") &&
+             named(root, "Swap Kit " + std::string(which)) == std::vector<std::string>{"Swap Kit " + std::string(which) + ".INCOMPLETE"});
+    }
+
+    // ── Codex r1 P2: a Drum Kit's .txperf is read (garbage, re-signed, is refused) ──
+    {
+        const fs::path dk = root / "txperf" / "AIA Demo Kit";
+        fs::create_directories(dk.parent_path());
+        fs::copy(inputs[1], dk, fs::copy_options::recursive);
+        put(dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", "garbage, not a performance");
+        resign(dk);
+        TEST("garbage .txperf, re-signed: the package check refuses it", has(media::sound::verifyPackage(dk).text, ".txperf"));
+        const auto st = run(k::importKit({dk}, root / "Perf Kit"));
+        TEST("garbage .txperf, re-signed: the kit is FAILED at the member check", st.phase == Phase::Failed && st.stoppedAt == Phase::Dependencies &&
+             has(st.reason, ".txperf") && named(root, "Perf Kit").empty());
+        fs::copy_file(inputs[1] / "tx/AIA Demo Kit/AIA Demo Kit.txperf", dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", fs::copy_options::overwrite_existing);
+        replaceIn(dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", "tx:program=\"AIA Demo Kit.txprog\"", "tx:program=\"../x.txprog\"");
+        resign(dk);
+        TEST(".txperf naming a program outside its folder: refused", has(media::sound::verifyPackage(dk).text, "is not a .txprog file name"));
+        fs::copy_file(inputs[1] / "tx/AIA Demo Kit/AIA Demo Kit.txperf", dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", fs::copy_options::overwrite_existing);
+        resign(dk);
+        TEST("the real .txperf passes", media::sound::verifyPackage(dk).ok);
+    }
+
+    // ── Codex r1 P2: a member file above 64 MiB is streamed, not refused (sparse 70 MiB SF2) ──
+    {
+        const fs::path big = root / "big" / "AIA Demo Organ";
+        fs::create_directories(big.parent_path());
+        fs::copy(inputs[0], big, fs::copy_options::recursive);
+        fs::resize_file(big / "AIA_Demo_Organ.sf2", uint64_t(70) << 20);   // zero tail after the RIFF chunk (sparse on APFS)
+        resign(big);
+        const auto st = run(k::importKit({big}, root / "Big Kit"));
+        TEST("70 MiB SF2 member: kit done, the copy is the same bytes", st.phase == Phase::Done &&
+             fs::file_size(root / "Big Kit/SOUNDS/AIA Demo Organ/AIA_Demo_Organ.sf2") == (uint64_t(70) << 20) &&
+             hashes(big / "AIA_Demo_Organ.sf2") == hashes(root / "Big Kit/SOUNDS/AIA Demo Organ/AIA_Demo_Organ.sf2"));
+    }
+
+    // ── Codex r1 P2: a folder of outputs is listed by the job, not when the job is made ──
+    {
+        const fs::path later = root / "later";
+        auto s = k::importKit({}, root / "Later Kit", later);   // the folder does not exist yet
+        fs::create_directories(later);
+        fs::copy(inputs[3], later / "Waltz.mid");
+        k::lastListingThread = 0;
+        const auto st = run(s);
+        TEST("folder of outputs: listed inside the job (validate), on the job's thread", st.phase == Phase::Done &&
+             fs::is_regular_file(root / "Later Kit/STYLES/Waltz.mid") && k::lastListingThread.load() == thisThread() && st.source == later.string());
+        const auto in = run(k::importKit({}, later / "kit", later));
+        TEST("folder of outputs: a kit inside that folder is refused (D18)", in.phase == Phase::Failed && in.stoppedAt == Phase::Destination);
+    }
 
     // ── fail closed: a corrupted source member stops the kit before anything is created ──
     {

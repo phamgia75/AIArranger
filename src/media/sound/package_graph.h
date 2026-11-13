@@ -277,6 +277,43 @@ inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::
         }
     }
     if (ec) { if (err) *err = dir.string() + ": cannot list tx/: " + ec.message(); return false; }
+    // A .txperf (TX16Wx Performance, imported by the Pa5X as a Drum Kit, MAN p.1206, p.1210) is read too: one
+    // <tx:performance> document in the TX16Wx performance namespace, as Korg's "Real-Drums DrumKit" example and
+    // txperf_writer.h, with at least one slot, each slot's tx:program a plain .txprog file name present in its own folder.
+    // shortcut: a structural scan like the .txprog one above, not a full XML parser; the full independent check of a
+    // Drum Kit package is tools/validate_drumkit_package.py (Python, CTest test_drumkit_package_independent).
+    for (fs::recursive_directory_iterator it(dir / "tx", ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().extension().string() != ".txperf") continue;
+        std::vector<uint8_t> b;
+        const std::string name = it->path().lexically_relative(dir).generic_string();
+        auto bad = [&](const std::string& why) { if (err) *err = dir.string() + ": " + name + ": " + why; return false; };
+        if (!contained(name) || !read(it->path(), b)) return bad("cannot read it (a link, not a regular file, or larger than 16 MiB)");
+        std::string x(b.begin(), b.end());
+        if (x.rfind("\xEF\xBB\xBF", 0) == 0) x.erase(0, 3);
+        while (!x.empty() && std::isspace(static_cast<unsigned char>(x.back()))) x.pop_back();
+        const size_t root = x.find("<tx:performance");
+        if (x.rfind("<?xml", 0) != 0 || root == std::string::npos || x.find('<', x.find("?>") + 2) != root)
+            return bad("not a TX16Wx Performance (an XML document whose root is tx:performance)");
+        if (x.find("xmlns:tx=\"http://www.tx16wx.com/3.0/performance\"") == std::string::npos) return bad("not in the TX16Wx performance namespace");
+        if (x.size() < 17 || x.compare(x.size() - 17, 17, "</tx:performance>") != 0) return bad("the tx:performance element is not closed at the end");
+        if (std::count(b.begin(), b.end(), uint8_t(0))) return bad("contains a NUL byte");
+        size_t slots = 0;
+        for (size_t at = 0; (at = x.find("<tx:slot", at)) != std::string::npos; ++at) {
+            const size_t close = x.find('>', at), p = x.find("tx:program=\"", at);
+            if (close == std::string::npos || p == std::string::npos || p > close) return bad("a tx:slot has no tx:program");
+            const size_t q = x.find('"', p + 12);
+            std::string v = x.substr(p + 12, q == std::string::npos ? 0 : q - p - 12);
+            for (const auto& [ent, ch] : std::vector<std::pair<std::string, std::string>>{{"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"}})
+                for (size_t i; (i = v.find(ent)) != std::string::npos;) v.replace(i, ent.size(), ch);
+            if (v.size() <= 7 || v.compare(v.size() - 7, 7, ".txprog") != 0 || v.find_first_of("/\\") != std::string::npos || v == "..")
+                return bad("tx:program '" + v + "' is not a .txprog file name");
+            std::error_code se;
+            if (!fs::is_regular_file(fs::symlink_status(it->path().parent_path() / v, se))) return bad("tx:program '" + v + "' is not in its folder");
+            ++slots;
+        }
+        if (!slots) return bad("no tx:slot");
+    }
+    if (ec) { if (err) *err = dir.string() + ": cannot list tx/: " + ec.message(); return false; }
     std::set<std::string> manifestWavs;
     for (const auto& [id, n] : tmp.nodes()) {
         if (!n.sample) continue;

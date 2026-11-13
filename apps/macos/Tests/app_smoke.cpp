@@ -11,6 +11,7 @@
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/serializer.h"
 #include "jobs/export_specs.h"
+#include "jobs/import_kit.h"
 #include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
@@ -1201,6 +1202,7 @@ int main() {
                 const std::string kitMd{std::istreambuf_iterator<char>(md), {}};
                 TEST("kit: done off the message thread, member in SOUNDS, KIT.md labelled, L1 passed, never L3", kid > 0 && kj.phase == P::Done &&
                      kj.writerThread != jobs::thisThread() && fs::is_directory(root / "kit-job/SOUNDS/pkg-job") &&
+                     jobs::kit::lastListingThread.load() == kj.writerThread &&   // the outputs folder was listed by the job's worker, not the UI
                      kitMd.find("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X") != std::string::npos && kj.level.l1.state == ui::studio::Check::Passed &&
                      kj.level.l3.state == ui::studio::Check::NotRun && !fs::exists(root / "kit-job.INCOMPLETE"));
             }
