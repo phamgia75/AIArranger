@@ -20,18 +20,23 @@
 
 namespace ai_arranger::media::samplelab {
 
-struct WavFormat { uint32_t rate = 0; uint16_t bits = 0; bool isFloat = false; uint8_t channels = 0; size_t frames = 0; };
+struct WavFormat { uint32_t rate = 0; uint16_t bits = 0; bool isFloat = false; uint8_t channels = 0; size_t frames = 0; uint16_t validBits = 0; };
 
 inline std::string formatLine(const WavFormat& f) {
-    return std::to_string(f.rate) + " Hz " + std::to_string(f.bits) + "-bit" + (f.isFloat ? " float" : "") + " " + std::to_string(f.channels) +
-           " ch " + std::to_string(f.frames) + " frames";
+    return std::to_string(f.rate) + " Hz " + std::to_string(f.bits) + "-bit" + (f.isFloat ? " float" : "") +
+           (f.validBits && f.validBits < f.bits ? " (" + std::to_string(f.validBits) + " valid)" : "") + " " + std::to_string(f.channels) + " ch " +
+           std::to_string(f.frames) + " frames";
 }
+
+// Input rates a file may declare (owner gate #52): wider than the Pa5X range so 8 kHz and 96/192 kHz material converts,
+// narrow enough that a declared rate cannot make the resampler's output or its filter impractically large.
+inline constexpr uint32_t kMinInputRate = 4000, kMaxInputRate = 192000;
 
 // The WAV `b` as 16-bit PCM bytes, its own format in *in. Empty with *err set when it is not a PCM/float WAV.
 inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in, std::string* err) {
     auto u16 = [&](size_t o) { return uint32_t(b[o] | b[o + 1] << 8); };
     auto u32 = [&](size_t o) { return u16(o) | u16(o + 2) << 16; };
-    auto fail = [&](const char* m) { *err = m; return std::vector<uint8_t>{}; };
+    auto fail = [&](const std::string& m) { *err = m; return std::vector<uint8_t>{}; };
     if (b.size() < 12 || std::memcmp(b.data(), "RIFF", 4) || std::memcmp(&b[8], "WAVE", 4)) return fail("not a RIFF/WAVE file");
     size_t fmtAt = 0, dataAt = 0, dataLen = 0;
     for (size_t o = 12; o + 8 <= b.size();) {
@@ -42,22 +47,37 @@ inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in
         o = body + len + (len & 1);
     }
     if (!fmtAt || !dataAt) return fail("missing fmt or data chunk");
+    // Samples are decoded by their CONTAINER (wBitsPerSample, nBlockAlign); wValidBitsPerSample (EXTENSIBLE) says how many
+    // of its top bits carry audio, the rest are padding and are ignored.
     uint32_t tag = u16(fmtAt);
-    if (tag == 0xFFFE) {   // WAVE_FORMAT_EXTENSIBLE: the sub-format GUID starts with the plain tag
-        if (u32(fmtAt - 4) < 40) return fail("extensible fmt chunk too short");
+    const uint32_t ch = u16(fmtAt + 2), rate = u32(fmtAt + 4), align = u16(fmtAt + 12), bits = u16(fmtAt + 14);
+    uint32_t valid = bits;
+    if (tag == 0xFFFE) {   // WAVE_FORMAT_EXTENSIBLE
+        if (u32(fmtAt - 4) < 40) return fail("extensible fmt chunk shorter than 40 bytes");
+        if (u16(fmtAt + 16) < 22) return fail("extensible fmt cbSize " + std::to_string(u16(fmtAt + 16)) + " below 22");
+        if (u16(fmtAt + 18)) valid = u16(fmtAt + 18);   // 0: not stated, every container bit is valid
+        static const uint8_t guidTail[14] = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71};
         tag = u16(fmtAt + 24);
+        if (std::memcmp(&b[fmtAt + 26], guidTail, 14) || (tag != 1 && tag != 3)) return fail("unsupported subformat (only PCM or IEEE float)");
     }
-    in->channels = uint8_t(std::min<uint32_t>(u16(fmtAt + 2), 255));
-    in->rate = u32(fmtAt + 4);
-    in->bits = uint16_t(u16(fmtAt + 14));
-    in->isFloat = tag == 3;
-    const unsigned bytes = in->bits / 8;
-    if (in->channels != 1 && in->channels != 2) return fail("only mono or stereo is supported");
-    if (!((tag == 1 && (in->bits == 8 || in->bits == 16 || in->bits == 24 || in->bits == 32)) || (tag == 3 && in->bits == 32)))
+    if (ch != 1 && ch != 2) return fail("only mono or stereo is supported");
+    if (rate < kMinInputRate || rate > kMaxInputRate)
+        return fail("sample rate " + std::to_string(rate) + " Hz outside the accepted input range " + std::to_string(kMinInputRate) + "-" +
+                    std::to_string(kMaxInputRate) + " Hz");
+    if (!((tag == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) || (tag == 3 && bits == 32)))
         return fail("only 8/16/24/32-bit PCM or 32-bit float is supported");
-    if (dataLen % (bytes * in->channels)) return fail("data chunk does not hold whole frames");
-    in->frames = dataLen / (bytes * in->channels);
-    if (tag == 1 && in->bits == 16 && u16(fmtAt) == 1) return b;   // already what the pipeline reads
+    if (align != ch * bits / 8) return fail("block align " + std::to_string(align) + " is not channels * container bytes (" + std::to_string(ch * bits / 8) + ")");
+    if (valid > bits || (tag == 3 && valid != bits)) return fail("valid bits " + std::to_string(valid) + " do not fit the " + std::to_string(bits) + "-bit container");
+    in->channels = uint8_t(ch);
+    in->rate = rate;
+    in->bits = uint16_t(bits);
+    in->validBits = uint16_t(valid);
+    in->isFloat = tag == 3;
+    const unsigned bytes = bits / 8;
+    if (dataLen % (bytes * ch)) return fail("data chunk does not hold whole frames");
+    in->frames = dataLen / (bytes * ch);
+    if (u16(fmtAt) == 1 && bits == 16) return b;   // plain 16-bit PCM: already what the pipeline reads
+    const uint32_t keep = valid >= 32 ? 0xFFFFFFFFu : ~((1u << (32 - valid)) - 1);   // the valid top bits of a left-justified 32-bit word
 
     uint32_t seed = 0x9E3779B9u;   // xorshift32: TPDF dither, the same for every run
     auto rnd = [&] { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed / 4294967296.0 - 0.5; };
@@ -75,14 +95,16 @@ inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in
             for (size_t i = 0; i < in->frames * in->channels; ++i) {
                 const size_t p = dataAt + i * bytes;
                 long v;
-                if (in->bits == 8) v = (long(b[p]) - 128) * 256;   // unsigned 8-bit: exact
-                else if (in->bits == 16 && !in->isFloat) v = int16_t(u16(p));   // 16-bit in an EXTENSIBLE fmt: exact, two bytes
-                else {
-                    double x;
-                    if (in->isFloat) { float f; std::memcpy(&f, &b[p], 4); x = std::isfinite(f) ? double(f) * 32768.0 : 0.0; }
-                    else if (in->bits == 24) x = double(int32_t(uint32_t(b[p]) << 8 | uint32_t(b[p + 1]) << 16 | uint32_t(b[p + 2]) << 24)) / 65536.0;
-                    else x = double(int32_t(u32(p))) / 65536.0;
-                    v = std::lround(x + rnd() + rnd());
+                if (in->isFloat) {
+                    float f;
+                    std::memcpy(&f, &b[p], 4);
+                    v = std::lround((std::isfinite(f) ? double(f) * 32768.0 : 0.0) + rnd() + rnd());
+                } else {   // the container value, left-justified in 32 bits, padding bits cleared
+                    const uint32_t w = bits == 8 ? uint32_t(uint8_t(b[p] - 128)) << 24 : bits == 16 ? u16(p) << 16
+                                     : bits == 24 ? uint32_t(b[p]) << 8 | uint32_t(b[p + 1]) << 16 | uint32_t(b[p + 2]) << 24 : u32(p);
+                    const int32_t x = int32_t(w & keep);
+                    v = valid <= 16 ? long(x >> 16)                                 // 16 valid bits or fewer: exact
+                                    : std::lround(double(x) / 65536.0 + rnd() + rnd());   // deeper: TPDF dither to 16 bits
                 }
                 put16(uint16_t(int16_t(std::clamp(v, -32768L, 32767L))));
             }
@@ -110,17 +132,26 @@ inline uint32_t pa5xRate(uint32_t r) {
     return r < 11025 ? 11025 : r;
 }
 
-// The Pa5X frame limit (MAN p.1155), checked on the OUTPUT length before anything is allocated: an input's declared
-// rate is untrusted (1 Hz, 1 000 000 frames would ask for 11 025 000 000). "" or the reason; s is unchanged then.
+// Checked before anything is allocated (owner gate #52): both rates inside the accepted input range, the output length
+// computed in overflow-checked 64-bit integers, then the Pa5X frame limit (MAN p.1155) and the memory budget of the
+// output PCM. A declared rate is untrusted (1 Hz, 1 000 000 frames would ask for 11 025 000 000 frames).
+// "" or the reason; s is unchanged then.
 inline constexpr uint64_t kMaxFrames = 1048576;
+inline constexpr uint64_t kResampleBudgetBytes = kMaxFrames * 2 * 2;   // stereo 16-bit at the frame limit: 4 MiB
 inline std::string resample(sound::Sample& s, uint32_t to) {
     if (to == s.rate || !s.channels) return "";
-    if (!s.rate || !to) return "sample rate 0 Hz";
-    const double ratio = double(to) / s.rate, fc = 0.5 * std::min(1.0, ratio) * 0.97;   // cut-off in input cycles/frame
-    const double want = std::round(double(s.frames()) * ratio);
-    if (want > double(kMaxFrames))
-        return "resampling " + std::to_string(s.rate) + " Hz to " + std::to_string(to) + " Hz would make " + std::to_string(uint64_t(want)) +
+    for (uint32_t r : {s.rate, to})
+        if (r < kMinInputRate || r > kMaxInputRate)
+            return "sample rate " + std::to_string(r) + " Hz outside " + std::to_string(kMinInputRate) + "-" + std::to_string(kMaxInputRate) + " Hz";
+    const uint64_t n64 = s.frames();
+    if (n64 > UINT64_MAX / to) return "resampling: frame count overflows";
+    const uint64_t outFrames = (n64 * to + s.rate / 2) / s.rate;   // rounded half up, as llround on these positive values
+    if (outFrames > kMaxFrames)
+        return "resampling " + std::to_string(s.rate) + " Hz to " + std::to_string(to) + " Hz would make " + std::to_string(outFrames) +
                " frames, over the Pa5X limit of 1048576";
+    if (outFrames * s.channels * 2 > kResampleBudgetBytes) return "resampling: output over the " + std::to_string(kResampleBudgetBytes) + "-byte budget";
+    const double ratio = double(to) / s.rate, fc = 0.5 * std::min(1.0, ratio) * 0.97;   // cut-off in input cycles/frame
+    const double want = double(outFrames);
     const long H = long(std::ceil(16 / fc));                                               // half width: 16 zero crossings
     const size_t n = s.frames(), m = size_t(want), ch = s.channels;
     const double kPi = 3.14159265358979323846;

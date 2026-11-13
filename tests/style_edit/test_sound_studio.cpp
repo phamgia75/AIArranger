@@ -34,7 +34,10 @@ static std::vector<uint8_t> makeWav(int bits, bool isFloat, bool extensible, uin
     const int by = bits / 8;
     id("RIFF"); u32(0); id("WAVE");
     id("fmt "); u32(extensible ? 40 : 16); u16(extensible ? 0xFFFE : isFloat ? 3 : 1); u16(ch); u32(rate); u32(rate * by * ch); u16(by * ch); u16(bits);
-    if (extensible) { u16(22); u16(bits); u32(ch == 2 ? 3 : 4); u16(isFloat ? 3 : 1); for (int i = 0; i < 14; ++i) b.push_back(0); }
+    if (extensible) {   // KSDATAFORMAT_SUBTYPE_PCM / IEEE_FLOAT
+        u16(22); u16(bits); u32(ch == 2 ? 3 : 4); u16(isFloat ? 3 : 1);
+        b.insert(b.end(), {0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71});
+    }
     id("data"); u32(uint32_t(x.size() * by));
     for (double v : x) {
         if (isFloat) { float f = float(v); uint8_t t[4]; std::memcpy(t, &f, 4); b.insert(b.end(), t, t + 4); }
@@ -137,9 +140,13 @@ int main() {
             lab::Sample tiny;
             tiny.rate = 1;
             tiny.pcm.assign(1000, 100);
-            const auto e = lab::resample(tiny, 11025);
+            TEST("resample refuses a 1 Hz source (outside the input range), sample unchanged",
+                 has(lab::resample(tiny, 11025), "sample rate 1 Hz outside") && tiny.rate == 1 && tiny.frames() == 1000);
+            lab::Sample slow;
+            slow.rate = 4000;
+            slow.pcm.assign(400000, 100);
             TEST("resample refuses an output over 1 048 576 frames before allocating, sample unchanged",
-                 has(e, "11025000 frames") && tiny.rate == 1 && tiny.frames() == 1000);
+                 has(lab::resample(slow, 11025), "1102500 frames") && slow.rate == 4000 && slow.frames() == 400000);
         }
         lab::Sample hf;
         lab::readWavAny(makeWav(16, false, false, 96000, 1, sine(30000, 96000, 9600, 0.5)), &hf, &f);
@@ -167,8 +174,8 @@ int main() {
         TEST("source folder unchanged", fs::file_size(in / "hi.wav") > 140000);
         putBytes(root / "convbig/one-hz.wav", makeWav(16, false, false, 1, 1, std::vector<double>(1000, 0.1)));
         const auto big = lab::runBatch(root / "convbig", {}, o);
-        TEST("batch convert: a 1 Hz file is refused by the resampler's limit (not after a huge allocation)",
-             big.items.size() == 1 && has(big.items[0].error, "resampling 1 Hz to 11025 Hz"));
+        TEST("batch convert: a 1 Hz file is refused at read (before any resampling or allocation)",
+             big.items.size() == 1 && has(big.items[0].error, "sample rate 1 Hz outside"));
     }
 
     // ── waveform view and seam ──
@@ -318,7 +325,7 @@ int main() {
         putBytes(root / "drumbig/one-hz.wav", makeWav(16, false, false, 1, 1, std::vector<double>(1000, 0.1)));
         {
             sound::DrumKit x;
-            TEST("refused: a WAV whose conversion would exceed the frame limit", has(lab::buildDrumKit(root / "drumbig", "K", "36 one-hz.wav\n", &x), "resampling 1 Hz"));
+            TEST("refused: a WAV whose conversion would exceed the frame limit", has(lab::buildDrumKit(root / "drumbig", "K", "36 one-hz.wav\n", &x), "sample rate 1 Hz outside"));
         }
 
         const auto kp = std::make_shared<const sound::DrumKit>(kit);

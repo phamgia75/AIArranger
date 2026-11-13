@@ -143,7 +143,7 @@ inline std::string drumKitAsInstrument(const sound::DrumKit& kit, sound::Instrum
     in.name = kit.name;
     sound::Layer L;
     L.name = kit.name;
-    size_t layers = 0, pans = 0, boosts = 0, chokes = 0;
+    size_t layers = 0, pans = 0, boosts = 0, cuts = 0, chokes = 0;
     std::map<int, int> index;
     for (const auto& I : kit.instruments) {
         chokes += I.choke != 0;
@@ -152,6 +152,7 @@ inline std::string drumKitAsInstrument(const sound::DrumKit& kit, sound::Instrum
             layers += k.layers.size() > 1;
             pans += k.panPct != 0;
             boosts += c.gainDb10 > 0;
+            cuts += c.gainDb10 < 0;
             const int root = int(k.key) - k.transpose;
             if (root < 0 || root > 127) return "key " + std::to_string(k.key) + ": transpose leaves the root outside 0-127";
             if (!index.count(c.sample)) { index[c.sample] = int(in.samples.size()); in.samples.push_back(kit.samples[size_t(c.sample)]); }
@@ -165,6 +166,7 @@ inline std::string drumKitAsInstrument(const sound::DrumKit& kit, sound::Instrum
     lost->push_back("exclusive groups (" + std::to_string(chokes) + " choking group(s)), group names and drum families: Drum Kit settings, not in a KMP");
     if (layers) lost->push_back(std::to_string(layers) + " key(s) with velocity layers: only the top layer is written");
     if (boosts) lost->push_back(std::to_string(boosts) + " key(s) with a level above 0 dB: written at 0 dB");
+    if (cuts) lost->push_back(std::to_string(cuts) + " key level cut(s): a KMP zone level is not written (korg_kmp_writer: 0 dB)");
     *out = std::move(in);
     return "";
 }
