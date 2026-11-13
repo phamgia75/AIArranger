@@ -114,7 +114,7 @@ inline std::string buildDrumKit(const fs::path& dir, const std::string& kitName,
         WavFormat fmt;
         bool noSmpl = false;
         if (const auto e = readWavAny(bytes, &s, &fmt, &noSmpl); !e.empty()) return at + file + ": " + e;
-        resample(s, pa5xRate(s.rate));
+        if (const auto e = resample(s, pa5xRate(s.rate)); !e.empty()) return at + file + ": " + e;
         s.looped = false;   // drums are one-shots (the TXPERF matrix and KSF play them through)
         s.root = uint8_t(key);   // the drum plays as recorded on its key
         const std::string name = opt.count("name") ? opt["name"] : drumName(file);

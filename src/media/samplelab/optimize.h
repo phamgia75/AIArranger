@@ -8,7 +8,8 @@
 //               16-bit PCM. 8-bit is exact (a shift); deeper words get TPDF dither (fixed seed: the same input gives
 //               the same bytes). Every other chunk (smpl: root and loop) is copied unchanged.
 //   pa5xRate    the rate a sample must be converted to, or its own when it is already inside 11 025-48 000 Hz.
-//   resample    windowed-sinc (Blackman, low-pass at 97 % of the lower Nyquist); loop points scale with the rate.
+//   resample    windowed-sinc (Blackman, low-pass at 97 % of the lower Nyquist); loop points scale with the rate;
+//               refused before allocating when the output would exceed 1 048 576 frames.
 //   formatLine  "<rate> Hz <bits>-bit <ch> ch <frames> frames" for the before/after report.
 
 #include "media/sound/wav_folder_source.h"
@@ -75,6 +76,7 @@ inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in
                 const size_t p = dataAt + i * bytes;
                 long v;
                 if (in->bits == 8) v = (long(b[p]) - 128) * 256;   // unsigned 8-bit: exact
+                else if (in->bits == 16 && !in->isFloat) v = int16_t(u16(p));   // 16-bit in an EXTENSIBLE fmt: exact, two bytes
                 else {
                     double x;
                     if (in->isFloat) { float f; std::memcpy(&f, &b[p], 4); x = std::isfinite(f) ? double(f) * 32768.0 : 0.0; }
@@ -108,11 +110,19 @@ inline uint32_t pa5xRate(uint32_t r) {
     return r < 11025 ? 11025 : r;
 }
 
-inline void resample(sound::Sample& s, uint32_t to) {
-    if (to == s.rate || !s.rate || !to || !s.channels) return;
+// The Pa5X frame limit (MAN p.1155), checked on the OUTPUT length before anything is allocated: an input's declared
+// rate is untrusted (1 Hz, 1 000 000 frames would ask for 11 025 000 000). "" or the reason; s is unchanged then.
+inline constexpr uint64_t kMaxFrames = 1048576;
+inline std::string resample(sound::Sample& s, uint32_t to) {
+    if (to == s.rate || !s.channels) return "";
+    if (!s.rate || !to) return "sample rate 0 Hz";
     const double ratio = double(to) / s.rate, fc = 0.5 * std::min(1.0, ratio) * 0.97;   // cut-off in input cycles/frame
+    const double want = std::round(double(s.frames()) * ratio);
+    if (want > double(kMaxFrames))
+        return "resampling " + std::to_string(s.rate) + " Hz to " + std::to_string(to) + " Hz would make " + std::to_string(uint64_t(want)) +
+               " frames, over the Pa5X limit of 1048576";
     const long H = long(std::ceil(16 / fc));                                               // half width: 16 zero crossings
-    const size_t n = s.frames(), m = size_t(std::llround(n * ratio)), ch = s.channels;
+    const size_t n = s.frames(), m = size_t(want), ch = s.channels;
     const double kPi = 3.14159265358979323846;
     std::vector<int16_t> out(m * ch);
     for (size_t j = 0; j < m; ++j) {
@@ -136,6 +146,7 @@ inline void resample(sound::Sample& s, uint32_t to) {
     }
     s.pcm = std::move(out);
     s.rate = to;
+    return "";
 }
 
 }  // namespace ai_arranger::media::samplelab

@@ -79,10 +79,14 @@ inline Conversion soundConversion(const snd::Instrument& in, const fs::path& sou
 inline Conversion drumConversion(const snd::DrumKit& kit, const std::vector<std::string>& lost) {
     size_t keys = 0, chokes = 0;
     for (const auto& I : kit.instruments) { keys += I.keys.size(); chokes += I.choke != 0; }
-    Conversion c = {{"EXACT", "16-bit audio of " + std::to_string(kit.samples.size()) + " sample(s), one-shot, as read (or converted, see the notes)"},
-                    {"EXACT", std::to_string(keys) + " key(s), " + std::to_string(kit.instruments.size()) + " group(s), " + std::to_string(chokes) +
-                                  " with an exclusive group; level and pan as mapped"}};
-    if (lost.empty()) c.push_back({"EXACT", "group names, exclusive groups, pan and drum families (TXPERF matrices)"});
+    Conversion c = {{"EXACT", "16-bit audio of " + std::to_string(kit.samples.size()) + " sample(s), one-shot, as read (or converted, see the notes)"}};
+    if (lost.empty()) {   // TXPERF: every Drum Kit setting of the map is written
+        c.push_back({"EXACT", std::to_string(keys) + " key(s), " + std::to_string(kit.instruments.size()) + " group(s), " + std::to_string(chokes) +
+                                  " with an exclusive group; level and pan as mapped"});
+        c.push_back({"EXACT", "group names, exclusive groups, pan and drum families (TXPERF matrices)"});
+    } else {              // KMP: only the keys and samples; what was dropped is listed MISSING below
+        c.push_back({"EXACT", std::to_string(keys) + " key(s), one zone per key, root = key"});
+    }
     for (const auto& l : lost) c.push_back({"MISSING", l});
     c.push_back({"MISSING", "Drum Kit filter/envelope/effects edits: set by hand on the Pa5X"});
     return c;

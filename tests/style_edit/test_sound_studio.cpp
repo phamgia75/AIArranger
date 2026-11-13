@@ -103,6 +103,16 @@ int main() {
         const auto w24 = makeWav(24, false, false, 48000, 1, x);
         bool n1 = false;
         TEST("dither is deterministic (same input, same samples)", lab::readWavAny(w24, &a, &f, &n1).empty() && lab::readWavAny(w24, &c, &f, &n1).empty() && a.pcm == c.pcm);
+        {   // Codex r1 P1: 16-bit EXTENSIBLE is exact, also with the data chunk ending the file
+            auto ext = makeWav(16, false, true, 48000, 1, x);
+            ext.resize(ext.size() - 44);   // drop the smpl chunk (8 + 36, no loop): data is now the last chunk
+            const uint32_t riff = uint32_t(ext.size() - 8);
+            std::memcpy(&ext[4], &riff, 4);
+            lab::Sample e16;
+            bool noS = false;
+            TEST("16-bit EXTENSIBLE (data at EOF) decodes exactly, sample for sample",
+                 lab::readWavAny(ext, &e16, &f, &noS).empty() && f.bits == 16 && e16.pcm == ref.pcm);
+        }
         auto w12 = makeWav(16, false, false, 48000, 1, x);
         w12[34] = 12;   // bits per sample
         TEST("not a WAV, or an unsupported depth: refused with a reason", lab::to16bit(std::vector<uint8_t>(20, 0), &f, &err).empty() && has(err, "RIFF") &&
@@ -123,6 +133,14 @@ int main() {
         TEST("1 kHz stays 1 kHz (rising crossings over 1 s)", risingCrossings(s) >= 999 && risingCrossings(s) <= 1001);
         TEST("level within 0.1 dB", std::abs(after.rmsDb - before.rmsDb) < 0.1);
         TEST("loop points scale with the rate", s.looped && s.loopStart == 4800 && s.loopEnd == 43200);
+        {   // Codex r1 P1: the output length is checked before anything is allocated
+            lab::Sample tiny;
+            tiny.rate = 1;
+            tiny.pcm.assign(1000, 100);
+            const auto e = lab::resample(tiny, 11025);
+            TEST("resample refuses an output over 1 048 576 frames before allocating, sample unchanged",
+                 has(e, "11025000 frames") && tiny.rate == 1 && tiny.frames() == 1000);
+        }
         lab::Sample hf;
         lab::readWavAny(makeWav(16, false, false, 96000, 1, sine(30000, 96000, 9600, 0.5)), &hf, &f);
         lab::resample(hf, 48000);
@@ -147,6 +165,10 @@ int main() {
         std::string err;
         TEST("convert: the written WAV is 16-bit 48 kHz", lab::readWavFile(root / "convout/wav/hi.wav", &s, &err) && s.rate == 48000 && s.frames() == 24000);
         TEST("source folder unchanged", fs::file_size(in / "hi.wav") > 140000);
+        putBytes(root / "convbig/one-hz.wav", makeWav(16, false, false, 1, 1, std::vector<double>(1000, 0.1)));
+        const auto big = lab::runBatch(root / "convbig", {}, o);
+        TEST("batch convert: a 1 Hz file is refused by the resampler's limit (not after a huge allocation)",
+             big.items.size() == 1 && has(big.items[0].error, "resampling 1 Hz to 11025 Hz"));
     }
 
     // ── waveform view and seam ──
@@ -293,6 +315,11 @@ int main() {
         TEST("refused: missing file", has(bad("36 Nope.wav\n"), "not a regular file"));
         TEST("refused: a path", has(bad("36 ../x.wav\n"), "not a path"));
         TEST("refused: unknown option", has(bad("36 Kick 1.wav velo=3\n"), "unknown option"));
+        putBytes(root / "drumbig/one-hz.wav", makeWav(16, false, false, 1, 1, std::vector<double>(1000, 0.1)));
+        {
+            sound::DrumKit x;
+            TEST("refused: a WAV whose conversion would exceed the frame limit", has(lab::buildDrumKit(root / "drumbig", "K", "36 one-hz.wav\n", &x), "resampling 1 Hz"));
+        }
 
         const auto kp = std::make_shared<const sound::DrumKit>(kit);
         const auto tx = run(drumKit(kp, notes, root / "kit-tx"));
@@ -308,6 +335,8 @@ int main() {
         TEST("KMP/KSF Drum Kit job: done, L1, pan and exclusive groups listed MISSING", km.phase == Phase::Done && km.level.l1.state == Check::Passed &&
                                                                                           has(km.reportMd, "**MISSING** pan (1 key(s) panned)") &&
                                                                                           has(km.reportMd, "**MISSING** exclusive groups (1 choking"));
+        TEST("KMP/KSF Drum Kit report never calls the dropped pan, exclusive groups or level EXACT (Codex r1 P2)",
+             !has(km.reportMd, "pan as mapped") && !has(km.reportMd, "with an exclusive group") && has(km.reportMd, "**EXACT** 2 key(s), one zone per key"));
         sound::Instrument rb;
         TEST("KRONOS reader: one zone per key, root = key",
              sound::buildFromKorgFolder(root / "kit-kmp", "Back", {}, {}, &rb).empty() && rb.layers.size() == 1 && rb.layers[0].zones.size() == 2 &&

@@ -305,7 +305,7 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
             const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             if (o.convert) {
                 it.error = readWavAny(b, &s, &it.in, &noSmpl);
-                if (it.error.empty() && it.in.rate) resample(s, pa5xRate(s.rate));
+                if (it.error.empty()) it.error = resample(s, pa5xRate(s.rate));
             } else {
                 it.error = sound::readWav(b, &s, &noSmpl);
                 it.in = {s.rate, 16, false, s.channels, s.frames()};
