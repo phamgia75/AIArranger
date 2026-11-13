@@ -31,6 +31,7 @@ Evidence classes:
 |---|---|---|
 | A. Native | Kronos KMP/KSF → USB → Pa5X Import KMP (one multisample, then build the Sound by hand) | UNK: whether Kronos-generation KMP/KSF (newer than Triton) is accepted. Needs one owner test, under the same gate rules as S6 |
 | B. Convert | KMP/KSF → `Instrument` model → TXPROG package (whole Sound, velocity layers, loops) | **Built (SOFTWARE):** `src/media/sound/korg_kmp_source.h`; CLI `aiarranger-sound kronos --in SRC --name NAME [--layers a,b --splits 90] --out DIR`; app: Sounds & Resources > Convert Sound > Choose Folder... (a folder with .KMP files is read as KRONOS). Tests: `test_kronos_source` (files written from the documented layout), app smoke, 200 000-case ASan/UBSan fuzz of both readers |
+| D. Write (E1, EXPERIMENTAL, L1) | `Instrument` -> KMP + KSF folder from the same p.1158-1159 layout, read back by this reader before it is published | `src/media/sound/korg_kmp_writer.h`; CLI `aiarranger-sound kmp --source demo\|wav\|kronos\|ksf ... --out DIR`; tests `test_kmp_writer`, `test_kmp_cli`. Not run on a KRONOS or a Pa5X |
 | C. Via WAV | Owner exports WAV from the Kronos (or a DAW) → `Instrument` from WAV + key map → TXPROG | **Built (SOFTWARE):** `aiarranger-sound wav --in SRC --name NAME [--layers a,b --splits 90] --out DIR` (`src/media/sound/wav_folder_source.h`). Files named `<layer>_<OrgKey>_<LowKey>_<HighKey>.wav` (MAN p.1212); root and forward loop from `smpl`; 16-bit mono/stereo only; anything else refused. Round trip of the demo package is exact. Not yet run on Kronos-exported WAVs (BLOCKED, material) |
 
 **Recommended order (revised 2026-11-11, KRONOS FIRST directive):** B. The KRONOS WAV export cannot carry the
@@ -52,8 +53,9 @@ the map from the KMP and joins the pair into stereo samples.
 | Level, Loop Tune, +12 dB mixed, RLP2/RLP3 | — | LOST, listed in REPORT.txt |
 | Program (.PCG): velocity zones, filters, EGs, LFOs, FX | — | not in these files; the musician sets layer order and splits |
 
-Refused, with the file and the reason: compressed data, Reverse, 8-bit, more than 1 channel in a KSF, shared data
-(SMF1), divided files (SPD1/SDD1), INTERNALnnnn, Non Transpose over several keys, any undocumented chunk, any chunk
+Shared data (SMF1, p.1159; 2026-11-13, E1): the audio is read from the KSF that SMF1 names, in the same folder; path
+components, links, chains and header mismatches are refused (`docs/research/pa-studio/PA5X_KST_WRITER_ROADMAP.md` §4).
+Refused, with the file and the reason: compressed data, Reverse, 8-bit, more than 1 channel in a KSF, divided files (SPD1/SDD1), INTERNALnnnn, Non Transpose over several keys, any undocumented chunk, any chunk
 or value that does not fit the documented size.
 
 ## KSF samples without a KMP (route B2, BUILT 2026-11-11)

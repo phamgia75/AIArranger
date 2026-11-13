@@ -71,6 +71,14 @@ struct FileSet {
     // "" when the folder holds exactly these files, each with its length and SHA-256, and the package loads back
     // with the reader every other tool uses (loadPackage: WAVs against RESOURCES.tsv, TX references). Read-only.
     std::string check() const {
+        if (const auto e = checkFiles(); !e.empty()) return e;
+        graph::Graph g;
+        std::string err, pkg;
+        if (!loadPackage(root, g, pkg, &err)) return "it does not load back: " + err;
+        return "";
+    }
+    // The file half of check(): exactly these files, each with its length and SHA-256. Read-only.
+    std::string checkFiles() const {
         detail::Listing L;
         std::string err;
         if (!detail::listFiles(root, L, err)) return "cannot list it: " + err;
@@ -86,9 +94,6 @@ struct FileSet {
             while (f.read(buf, sizeof buf) || f.gcount() > 0) { h.update(buf, static_cast<size_t>(f.gcount())); if (!f) break; }
             if (!f.eof() || h.hex() != w.second) return rel + " does not read back as written";
         }
-        graph::Graph g;
-        std::string pkg;
-        if (!loadPackage(root, g, pkg, &err)) return "it does not load back: " + err;
         return "";
     }
 };
@@ -101,8 +106,9 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
     const fs::path dest = folderPath(destGiven), out = incompletePath(dest);
-    if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
-    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
+    // a mounted volume (also through a link), an existing folder or an unfinished earlier write: refused here, before
+    // anything is created, so every caller (CLI, GUI, plugin sampler) is covered (media/output_guard.h)
+    if (const auto why = outputFolderRefusal(dest); !why.empty()) return fail(why);
     if (const auto e = validate(in); !e.empty()) return fail("invalid: " + e.front());
     const auto sf2 = writeSf2(in);
     const auto tx = writeTxProg(in);
@@ -178,8 +184,9 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
     const fs::path dest = folderPath(destGiven), out = incompletePath(dest);   // renamed to dest once complete, as writePackage
-    if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
-    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
+    // a mounted volume (also through a link), an existing folder or an unfinished earlier write: refused here, before
+    // anything is created, so every caller (CLI, GUI, plugin sampler) is covered (media/output_guard.h)
+    if (const auto why = outputFolderRefusal(dest); !why.empty()) return fail(why);
     if (const auto e = validate(kit); !e.empty()) return fail("invalid: " + e.front());
     const auto tx = writeTxPerf(kit);
     if (tx.empty()) return fail("the writer refused the kit (two samples or keys map to the same file name)");
