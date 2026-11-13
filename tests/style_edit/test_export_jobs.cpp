@@ -364,6 +364,49 @@ int main() {
         TEST("queue: the job cancelled by destruction published nothing", !fs::exists(root / "q4.uasf"));
     }
 
+    // ── queue shutdown: an idle worker is joined; a running, cancelled job never makes destruction wait ──
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));   // workers from the blocks above have all exited
+        const int before = JobQueue::workers();
+        {
+            JobQueue q;
+            TEST("shutdown: a queue starts one worker", JobQueue::workers() == before + 1);
+            q.enqueue(styleUasf("j1", {'u'}, root / "j1.uasf"));
+            for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST("shutdown: destroying an idle queue joins its worker (gone when the destructor returns)", JobQueue::workers() == before &&
+             fs::is_regular_file(root / "j1.uasf"));
+        std::atomic<bool> release{false};
+        auto blocked = styleUasf("j2", {'u'}, root / "j2.uasf");
+        blocked.write = [&release](const fs::path&, const std::function<bool(double)>&) {   // ignores cancel until released
+            while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return WriteResult{"stopped", ""};
+        };
+        const auto t0 = std::chrono::steady_clock::now();
+        {
+            JobQueue q;
+            q.enqueue(blocked);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        TEST("shutdown: a running job that ignores cancel does not hang destruction (detached)", ms < 300 && JobQueue::workers() == before + 1);
+        release = true;
+        for (int i = 0; i < 200 && JobQueue::workers() != before; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        TEST("shutdown: the detached worker exits once its job stops, publishing nothing", JobQueue::workers() == before && !fs::exists(root / "j2.uasf"));
+    }
+
+    // ── leftovers: the read-only listing behind the studio's banner ──
+    {
+        const auto d = root / "left";
+        fs::create_directories(d / "Pkg.INCOMPLETE");
+        fs::create_directories(d / "Old.INCOMPLETE.stale-20260101T000000Z");
+        fs::create_directories(d / "Done");
+        put(d / "notes.INCOMPLETE.txt", "x");
+        TEST("leftovers: NAME.INCOMPLETE and .stale- folders, sorted, nothing else",
+             (leftovers(d) == std::vector<std::string>{"Old.INCOMPLETE.stale-20260101T000000Z", "Pkg.INCOMPLETE"}) && fs::is_directory(d / "Pkg.INCOMPLETE"));
+        TEST("leftovers: a missing folder lists nothing", leftovers(root / "no-such").empty());
+    }
+
     // ── Library Manager plan (E7) as a job: D18 covers both libraries, EXPORT-ONLY, L1 only ──
     {
         put(root / "LibA.KST/STYLE/USER01/Ballad.STG", "s");

@@ -202,6 +202,17 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         b->setVisible(false);
     ioPage_.collapse = {workStatus_, waitQuitBtn_};   // the quit prompt's rows take no space while it is hidden
     manager_.enqueueJob = [this](jobs::ExportSpec spec, std::function<void(const jobs::JobState&)> done) { return enqueue(std::move(spec), nullptr, std::move(done)); };
+    // Backup KST, Convert Sound Generate and Sample Plugin Generate run in this window's one queue too (job list, busy(), Cancel Job)
+    res_.setJobPort({manager_.enqueueJob, [this](uint64_t id) { queue_->cancel(id); },
+                     [this](uint64_t id) -> std::optional<jobs::JobState> {
+                         for (const auto& j : queue_->snapshot()) if (j.id == id) return j;
+                         return std::nullopt;
+                     }});
+    leftovers_.setColour(juce::Label::textColourId, kPending);
+    leftovers_.setColour(juce::Label::backgroundColourId, kSurface2);
+    leftovers_.setJustificationType(juce::Justification::centredLeft);
+    leftovers_.setMinimumHorizontalScale(1.0f);
+    addChildComponent(leftovers_);   // checked by showDomain below (launch) and on every page open
 
     // ── Sample Lab › Quality Report (the Convert Sound recipe with its measured QUALITY section) ──
     styleText(quality_);
@@ -444,6 +455,7 @@ juce::Component& StudioComponent::page(Domain d) {
 }
 
 void StudioComponent::showDomain(Domain d, int segment) {
+    checkLeftovers();   // a page opens: the banner reflects the folder as it is now
     const auto& segs = segments_.at(d);
     if (segment < 0 || segment >= int(segs.size()) || segs[size_t(segment)].unavailable.isNotEmpty()) segment = 0;
     domain_ = d;
@@ -939,20 +951,10 @@ void StudioComponent::importSmfTrack(const juce::File& mid) {
 }
 
 void StudioComponent::exportStyleSmf(const juce::File& mid) {
-    st::Verification v;
-    const auto why = style_.exportSmf(mid.getFullPathName().toStdString(), &v);
-    if (why.empty()) {
-        validationTarget_ = mid;
-        verification_ = v;
-        verificationIsPackage_ = false;   // a single file has no PACKAGE.sha256 for an L3 record to name
-        verificationDomain_ = Domain::StyleStudio;
-        addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  Style SMF export (EXPERIMENTAL)  done  " +
-               juce::String::fromUTF8(st::badgeLine(v).c_str()) + "  " + mid.getFullPathName() + "\n" + juce::String(v.l1.detail) + "\n");
-    }
-    styleStatus_.setText(why.empty() ? "Wrote " + mid.getFullPathName() + "  " + juce::String::fromUTF8(st::badgeLine(v).c_str()) + " (EXPERIMENTAL)"
-                                     : "Not written: " + juce::String(why),
-                         juce::dontSendNotification);
-    refreshStyle();
+    // An export job like the Import / Export Center's (staged, read back, L1 check, then published); lands in styleStatus_
+    styleStatus_.setText("Exporting " + mid.getFullPathName() + " (export job; Import / Export Center lists every job)...", juce::dontSendNotification);
+    if (exportJob(ExportJob::StyleSmf, mid) == 0)   // (a quick job may already have landed and set the status)
+        styleStatus_.setText("Not written: " + exportUnavailable(ExportJob::StyleSmf), juce::dontSendNotification);
 }
 
 void StudioComponent::saveStyleUasf(const juce::File& f) {
@@ -994,9 +996,13 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
             const auto path = style_.path();
             auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_edit::exportPa5xSmf(style_.style()), d, path)
                                                  : jobs::styleUasf(path.filename().string(), uasf, d, path);
-            return enqueue(std::move(spec), nullptr, [this, uasf, path](const jobs::JobState& s) {
-                if (s.phase != jobs::Phase::Done || style_.path() != path) return;
-                style_.markWritten(uasf);
+            const bool smf = j == ExportJob::StyleSmf;
+            return enqueue(std::move(spec), nullptr, [this, uasf, path, smf](const jobs::JobState& s) {
+                const bool ok = s.phase == jobs::Phase::Done;
+                styleStatus_.setText(ok ? "Wrote " + juce::String(s.dest) + "  " + juce::String::fromUTF8(st::badgeLine(s.level).c_str()) + (smf ? " (EXPERIMENTAL)" : "")
+                                        : "Not written: " + juce::String(s.reason),
+                                     juce::dontSendNotification);
+                if (ok && style_.path() == path) style_.markWritten(uasf);
                 refreshStyle();
             });
         }
@@ -1004,8 +1010,40 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
     return 0;
 }
 
+// Where the last export went is kept across launches (a one-line file), so the leftover banner can look there.
+static juce::File lastOutputRecord() {
+    const auto dir = juce::SystemStats::getEnvironmentVariable("AIARR_STATE_DIR", {});
+    return (dir.isNotEmpty() ? juce::File(dir) : juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("AIArranger"))
+        .getChildFile("last-output-folder.txt");
+}
+
+// shortcut: lists one folder on the message thread (fast on a local disk); move it to a worker if the last output folder
+// can be a slow network volume.
+void StudioComponent::checkLeftovers() {
+    const auto rec = lastOutputRecord();
+    const auto folder = rec.existsAsFile() ? rec.loadFileAsString().trim() : juce::String();
+    const auto names = folder.isEmpty() ? std::vector<std::string>{} : jobs::leftovers(folder.toStdString());
+    juce::StringArray shown;
+    for (size_t i = 0; i < names.size() && i < 4; ++i) shown.add(juce::String::fromUTF8(names[i].c_str()));
+    if (names.size() > 4) shown.add("and " + juce::String(int(names.size() - 4)) + " more");
+    const bool show = !names.empty();
+    leftovers_.setText(show ? "Unfinished writes in " + folder + ": " + shown.joinIntoString(", ") +
+                                  ". Nothing is deleted by the app: check them, then move them aside or delete them in Finder."
+                            : juce::String(),
+                       juce::dontSendNotification);
+    leftovers_.setTooltip(leftovers_.getText());   // the whole list when the banner line is cut
+    if (show != leftovers_.isVisible()) { leftovers_.setVisible(show); resized(); }
+}
+
 uint64_t StudioComponent::enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done) {
     const juce::String type(spec.type);
+    {
+        std::error_code ec;
+        const juce::String parent(media::folderPath(std::filesystem::absolute(spec.dest, ec)).parent_path().string());
+        const auto rec = lastOutputRecord();
+        if (!ec && (!rec.existsAsFile() || rec.loadFileAsString().trim() != parent) && rec.getParentDirectory().createDirectory())
+            rec.replaceWithText(parent);
+    }
     JobHome home{spec, out, domain_, std::move(done)};
     const auto id = queue_->enqueue(std::move(spec));
     jobHomes_[id] = std::move(home);
@@ -1188,6 +1226,7 @@ void StudioComponent::resized() {
         for (auto* b : bs) if (!b->isEnabled()) { s.removeFromLeft(6); reasonFor(*b).setBounds(s); }
     }
     r.removeFromTop(10);
+    if (leftovers_.isVisible()) { leftovers_.setBounds(r.removeFromTop(40)); r.removeFromTop(8); }
     for (auto* p : {(juce::Component*)&res_, (juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
                     (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
                     (juce::Component*)&manager_})

@@ -5,7 +5,7 @@
 // Rendering runs in the separate aiarranger-plugin-sampler process (docs/research/
 // PLUGIN_SAMPLER_GUI_PLAN.md): a plugin that crashes or hangs takes down only that process, and it
 // opens no audio device and no MIDI port. The render lands in a private staging folder; Generate
-// copies it to a new local folder (never a mounted volume, never an existing folder).
+// copies it to a new local folder as an export job (never a mounted volume, never an existing folder).
 
 #include "SoundConversionComponent.h"
 #include "ui/sound/plugin_sampler_model.h"
@@ -56,7 +56,8 @@ public:
     bool selectInstrument(const juce::String& name);
     void startRender();                         // asynchronous; busy() until it ends
     void cancelRender();
-    void generate(const juce::File& outDir);    // asynchronous copy of the staged package
+    void generate(const juce::File& outDir);    // an export job copying the staged package
+    void setJobPort(JobPort p) { port_ = std::move(p); }   // the studio's queue; else this tab's own
 
     bool busy() const { return jobs_ > 0; }
     bool rendered() const { return in_ != nullptr; }
@@ -97,7 +98,6 @@ private:
     KeyMapView map_;
     TextView preview_, report_;
     std::shared_ptr<juce::FileChooser> chooser_;
-    std::thread copier_;   // Generate: joined before staging is deleted, so a package is never left half-copied
     void findPrograms();
     std::unique_ptr<SamplerProcess> proc_, listProc_, progProc_;   // destroyed first in ~PluginSamplerComponent: their callbacks capture this
     ui::SamplerProgress got_;
@@ -107,6 +107,9 @@ private:
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     int jobs_ = 0;
     uint64_t generation_ = 0;
+    PendingJob genJob_;
+    JobRunner ownJobs_;   // the destructor waits for its Generate copy before staging is deleted (a package is never half-copied)
+    JobPort port_ = ownJobs_.port();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginSamplerComponent)
 };

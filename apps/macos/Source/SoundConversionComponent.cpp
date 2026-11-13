@@ -1,4 +1,5 @@
 #include "SoundConversionComponent.h"
+#include "jobs/export_specs.h"
 #include <thread>
 
 namespace ai_arranger::app {
@@ -184,24 +185,23 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     if (!model_.built()) return;
     ++jobs_;
     generateBtn_.setEnabled(false);
-    status_.setText("Writing " + outDir.getFullPathName() + "...", juce::dontSendNotification);
-    auto in = model_.snapshot();   // shared, immutable: no audio copy on the message thread
+    status_.setText("Writing " + outDir.getFullPathName() + " (export job)...", juce::dontSendNotification);
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
-    std::thread([this, alive, gen, in, out = outDir.getFullPathName().toStdString(), src = model_.folder(), notes = ksfNotes_] {
-        std::string err;
-        const std::string sum = SoundConversionModel::generate(*in, src, out, &err, notes);
-        juce::MessageManager::callAsync([this, alive, gen, sum, err, out] {
+    // An export job (D17/D18): staged in NAME.INCOMPLETE, verified, then published; never over the source folder
+    auto spec = jobs::soundPackage(model_.snapshot(), model_.folder(), ksfNotes_, outDir.getFullPathName().toStdString());
+    genJob_.start([&] {
+        return port_.enqueue(std::move(spec), [this, alive, gen](const jobs::JobState& j) {
             if (alive.expired()) return;
-            --jobs_;
+            if (genJob_.land(j.id)) --jobs_;
             if (gen != generation_) return;   // the user moved on (new folder, settings or preview): keep their state
             generateBtn_.setEnabled(true);
-            if (sum.empty()) { status_.setText("Not written: " + juce::String(err), juce::dontSendNotification); return; }
-            preview_.setText(sum);
-            status_.setText("Package written to " + juce::String(out) + ". Opened in Resource Graph.", juce::dontSendNotification);
-            if (openInResources_) openInResources_(juce::File(out));
+            if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }
+            preview_.setText(j.writerText);
+            status_.setText("Package written to " + juce::String(j.dest) + ". Opened in Resource Graph.", juce::dontSendNotification);
+            if (openInResources_) openInResources_(juce::File(juce::String(j.dest)));
         });
-    }).detach();
+    });
 }
 
 void SoundConversionComponent::resized() {

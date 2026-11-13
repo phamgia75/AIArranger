@@ -3,9 +3,10 @@
 // "Convert Sound" tab: WAV folder -> layers and velocity splits -> key/velocity map preview, checks
 // and Sound Recipe -> package folder (SF2, TX16Wx, WAVs, REPORT, RESOURCES.tsv). A view over
 // ui::SoundConversionModel; conversion runs off the message thread. Reads the source, writes one new
-// local folder, never talks to an instrument.
+// local folder as an export job (JobPort), never talks to an instrument.
 
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "JobPort.h"
 #include "ui/sound/sound_conversion_model.h"
 #include <array>
 
@@ -61,7 +62,8 @@ public:
     // Used by the buttons and by the UI smoke test.
     bool inspectFolder(const juce::File& dir);
     void buildPreview();                      // asynchronous (reads every WAV)
-    void generate(const juce::File& outDir);   // asynchronous; busy() until it lands
+    void generate(const juce::File& outDir);   // an export job; busy() until it lands
+    void setJobPort(JobPort p) { port_ = std::move(p); }   // the studio's queue; else this tab's own
 
     bool busy() const { return jobs_ > 0; }
     ui::SoundConversionModel& model() { return model_; }
@@ -88,8 +90,12 @@ private:
     std::string ksfNotes_;   // KSF folder: REPORT source section measured on the previewed audio
     int jobs_ = 0;
     uint64_t generation_ = 0;
+    PendingJob genJob_;
     void showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err, const std::string& mapping,
                      const std::string& ksfNotes);
+
+    JobRunner ownJobs_;   // destroyed first: its jobs are cancelled (never published half-way), its done callbacks dropped
+    JobPort port_ = ownJobs_.port();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SoundConversionComponent)
 };

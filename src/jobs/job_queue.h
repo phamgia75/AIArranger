@@ -6,6 +6,7 @@
 // every state change (the app posts it to the message thread). Destroying the queue cancels every job and returns at
 // once: the worker stops at the job's next cancel check and exits; it never touches the queue's owner afterwards.
 // An idle worker (no job running, e.g. after the app's quit waited for every job) is joined; a busy one is detached.
+// workers() counts the worker threads still alive in this process (a direct check of that join in the tests).
 
 #include "jobs/export_job.h"
 #include <condition_variable>
@@ -20,7 +21,11 @@ class JobQueue {
 public:
     explicit JobQueue(std::function<void()> changed = {}) : s_(std::make_shared<Shared>()) {
         s_->changed = std::move(changed);
-        thread_ = std::thread([s = s_] { work(s); });
+        ++workers();
+        thread_ = std::thread([s = s_] {
+            struct Exit { ~Exit() { --workers(); } } exit;
+            work(s);
+        });
     }
     ~JobQueue() {
         bool running;
@@ -73,6 +78,7 @@ public:
         for (const auto& j : s_->jobs) r.push_back(j.state);
         return r;
     }
+    static std::atomic<int>& workers() { static std::atomic<int> n{0}; return n; }
     bool idle() const {
         std::lock_guard<std::mutex> l(s_->m);
         for (const auto& j : s_->jobs) if (!finished(j.state.phase)) return false;

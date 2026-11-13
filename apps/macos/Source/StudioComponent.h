@@ -89,8 +89,9 @@ public:
     bool styleUndo();
     bool styleRedo();
     void importSmfTrack(const juce::File& mid);
-    void exportStyleSmf(const juce::File& mid);
-    void saveStyleUasf(const juce::File& uasf);
+    void exportStyleSmf(const juce::File& mid);   // an export job (EXPERIMENTAL, L1); the status says when it lands
+    juce::String leftoverText() const { return leftovers_.isVisible() ? leftovers_.getText() : juce::String(); }
+    void saveStyleUasf(const juce::File& uasf);   // direct and synchronous (writeNewFile): the Save choice of the unwritten-edits prompt needs it
     const ui::studio::StyleStudioModel& styleModel() const { return style_; }
     juce::String styleStatus() const { return styleStatus_.getText(); }
     juce::String kmpText() const { return kmpReport_.getText(); }
@@ -162,6 +163,8 @@ private:
     juce::TextButton* liveBtn_ = nullptr;
     std::map<Domain, std::vector<juce::TextButton*>> segmentButtons_;
     juce::Label title_, experimental_;
+    juce::Label leftovers_;   // non-blocking banner: unfinished writes (NAME.INCOMPLETE, .stale-*) in the last output folder
+    void checkLeftovers();    // read-only listing; on launch and whenever a page opens
     juce::TextEditor inspector_;
 
     Domain domain_ = Domain::Library;

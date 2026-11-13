@@ -1,5 +1,6 @@
 #include "media/sound/package_verify.h"
 #include "ResourcesComponent.h"
+#include "jobs/export_specs.h"
 #include <thread>
 
 namespace ai_arranger::app {
@@ -157,7 +158,7 @@ ResourcesComponent::ResourcesComponent() {
 }
 
 ResourcesComponent::~ResourcesComponent() {
-    cancelBackup_ = true;   // the copy stops within one 1 MB chunk and removes its INCOMPLETE folder
+    cancelBackup_ = true;   // a Verify Backup stops; a backup job is cancelled when ownJobs_ goes (never published half-way)
     if (backupThread_.joinable()) backupThread_.join();
     *alive_ = false;
     tree_.setRootItem(nullptr);
@@ -266,45 +267,57 @@ juce::File ResourcesComponent::backupFolderFor(const juce::File& source, const j
     return parent.getChildFile(source.getFileName() + " backup " + juce::Time::getCurrentTime().formatted("%Y-%m-%d %H%M%S"));
 }
 
+void ResourcesComponent::setJobPort(JobPort p) {
+    convert_.setJobPort(p);
+    sampler_.setJobPort(p);
+    port_ = std::move(p);
+}
+
+void ResourcesComponent::cancelBackup() {
+    cancelBackup_ = true;   // a Verify Backup
+    if (backupJob_.waiting() && backupJob_.id != UINT64_MAX) port_.cancel(backupJob_.id);
+}
+
 void ResourcesComponent::startBackup(const juce::File& source, const juce::File& newFolder) {
     if (backingUp_) return;
-    if (backupThread_.joinable()) backupThread_.join();   // the previous backup has finished: backingUp_ was false
+    if (backupThread_.joinable()) backupThread_.join();   // a finished Verify Backup: backingUp_ was false
     backingUp_ = true;
     cancelBackup_ = false;
     backupProgress_ = 0;
     backupBtn_.setEnabled(false);
     verifyBtn_.setEnabled(false);
     cancelBackupBtn_.setEnabled(true);
-    kstOut_.setText("Backing up " + source.getFullPathName() + "\n  to " + newFolder.getFullPathName() + "\n(the source is only read)...", false);
+    kstOut_.setText("Backing up " + source.getFullPathName() + "\n  to " + newFolder.getFullPathName() + "\n(the source is only read; export job)...", false);
     std::weak_ptr<bool> alive = alive_;
-    backupThread_ = std::thread([this, alive, src = source.getFullPathName().toStdString(), dst = newFolder.getFullPathName().toStdString()] {
-        auto last = std::chrono::steady_clock::now();
-        const auto r = media::backupKst(src, dst, [&](const media::BackupProgress& p) {
-            if (const auto now = std::chrono::steady_clock::now(); now - last > std::chrono::milliseconds(100) || p.workDone == p.workTotal) {
-                last = now;
-                const double f = p.workTotal ? double(p.workDone) / double(p.workTotal) : 0.0;
-                using Ph = media::BackupProgress::Phase;
-                const char* what = p.phase == Ph::Scan ? "Reading the source" : p.phase == Ph::Copy ? "Copying and reading back"
-                                 : p.phase == Ph::CheckSource ? "Re-checking the source" : "Final check of the copy";
-                juce::MessageManager::callAsync([this, alive, f, what] {
-                    if (alive.expired()) return;
-                    backupProgress_ = f;
-                    backupBar_.setTextToDisplay(juce::String(what) + " " + juce::String(int(f * 100)) + "%");
-                });
-            }
-            return !cancelBackup_;
-        });
-        juce::MessageManager::callAsync([this, alive, r] {
+    const auto text = [](const jobs::JobState& j) {
+        return j.phase == jobs::Phase::Done ? juce::String(j.writerText) + "\nExport job #" + juce::String(j.id) + ", report: " + juce::String(j.reportPath)
+                                            : juce::String(j.reason) + "\nNo backup was made: nothing at the destination is a complete copy.";
+    };
+    // An export job (D17/D18): staged in NAME.INCOMPLETE, never inside the source, verified, then published with its manifest
+    auto spec = jobs::kstBackup(source.getFullPathName().toStdString(), newFolder.getFullPathName().toStdString());
+    backupJob_.start([&] {
+        return port_.enqueue(std::move(spec), [this, alive, text](const jobs::JobState& j) {
             if (alive.expired()) return;
+            if (!backupJob_.land(j.id)) { kstOut_.setText(text(j), false); return; }   // a re-run from the studio's job list
             backingUp_ = false;
-            backupProgress_ = r.ok ? 1.0 : 0.0;
-            backupBar_.setTextToDisplay(r.ok ? "Verified" : r.cancelled ? "Cancelled" : "Not completed");
+            backupProgress_ = j.phase == jobs::Phase::Done ? 1.0 : 0.0;
+            backupBar_.setTextToDisplay(j.phase == jobs::Phase::Done ? "Verified" : j.phase == jobs::Phase::Cancelled ? "Cancelled" : "Not completed");
             backupBtn_.setEnabled(true);
             verifyBtn_.setEnabled(true);
             cancelBackupBtn_.setEnabled(false);
-            kstOut_.setText(juce::String(r.message) + (r.ok ? "" : "\nNo backup was made: nothing at the destination is a complete copy."), false);
+            kstOut_.setText(text(j), false);
         });
     });
+    pollBackup();
+}
+
+void ResourcesComponent::pollBackup() {
+    if (!backupJob_.waiting()) return;
+    if (const auto j = backupJob_.id != UINT64_MAX ? port_.state(backupJob_.id) : std::nullopt; j && !jobs::finished(j->phase)) {
+        backupProgress_ = j->progress;
+        backupBar_.setTextToDisplay(juce::String(jobs::phaseName(j->phase)) + " " + juce::String(int(j->progress * 100)) + "%");
+    }
+    juce::Timer::callAfterDelay(100, [this, alive = std::weak_ptr<bool>(alive_)] { if (!alive.expired()) pollBackup(); });
 }
 
 void ResourcesComponent::startVerify(const juce::File& folder) {

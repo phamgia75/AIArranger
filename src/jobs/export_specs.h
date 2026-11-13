@@ -259,6 +259,28 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
     return s;
 }
 
+// A package already written and checked in a private staging folder (the plugin sampler's render), copied as a new
+// output. The copy must equal the staged files before the job verifies it (L1 + L2 with the shared verifier).
+inline ExportSpec stagedPackage(fs::path staged, fs::path dest) {
+    ExportSpec s;
+    s.type = "Sound package (rendered from a plugin)";
+    s.source = staged.string();
+    s.sources = {staged};
+    s.dest = std::move(dest);
+    s.validate = [staged] { return detail::isDir(staged) ? "" : "refusing: the rendered package " + staged.string() + " is gone (render again)"; };
+    s.preview = [staged] { return listFiles(staged); };
+    s.write = [staged](const fs::path& out, auto&) {
+        std::error_code ec;
+        fs::copy(staged, out, fs::copy_options::recursive, ec);
+        if (ec) return WriteResult{"copy failed: " + ec.message(), ""};
+        if (const auto d = media::diff(staged, out); !d.same())
+            return WriteResult{"the copy does not match the rendered package (" + (d.ok ? std::string("files differ") : d.error) + ")", ""};
+        return WriteResult{"", ui::SoundConversionModel::writtenSummary(out)};
+    };
+    s.verify = detail::outputLevel;
+    return s;
+}
+
 // Library Manager plan (E7, EXPORT-ONLY): plan.json + PLAN.txt as a new folder. Both libraries are sources, so the D18
 // overlap check refuses a plan folder that is, contains or lies inside either one before anything is created.
 inline ExportSpec libraryPlan(std::shared_ptr<const library::Library> A, std::shared_ptr<const library::Library> B, std::vector<library::Step> plan,

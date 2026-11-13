@@ -1,5 +1,6 @@
 #include "media/kst_diff.h"
 #include "PluginSamplerComponent.h"
+#include "jobs/export_specs.h"
 #include <cstdlib>
 #include <fstream>
 
@@ -152,7 +153,7 @@ PluginSamplerComponent::~PluginSamplerComponent() {
     proc_.reset();   // kills a running render and stops its reader (bounded); queued callbacks are then dropped
     listProc_.reset();
     progProc_.reset();
-    if (copier_.joinable()) copier_.join();   // let Generate finish copying out of staging before it is deleted
+    ownJobs_.waitIdle();   // let Generate finish copying out of staging before it is deleted
     discardStaging();
 }
 
@@ -349,42 +350,20 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
     if (const auto r = media::sound::outputFolderRefusal(out); !r.empty()) { status_.setText("Not written: " + juce::String(r), juce::dontSendNotification); return; }
     ++jobs_;
     settingsChanged();
-    status_.setText("Writing " + outDir.getFullPathName() + "...", juce::dontSendNotification);
+    status_.setText("Writing " + outDir.getFullPathName() + " (export job)...", juce::dontSendNotification);
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
-    if (copier_.joinable()) copier_.join();   // the previous copy has finished: busy() was false
-    copier_ = std::thread([this, alive, gen, from, chosen = out] {
-        std::error_code ec;
-        std::string sum, err;
-        // Write to the resolved path and check it again here, so a symlink retargeted since the click cannot redirect the copy.
-        // shortcut: a parent folder swapped between this check and create_directory still races; needs openat()-anchored writes to close.
-        const fs::path out = fs::weakly_canonical(chosen, ec);
-        const auto copyOut = [&]() -> std::string {   // "" = published at `out`
-            if (ec) return "cannot resolve " + chosen.string() + ": " + ec.message();
-            if (const auto r = media::sound::outputFolderRefusal(out); !r.empty()) return r;
-            const auto work = media::incompletePath(out);
-            if (!fs::create_directory(work, ec) || ec) return "cannot create " + work.string() + (ec ? ": " + ec.message() : " (it exists)");
-            const std::string stays = ". The unfinished copy stays at " + work.string() + " (not a package; delete it)";
-            if (fs::copy(from, work, fs::copy_options::recursive, ec); ec) return "copy failed: " + ec.message() + stays;
-            // Before publishing: the same files and bytes as the rendered package, and it loads back with the shared reader.
-            if (const auto d = media::diff(from, work); !d.same()) return "the copy does not match the rendered package (" + (d.ok ? std::string("files differ") : d.error) + ")" + stays;
-            media::graph::Graph g;
-            std::string pkg, e;
-            if (!media::sound::loadPackage(work, g, pkg, &e)) return "the copy does not load back (" + e + ")" + stays;
-            if (!media::publishNewFolder(work, out)) return out.string() + " appeared while writing; the package stays at " + work.string();
-            return "";
-        };
-        err = copyOut();
-        if (err.empty()) sum = SoundConversionModel::writtenSummary(out);
-        juce::MessageManager::callAsync([this, alive, gen, out, sum, err] {
+    // An export job (D17/D18): the copy is staged in NAME.INCOMPLETE, must equal the render and load back, then is published
+    genJob_.start([&] {
+        return port_.enqueue(jobs::stagedPackage(from, out), [this, alive, gen](const jobs::JobState& j) {
             if (alive.expired()) return;
-            --jobs_;
+            if (genJob_.land(j.id)) --jobs_;
             settingsChanged();
-            if (!err.empty()) { status_.setText("Not written: " + juce::String(err), juce::dontSendNotification); return; }
+            if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }
             if (gen != generation_) return;
-            preview_.setText(sum + preview_.getText().toStdString());
-            status_.setText("Package written to " + juce::String(out.string()) + ". Opened in Resource Graph.", juce::dontSendNotification);
-            if (openInResources_) openInResources_(juce::File(out.string()));
+            preview_.setText(j.writerText + preview_.getText().toStdString());
+            status_.setText("Package written to " + juce::String(j.dest) + ". Opened in Resource Graph.", juce::dontSendNotification);
+            if (openInResources_) openInResources_(juce::File(juce::String(j.dest)));
         });
     });
 }

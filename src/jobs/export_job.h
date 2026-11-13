@@ -97,6 +97,20 @@ inline std::vector<OutFile> listFiles(const fs::path& root) {
     return r;
 }
 
+// Unfinished writes in `dir`: NAME.INCOMPLETE, and leftovers moved aside as NAME.INCOMPLETE.stale-<time>. Names only,
+// sorted; read-only (nothing is opened, moved or deleted).
+inline std::vector<std::string> leftovers(const fs::path& dir) {
+    std::vector<std::string> r;
+    std::error_code ec;
+    static const std::string inc = ".INCOMPLETE";
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const auto n = it->path().filename().string();
+        if ((n.size() > inc.size() && n.compare(n.size() - inc.size(), inc.size(), inc) == 0) || n.find(inc + ".stale-") != std::string::npos) r.push_back(n);
+    }
+    std::sort(r.begin(), r.end());
+    return r;
+}
+
 // Machine report (aiarranger-export-report/1) and its human-readable twin.
 inline std::string reportJson(const JobState& s) {
     auto q = [](const std::string& v) { return "\"" + media::graph::jsonEscape(v) + "\""; };
@@ -323,7 +337,8 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
     if (!enter(Phase::Verify)) return;
     if (spec.verify) std::tie(st.level, st.verifyText) = spec.verify(staged);
-    for (size_t k; (k = st.verifyText.find(staged.string())) != std::string::npos;) st.verifyText.replace(k, staged.string().size(), dest.string());
+    for (auto* t : {&st.verifyText, &st.writerText})   // the texts name the published path, not the job's work folder
+        for (size_t k; (k = t->find(staged.string())) != std::string::npos;) t->replace(k, staged.string().size(), dest.string());
     st.level.l3 = {Check::NotRun, "not tested on a Pa5X"};   // only an owner record gives L3 (Validation & Reports)
     if (st.level.l1.state == Check::Failed)
         return stop(Phase::Failed, "the written output failed its check (L1: " + st.level.l1.detail + "); nothing was published" + kept());

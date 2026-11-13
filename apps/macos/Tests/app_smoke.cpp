@@ -58,6 +58,8 @@ static juce::String section(juce::Component& root) {
 
 int main() {
     setenv("AIARR_MIDI_HW_TX", "0", 1);
+    const auto stateDir = std::filesystem::temp_directory_path() / ("aia-smoke-state-" + std::to_string(::getpid()));
+    setenv("AIARR_STATE_DIR", stateDir.c_str(), 1);   // the studio's last-output record: never the user's own
     juce::ScopedJuceInitialiser_GUI gui;
     std::printf("Test: macOS app UI smoke (LiveHostComponent)\n");
 
@@ -204,6 +206,13 @@ int main() {
             TEST("Backup KST: complete and verified, manifest beside it, progress full",
                  rc.kstText().startsWith("Backup complete and verified") && media::diff(kst, b1p).same() && media::verifyBackup(b1p).empty() &&
                  rc.backupProgress() == 1.0);
+            TEST("Backup KST runs as an export job: its report sits beside the backup", fs::is_regular_file(b1p.string() + ".export.md") &&
+                 rc.kstText().contains("Export job #"));
+            rc.startBackup(juce::File(kst.string()), juce::File((kst / "STYLE/inside").string()));
+            waitBackup(rc);
+            TEST("Backup KST into a folder inside its source is refused, nothing created there (D18)", rc.kstText().contains("No backup was made") &&
+                 (rc.kstText().contains("overlaps") || rc.kstText().contains("inside the source")) && !fs::exists(kst / "STYLE/inside") &&
+                 !fs::exists(kst / "STYLE/inside.INCOMPLETE"));
             rc.startVerify(b1);
             waitBackup(rc);
             TEST("Verify Backup: a good backup verifies", rc.kstText().startsWith("Backup verified: all 1 files"));
@@ -372,6 +381,8 @@ int main() {
             const double generateGap = watch.worstMs;
             TEST("generate: package written, summary with budget", cv.statusText().startsWith("Package written") && cv.previewText().contains("verdict: fits") &&
                  fs::exists(root / "out/Big Sine/RESOURCES.tsv"));
+            TEST("Generate runs as an export job: report beside the package, no work folder left", fs::is_regular_file(root / "out/Big Sine.export.md") &&
+                 !fs::exists(root / "out/Big Sine.INCOMPLETE") && !cv.previewText().contains(".INCOMPLETE"));
             watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
             for (int i = 0; i < 1500 && rc.loading(); ++i) pump(20);
             const double loadGap = watch.worstMs;
@@ -399,6 +410,14 @@ int main() {
                 cv.generate(juce::File(root.string() + "/out/Stale"));
                 for (int i = 0; i < 50 && cv.busy(); ++i) pump(20);
                 TEST("Generate with a stale preview writes nothing", !fs::exists(root / "out/Stale"));
+                cv.splitsField().setText("64");
+                pump(50);
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                cv.generate(juce::File(root.string() + "/big/Inside"));
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                TEST("Generate into a folder inside the source WAV folder is refused, nothing created there (D18)",
+                     cv.statusText().contains("overlaps the job's source") && !fs::exists(root / "big/Inside") && !fs::exists(root / "big/Inside.INCOMPLETE"));
                 cv.splitsField().setText("64");
                 pump(50);
                 cv.buildPreview();
@@ -652,6 +671,11 @@ int main() {
                 TEST("generate copies the package and opens it in Resource Graph",
                      fs::exists(root / "plug-out/DLS Piano/RESOURCES.tsv") && fs::exists(root / "plug-out/DLS Piano/REPORT.txt") &&
                      rc.tabs().getCurrentTabIndex() == 0 && ps.statusText().startsWith("Package written"));
+                TEST("Sample Plugin Generate runs as an export job: report beside the package", fs::is_regular_file(root / "plug-out/DLS Piano.export.md"));
+                ps.generate(ps.stagingFolder().getChildFile("pkg/copy"));
+                waitIdle(10000);
+                TEST("Sample Plugin Generate into the render's own staging folder is refused (D18)", ps.statusText().contains("overlaps the job's source") &&
+                     !ps.stagingFolder().getChildFile("pkg/copy").exists() && !ps.stagingFolder().getChildFile("pkg/copy.INCOMPLETE").exists());
                 {   // a copy that fails part way is never left under the package's name (only NAME.INCOMPLETE)
                     fs::path wav;
                     for (const auto& e : fs::directory_iterator(ps.stagingFolder().getChildFile("pkg/wav").getFullPathName().toStdString())) { wav = e.path(); break; }
@@ -1159,12 +1183,20 @@ int main() {
             click(pg, "Apply");
             TEST("studio: velocity scale", st.styleStatus().startsWith("Done: Velocity"));
             st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
+            waitIdle(10000);
+            {
+                const auto all = st.jobList();
+                TEST("studio: the Style page's SMF export ran as an export job", !all.empty() && all.back().type == "Style as Pa5X SMF (EXPERIMENTAL)" &&
+                     all.back().dest == (root / "waltz.mid").string());
+            }
             TEST("studio: Pa5X SMF export writes a new file at L1 (validator), EXPERIMENTAL", fs::is_regular_file(root / "waltz.mid") &&
                  st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") && st.inspectorText().contains("STAGED CHANGES\n0.") &&
                  st.inspectorText().contains("waltz.mid") && st.inspectorText().contains(l1only));
             st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
+            waitIdle(10000);
             TEST("studio: an existing SMF is never overwritten", st.styleStatus().contains("already exists"));
             st.exportStyleSmf(juce::File("/Volumes/AIA-SMOKE-" + juce::String(::getpid()) + "/w.mid"));
+            waitIdle(10000);
             TEST("studio: SMF onto a mounted volume refused", st.styleStatus().contains("mounted volume"));
             st.importSmfTrack(juce::File((root / "waltz.mid").string()));
             TEST("studio: Import SMF Track replaces the chosen track (undoable)", st.styleStatus().startsWith("Imported") &&
@@ -1287,6 +1319,25 @@ int main() {
                 pump(300);
                 TEST("quit: Cancel Jobs and Quit cancels every job, then quits", wq == 2 && !st.workPromptShown() &&
                      job(j1).phase == jobs::Phase::Cancelled && job(j2).phase == jobs::Phase::Cancelled);
+                {   // leftover banner: read-only listing of the last output folder, on launch and on page open; nothing deleted
+                    app::StudioComponent again([] {});
+                    pump(50);
+                    TEST("leftovers: on launch a banner lists NAME.INCOMPLETE in the last output folder", again.leftoverText().contains("quit-slow.INCOMPLETE") &&
+                         again.leftoverText().contains(juce::String(root.string())) && again.leftoverText().contains("Nothing is deleted"));
+                    fs::create_directories(root / "old.INCOMPLETE.stale-20260101T000000Z");
+                    again.showDomain(D::Validation);
+                    TEST("leftovers: opening a page lists a moved-aside .stale- folder too", again.leftoverText().contains("old.INCOMPLETE.stale-20260101T000000Z"));
+                    TEST("leftovers: the listing changes nothing", fs::is_directory(root / "quit-slow.INCOMPLETE") &&
+                         fs::is_directory(root / "old.INCOMPLETE.stale-20260101T000000Z"));
+                    const auto rec = stateDir / "last-output-folder.txt";
+                    const auto keep = juce::File(rec.string()).loadFileAsString();
+                    fs::create_directories(root / "clean-out");
+                    juce::File(rec.string()).replaceWithText(juce::String((root / "clean-out").string()));
+                    again.showDomain(D::ImportExport);
+                    TEST("leftovers: no banner when the last output folder has none", again.leftoverText().isEmpty());
+                    juce::File(rec.string()).replaceWithText(keep);
+                    fs::remove_all(root / "old.INCOMPLETE.stale-20260101T000000Z");
+                }
                 TEST("quit: a cancelled job leaves only NAME.INCOMPLETE, nothing published (D17)", !fs::exists(root / "quit-slow") &&
                      fs::is_directory(root / "quit-slow.INCOMPLETE") && !fs::exists(root / "quit-pkg2") && !fs::exists(root / "quit-pkg2.INCOMPLETE"));
                 TEST("quit: idle -> quits at once, no work prompt", !st.busy() && st.requestQuit(wfn) && wq == 3 && !st.workPromptShown());
@@ -1455,6 +1506,7 @@ int main() {
         fs::remove_all(root);
     }
 
+    std::filesystem::remove_all(stateDir);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

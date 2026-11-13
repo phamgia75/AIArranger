@@ -2,7 +2,8 @@
 
 // Resources window: Resource Graph browser, KST Library (file-level) and Memory Check.
 // A JUCE view over ui::ResourceBrowserModel. Inventory, Compare and Merge Plan only read. The one KST write
-// is Backup KST: a verified copy into a NEW local folder (media/kst_backup.h); the source is only read.
+// is Backup KST: a verified copy into a NEW local folder (media/kst_backup.h), run as an export job (JobPort:
+// D17 never delete, D18 never inside the source); the source is only read.
 // Never sends MIDI and never talks to the instrument.
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -30,7 +31,8 @@ public:
     void runKst(ui::ResourceBrowserModel::KstAction a, const juce::String& first, const juce::String& second = {});
     void compareMemory();
     void startBackup(const juce::File& source, const juce::File& newFolder);   // asynchronous; backingUp() until done
-    void cancelBackup() { cancelBackup_ = true; }   // also stops a Verify Backup
+    void cancelBackup();   // the backup job, or a Verify Backup
+    void setJobPort(JobPort p);   // the studio's queue for Backup KST, Convert Sound and Sample Plugin; else their own
     void startVerify(const juce::File& backupFolder);   // asynchronous, read-only; backingUp() until done
     bool backingUp() const { return backingUp_; }
     double backupProgress() const { return backupProgress_; }
@@ -74,7 +76,7 @@ private:
     juce::ProgressBar backupBar_{backupProgress_};
     bool backingUp_ = false;      // message thread only
     std::atomic<bool> cancelBackup_{false};
-    std::thread backupThread_;    // joined in the destructor (cancelled first), never detached
+    std::thread backupThread_;    // Verify Backup: joined in the destructor (cancelled first), never detached
     juce::Label kstNote_;
     juce::TextEditor kstOut_;
     std::atomic<int> kstJobs_{0};
@@ -91,6 +93,10 @@ private:
 
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    void pollBackup();      // the progress bar follows the backup job's state
+    PendingJob backupJob_;
+    JobRunner ownJobs_;     // destroyed first: closing the window cancels a backup (only NAME.INCOMPLETE stays, D17)
+    JobPort port_ = ownJobs_.port();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ResourcesComponent)
 };
