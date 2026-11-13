@@ -127,7 +127,7 @@ inline std::string reportJson(const JobState& s) {
     };
     std::string o = "{\n  \"schema\": \"aiarranger-export-report/1\",\n  \"job\": " + std::to_string(s.id) + ",\n  \"type\": " + q(s.type) +
                     ",\n  \"source\": " + q(s.source) + ",\n  \"output\": " + q(s.dest) + ",\n  \"result\": " + q(phaseName(s.phase)) +
-                    ",\n  \"reason\": " + q(s.reason) + ",\n  \"missing\": " + list(s.missing) + ",\n  \"notes\": " + list(s.notes) +
+                    ",\n  \"reason\": " + q(s.reason) + ",\n  \"writer\": " + q(s.writerText) + ",\n  \"verifyText\": " + q(s.verifyText) + ",\n  \"missing\": " + list(s.missing) + ",\n  \"notes\": " + list(s.notes) +
                     ",\n  \"warnings\": " + list(s.warnings) + ",\n  \"plannedBytes\": " + std::to_string(s.plannedBytes) +
                     ",\n  \"sampleBytes\": " + std::to_string(s.sampleBytes) + ",\n  \"verification\": {\"L1\": " + lvl(s.level.l1) +
                     ", \"L2\": " + lvl(s.level.l2) + ", \"L3\": " + lvl(s.level.l3) + "},\n  \"files\": [";
@@ -150,6 +150,7 @@ inline std::string reportMd(const JobState& s) {
     section("Missing resources", s.missing);
     section("Warnings", s.warnings);
     section("Notes", s.notes);
+    if (!s.writerText.empty()) o += "\n## Writer report\n\n```\n" + s.writerText + (s.writerText.back() == '\n' ? "" : "\n") + "```\n";
     if (!s.verifyText.empty()) o += "\n## Verification\n\n" + s.verifyText + "\n";
     o += "\n## Files (SHA-256, sha256sum format)\n\n```\n";
     for (const auto& f : s.files) o += f.sha256 + "  " + f.rel + "\n";

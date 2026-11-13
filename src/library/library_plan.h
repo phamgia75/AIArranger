@@ -1,9 +1,9 @@
 // E7 SET/KST Manager PLANNING: copy / move / rename / bank-swap steps between two read-only libraries, checked step by
 // step against a simulated state of both libraries, and exported as a staged plan document (plan.json + PLAN.txt).
 //
-// No native-format write exists or happens here. The only verified writer for keyboard data is Backup KST
-// (media/kst_backup.h, tools/kst_copy.py): a byte copy of a WHOLE folder into a new folder. It cannot apply a single
-// copy, move, rename or bank swap, so every plan is EXPORT-ONLY and says so in both files. The export itself is a new
+// No native-format write exists or happens here: the exported plan is a document (EXPORT-ONLY, said in both files).
+// evaluate() also resolves each step into the file operations it implies (FileOp); library_apply.h (E8) executes the
+// file-level ones into a NEW copy of the target library and refuses item-level edits inside a SET container. The export itself is a new
 // local folder written by the shared Sample Lab folder writer (NAME.INCOMPLETE, every file hashed, PACKAGE.sha256,
 // checked, published by one no-replace rename; mounted volumes refused; never inside either library).
 #ifndef AI_ARRANGER_LIBRARY_LIBRARY_PLAN_H
@@ -25,9 +25,19 @@ struct Step {
     std::string bank;         // Copy/Move: target bank in the other library ("" = same bank id); BankSwap: first bank
     int slot = -1;            // Copy/Move: 0-based target slot (SET); -1 = first free
     std::string text;         // Rename: new name; BankSwap: second bank
+    bool wholeFile = false;   // SET Copy/Move/Rename: the item's whole bank FILE (e.g. STYLE/USER03.STY), not one item in it
 };
 
-struct StepCheck { std::string summary; std::vector<std::string> conflicts, warnings; };
+// What a step does to files, resolved against the simulated state at that step (paths relative to the library root;
+// they reflect every earlier step). Used by plan execution (library_apply.h); empty for a step with nothing to do.
+struct FileOp {
+    enum Kind { CopyIn, Rename, Swap } kind = CopyIn;
+    std::string from, to;     // CopyIn: file in the source library -> file in the target; Rename/Swap: in the target
+    std::string sha;          // CopyIn: SHA-256 the source file had when it was opened
+    bool folder = false;      // Swap: bank folders (KST); else bank files (SET)
+};
+
+struct StepCheck { std::string summary; std::vector<std::string> conflicts, warnings; std::vector<FileOp> ops; };
 struct Evaluation {
     std::vector<StepCheck> steps;
     size_t conflicts = 0, warnings = 0;
@@ -35,17 +45,18 @@ struct Evaluation {
 };
 
 inline constexpr const char* kApplyReason =
-    "EXPORT-ONLY: no verified writer can apply these steps. The only verified writer for keyboard data is Backup KST "
-    "(a byte copy of a whole folder into a new folder); it cannot copy, move, rename or swap single items or banks, and "
-    "AIArranger writes no Pa-native or KST file. Carry the steps out on the keyboard (or by hand on a Backup KST copy), "
-    "then check the result with Library Compare. Both libraries were only read.";
+    "EXPORT-ONLY: this plan document applies nothing. Execute plan... (E8) can carry out the file-level steps (Pa5X KST "
+    "files; whole SET bank files between SETs of the same generation) into a NEW copy of the target library; it refuses "
+    "item-level edits inside a Pa-native container, whose payload and record trailer are UNKNOWN. AIArranger writes no "
+    "Pa-native or KST file content. Otherwise carry the steps out on the keyboard, then check the result with Library "
+    "Compare. Both libraries were only read.";
 
 namespace detail {
 struct SimItem { std::string type, bank, name, file, sha; int slot; bool gone = false; };
-struct Sim { Format format; std::vector<SimItem> items; };
+struct Sim { Format format; std::string layout; std::vector<SimItem> items; };
 
 inline Sim simOf(const Library& L) {
-    Sim s{L.format, {}};
+    Sim s{L.format, L.layout, {}};
     for (const auto& it : L.items) {
         const auto f = L.files.find(it.file);
         s.items.push_back({it.type, it.bank, trimmed(it.name), it.file, f == L.files.end() ? "" : f->second.sha256, it.slot});
@@ -69,7 +80,15 @@ inline std::string slotText(int s) { return s >= 0 ? " slot " + std::to_string(s
 inline std::string badName(const std::string& n) {
     if (trimmed(n).empty()) return "the new name is empty";
     for (unsigned char c : n) if (c < 0x20 || c > 0x7E || c == '/' || c == '\\') return "the new name holds a character outside printable ASCII or a slash";
+    for (unsigned char c : n) if (std::string(":*?\"<>|").find(char(c)) != std::string::npos) return "the new name holds a character a FAT/exFAT USB stick does not allow (: * ? \" < > |)";
     return "";
+}
+// Bank file names the keyboard uses: PREFIXnn (MAN4 PDF p.975 BANKnn/USERnn/FAVORITEnn; OBSERVED Pa700 USERnn).
+inline bool bankFileName(const std::string& stem) {
+    const std::string s = media::detail::upper(stem);
+    for (const std::string p : {"BANK", "USER", "FAVORITE"})
+        if (s.size() == p.size() + 2 && s.compare(0, p.size(), p) == 0 && std::isdigit((unsigned char)s[p.size()]) && std::isdigit((unsigned char)s[p.size() + 1])) return true;
+    return false;
 }
 }  // namespace detail
 
@@ -90,16 +109,25 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
         auto warn = [&](std::string s) { c.warnings.push_back(std::move(s)); };
         if (st.op == Op::BankSwap) {
             c.summary = std::string("bank-swap in ") + st.side + ": " + st.bank + " <-> " + st.text;
-            std::string tx, ty;
-            for (const auto& it : S.items) if (!it.gone) { if (detail::same(it.bank, st.bank)) tx = it.type; if (detail::same(it.bank, st.text)) ty = it.type; }
+            std::string tx, ty, bx = st.bank, by = st.text, fx, fy;   // bx/by: the banks as spelled in the library (a typed name may differ in case)
+            for (const auto& it : S.items) if (!it.gone) {
+                if (detail::same(it.bank, st.bank)) { tx = it.type; bx = it.bank; fx = it.file; }
+                if (detail::same(it.bank, st.text)) { ty = it.type; by = it.bank; fy = it.file; }
+            }
             if (detail::same(st.bank, st.text)) conflict("both banks are the same bank");
             else if (st.bank == "(root)" || st.text == "(root)") conflict("files at the library root are not a bank");
             else if (tx.empty() && ty.empty()) conflict("neither bank holds an item in " + std::string(1, st.side));
             else if (!tx.empty() && !ty.empty() && tx != ty) conflict("the banks hold different types (" + tx + ", " + ty + ")");
             else {
                 for (auto& it : S.items) {   // gone items too: their paths must not shadow the swapped ones
-                    if (detail::same(it.bank, st.bank)) { it.bank = st.text; detail::rebank(it.file, st.bank, st.text); }
-                    else if (detail::same(it.bank, st.text)) { it.bank = st.bank; detail::rebank(it.file, st.text, st.bank); }
+                    if (detail::same(it.bank, bx)) { it.bank = by; detail::rebank(it.file, bx, by); }
+                    else if (detail::same(it.bank, by)) { it.bank = bx; detail::rebank(it.file, by, bx); }
+                }
+                if (S.format == Format::PaSet) {   // a SET bank is one file: swap the two bank files
+                    const std::string ext = fs::path(fx.empty() ? fy : fx).extension().string();
+                    c.ops.push_back({FileOp::Swap, fx.empty() ? bx + ext : fx, fy.empty() ? by + ext : fy, "", false});
+                } else {
+                    c.ops.push_back({FileOp::Swap, bx, by, "", true});
                 }
                 warn("what refers to these banks by bank and slot (SongBook entries, Keyboard Sets, Style settings) is not decoded: "
                      "those references may point elsewhere after the swap (UNKNOWN)");
@@ -107,6 +135,22 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
         } else if (st.item >= L.items.size() || S.items[st.item].gone) {
             c.summary = std::string(opName(st.op)) + " from " + st.side + ": item " + std::to_string(st.item);
             conflict("the item is not in library " + std::string(1, st.side) + (st.item < L.items.size() ? " any more (an earlier step moved it)" : ""));
+        } else if (st.op == Op::Rename && st.wholeFile && S.format == Format::PaSet) {   // rename a SET bank FILE
+            const auto& it = S.items[st.item];
+            const std::string from = it.file, oldBank = it.bank, to = (fs::path(it.file).parent_path() / (trimmed(st.text) + fs::path(it.file).extension().string())).generic_string();
+            c.summary = std::string("rename bank file in ") + st.side + ": " + from + " -> " + to;
+            if (const auto why = detail::badName(st.text); !why.empty()) conflict(why);
+            else {
+                for (const auto& o : S.items) if (!o.gone && detail::same(o.file, to)) { conflict("the bank file " + to + " already exists in " + std::string(1, st.side)); break; }
+                if (!detail::bankFileName(trimmed(st.text)))
+                    warn("bank files are named BANKnn / USERnn / FAVORITEnn (MAN4 PDF p.975; OBSERVED Pa700: USERnn): whether the keyboard reads \"" + trimmed(st.text) + "\" is UNKNOWN");
+                warn("what refers to this bank by bank and slot (SongBook entries, Style settings) is not decoded: those references may point elsewhere (UNKNOWN)");
+                if (c.conflicts.empty()) {
+                    const std::string newBank = (fs::path(oldBank).parent_path() / trimmed(st.text)).generic_string();
+                    for (auto& o : S.items) if (detail::same(o.file, from)) { o.file = to; o.bank = newBank; }
+                    c.ops.push_back({FileOp::Rename, from, to, "", false});
+                }
+            }
         } else if (st.op == Op::Rename) {
             auto& it = S.items[st.item];
             c.summary = std::string("rename in ") + st.side + ": " + it.bank + detail::slotText(it.slot) + " \"" + it.name + "\" -> \"" + st.text + "\"";
@@ -119,6 +163,7 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
                 if (S.format != Format::PaSet) {   // a KST/folder item is a file: the rename renames it
                     const std::string to = (fs::path(it.file).parent_path() / (trimmed(st.text) + fs::path(it.file).extension().string())).generic_string();
                     for (const auto& o : S.items) if (&o != &it && !o.gone && detail::same(o.file, to)) conflict("the file " + to + " already exists in " + std::string(1, st.side));
+                    if (c.conflicts.empty() && to != it.file) c.ops.push_back({FileOp::Rename, it.file, to, "", false});
                     if (c.conflicts.empty()) it.file = to;
                 }
                 if (c.conflicts.empty()) it.name = trimmed(st.text);
@@ -128,6 +173,8 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             const std::string bank = st.bank.empty() ? src.bank : st.bank;
             c.summary = std::string(opName(st.op)) + " " + st.side + ":" + src.bank + detail::slotText(src.slot) + " \"" + src.name + "\" -> " + other + ":" + bank;
             if (S.format != D.format) conflict(std::string("formats differ (") + formatName(S.format) + " -> " + formatName(D.format) + "): converting is not available");
+            else if (S.format == Format::PaSet && S.layout != D.layout)
+                conflict("SET generations differ (" + S.layout + " -> " + D.layout + "): their files are not known to be interchangeable");
             std::string btype;
             std::set<int> used;
             bool unknownOccupancy = false;   // an undecoded SET bank file: which slots are taken is UNKNOWN
@@ -136,7 +183,18 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             int slot = -1;
             bool already = false;   // the same bytes are already at the target path: nothing to add
             std::string file = src.file;
-            if (D.format == Format::PaSet && S.format == Format::PaSet) {
+            if (D.format == Format::PaSet && S.format == Format::PaSet && st.wholeFile) {   // the whole bank FILE, as a file
+                file = bank + fs::path(src.file).extension().string();
+                c.summary = std::string(opName(st.op)) + " bank file " + st.side + ":" + src.file + " -> " + other + ":" + file;
+                for (const auto& o : D.items) {
+                    if (o.gone || !detail::same(o.file, file)) continue;
+                    if (o.sha == src.sha) { already = true; warn(std::string(1, other) + " already has " + file + " with the same bytes: nothing to do"); }
+                    else { conflict(std::string(1, other) + " already has the bank file " + file + ": the copy would replace it"); }
+                    break;
+                }
+                if (!detail::bankFileName(fs::path(file).stem().string()))
+                    warn("bank files are named BANKnn / USERnn / FAVORITEnn (MAN4 PDF p.975; OBSERVED Pa700: USERnn): whether the keyboard reads " + file + " is UNKNOWN");
+            } else if (D.format == Format::PaSet && S.format == Format::PaSet) {
                 const int cap = bankCapacity(D.format, src.type);
                 slot = st.slot;
                 if (slot < 0 && !unknownOccupancy) { slot = 0; while (used.count(slot)) ++slot; }
@@ -169,8 +227,15 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
                 warn("loading a whole KST that holds a PCM folder deletes all User Samples in memory (Pa5X manual p.736): load single Sounds");
             if (st.op == Op::Move) warn(std::string("library ") + st.side + " is only read: removing the item there is a step for the keyboard");
             if (c.conflicts.empty()) {
-                if (!already) D.items.push_back({src.type, bank, src.name, file, src.sha, slot});
-                if (st.op == Op::Move) S.items[st.item].gone = true;
+                const std::string srcFile = src.file, srcSha = src.sha;
+                if (st.wholeFile && D.format == Format::PaSet) {
+                    if (!already) for (const auto& o : S.items) if (!o.gone && o.file == srcFile) D.items.push_back({o.type, bank, o.name, file, o.sha, o.slot});
+                    if (st.op == Op::Move) for (auto& o : S.items) if (o.file == srcFile) o.gone = true;
+                } else {
+                    if (!already) D.items.push_back({src.type, bank, src.name, file, src.sha, slot});
+                    if (st.op == Op::Move) S.items[st.item].gone = true;
+                }
+                if (!already && (D.format != Format::PaSet || st.wholeFile)) c.ops.push_back({FileOp::CopyIn, srcFile, file, srcSha, false});
             }
         }
         ev.conflicts += c.conflicts.size();
@@ -222,6 +287,7 @@ inline std::string planJson(const Library& A, const Library& B, const std::vecto
         }
         if (st.op == Op::Copy || st.op == Op::Move) o << ", \"to_bank\": " << q(st.bank) << ", \"to_slot\": " << st.slot;
         if (st.op == Op::Rename) o << ", \"new_name\": " << q(st.text);
+        if (st.wholeFile) o << ", \"whole_file\": true";
         if (st.op == Op::BankSwap) o << ", \"banks\": [" << q(st.bank) << ", " << q(st.text) << "]";
         o << ", \"summary\": " << q(ev.steps[i].summary) << ", \"conflicts\": " << list(ev.steps[i].conflicts) << ", \"warnings\": " << list(ev.steps[i].warnings)
           << ", \"applicable\": false}";

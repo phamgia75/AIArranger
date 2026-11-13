@@ -8,7 +8,7 @@
 // by value or as immutable snapshots, so a job never touches state the UI keeps editing.
 
 #include "jobs/export_job.h"
-#include "library/library_plan.h"
+#include "library/library_apply.h"
 #include "media/sound/package_graph.h"
 #include "ui/sound/sound_conversion_model.h"
 #include "ui/studio/studio_tools.h"
@@ -278,6 +278,54 @@ inline ExportSpec stagedPackage(fs::path staged, fs::path dest) {
         return WriteResult{"", ui::SoundConversionModel::writtenSummary(out)};
     };
     s.verify = detail::outputLevel;
+    return s;
+}
+
+// Library Manager plan EXECUTION (E8, file level): a NEW library = the target's verified copy with the plan's file-level
+// steps applied (library_apply.h). Both libraries are sources (D18); verify re-opens the staged output, runs the
+// validator and re-checks both sources before anything is published.
+inline ExportSpec libraryApply(std::shared_ptr<const library::Library> A, std::shared_ptr<const library::Library> B, std::vector<library::Step> plan,
+                               fs::path dest) {
+    ExportSpec s;
+    s.type = "Library plan execution (file level)";
+    s.source = "A: " + (A ? A->root : std::string()) + ", B: " + (B ? B->root : std::string());
+    if (A && B) s.sources = {A->root, B->root};
+    s.dest = std::move(dest);
+    s.validate = [A, B, plan] {
+        if (!A || !B || !A->ok || !B->ok) return std::string("refusing: a plan needs a library open on both sides");
+        const auto x = library::executable(*A, *B, plan, library::evaluate(*A, *B, plan));
+        return x.refusal.empty() ? std::string() : "refusing: " + x.refusal;
+    };
+    s.dependencies = [A, B, plan](auto& notes, auto&) {
+        const auto ev = library::evaluate(*A, *B, plan);
+        notes.push_back(std::string(library::kFileLevelLabel) + ": files are copied, renamed or swapped as opaque bytes; no file content is written or decoded");
+        for (size_t i = 0; i < ev.steps.size(); ++i)
+            for (const auto& w : ev.steps[i].warnings) notes.push_back("step " + std::to_string(i + 1) + ": " + w);
+        return std::vector<std::string>{};
+    };
+    s.preview = [A, B, plan] {
+        const auto ev = library::evaluate(*A, *B, plan);
+        const auto x = library::executable(*A, *B, plan, ev);
+        const auto& T = x.target == 'A' ? *A : *B;
+        const auto& S = x.target == 'A' ? *B : *A;
+        std::vector<OutFile> r;
+        for (const auto& [rel, f] : T.files) r.push_back({rel, f.size});
+        for (const auto& sc : ev.steps) for (const auto& op : sc.ops)
+            if (op.kind == library::FileOp::CopyIn) r.push_back({op.to, S.files.count(op.from) ? S.files.at(op.from).size : 0});
+        return r;
+    };
+    s.write = [A, B, plan](const fs::path& out, const std::function<bool(double)>& progress) {
+        const auto r = library::applyPlan(*A, *B, plan, out, progress);
+        return WriteResult{r.error.empty() ? "" : r.error == "cancelled" ? "Execution cancelled" : "Plan NOT executed: " + r.error, r.text};
+    };
+    s.verify = [A, B, plan](const fs::path& out) {
+        const auto [ok, text] = library::verifyApplied(*A, *B, plan, out);
+        Verification v;
+        v.l1 = ok ? ui::studio::Level{Check::Passed, "manifest, expected files, re-opened library, validator and unchanged sources all pass"}
+                  : ui::studio::Level{Check::Failed, "the executed library failed a check (see the verification text)"};
+        v.l2 = {Check::NotRun, "not applicable: file content is not decoded (" + std::string(library::kFileLevelLabel) + ")"};
+        return std::pair<Verification, std::string>{v, text};
+    };
     return s;
 }
 
