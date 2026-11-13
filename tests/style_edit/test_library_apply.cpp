@@ -320,6 +320,26 @@ int main() {
         TEST("staged folder replaced during the re-check's hash walk: refused, nothing published",
              hit && st.phase == Phase::Failed && st.stoppedAt == Phase::Publish && has(st.reason, "replaced") && !fs::exists(dest) && untouched());
     }
+    // ── integ E8+E9: the staged folder swapped AFTER E8's re-check passed, right before the renames: E9's identity
+    //    check in the shared publish step (export_job.h) refuses it, so the E8 job publishes only what was verified ──
+    {
+        const fs::path dest = out / "swapped-before-rename.KST";
+        const fs::path staged = media::incompletePath(dest) / dest.filename();
+        auto spec = libraryApply(A, B, one, dest);
+        std::string e8;
+        bool hit = false;
+        spec.beforePublish = [&, orig = spec.beforePublish](const fs::path& o) {
+            e8 = orig(o);
+            hit = true;   // same names, sizes and bytes in a new folder: only the dev/ino identity can tell
+            fs::rename(staged, root / "aside-before-rename");
+            fs::copy(root / "aside-before-rename", staged, fs::copy_options::recursive);
+            return e8;
+        };
+        const auto st = run(spec);
+        TEST("integ: staged folder swapped after E8's re-check passed: E9 identity check refuses, nothing published",
+             hit && e8.empty() && st.phase == Phase::Failed && st.stoppedAt == Phase::Publish && has(st.reason, "changed after it was verified") &&
+                 !fs::exists(dest) && !fs::exists(dest.string() + ".manifest.sha256") && untouched());
+    }
     // ── Codex r3 P2: a rename that only changes letter case (one name on FAT/exFAT and on this temp folder) ──
     refused({{Op::Rename, 'B', item(B, "Waltz"), "", -1, "waltz"}}, "letter case", "case-only rename");
     // ── Codex r2 P2: a source folder swapped for a symlink to an outside folder is never read through ──
