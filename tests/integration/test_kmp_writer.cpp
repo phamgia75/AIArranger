@@ -109,6 +109,8 @@ int main() {
     {   // REPORT: labels, read-back command
         TEST("REPORT: EXPERIMENTAL, L1 only, not labelled Pa5X-compatible",
              rep.find("EXPERIMENTAL. Verification level L1 only") != std::string::npos && rep.find("not labelled Pa5X-compatible") != std::string::npos);
+        TEST("REPORT: audio after the loop end counted once per sample (stereo too): Low C, High C, Pad St = 3",
+             rep.find("  3 sample(s) have audio after the loop end") != std::string::npos);
         TEST("REPORT: the read-back command carries the layer order and splits",
              rep.find("--layers 'Soft Keys,Hard Keys,Twenty Char Pad Name' --splits 64,100") != std::string::npos);
         std::ifstream m(out / "PACKAGE.sha256");
@@ -133,6 +135,8 @@ int main() {
     refuse("zone tune -100 cents", x, "outside -99..+99");
     x = one; x.layers[0].name = "Lead -L";
     refuse("a mono layer named like a stereo half", x, "cannot end in -L or -R");
+    x = one; x.samples[0].channels = 2; x.layers[0].name = "Lead -R";
+    refuse("a stereo layer named like a stereo half", x, "cannot end in -L or -R");
     x = one; x.layers[0].name = "Lead,1";
     refuse("a comma in the multisample name (the reader cannot give it back)", x, "contain a comma");
     x = one; x.layers[0].name = "Lead ";
@@ -145,6 +149,12 @@ int main() {
     refuse("a sample rate the Pa5X model refuses (validate)", x, "rate outside 11025-48000");
     x = one; x.samples[0].name = "A twenty-one-char nam";
     refuse("a sample name longer than 20 (NAME holds 24; the model allows 20)", x, "1-20 printable");
+    {   // an apostrophe in a name: the printed read-back command must still be one shell word per argument
+        x = one; x.name = "Bob's Lead";
+        std::string e;
+        const auto r = snd::writeKorgFolder(x, root / "Quote", "", &e);
+        TEST("REPORT quotes an apostrophe for the shell: " + e, r.find("--name 'Bob'\\''s Lead'") != std::string::npos);
+    }
     {
         std::string e;
         TEST("an existing folder is never written into", snd::writeKorgFolder(one, out, "", &e).empty() && e.find("already exists") != std::string::npos);

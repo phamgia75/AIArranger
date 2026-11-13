@@ -90,7 +90,7 @@ inline std::string korgFiles(const Instrument& in, std::vector<KorgFile>* out, s
         const std::string what = "layer '" + L.name + "'";
         // The name must come back unchanged from the reader (korg::layerName, korg::side).
         if (L.name != korg::layerName(L.name)) return what + ": a multisample name cannot start or end with a space or contain a comma";
-        if (korg::side(L.name).second) return what + ": a mono multisample name cannot end in -L or -R (the KRONOS stereo naming, p.1161)";
+        if (korg::side(L.name).second) return what + ": a layer name cannot end in -L or -R (the KRONOS stereo-half naming, p.1161)";
         if (!names.insert(L.name).second) return what + ": two layers have the same name";
         const int ch = in.samples[size_t(L.zones.front().sample)].channels;
         std::vector<Zone> zs = L.zones;
@@ -113,7 +113,7 @@ inline std::string korgFiles(const Instrument& in, std::vector<KorgFile>* out, s
                     std::snprintf(nm, sizeof nm, "MS%04u%s.KSF", unsigned(k), ch == 2 ? (side ? "R" : "L") : "");
                     f = nm;
                     out->push_back({f, kmpw::ksf(s, ch == 2 ? side : 0, k)});
-                    tails += s.looped && s.loopEnd < s.frames();
+                    tails += side == 0 && s.looped && s.loopEnd < s.frames();   // a stereo sample once
                 }
                 r.push_back({z.root, z.hi, z.tuneCents, f});
             }
@@ -176,6 +176,11 @@ inline std::string writeKorgFolder(const Instrument& in, const std::filesystem::
     pkgio::FileSet files{out};
     for (const auto& f : kf) files.save(f.name, f.bytes);
 
+    const auto q = [](const std::string& t) {   // one shell word, also with an apostrophe in a name
+        std::string r = "'";
+        for (char c : t) r += c == '\'' ? std::string("'\\''") : std::string(1, c);
+        return r + "'";
+    };
     std::string layers, splits, rep =
         "AIArranger Korg-format multisample folder (.KMP + .KSF)\n"
         "EXPERIMENTAL. Verification level L1 only: written from the KRONOS Parameter Guide En 3 p.1158-1159 and read back\n"
@@ -191,8 +196,8 @@ inline std::string writeKorgFolder(const Instrument& in, const std::filesystem::
     rep += "Files:\n";
     for (const auto& f : kf) rep += "  " + f.name + "  " + std::to_string(f.bytes.size()) + " bytes\n";
     rep += "\nNot in these files: velocity layers (a KMP is one key-split multisample; layers belong to the Program/Sound), "
-           "envelopes, filters, effects. Read back with:\n  aiarranger-sound kronos --in <this folder> --name '" + in.name + "'" +
-           (in.layers.size() > 1 ? " --layers '" + layers + "' --splits " + splits : "") + " --out DIR\n";
+           "envelopes, filters, effects. Read back with:\n  aiarranger-sound kronos --in <this folder> --name " + q(in.name) +
+           (in.layers.size() > 1 ? " --layers " + q(layers) + " --splits " + splits : "") + " --out DIR\n";
     if (!lost.empty()) rep += "Not carried:\n" + lost;
     rep += "\nPa5X (owner test, not done): Sample Edit > Import, format KMP (MAN5 p.1206-1209) takes one multisample;\n"
            "  stereo = the _L/_R pair. Whether the Pa5X accepts KRONOS-generation KMP/KSF is UNKNOWN (MAN5 p.722 names\n"
