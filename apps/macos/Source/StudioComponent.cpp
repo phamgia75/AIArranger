@@ -695,12 +695,9 @@ void StudioComponent::loadStyle(const juce::File& sty, bool discard) {
         return;
     }
     sff1Report_ = report;
-    styleElem_.clear(juce::dontSendNotification);
-    styleElem_.addItem("All elements", 1);
-    for (size_t i = 0; i < style_.style().sections.size(); ++i)
-        styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
-    styleElem_.setSelectedId(1, juce::dontSendNotification);
+    styleElem_.clear(juce::dontSendNotification);   // refreshStyle() fills the element choices of the new Style
     refreshStyle();
+    styleElem_.setSelectedId(1, juce::dontSendNotification);
 }
 
 void StudioComponent::setValidationTarget(const juce::File& f) {
@@ -934,6 +931,14 @@ void StudioComponent::runLabTool(LabTool t, const juce::File& dest) {
 // ── Style Studio editing (E3) ──
 void StudioComponent::refreshStyle() {
     if (style_.loaded()) {
+        // Element choices follow the Style after every edit, undo and redo (copy adds one, rename relabels it); the chosen
+        // one stays chosen while it exists, else All elements.
+        const int keepElem = styleElem_.getSelectedId();
+        styleElem_.clear(juce::dontSendNotification);
+        styleElem_.addItem("All elements", 1);
+        for (size_t i = 0; i < style_.style().sections.size(); ++i)
+            styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
+        styleElem_.setSelectedId(styleElem_.indexOfItemId(keepElem) >= 0 ? keepElem : 1, juce::dontSendNotification);
         const int keep = styleTrack_.getSelectedId(), sec = styleElem_.getSelectedId() - 2;
         styleTrack_.clear(juce::dontSendNotification);
         styleTrack_.addItem("All tracks", 1);
@@ -944,6 +949,7 @@ void StudioComponent::refreshStyle() {
         styleReport_.setText(juce::String::fromUTF8((style_.browser() + (sff1Report_.empty() ? "" : "\n" + sff1Report_)).c_str()), false);
     } else {
         styleTrack_.clear(juce::dontSendNotification);
+        styleElem_.clear(juce::dontSendNotification);
         if (!sff1Report_.empty()) styleReport_.setText(juce::String::fromUTF8(sff1Report_.c_str()), false);
     }
     undoBtn_->setButtonText(style_.undoLabel().empty() ? juce::String("Undo") : "Undo " + juce::String(style_.undoLabel()));

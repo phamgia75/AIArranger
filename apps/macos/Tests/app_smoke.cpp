@@ -1395,7 +1395,18 @@ int main() {
                 click(pg, "Apply");
                 TEST("P1 studio: Element copy applied from the page", st.styleStatus().startsWith("Done: Element: copy to") &&
                      find<juce::Button>(pg, "Undo Copy to Ending 3") != nullptr);
+                const int n = int(st.styleModel().style().sections.size());
+                TEST("r1#3 studio: every element, a new one included, is selectable with its current name",
+                     st.styleElement().getNumItems() == n + 1 && st.styleElement().getItemText(n).contains(juce::String(st.styleModel().style().sections.back().name)) &&
+                     st.styleElement().getSelectedId() == 2);
+                st.styleOp().setSelectedId(10);   // Element: rename
+                st.styleValue().setText("Groove X");
+                click(pg, "Apply");
+                TEST("r1#3 studio: a renamed element shows its new name", st.styleElement().getItemText(1).contains("Groove X"));
                 st.styleUndo();
+                st.styleUndo();
+                TEST("r1#3 studio: undo removes the copied element from the choices", st.styleElement().getNumItems() == n &&
+                     !st.styleElement().getItemText(1).contains("Groove X"));
                 st.openStyle(juce::File((root / "waltz-job.mid").string()));
                 if (st.unsavedPromptShown()) st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
                 TEST("P1 studio: a Korg Style SMF opens for editing", st.styleStatus().startsWith("Opened for editing") &&
