@@ -309,6 +309,9 @@ add_executable(aiarranger-resources tools/aiarranger_resources.cpp)   # resource
 target_include_directories(aiarranger-resources PRIVATE src)
 add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder
 target_include_directories(aiarranger-sound PRIVATE src)
+add_executable(aiarranger-samplelab tools/aiarranger_samplelab.cpp)   # Sample Lab E4, offline; writes only to a new folder
+target_include_directories(aiarranger-samplelab PRIVATE src)
+add_test(NAME test_samplelab_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_samplelab_cli.sh ${CMAKE_BINARY_DIR})
 if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit package (docs/research/TXPERF_DRUMKIT_NOTES.md)
     add_test(NAME test_drumkit_package_independent
              COMMAND sh -c "rm -rf drumkit-pkg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-pkg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_drumkit_package.py drumkit-pkg"
