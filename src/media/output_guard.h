@@ -44,6 +44,8 @@ inline bool publishNewFolder(const std::filesystem::path& work, const std::files
 
 // A new single file (Style SMF, UASF): the same refusals as a folder (mounted volume, also through a link; an existing
 // path), then written to `path.tmp` and published by one rename that never replaces anything. "" = written.
+// shortcut: a parent folder swapped for a symlink between the guard check and the create is not caught; the guard stops
+// accidental writes to hardware volumes, not a concurrent hostile local process (same as the package writers, D16 C1).
 inline std::string writeNewFile(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) {
     if (auto why = outputFolderRefusal(path); !why.empty()) return why;
     const std::filesystem::path tmp = path.string() + ".tmp";

@@ -66,6 +66,11 @@ public:
     juce::ComboBox& styleOp() { return styleOp_; }
     juce::TextEditor& styleValue() { return styleValue_; }
     void applyStyleOp();
+    // Opening another Style while the open one has unwritten edits asks first (inline, on the Style page): Save UASF...
+    // (then open), Discard (then open) or Cancel (the open Style stays as it is, undo included).
+    enum class UnsavedChoice { Save, Discard, Cancel };
+    void resolveUnsavedStyle(UnsavedChoice c, const juce::File& saveAs = {});
+    bool unsavedPromptShown() const { return pendingStyle_ != juce::File(); }
     bool styleUndo();
     bool styleRedo();
     void importSmfTrack(const juce::File& mid);
@@ -107,6 +112,7 @@ private:
     void runOutputJob(const juce::String& name, juce::TextEditor& out, std::function<ui::studio::JobResult()> work);
     void chooseSave(const juce::String& title, const juce::String& pattern, std::function<void(juce::File)> then);
     void refreshStyle();
+    void loadStyle(const juce::File& sty, bool discard);
     void chooseFolder(const juce::String& title, std::function<void(juce::File)> then, bool files = false, const juce::String& pattern = {});
     juce::TextButton& button(const juce::String& text, std::function<void()> onClick);
     juce::Label& label(const juce::String& text, juce::Colour c);
@@ -159,6 +165,8 @@ private:
     juce::TextButton* liveFromStyle_ = nullptr;
     ui::studio::StyleStudioModel style_;
     std::string sff1Report_;
+    juce::File pendingStyle_;   // asked to open while the open Style has unwritten edits
+    juce::TextButton *pendSave_ = nullptr, *pendDiscard_ = nullptr, *pendCancel_ = nullptr;
     juce::ComboBox styleElem_, styleTrack_, styleOp_;
     juce::TextEditor styleValue_;
     juce::Label styleStatus_;
@@ -173,6 +181,7 @@ private:
     juce::TextButton *useSourceBtn_ = nullptr, *l3Btn_ = nullptr;
     ui::studio::Verification verification_;
     bool verificationIsPackage_ = false;
+    Domain verificationDomain_ = Domain::Validation;   // the page whose output the badges describe
 
     int jobs_ = 0;   // message thread only
     std::shared_ptr<juce::FileChooser> chooser_;

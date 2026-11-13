@@ -8,6 +8,8 @@
 #include "../Source/LiveHostComponent.h"
 #include "../Source/ResourcesComponent.h"
 #include "../Source/StudioComponent.h"
+#include "engine/uasf/deserializer.h"
+#include "engine/uasf/serializer.h"
 #include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
@@ -963,12 +965,16 @@ int main() {
             auto& pg = st.page(D::StyleStudio);
             TEST("studio: the Style opens for editing with an element/track browser", st.styleModel().loaded() &&
                  st.styleText().contains("    [0] ch ") && st.styleStatus().startsWith("Opened for editing"));
+            TEST("studio: the Style inspector shows the open Style, not another page's output badges (Codex check)",
+                 st.inspectorText().contains("STYLE\nSYNTH_WALTZ_68.sty") && st.inspectorText().contains("No output of this page checked yet") &&
+                 !st.inspectorText().contains(l1only) && !st.inspectorText().contains("Level 1 structural"));
             const auto tempo = st.styleModel().style().tempo_bpm;
             st.styleOp().setSelectedId(6);   // Tempo
             st.styleValue().setText("97");
             click(pg, "Apply");
             TEST("studio: tempo edit applied and staged", st.styleModel().style().tempo_bpm == 97 && st.styleStatus().startsWith("Done") &&
-                 st.inspectorText().contains("1 Style Studio edit(s) not written yet") && find<juce::Label>(st.page(D::ImportExport), "STAGED CHANGES: 1") != nullptr);
+                 st.inspectorText().contains("Style Studio edits not written yet") &&
+                 find<juce::Label>(st.page(D::ImportExport), "STAGED CHANGES: Style Studio edits not written yet") != nullptr);
             TEST("studio: Undo names the op and restores", find<juce::Button>(pg, "Undo Tempo") != nullptr && st.styleUndo() &&
                  st.styleModel().style().tempo_bpm == tempo && find<juce::Button>(pg, "Redo Tempo") != nullptr);
             TEST("studio: Redo re-applies", st.styleRedo() && st.styleModel().style().tempo_bpm == 97);
@@ -991,7 +997,8 @@ int main() {
             TEST("studio: velocity scale", st.styleStatus().startsWith("Done: Velocity"));
             st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
             TEST("studio: Pa5X SMF export writes a new file at L1 (validator), EXPERIMENTAL", fs::is_regular_file(root / "waltz.mid") &&
-                 st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") && st.inspectorText().contains("STAGED CHANGES\n0."));
+                 st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") && st.inspectorText().contains("STAGED CHANGES\n0.") &&
+                 st.inspectorText().contains("waltz.mid") && st.inspectorText().contains(l1only));
             st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
             TEST("studio: an existing SMF is never overwritten", st.styleStatus().contains("already exists"));
             st.exportStyleSmf(juce::File("/Volumes/AIA-SMOKE-" + juce::String(::getpid()) + "/w.mid"));
@@ -1006,6 +1013,42 @@ int main() {
             st.runValidator(app::StudioComponent::Validator::StyleSmf);
             waitIdle(5000);
             TEST("studio: Style SMF Check -> L1 only", st.badgeText() == l1only && st.jobsText().contains("Style SMF Check"));
+            st.showDomain(D::StyleStudio);
+            TEST("studio: a Validation check is not shown as the Style page's badge", !st.inspectorText().contains(l1only));
+
+            // Codex C2: opening another Style while edits are unwritten asks Save / Discard / Cancel; Cancel keeps it all
+            st.styleOp().setSelectedId(6);   // Tempo
+            st.styleValue().setText("99");
+            click(pg, "Apply");
+            st.openStyle(juce::File(sty.string()));
+            TEST("C2 studio: open with unwritten edits -> asks first, nothing replaced", st.unsavedPromptShown() &&
+                 st.styleModel().style().tempo_bpm == 99 && st.styleStatus().contains("not written yet") &&
+                 find<juce::Button>(pg, "Discard Edits and Open") && find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Cancel);
+            TEST("C2 studio: Cancel keeps the Style, its edits and its undo", !st.unsavedPromptShown() && st.styleModel().style().tempo_bpm == 99 &&
+                 st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() && !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
+            st.openStyle(juce::File(sty.string()));
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "kept.uasf").string()));
+            TEST("C2 studio: Save writes the edits first, then opens the other Style", fs::is_regular_file(root / "kept.uasf") &&
+                 !st.unsavedPromptShown() && fs::equivalent(st.styleModel().path(), sty) && !st.styleModel().dirty());
+            st.styleValue().setText("98");
+            click(pg, "Apply");
+            st.openStyle(juce::File((root / "kept.uasf").string()));
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
+            TEST("C2 studio: Discard opens the other Style", fs::equivalent(st.styleModel().path(), root / "kept.uasf") && st.styleModel().style().tempo_bpm == 99);
+
+            // Codex C3: an invalid Style is refused for editing with the validator message; the open one stays
+            {
+                uasf::UasfDeserializer des;
+                auto bad = des.deserializeFromFile((root / "kept.uasf").string());
+                bad.style.sections[0].beats_per_bar = 0;
+                uasf::UasfSerializer ser;
+                const auto b = ser.serialize(bad.style);
+                std::ofstream(root / "invalid.uasf", std::ios::binary).write(reinterpret_cast<const char*>(b.data.data()), std::streamsize(b.data.size()));
+            }
+            st.openStyle(juce::File((root / "invalid.uasf").string()));
+            TEST("C3 studio: invalid Style not editable, validator named, the open Style unchanged",
+                 st.styleStatus().startsWith("Not editable") && st.styleStatus().contains("UASF validator") && fs::equivalent(st.styleModel().path(), root / "kept.uasf"));
         }
 
         // Validation & Reports: badges from the shared verifiers; L3 only from a matching owner record

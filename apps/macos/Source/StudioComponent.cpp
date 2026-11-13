@@ -234,16 +234,24 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     saveUasfBtn_ = &button("Save UASF...", [this] {
         chooseSave("New UASF file (never overwrites)", "*.uasf", [this](juce::File f) { saveStyleUasf(f.withFileExtension("uasf")); });
     });
+    pendSave_ = &button("Save UASF, then Open...", [this] {
+        chooseSave("New UASF file for the unwritten edits (never overwrites)", "*.uasf",
+                   [this](juce::File f) { resolveUnsavedStyle(UnsavedChoice::Save, f.withFileExtension("uasf")); });
+    });
+    pendDiscard_ = &button("Discard Edits and Open", [this] { resolveUnsavedStyle(UnsavedChoice::Discard); });
+    pendCancel_ = &button("Cancel", [this] { resolveUnsavedStyle(UnsavedChoice::Cancel); });
     stylePage_.rows = {{{&openSty, 150}, {liveFromStyle_, 160}, {&label("Load the Style there with Load Style... to audition it.", kText2), 0}},
                        {{&label("Element", kText2), 60}, {&styleElem_, 220}, {&label("Track", kText2), 44}, {&styleTrack_, 220}},
                        {{&styleOp_, 170}, {&styleValue_, 170}, {applyBtn_, 80}, {&reasonFor(*applyBtn_), 0}},
                        {{&styleStatus_, 0}},
+                       {{pendSave_, 200}, {pendDiscard_, 190}, {pendCancel_, 90}},
                        {{undoBtn_, 170}, {&reasonFor(*undoBtn_), 150}, {redoBtn_, 170}, {&reasonFor(*redoBtn_), 0}},
                        {{importSmfBtn_, 200}, {&reasonFor(*importSmfBtn_), 0}},
                        {{exportSmfBtn_, 260}, {&reasonFor(*exportSmfBtn_), 0}},
                        {{saveUasfBtn_, 200}, {&reasonFor(*saveUasfBtn_), 0}}};
     stylePage_.fill = &styleReport_;
     for (auto& row : stylePage_.rows) for (auto& [c, w] : row) stylePage_.addAndMakeVisible(c);
+    for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(false);
     stylePage_.addAndMakeVisible(styleReport_);
 
     // ── Validation & Reports ──
@@ -457,24 +465,55 @@ void StudioComponent::openSource(const juce::File& dir) {
 }
 
 void StudioComponent::openStyle(const juce::File& sty) {
-    sff1Report_.clear();
+    if (style_.dirty()) {   // never drop unwritten edits silently: ask on the page
+        pendingStyle_ = sty;
+        styleStatus_.setText("The open Style has edits not written yet. Open " + sty.getFileName() + " anyway? Save them, discard them, or cancel.",
+                             juce::dontSendNotification);
+        for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(true);
+        return;
+    }
+    loadStyle(sty, false);
+}
+
+void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& saveAs) {
+    const auto next = pendingStyle_;
+    if (next == juce::File()) return;
+    if (c == UnsavedChoice::Save) {
+        saveStyleUasf(saveAs);
+        if (style_.dirty()) return;   // not written (the status says why): keep asking, nothing is lost
+    }
+    pendingStyle_ = juce::File();
+    for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(false);
+    if (c == UnsavedChoice::Cancel) {
+        styleStatus_.setText("Cancelled: " + juce::String(style_.path().filename().string()) + " stays open with its edits.", juce::dontSendNotification);
+        refreshStyle();
+        return;
+    }
+    loadStyle(next, c == UnsavedChoice::Discard);
+}
+
+void StudioComponent::loadStyle(const juce::File& sty, bool discard) {
+    std::string report;
     if (!sty.hasFileExtension("uasf")) {
         importers::sff1::Sff1Reader reader;
         const auto r = reader.parseFile(sty.getFullPathName().toStdString());
-        sff1Report_ = "Style: " + sty.getFileName().toStdString() + "  (read-only; nothing is written to it)\n" + sty.getFullPathName().toStdString() +
-                      "\n\n" + importers::sff1::Sff1ReportGenerator::generateReport(r);
+        report = "Style: " + sty.getFileName().toStdString() + "  (read-only; nothing is written to it)\n" + sty.getFullPathName().toStdString() +
+                 "\n\n" + importers::sff1::Sff1ReportGenerator::generateReport(r);
     }
     std::string err;
-    styleStatus_.setText(style_.load(sty.getFullPathName().toStdString(), &err) ? "Opened for editing: " + sty.getFileName()
-                                                                                : "Not editable: " + juce::String(err),
-                         juce::dontSendNotification);
-    styleElem_.clear(juce::dontSendNotification);
-    if (style_.loaded()) {
-        styleElem_.addItem("All elements", 1);
-        for (size_t i = 0; i < style_.style().sections.size(); ++i)
-            styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
-        styleElem_.setSelectedId(1, juce::dontSendNotification);
+    const bool ok = style_.load(sty.getFullPathName().toStdString(), &err, discard);
+    styleStatus_.setText(ok ? "Opened for editing: " + sty.getFileName() : "Not editable: " + juce::String(err), juce::dontSendNotification);
+    if (!ok) {   // the read-only report may still be shown, but only when no other Style is open for editing
+        if (!style_.loaded()) sff1Report_ = report;
+        refreshStyle();
+        return;
     }
+    sff1Report_ = report;
+    styleElem_.clear(juce::dontSendNotification);
+    styleElem_.addItem("All elements", 1);
+    for (size_t i = 0; i < style_.style().sections.size(); ++i)
+        styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
+    styleElem_.setSelectedId(1, juce::dontSendNotification);
     refreshStyle();
 }
 
@@ -482,6 +521,7 @@ void StudioComponent::setValidationTarget(const juce::File& f) {
     validationTarget_ = f;
     verification_ = {};
     verificationIsPackage_ = false;
+    verificationDomain_ = Domain::Validation;
     refreshAvailability();
     refreshInspector();
 }
@@ -571,6 +611,7 @@ void StudioComponent::runJob(const juce::String& name, std::function<std::pair<j
             if (target == validationTarget_ && result->second) {
                 verification_ = *result->second;
                 verificationIsPackage_ = name == "Verify Package" || name == "L3 record";
+                verificationDomain_ = Domain::Validation;
             }
             addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  done" +
                    (result->second ? "  " + juce::String::fromUTF8(st::badgeLine(*result->second).c_str()) : juce::String()) + "\n" +
@@ -600,9 +641,9 @@ void StudioComponent::runOutputJob(const juce::String& name, juce::TextEditor& o
     addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  running...");
     refreshAvailability();
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, name, &out, work = std::move(work)] {
+    std::thread([this, alive, name, &out, from = domain_, work = std::move(work)] {
         auto r = std::make_shared<st::JobResult>(work());
-        juce::MessageManager::callAsync([this, alive, name, &out, r] {
+        juce::MessageManager::callAsync([this, alive, name, &out, from, r] {
             if (alive.expired()) return;
             --jobs_;
             out.setText(juce::String::fromUTF8(r->text.c_str()), false);
@@ -610,6 +651,7 @@ void StudioComponent::runOutputJob(const juce::String& name, juce::TextEditor& o
                 validationTarget_ = juce::File(juce::String::fromUTF8(r->output.c_str()));
                 verification_ = *r->level;
                 verificationIsPackage_ = true;   // it has a PACKAGE.sha256, so an owner L3 record can name it
+                verificationDomain_ = from;
             }
             addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  done" +
                    (r->level ? "  " + juce::String::fromUTF8(st::badgeLine(*r->level).c_str()) + "  " + juce::String(r->output) : juce::String()) +
@@ -749,6 +791,7 @@ void StudioComponent::exportStyleSmf(const juce::File& mid) {
         validationTarget_ = mid;
         verification_ = v;
         verificationIsPackage_ = false;   // a single file has no PACKAGE.sha256 for an L3 record to name
+        verificationDomain_ = Domain::StyleStudio;
         addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  Style SMF export (EXPERIMENTAL)  done  " +
                juce::String::fromUTF8(st::badgeLine(v).c_str()) + "  " + mid.getFullPathName() + "\n" + juce::String(v.l1.detail) + "\n");
     }
@@ -799,19 +842,29 @@ void StudioComponent::refreshInspector() {
     juce::String t;
     t << "SOURCE\n"
       << (source_ ? juce::String::fromUTF8(st::sourceHeader(*source_).c_str()) + "\n" + source_->path
-                  : juce::String("No source open.\nLibrary Workspace > Sources > Open Source..."))
-      << "\n\nVERIFICATION\n"
-      << (validationTarget_ == juce::File() ? juce::String("No target checked yet.") : validationTarget_.getFileName()) << "\n"
-      << juce::String::fromUTF8(st::badgeLine(verification_).c_str()) << "\n"
-      << juce::String::fromUTF8(st::spokenBadges(verification_).c_str())
-      << "\n\nSTAGED CHANGES\n"
-      << (style_.unsaved() > 0 ? juce::String(style_.unsaved()) + " Style Studio edit(s) not written yet. Export Pa5X SMF... or Save UASF... "
-                                                                  "writes a NEW file; the source Style is never changed."
-                               : juce::String("0. Nothing is written until an export job runs, always into a new local folder."))
+                  : juce::String("No source open.\nLibrary Workspace > Sources > Open Source..."));
+    if (domain_ == Domain::StyleStudio)
+        t << "\n\nSTYLE\n"
+          << (style_.loaded() ? juce::String(style_.path().filename().string()) + " (the file is only read)\nUASF validator: passed when opened; every "
+                                "edit is re-validated. In memory only: L1 belongs to an exported Style SMF."
+                              : juce::String("No Style open for editing."));
+    // Badges only for an output of this page (or on Validation & Reports itself): never attached to another page's output.
+    t << "\n\nVERIFICATION\n";
+    if (domain_ == Domain::Validation || domain_ == verificationDomain_)
+        t << (validationTarget_ == juce::File() ? juce::String("No target checked yet.") : validationTarget_.getFileName()) << "\n"
+          << juce::String::fromUTF8(st::badgeLine(verification_).c_str()) << "\n" << juce::String::fromUTF8(st::spokenBadges(verification_).c_str());
+    else
+        t << "No output of this page checked yet. The last check is in Validation & Reports.";
+    const bool dirty = style_.dirty();
+    t << "\n\nSTAGED CHANGES\n"
+      << (dirty ? juce::String("Style Studio edits not written yet. Export Pa5X SMF... or Save UASF... writes a NEW file; the source Style is "
+                               "never changed.")
+                : juce::String("0. Nothing is written until an export job runs, always into a new local folder."))
       << "\n\nNOT VERIFIED\nLoading on a Pa5X. L3 comes only from an owner's recorded hardware test.";
     inspector_.setText(t, false);
-    staged_->setText("STAGED CHANGES: " + juce::String(style_.unsaved()) + ". Sources are never changed in place; Style Studio edits are staged "
-                     "until Export Pa5X SMF... or Save UASF... writes a new file.", juce::dontSendNotification);
+    staged_->setText(juce::String("STAGED CHANGES: ") + (dirty ? "Style Studio edits not written yet" : "0") +
+                         ". Sources are never changed in place; Style Studio edits are staged until Export Pa5X SMF... or Save UASF... "
+                         "writes a new file.", juce::dontSendNotification);
     badges_.setTitle(st::spokenBadges(verification_));   // VoiceOver reads the meaning, not the glyphs
 }
 

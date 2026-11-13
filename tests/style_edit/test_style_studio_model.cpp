@@ -31,10 +31,10 @@ int main() {
     TEST("SFF1 Style opens for editing", m.load(sty, &err) && m.loaded());
     const auto b = m.browser();
     TEST("browser lists elements and tracks", has(b, "[0] ") && has(b, "    [0] ch ") && has(b, "notes") && has(b, "never changed"));
-    TEST("nothing staged after open", m.unsaved() == 0 && m.undoLabel().empty());
+    TEST("nothing staged after open", !m.dirty() && m.undoLabel().empty());
 
     const uint32_t tempo = m.style().tempo_bpm;
-    TEST("tempo edit", m.apply(Op::Tempo, {}, {}, "97").empty() && m.style().tempo_bpm == 97 && m.unsaved() == 1);
+    TEST("tempo edit", m.apply(Op::Tempo, {}, {}, "97").empty() && m.style().tempo_bpm == 97 && m.dirty());
     TEST("undo label names the op", m.undoLabel() == "Tempo");
     TEST("undo restores", m.undo() && m.style().tempo_bpm == tempo && m.redoLabel() == "Tempo");
     TEST("redo re-applies", m.redo() && m.style().tempo_bpm == 97);
@@ -51,7 +51,7 @@ int main() {
     // ── SMF track import ──
     const fs::path mid = root / "ours.mid";
     Verification lvl;
-    TEST("Style SMF export written", m.exportSmf(mid, &lvl).empty() && fs::is_regular_file(mid) && m.unsaved() == 0);
+    TEST("Style SMF export written", m.exportSmf(mid, &lvl).empty() && fs::is_regular_file(mid) && !m.dirty());
     TEST("Style SMF real level: L1 only (validator), L2 not applicable, no L3",
          lvl.l1.state == Check::Passed && lvl.l2.state == Check::NotRun && lvl.l3.state == Check::NotRun && has(lvl.l1.detail, "validator"));
     TEST("existing SMF never overwritten", has(m.exportSmf(mid, &lvl), "already exists"));
@@ -70,7 +70,44 @@ int main() {
     TEST("UASF written", m.saveUasf(root / "edited.uasf").empty());
     StyleStudioModel back;
     TEST("UASF reopens with the edit", back.load(root / "edited.uasf", &err) && back.style().tempo_bpm == 97);
-
+    // ── Codex C4: dirty = the model differs from what was last written (save, then undo twice) ──
+    {
+        StyleStudioModel d;
+        d.load(sty, &err);
+        d.apply(Op::Tempo, {}, {}, "101");
+        d.apply(Op::Tempo, {}, {}, "102");
+        TEST("C4: written -> nothing staged", d.saveUasf(root / "c4.uasf").empty() && !d.dirty());
+        d.undo();
+        d.undo();
+        TEST("C4: save + undo twice -> still staged (model differs from the written file)", d.dirty());
+        d.redo();
+        d.redo();
+        TEST("C4: redo back to the written state -> nothing staged", !d.dirty());
+    }
+    // ── Codex C3: an invalid style never becomes an editable model ──
+    {
+        uasf::UasfDeserializer des;
+        auto good = des.deserializeFromFile(std::string(REPO_DIR) + "/fixtures/synthetic/SYNTH_FULL_SFF2.uasf");
+        TEST("C3 fixture readable", good.success && !good.style.sections.empty());
+        good.style.sections[0].beats_per_bar = 0;
+        uasf::UasfSerializer ser;
+        const auto bytes = ser.serialize(good.style);
+        std::ofstream(root / "invalid.uasf", std::ios::binary).write(reinterpret_cast<const char*>(bytes.data.data()), std::streamsize(bytes.data.size()));
+        StyleStudioModel inv;
+        std::string why;
+        TEST("C3: invalid style refused with the validator message", bytes.success && !inv.load(root / "invalid.uasf", &why) && !inv.loaded() &&
+             has(why, "validator"));
+    }
+    // ── Codex C2: opening another Style never silently drops unwritten edits ──
+    {
+        StyleStudioModel a;
+        a.load(sty, &err);
+        a.apply(Op::Tempo, {}, {}, "88");
+        std::string why;
+        TEST("C2: open B while A has unwritten edits -> refused, A intact with its undo",
+             !a.load(root / "edited.uasf", &why) && a.style().tempo_bpm == 88 && a.undoLabel() == "Tempo" && has(why, "not written"));
+        TEST("C2: open B after an explicit discard", a.load(root / "edited.uasf", &why, true) && a.style().tempo_bpm == 97);
+    }
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

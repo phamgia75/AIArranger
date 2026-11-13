@@ -36,7 +36,11 @@ public:
         return h[int(o)];
     }
 
-    bool load(const std::filesystem::path& path, std::string* error) {
+    // Refused while the open Style has edits not written yet, unless `discard` (the user chose Discard): opening another
+    // Style must never silently drop them. An invalid Style (UASF validator ERROR) never becomes an editable model.
+    bool load(const std::filesystem::path& path, std::string* error, bool discard = false) {
+        if (dirty() && !discard)
+            return fail(error, "the open Style has edits not written yet: Save UASF... or Export Pa5X SMF..., or Discard them first");
         uasf::StyleDefinition s;
         std::string ext = path.extension().string();
         for (auto& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -55,16 +59,25 @@ public:
             s = std::move(mapped.style);
         }
         if (s.sections.empty()) return fail(error, path.string() + ": no Style elements with events");
+        uasf::UasfValidator v;
+        for (const auto& i : v.validate(s).issues)
+            if (i.severity == uasf::ValidationIssue::ERROR)
+                return fail(error, path.string() + ": refused by the UASF validator: " + i.message + (i.location.empty() ? "" : " (" + i.location + ")"));
         ed_ = std::make_unique<style_edit::StyleEditor>(std::move(s));
         path_ = path;
-        unsaved_ = 0;
+        saved_ = bytes();
         return true;
     }
     bool loaded() const { return ed_ != nullptr; }
     const uasf::StyleDefinition& style() const { return ed_->style(); }
     const std::filesystem::path& path() const { return path_; }
-    // Edits since the Style was opened or last written: the studio's staged changes (sources are never changed in place).
-    int unsaved() const { return unsaved_; }
+    // The studio's staged changes: the model differs from what was opened or last written (Save UASF / Export SMF).
+    // Compared by content, so save + undo is dirty and redo back to the written state is not.
+    bool dirty() const {
+        if (!ed_) return false;
+        const auto now = bytes();
+        return now.empty() || now != saved_;   // a Style that cannot be serialized counts as unwritten
+    }
 
     // Element/track browser: one line per element, its tracks indented.
     std::string browser() const {
@@ -131,10 +144,8 @@ public:
         return done(r);
     }
 
-    // shortcut: an undo/redo after a write counts as a change (it may overcount, never shows 0 while edited); a saved
-    // revision marker would be exact if the staged count must ever drive a "discard changes?" prompt.
-    bool undo() { return ed_ && ed_->undo() && (unsaved_ = unsaved_ > 0 ? unsaved_ - 1 : 1, true); }
-    bool redo() { return ed_ && ed_->redo() && (++unsaved_, true); }
+    bool undo() { return ed_ && ed_->undo(); }
+    bool redo() { return ed_ && ed_->redo(); }
     std::string undoLabel() const { return ed_ && ed_->history().canUndo() ? ed_->history().undoLabel() : ""; }
     std::string redoLabel() const { return ed_ && ed_->history().canRedo() ? ed_->history().redoLabel() : ""; }
 
@@ -164,7 +175,7 @@ public:
         if (!x.ok) return "export refused: " + x.error;
         if (auto e = media::writeNewFile(out, x.bytes); !e.empty()) return e;
         if (level) *level = checkStyleSmf(out);
-        unsaved_ = 0;
+        saved_ = bytes();
         return "";
     }
     // UASF (our own format) of the edited Style. Written only when the UASF validator has no ERROR.
@@ -174,7 +185,7 @@ public:
         const auto r = ser.serialize(style());
         if (!r.success) return "serialize failed: " + r.error;
         if (auto e = media::writeNewFile(out, r.data); !e.empty()) return e;
-        unsaved_ = 0;
+        saved_ = r.data;
         return "";
     }
 
@@ -206,14 +217,17 @@ private:
         return end && !*end;
     }
     std::string done(const style_edit::EditResult& r) {
-        if (!r.ok) return r.error.empty() ? std::string("refused by the validator") : r.error;
-        ++unsaved_;
-        return "";
+        return r.ok ? "" : r.error.empty() ? std::string("refused by the validator") : r.error;
     }
 
     std::unique_ptr<style_edit::StyleEditor> ed_;
     std::filesystem::path path_;
-    int unsaved_ = 0;
+    std::vector<uint8_t> saved_;   // UASF bytes of the Style as opened or last written
+    std::vector<uint8_t> bytes() const {
+        uasf::UasfSerializer ser;
+        auto r = ser.serialize(style());
+        return r.success ? std::move(r.data) : std::vector<uint8_t>{};
+    }
 };
 
 }  // namespace ai_arranger::ui::studio
