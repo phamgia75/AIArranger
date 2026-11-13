@@ -61,6 +61,7 @@ struct ExportSpec {
     std::function<std::vector<OutFile>()> preview;
     std::function<WriteResult(const fs::path& out, const std::function<bool(double)>& progress)> write;
     std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;   // runs on the STAGED output; L1 Failed = not published
+    std::function<std::string(const fs::path& out)> beforePublish;   // right before the publishing renames: "" = publish, else why not
 };
 
 struct JobState {
@@ -349,6 +350,8 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         return stop(Phase::Failed, "the written output failed its check (L1: " + st.level.l1.detail + "); nothing was published" + kept());
 
     if (!enter(Phase::Publish)) return;
+    if (spec.beforePublish)
+        if (const auto e = spec.beforePublish(staged); !e.empty()) return stop(Phase::Failed, "refusing to publish: " + e + "; nothing was published" + kept());
     // Side files the writer put next to its output (the KST backup's NAME.manifest.sha256) go first, the output last,
     // as backupKst publishes: until that last rename nothing is under the output's name.
     std::vector<fs::path> entries;   // listed first: the folder is not changed while it is being iterated

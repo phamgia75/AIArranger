@@ -151,6 +151,28 @@ int main() {
     TEST("text: summary line says file level, not verified on a keyboard",
          validationText(good).find("not verified on a keyboard") != std::string::npos && validationText(good).find("[MAN5 p.736") != std::string::npos);
 
+    // Codex E8 r2: names that differ only in letter case are one name on a FAT/exFAT stick (R-18 ERROR)
+    {
+        const auto c = detail::caseCollisions({"STYLE/BANK01/Foo.STG", "STYLE/BANK01/foo.STG", "PAD/BANK01", "PAD/bank01", "PAD/BANK01/P.PDC", "SOUND/A.PCG"});
+        TEST("listing: file and folder names folded on the full path collide; distinct names do not",
+             c.size() == 2 && c.count("STYLE/BANK01/foo.STG") && c.at("STYLE/BANK01/foo.STG") == "STYLE/BANK01/Foo.STG" && c.count("PAD/bank01"));
+        TEST("listing: no collision in distinct names", detail::caseCollisions({"STYLE/BANK01/a.STG", "STYLE/BANK02/a.STG"}).empty());
+        TEST("R-18 is an ERROR in every table, citing FAT/exFAT", pa5xKstTable().rules.at("R-18").severity == Severity::Error &&
+             std::string(pa5xKstTable().rules.at("R-18").source).find("exFAT") != std::string::npos &&
+             std::string(pa4xSetTable().rules.at("R-18").source).find("MAN4 PDF p.972") != std::string::npos && pa700SetTable().rules.count("R-18"));
+        make(root / "cs", {{"a", "x"}});
+        if (fs::exists(root / "cs/A")) std::printf("  note: the temp folder is case-insensitive: real case-collision folders cannot be made here (set TMPDIR to a case-sensitive volume)\n");
+        else {
+            const auto k = validate(make(root / "CASE.KST", with(kst, {{"STYLE/BANK01/my style.STG", "y"}, {"PAD/bank01/Q.PDC", "x"}})));
+            std::set<std::string> at;
+            for (const auto& f : k.findings) if (f.rule == "R-18" && f.severity == Severity::Error) at.insert(f.path);
+            TEST("case-sensitive disk: KST file and folder collisions are R-18 ERRORs", k.ok && at.count("STYLE/BANK01/my style.STG") && at.count("PAD/bank01"));
+            const auto s = validate(make(root / "case700", with(p700, {{"STYLE/user01.STY", pnStyle}})));
+            TEST("case-sensitive disk: SET bank files USER01.STY + user01.STY are an R-18 ERROR", s.ok && rules(s, int(Severity::Error)).count("R-18"));
+        }
+        fs::remove_all(root / "cs");
+    }
+
     // read-only: validating changes nothing
     const auto before = snapshot(root);
     for (const auto& e : fs::directory_iterator(root)) (void)validate(e.path());

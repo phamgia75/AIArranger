@@ -318,14 +318,16 @@ inline ExportSpec libraryApply(std::shared_ptr<const library::Library> A, std::s
         const auto r = library::applyPlan(*A, *B, plan, out, progress);
         return WriteResult{r.error.empty() ? "" : r.error == "cancelled" ? "Execution cancelled" : "Plan NOT executed: " + r.error, r.text};
     };
-    s.verify = [A, B, plan](const fs::path& out) {
-        const auto [ok, text] = library::verifyApplied(*A, *B, plan, out);
+    const auto pinned = std::make_shared<library::Pinned>();   // the verified staged output, re-checked right before publishing
+    s.verify = [A, B, plan, pinned](const fs::path& out) {
+        const auto [ok, text] = library::verifyApplied(*A, *B, plan, out, pinned.get());
         Verification v;
         v.l1 = ok ? ui::studio::Level{Check::Passed, "manifest, expected files, re-opened library, validator and unchanged sources all pass"}
                   : ui::studio::Level{Check::Failed, "the executed library failed a check (see the verification text)"};
         v.l2 = {Check::NotRun, "not applicable: file content is not decoded (" + std::string(library::kFileLevelLabel) + ")"};
         return std::pair<Verification, std::string>{v, text};
     };
+    s.beforePublish = [pinned](const fs::path& out) { return library::recheckPinned(*pinned, out); };
     return s;
 }
 

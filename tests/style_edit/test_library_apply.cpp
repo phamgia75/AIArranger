@@ -280,6 +280,45 @@ int main() {
         TEST("staged folder swapped for a symlink: job fails, nothing published, both sources byte-identical",
              swapped && st.phase == Phase::Failed && !fs::exists(dest) && untouched());
     }
+    // ── Codex r2 P1: bytes changed in the staged output after verify (the Publish update hook) are never published ──
+    for (const std::string how : {"rewrite", "extra"}) {
+        const fs::path dest = out / ("late-" + how + ".KST");
+        const fs::path staged = media::incompletePath(dest) / dest.filename();
+        JobState st;
+        bool hit = false;
+        runExport(libraryApply(A, B, one, dest), st, [] { return false; }, [&](const JobState& s) {
+            if (s.phase != Phase::Publish || hit) return;
+            hit = true;
+            if (how == "rewrite") std::ofstream(staged / "STYLE/USER03/Tango.STG", std::ios::binary) << blob("TANGO");   // same size, other bytes
+            else put(staged / "STYLE/USER03/Extra.STG", blob("extra"));
+        });
+        TEST(("staged output changed after verify (" + how + "): not published, job fails at publish").c_str(),
+             hit && st.phase == Phase::Failed && st.stoppedAt == Phase::Publish && !fs::exists(dest) && has(st.reason, "after it was verified") && untouched());
+    }
+    // ── Codex r2 P2: a source folder swapped for a symlink to an outside folder is never read through ──
+    {
+        const fs::path outside = root / "outside";
+        put(outside / "Swing.STG", blob("swing"));   // the same bytes: only the descriptor walk can tell
+        fs::rename(ka / "STYLE/USER01", root / "USER01.aside");
+        fs::create_directory_symlink(outside, ka / "STYLE/USER01");
+        const auto st = run(libraryApply(A, B, one, out / "via-link.KST"));
+        fs::remove(ka / "STYLE/USER01");   // the test's own link
+        fs::rename(root / "USER01.aside", ka / "STYLE/USER01");
+        TEST("source folder replaced by a symlink: refused while writing, before reading the outside file, nothing published",
+             st.phase == Phase::Failed && st.stoppedAt == Phase::Run && has(st.reason, "links are never followed") && !fs::exists(out / "via-link.KST") && untouched());
+    }
+    // ── Codex r2 P2: names that differ only in case (one name on a FAT/exFAT stick) are never published ──
+    put(root / "cs/a", "x");
+    if (fs::exists(root / "cs/A")) std::printf("  note: the temp folder is case-insensitive: the case-collision job cannot be built here (set TMPDIR to a case-sensitive volume)\n");
+    else {
+        const fs::path f = root / "F.KST";
+        put(f / "STYLE/USER01/Foo.STG", blob("foo"));
+        put(f / "STYLE/USER01/foo.STG", blob("FOO"));
+        const auto F = open(f);
+        const auto st = run(libraryApply(A, F, {{Op::Copy, 'A', item(A, "Swing"), "STYLE/USER02", -1, ""}}, out / "case.KST"));
+        TEST("case-sensitive disk: a target with Foo.STG + foo.STG is not published (R-18 fails L1)",
+             st.phase == Phase::Failed && st.stoppedAt == Phase::Verify && has(st.verifyText, "R-18") && !fs::exists(out / "case.KST"));
+    }
     TEST("all cases: sources byte-identical", untouched() && setsUntouched());
 
     // Optional, never in CI: AIARR_LIBRARY_OWNER_SET names a local COPY of an owner SET folder. It is only read; the

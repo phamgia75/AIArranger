@@ -1,5 +1,6 @@
 // E8 structural validator for a keyboard library folder (in-repo port of the research prototype
-// pa-studio-research/interop/prototypes/kst_struct_check.py, rules R-01..R-14, plus SET rules R-15..R-17).
+// pa-studio-research/interop/prototypes/kst_struct_check.py, rules R-01..R-14, plus SET rules R-15..R-17 and the
+// case-fold collision rule R-18).
 //
 // FILE LEVEL ONLY: folder and file names, extensions, sizes, an AIArranger placeholder marker and, for a SET, whether a
 // bank file opens as the observed Pa-native container. It never interprets a payload, so a clean result does NOT prove
@@ -74,7 +75,8 @@ inline const RuleTable& pa5xKstTable() {
          {"R-11", {Severity::Warn, "macOS metadata (general rule, not Korg-specific)"}},
          {"R-12", {Severity::Warn, "AIArranger safety rule: links are never followed"}},
          {"R-13", {Severity::Info, "MAN5 p.736: loading the whole KST deletes the User Samples in memory"}},
-         {"R-14", {Severity::Warn, "MAN5 p.736 (User Sample Sounds) + OBSERVED MULTISMP folder"}}}};
+         {"R-14", {Severity::Warn, "MAN5 p.736 (User Sample Sounds) + OBSERVED MULTISMP folder"}},
+         {"R-18", {Severity::Error, "FAT32/exFAT names are case-insensitive (general file-system rule, not Korg-specific)"}}}};
     return t;
 }
 
@@ -107,7 +109,8 @@ inline const RuleTable& pa4xSetTable() {
          {"R-14", {Severity::Warn, "MAN4 PDF p.975: RAM.KMP goes with the RAMnn.PCM samples"}},
          {"R-15", {Severity::Info, "OBSERVED on one Pa700 SET only: Pa4X files may differ (UNKNOWN)"}},
          {"R-16", {Severity::Error, "MAN4 PDF p.975: 48 Styles / Keyboard Sets / Pads per bank file"}},
-         {"R-17", {Severity::Warn, "MAN4 PDF p.975: bank files BANKnn / USERnn / FAVORITEnn"}}}};
+         {"R-17", {Severity::Warn, "MAN4 PDF p.975: bank files BANKnn / USERnn / FAVORITEnn"}},
+         {"R-18", {Severity::Error, "MAN4 PDF p.972: FAT16/FAT32 devices (FAT names are case-insensitive)"}}}};
     return t;
 }
 
@@ -139,7 +142,8 @@ inline const RuleTable& pa700SetTable() {
          {"R-14", {Severity::Warn, "MAN4 PDF p.975 + OBSERVED: RAM.KMP goes with the RAMnn.PCM samples"}},
          {"R-15", {Severity::Warn, "OBSERVED 142/142 files of one Pa700 SET (PA_NATIVE_CONTAINER_NOTES.md §1)"}},
          {"R-16", {Severity::Error, "MAN4 PDF p.975: 48 Styles / Keyboard Sets / Pads per bank file"}},
-         {"R-17", {Severity::Warn, "OBSERVED: user bank files USERnn (MAN4 p.975 also lists BANKnn / FAVORITEnn)"}}}};
+         {"R-17", {Severity::Warn, "OBSERVED: user bank files USERnn (MAN4 p.975 also lists BANKnn / FAVORITEnn)"}},
+         {"R-18", {Severity::Error, "MAN4 PDF p.972: FAT16/FAT32 devices (FAT names are case-insensitive)"}}}};
     return t;
 }
 
@@ -168,6 +172,15 @@ inline int placeholder(const fs::path& p) {
     std::fclose(f);
     if (err) return -1;
     return n == std::strlen(kPlaceholder) && std::memcmp(b, kPlaceholder, n) == 0;
+}
+// Relative paths that equal an earlier one once letter case is folded over the WHOLE path (so a file below two folders
+// that differ only in case collides too): later path -> the first one, in sorted order. ASCII folding (FAT upper-cases).
+inline std::map<std::string, std::string> caseCollisions(std::vector<std::string> all) {
+    std::sort(all.begin(), all.end());
+    std::map<std::string, std::string> first, r;
+    for (const auto& rel : all)
+        if (const auto [it, fresh] = first.emplace(media::detail::upper(rel), rel); !fresh) r[rel] = it->second;
+    return r;
 }
 // PREFIXnn (two digits), case-insensitive.
 inline bool bankFileName(const std::string& stem, const std::vector<std::string>& prefixes) {
@@ -211,6 +224,8 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
         if (detail::fatBad(n)) add("R-09", rel, "character not allowed on a FAT/exFAT USB stick");
         if (detail::macMeta(n)) add("R-11", rel, "macOS metadata entry; delete it before copying to the stick");
     }
+    for (const auto& [rel, was] : detail::caseCollisions(all))
+        add("R-18", rel, "differs from " + was + " only in letter case: one name on a FAT/exFAT stick, one would replace the other");
     for (const auto& s : ls.skipped) add("R-12", s, "symlink or special file, not followed");
     for (const auto& d : ls.dirs) {
         std::vector<std::string> parts;
