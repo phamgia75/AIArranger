@@ -33,6 +33,7 @@ struct Inventory {
     std::vector<std::string> skipped;            // symlinks and special files (not followed); unreadable entries fail the scan
     std::map<std::string, ExtStats> by_type;     // documented Pa5X file type (manual v1.4 p.721-722)
     bool has_pcm_folder = false;                 // a folder named PCM: the KST holds User Samples (p.736)
+    std::string layout;                          // detectLayout(): Pa5X KST, Pa4X-family SET, Pa700/Pa1000-family SET, unknown
 };
 
 // Pa5X file type by extension, from the manual's file-type table (v1.4 p.721-722).
@@ -50,6 +51,29 @@ inline const char* documentedType(const std::string& upperExt) {
     const auto it = t.find(upperExt);
     return it == t.end() ? "(not a documented Pa5X type)" : it->second;
 }
+
+// Pa4X-family SET member types, from the Pa4X manual's file-type table (OS 3.1, PDF p.973-974).
+inline const char* setDocumentedType(const std::string& upperExt) {
+    static const std::map<std::string, const char*> t = {
+        {".BKP", "Full Resource Backup"}, {".GBL", "Global Setup"}, {".VOC", "Voice Preset bank"},
+        {".MXP", "MaxxAudio Preset"}, {".QTP", "Quarter Tone Preset"}, {".MPR", "MIDI Preset"},
+        {".PRF", "Keyboard Set bank (48 per file, MAN4 p.975)"}, {".PCG", "Sound"}, {".KMP", "Multisample"},
+        {".PCM", "Sample"}, {".AIF", "AIFF audio"}, {".WAV", "WAVE audio"},
+        {".STY", "Style bank (48 per file, MAN4 p.975)"}, {".PAD", "Pad bank (48 per file, MAN4 p.975)"},
+        {".SBD", "SongBook database"}, {".SBL", "SongBook Set List"}, {".JBX", "Jukebox"},
+        {".MID", "MIDI Song"}, {".MP3", "MP3 Song"}, {".TXT", "Text"},
+        // Seen only in the owner Pa700 SET (GLOBAL/LIMITER.AUD, MASTEREQ.AUD); not in the Pa4X table.
+        {".AUD", "GLOBAL audio preset (Pa700-family, not in the Pa4X table)"},
+    };
+    const auto it = t.find(upperExt);
+    return it == t.end() ? "(not a documented SET type)" : it->second;
+}
+
+constexpr const char* kLayoutKst = "Pa5X KST";
+constexpr const char* kLayoutPa700 = "Pa700/Pa1000-family SET";
+constexpr const char* kLayoutPa4x = "Pa4X-family SET (generation not determined)";
+constexpr const char* kLayoutUnknown = "unknown (no KST or SET markers)";
+inline bool isSetLayout(const std::string& layout) { return layout == kLayoutPa700 || layout == kLayoutPa4x; }
 
 namespace detail {
 inline bool hashFile(const std::filesystem::path& p, uint64_t& h) {
@@ -117,6 +141,38 @@ inline int compareFiles(const std::filesystem::path& a, const std::filesystem::p
     }
 }
 
+inline std::string upper(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::toupper(c); });
+    return s;
+}
+
+// Folder suffix first (.KST: MAN5 p.721; .SET: MAN4 PDF p.973), then names only:
+// Pa700/Pa1000 markers (owner Pa700 SET, pa-studio-research FORMAT_MATRIX.md): GLOBAL/LIMITER.AUD,
+//   GLOBAL/MASTEREQ.AUD, SOUND/USERDK01.PCG, folder SONGBOOK/SONGDB.SBD. Pa4X's manual layout has none of them.
+// Pa4X-family markers (MAN4 PDF p.975): .STY/.PRF/.PAD, SOUND/USERDK.PCG, MULTISMP/RAM.KMP.
+// Pa5X markers (MAN5 p.721): .STG/.KSC/.PDC.
+inline std::string detectLayout(const std::filesystem::path& root, const Listing& l) {
+    // The folder's own name, however it was spelled ("X.KST", "X.KST/", "X.KST/.", "."): resolve it first.
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::weakly_canonical(root, ec);
+    if (ec) dir = std::filesystem::absolute(root, ec).lexically_normal();
+    if (dir.filename().empty()) dir = dir.parent_path();
+    const std::string name = upper(dir.filename().string());
+    auto ends = [&](const char* s) { const std::string x(s); return name.size() >= x.size() && name.compare(name.size() - x.size(), x.size(), x) == 0; };
+    bool pa700 = false, pa4x = false, pa5x = false;
+    for (const auto& d : l.dirs) pa700 |= upper(d) == "SONGBOOK/SONGDB.SBD";
+    for (const auto& [rel, e] : l.files) {
+        const std::string r = upper(rel), ext = upper(std::filesystem::path(rel).extension().string());
+        pa700 |= r == "GLOBAL/LIMITER.AUD" || r == "GLOBAL/MASTEREQ.AUD" || r == "SOUND/USERDK01.PCG";
+        pa4x |= ext == ".STY" || ext == ".PRF" || ext == ".PAD" || r == "SOUND/USERDK.PCG" || r == "MULTISMP/RAM.KMP";
+        pa5x |= ext == ".STG" || ext == ".KSC" || ext == ".PDC";
+    }
+    if (ends(".KST")) return kLayoutKst;
+    if (pa700) return kLayoutPa700;
+    if (ends(".SET") || pa4x) return kLayoutPa4x;
+    return pa5x ? kLayoutKst : kLayoutUnknown;
+}
+
 }  // namespace detail
 
 // Strict: any permission, iteration, metadata or read error fails the whole scan (ok = false), so a
@@ -128,6 +184,8 @@ inline Inventory scan(const std::filesystem::path& root) {
     if (!detail::listFiles(root, l, inv.error)) return inv;
     inv.skipped = l.skipped;
     inv.has_pcm_folder = l.pcm;
+    inv.layout = detail::detectLayout(root, l);
+    const bool set = isSetLayout(inv.layout);
     std::map<uintmax_t, std::vector<const std::string*>> bySize;
     for (const auto& [rel, e] : l.files) {
         // Every file must at least open: a file nobody can read is an error even when its size is unique
@@ -139,7 +197,7 @@ inline Inventory scan(const std::filesystem::path& root) {
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::toupper(c); });
         auto& x = inv.by_ext[ext.empty() ? "(none)" : ext];
         ++x.files; x.bytes += e.size;
-        auto& ty = inv.by_type[documentedType(ext)];
+        auto& ty = inv.by_type[set ? setDocumentedType(ext) : documentedType(ext)];
         ++ty.files; ty.bytes += e.size;
         const auto slash = rel.find('/');
         auto& dir = inv.by_folder[slash == std::string::npos ? "." : rel.substr(0, slash)];
@@ -222,14 +280,17 @@ inline std::string format(const Inventory& inv, const std::string& label, uintma
     std::ostringstream o;
     o << "KST inventory (read-only): " << label << "\n";
     if (!inv.ok) { o << "ERROR: " << inv.error << "\n"; return o.str(); }
+    o << "Layout: " << inv.layout << " (folder suffix and file names only)\n";
     o << "Files: " << inv.files << ", bytes: " << inv.bytes << "\n\nBy extension:\n";
     for (const auto& [k, v] : inv.by_ext) o << "  " << k << "  " << v.files << " files, " << v.bytes << " bytes\n";
-    o << "\nBy documented Pa5X file type (manual v1.4 p.721; identification by extension only):\n";
+    o << (isSetLayout(inv.layout) ? "\nBy documented SET file type (Pa4X manual OS 3.1 PDF p.973-975; identification by extension only):\n"
+                                  : "\nBy documented Pa5X file type (manual v1.4 p.721; identification by extension only):\n");
     for (const auto& [k, v] : inv.by_type) o << "  " << k << "  " << v.files << " files, " << v.bytes << " bytes\n";
-    o << "\nPCM folder: " << (inv.has_pcm_folder
-          ? "YES. This KST holds User Samples: loading the WHOLE KST on a Pa5X deletes the User Samples in memory "
-            "(manual p.736); load single Sounds to keep them."
-          : "no") << "\n";
+    o << "\nPCM folder: " << (!inv.has_pcm_folder ? "no"
+          : isSetLayout(inv.layout)
+          ? "YES. This SET holds User Samples. A Pa5X reads a SET only through its one-way Data Conversion (manual p.737)."
+          : "YES. This KST holds User Samples: loading the WHOLE KST on a Pa5X deletes the User Samples in memory "
+            "(manual p.736); load single Sounds to keep them.") << "\n";
     o << "\nBy top-level folder:\n";
     for (const auto& [k, v] : inv.by_folder) o << "  " << k << "  " << v.files << " files, " << v.bytes << " bytes\n";
     o << "\nBy type folder / bank folder (files two or more levels down):\n";
