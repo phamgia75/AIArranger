@@ -552,6 +552,26 @@ int main() {
                 std::printf("  info: close mid-render took %.0f ms (component teardown included)\n", ms);
                 TEST("closing the window mid-render kills the tool quickly and removes staging", wasRunning && !pidAlive() && ms < 2000 && !cst.exists());
             }
+            {   // Codex r5 P1: a render inside the Studio counts for its quit guard, and Cancel Jobs and Quit stops it
+                using W = app::StudioComponent::WorkChoice;
+                app::StudioComponent s([] {});
+                auto& sp = s.resources().sampler();
+                form(sp, hang, "Fake Synth", "Fake");
+                sp.startRender();
+                const auto sst = sp.stagingFolder();
+                for (int i = 0; i < 250 && sp.progress() <= 0; ++i) pump(20);
+                int q = 0;
+                const bool deferred = !s.requestQuit([&q] { ++q; });
+                const auto* still = find<juce::Label>(s.page(app::StudioComponent::Domain::ImportExport), "Still running:");
+                TEST("Codex r5 P1: a Sample Plugin render in the Studio makes busy() true; quit is deferred and the prompt names it",
+                     pidAlive() && s.busy() && deferred && q == 0 && s.workPromptShown() && still && still->getText().contains("Sample Plugin"));
+                s.resolveRunningWork(W::CancelJobsAndQuit);
+                for (int i = 0; i < 250 && q == 0; ++i) pump(20);
+                pump(200);
+                TEST("Codex r5 P1: Cancel Jobs and Quit stops the render (tool killed, staging removed), then quits once",
+                     q == 1 && !pidAlive() && !sst.exists() && !sp.busy() && !s.busy());
+                fs::remove(pidFile);
+            }
 
             {   // a helper started by the plugin keeps the output pipe open after the sampler is killed
                 const auto orphanPid = root / "orphan.pid";
@@ -1574,6 +1594,32 @@ int main() {
                 TEST("quit: the Wait finishes the backup, publishes it and quits exactly once", hq == 3 && !rw->busy() &&
                      fs::is_directory(root / "host-backup4") && !fs::exists(root / "host-backup4.INCOMPLETE") && manifest(root / "bigkst2") == bigBefore);
                 fs::remove_all(root / "bigkst2");
+            }
+            {   // Codex r5 P2: a KST Inventory / Compare Folders scan counts as the window's work (standalone and in the Studio)
+                using W = app::StudioComponent::WorkChoice;
+                using KA = ui::ResourceBrowserModel::KstAction;
+                app::LiveHostComponent h;
+                find<juce::Button>(h, "Sound Tools...")->onClick();
+                auto* rw = h.resources();
+                rw->runKst(KA::Inventory, (root / "Mine.KST").string());
+                TEST("Codex r5 P2: a KST Inventory makes the standalone window busy()", rw->busy() && rw->kstScanning());
+                int hq = 0;
+                h.confirmQuit([&hq] { ++hq; });
+                TEST("Codex r5 P2: quit during a KST Inventory is deferred to the prompt", hq == 0 && h.studio() && h.studio()->workPromptShown());
+                if (auto* hs = h.studio()) hs->resolveRunningWork(W::CancelJobsAndQuit);   // a read-only scan cannot be stopped: quit waits
+                for (int i = 0; i < 500 && hq == 0; ++i) pump(20);
+                TEST("Codex r5 P2: Cancel Jobs and Quit waits for the read-only scan, shows its result, then quits once",
+                     hq == 1 && !rw->busy() && rw->kstText().contains("Semantic merge"));
+                rw->runKst(KA::Diff, (root / "Mine.KST").string(), (root / "Mine.KST").string());
+                TEST("Codex r5 P2: a Compare Folders scan makes the standalone window busy()", rw->busy());
+                for (int i = 0; i < 500 && rw->busy(); ++i) pump(20);
+                app::StudioComponent s([] {});
+                for (int i = 0; i < 500 && s.busy(); ++i) pump(20);   // its own start-up work first
+                const bool idleBefore = !s.busy();
+                s.resources().runKst(KA::MergePlan, (root / "Mine.KST").string(), (root / "Mine.KST").string());
+                TEST("Codex r5 P2: a Merge Plan scan in the Studio's Sounds & Resources makes the (idle) Studio busy()", idleBefore && s.busy());
+                for (int i = 0; i < 500 && s.busy(); ++i) pump(20);
+                TEST("Codex r5 P2: the Studio is idle once the scan has landed", !s.busy());
             }
         }
 

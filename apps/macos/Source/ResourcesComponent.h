@@ -33,9 +33,12 @@ public:
     void startBackup(const juce::File& source, const juce::File& newFolder);   // asynchronous; backingUp() until done
     void cancelBackup();   // the backup job, or a Verify Backup
     void setJobPort(JobPort p);   // the studio's queue for Backup KST, Convert Sound and Sample Plugin; else their own
-    // Work the app's quit must ask about (standalone window): a backup or check, a load, Convert Sound, Sample Plugin.
-    bool busy() const { return backingUp_ || loads_ > 0 || convert_.busy() || sampler_.busy(); }
+    // The one list of this window's work (the standalone window's quit and the Studio's busy() both ask it): a backup or check,
+    // a load, a KST Inventory / Compare Folders / Merge Plan scan, Convert Sound, Sample Plugin (render or Generate).
+    bool busy() const { return backingUp_ || loads_ > 0 || kstScanning() || convert_.busy() || sampler_.busy(); }
+    // Cancels all of it except a KST scan: it is read-only and has no stop point, so quit waits for it (it changes nothing).
     void cancelJobs() { cancelBackup(); ownJobs_.cancelAll(); convert_.cancelJobs(); sampler_.cancelJobs(); }
+    bool kstScanning() const { return kstJobs_ > 0; }
     const jobs::JobState& lastBackupJob() const { return lastBackup_; }   // the last Backup KST job that landed (tests)
     void startVerify(const juce::File& backupFolder);   // asynchronous, read-only; backingUp() until done
     bool backingUp() const { return backingUp_; }

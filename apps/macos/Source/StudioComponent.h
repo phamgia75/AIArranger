@@ -47,10 +47,9 @@ public:
     void attachL3Record(const juce::File& record);
     juce::String validatorUnavailable(Validator v) const;   // "" when it can run now
     bool busy() const {   // a finished export job counts until it has landed on its page (message thread); also the Library Manager and
-                          // the Sounds & Resources work (KST backup or backup check, package/evidence loads, Convert Sound)
+                          // all Sounds & Resources work (its own busy() is the one list)
         return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; }) ||
-               manager_.busy() || manager_.computing() || res_.backingUp() || res_.loading() || res_.converter().busy() ||
-               (otherBusy_ && otherBusy_());
+               manager_.busy() || manager_.computing() || res_.busy() || (otherBusy_ && otherBusy_());
     }
 
     // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.

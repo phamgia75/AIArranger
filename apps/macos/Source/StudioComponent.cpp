@@ -564,6 +564,8 @@ void StudioComponent::askRunningWork(std::function<void()> quit) {
     if (res_.backingUp()) what.add("a KST backup or backup check");
     if (res_.loading()) what.add("a package or evidence load");
     if (res_.converter().busy()) what.add("Convert Sound work");
+    if (res_.sampler().busy()) what.add("a Sample Plugin render or Generate");
+    if (res_.kstScanning()) what.add("a KST Inventory, Compare Folders or Merge Plan scan (read-only; it cannot be stopped, quit waits for it)");
     if (otherBusy_ && otherBusy_()) what.add(otherWhat_);
     if (jobs_ > 0 || what.isEmpty()) what.add("a read or check in progress");
     pendingWorkQuit_ = std::move(quit);
@@ -590,7 +592,7 @@ void StudioComponent::resolveRunningWork(WorkChoice c) {
         const auto all = queue_->snapshot();   // newest first: a queued job is cancelled before the running one can end and free the worker
         for (auto j = all.rbegin(); j != all.rend(); ++j) if (!jobs::finished(j->phase)) queue_->cancel(j->id);
         manager_.stopWork();
-        res_.cancelBackup();   // a KST backup or backup check stops; a cancelled backup is never published
+        res_.cancelJobs();   // all Sounds & Resources work: a backup or check, a render, Convert Sound / Sample Plugin jobs (never published)
         if (otherCancel_) otherCancel_();
         workStatus_->setText("Cancelling: a cancelled job stops at its next check and leaves only NAME.INCOMPLETE (never deleted); nothing is "
                              "published half-way. The app quits once everything has stopped.", juce::dontSendNotification);
