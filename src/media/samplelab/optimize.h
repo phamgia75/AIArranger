@@ -1,0 +1,143 @@
+#ifndef AI_ARRANGER_MEDIA_SAMPLELAB_OPTIMIZE_H
+#define AI_ARRANGER_MEDIA_SAMPLELAB_OPTIMIZE_H
+
+// Sample optimisation into the Pa5X import limits (P1): bit depth and sample rate. The Pa5X imports 8/16-bit mono or
+// stereo samples of 11 025-48 000 Hz, at most 1 048 576 frames (manual v1.4 p.1155, sound::validateSample); the Sound
+// pipeline is 16-bit. Offline and deterministic, never on the audio thread.
+//   to16bit     any PCM WAV (8/16/24/32-bit integer, 32-bit float, also as WAVE_FORMAT_EXTENSIBLE) -> the same file as
+//               16-bit PCM. 8-bit is exact (a shift); deeper words get TPDF dither (fixed seed: the same input gives
+//               the same bytes). Every other chunk (smpl: root and loop) is copied unchanged.
+//   pa5xRate    the rate a sample must be converted to, or its own when it is already inside 11 025-48 000 Hz.
+//   resample    windowed-sinc (Blackman, low-pass at 97 % of the lower Nyquist); loop points scale with the rate.
+//   formatLine  "<rate> Hz <bits>-bit <ch> ch <frames> frames" for the before/after report.
+
+#include "media/sound/wav_folder_source.h"
+#include <cmath>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace ai_arranger::media::samplelab {
+
+struct WavFormat { uint32_t rate = 0; uint16_t bits = 0; bool isFloat = false; uint8_t channels = 0; size_t frames = 0; };
+
+inline std::string formatLine(const WavFormat& f) {
+    return std::to_string(f.rate) + " Hz " + std::to_string(f.bits) + "-bit" + (f.isFloat ? " float" : "") + " " + std::to_string(f.channels) +
+           " ch " + std::to_string(f.frames) + " frames";
+}
+
+// The WAV `b` as 16-bit PCM bytes, its own format in *in. Empty with *err set when it is not a PCM/float WAV.
+inline std::vector<uint8_t> to16bit(const std::vector<uint8_t>& b, WavFormat* in, std::string* err) {
+    auto u16 = [&](size_t o) { return uint32_t(b[o] | b[o + 1] << 8); };
+    auto u32 = [&](size_t o) { return u16(o) | u16(o + 2) << 16; };
+    auto fail = [&](const char* m) { *err = m; return std::vector<uint8_t>{}; };
+    if (b.size() < 12 || std::memcmp(b.data(), "RIFF", 4) || std::memcmp(&b[8], "WAVE", 4)) return fail("not a RIFF/WAVE file");
+    size_t fmtAt = 0, dataAt = 0, dataLen = 0;
+    for (size_t o = 12; o + 8 <= b.size();) {
+        const size_t len = u32(o + 4), body = o + 8;
+        if (len > b.size() - body) return fail("chunk overruns the file");
+        if (!std::memcmp(&b[o], "fmt ", 4)) { if (len < 16) return fail("fmt chunk too short"); fmtAt = body; }
+        if (!std::memcmp(&b[o], "data", 4)) { dataAt = body; dataLen = len; }
+        o = body + len + (len & 1);
+    }
+    if (!fmtAt || !dataAt) return fail("missing fmt or data chunk");
+    uint32_t tag = u16(fmtAt);
+    if (tag == 0xFFFE) {   // WAVE_FORMAT_EXTENSIBLE: the sub-format GUID starts with the plain tag
+        if (u32(fmtAt - 4) < 40) return fail("extensible fmt chunk too short");
+        tag = u16(fmtAt + 24);
+    }
+    in->channels = uint8_t(std::min<uint32_t>(u16(fmtAt + 2), 255));
+    in->rate = u32(fmtAt + 4);
+    in->bits = uint16_t(u16(fmtAt + 14));
+    in->isFloat = tag == 3;
+    const unsigned bytes = in->bits / 8;
+    if (in->channels != 1 && in->channels != 2) return fail("only mono or stereo is supported");
+    if (!((tag == 1 && (in->bits == 8 || in->bits == 16 || in->bits == 24 || in->bits == 32)) || (tag == 3 && in->bits == 32)))
+        return fail("only 8/16/24/32-bit PCM or 32-bit float is supported");
+    if (dataLen % (bytes * in->channels)) return fail("data chunk does not hold whole frames");
+    in->frames = dataLen / (bytes * in->channels);
+    if (tag == 1 && in->bits == 16 && u16(fmtAt) == 1) return b;   // already what the pipeline reads
+
+    uint32_t seed = 0x9E3779B9u;   // xorshift32: TPDF dither, the same for every run
+    auto rnd = [&] { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed / 4294967296.0 - 0.5; };
+    std::vector<uint8_t> o(b.begin(), b.begin() + 12);
+    auto put16 = [&](uint32_t v) { o.push_back(uint8_t(v)); o.push_back(uint8_t(v >> 8)); };
+    auto put32 = [&](uint32_t v) { put16(v & 0xFFFF); put16(v >> 16); };
+    for (size_t at = 12; at + 8 <= b.size();) {
+        const size_t len = u32(at + 4), body = at + 8;
+        if (body == fmtAt) {
+            o.insert(o.end(), {'f', 'm', 't', ' '});
+            put32(16); put16(1); put16(in->channels); put32(in->rate); put32(in->rate * 2 * in->channels); put16(2 * in->channels); put16(16);
+        } else if (body == dataAt) {
+            o.insert(o.end(), {'d', 'a', 't', 'a'});
+            put32(uint32_t(in->frames * in->channels * 2));
+            for (size_t i = 0; i < in->frames * in->channels; ++i) {
+                const size_t p = dataAt + i * bytes;
+                long v;
+                if (in->bits == 8) v = (long(b[p]) - 128) * 256;   // unsigned 8-bit: exact
+                else {
+                    double x;
+                    if (in->isFloat) { float f; std::memcpy(&f, &b[p], 4); x = std::isfinite(f) ? double(f) * 32768.0 : 0.0; }
+                    else if (in->bits == 24) x = double(int32_t(uint32_t(b[p]) << 8 | uint32_t(b[p + 1]) << 16 | uint32_t(b[p + 2]) << 24)) / 65536.0;
+                    else x = double(int32_t(u32(p))) / 65536.0;
+                    v = std::lround(x + rnd() + rnd());
+                }
+                put16(uint16_t(int16_t(std::clamp(v, -32768L, 32767L))));
+            }
+        } else {
+            o.insert(o.end(), b.begin() + long(at), b.begin() + long(body + len));
+            if (len & 1) o.push_back(0);
+        }
+        at = body + len + (len & 1);
+    }
+    const uint32_t riff = uint32_t(o.size() - 8);
+    std::memcpy(&o[4], &riff, 4);   // little-endian hosts only (macOS arm64/x86_64)
+    return o;
+}
+
+// Any PCM WAV read into the 16-bit Sample; *fmt receives the file's own format. "" or the reason.
+inline std::string readWavAny(const std::vector<uint8_t>& b, sound::Sample* s, WavFormat* fmt, bool* noSmpl = nullptr) {
+    std::string err;
+    const auto w = to16bit(b, fmt, &err);
+    if (w.empty()) return err;
+    return sound::readWav(w, s, noSmpl);
+}
+
+inline uint32_t pa5xRate(uint32_t r) {
+    if (r > 48000) return r % 44100 == 0 ? 44100 : 48000;
+    return r < 11025 ? 11025 : r;
+}
+
+inline void resample(sound::Sample& s, uint32_t to) {
+    if (to == s.rate || !s.rate || !to || !s.channels) return;
+    const double ratio = double(to) / s.rate, fc = 0.5 * std::min(1.0, ratio) * 0.97;   // cut-off in input cycles/frame
+    const long H = long(std::ceil(16 / fc));                                               // half width: 16 zero crossings
+    const size_t n = s.frames(), m = size_t(std::llround(n * ratio)), ch = s.channels;
+    const double kPi = 3.14159265358979323846;
+    std::vector<int16_t> out(m * ch);
+    for (size_t j = 0; j < m; ++j) {
+        const double t = j / ratio;
+        const long c = long(std::floor(t));
+        double acc[2] = {0, 0};
+        for (long k = c - H + 1; k <= c + H; ++k) {
+            if (k < 0 || size_t(k) >= n) continue;
+            const double d = t - k, x = 2 * fc * d;
+            const double sinc = std::abs(x) < 1e-12 ? 1.0 : std::sin(kPi * x) / (kPi * x);
+            const double w = 0.42 + 0.5 * std::cos(kPi * d / H) + 0.08 * std::cos(2 * kPi * d / H);   // Blackman over [-H, H]
+            const double h = 2 * fc * sinc * w;
+            for (size_t q = 0; q < ch; ++q) acc[q] += h * s.pcm[size_t(k) * ch + q];
+        }
+        for (size_t q = 0; q < ch; ++q) out[j * ch + q] = int16_t(std::clamp(std::lround(acc[q]), -32768L, 32767L));
+    }
+    if (s.looped) {
+        s.loopStart = uint32_t(std::llround(s.loopStart * ratio));
+        s.loopEnd = std::min<uint32_t>(uint32_t(std::llround(s.loopEnd * ratio)), uint32_t(m));
+        if (s.loopEnd <= s.loopStart) s.looped = false;
+    }
+    s.pcm = std::move(out);
+    s.rate = to;
+}
+
+}  // namespace ai_arranger::media::samplelab
+
+#endif

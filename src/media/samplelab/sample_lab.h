@@ -257,6 +257,29 @@ inline std::string crossfadeLoop(Sample& s, uint32_t loopStart, uint32_t loopEnd
     return "";
 }
 
+// Waveform view (no audio playback): min/max of the mono mix in each of `columns` equal stretches of [from, to).
+struct Peak { int16_t lo = 0, hi = 0; };
+inline std::vector<Peak> overview(const Sample& s, size_t from, size_t to, size_t columns) {
+    to = std::min(to, s.frames());
+    if (from >= to || !columns) return {};
+    std::vector<Peak> r(columns);
+    for (size_t c = 0; c < columns; ++c) {
+        const size_t a = from + (to - from) * c / columns, b = std::max(a + 1, from + (to - from) * (c + 1) / columns);
+        double lo = 0, hi = 0;
+        for (size_t f = a; f < b && f < to; ++f) { const double v = monoAt(s, f); lo = f == a ? v : std::min(lo, v); hi = f == a ? v : std::max(hi, v); }
+        r[c] = {int16_t(std::lround(lo)), int16_t(std::lround(hi))};
+    }
+    return r;
+}
+
+// Loop seam, numerically: the jump from the last looped frame back to loopStart, beside the waveform's own step just
+// before the end (what a seamless loop would show). Both on the mono mix, in sample units. Not looped = has = false.
+struct Seam { bool has = false; double jump = 0, slope = 0; };
+inline Seam loopSeam(const Sample& s) {
+    if (!s.looped || s.loopEnd < 2 || s.loopEnd > s.frames() || s.loopStart >= s.loopEnd) return {};
+    return {true, std::abs(monoAt(s, s.loopStart) - monoAt(s, s.loopEnd - 1)), std::abs(monoAt(s, s.loopEnd - 1) - monoAt(s, s.loopEnd - 2))};
+}
+
 }  // namespace ai_arranger::media::samplelab
 
 #endif

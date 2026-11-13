@@ -132,12 +132,13 @@ inline JobResult labLoop(const fs::path& wav, uint32_t start, uint32_t end, uint
     return {"Written: " + media::folderPath(dest).string() + "\n" + v.text + "\n\n" + rep, v.level, media::folderPath(dest).string()};
 }
 
-// Batch over every .wav of a folder (optional trim and peak normalize) with the duplicates report. An empty dest is a
+// Batch over every .wav of a folder (optional trim, peak normalize, 16-bit/rate conversion) with the duplicates report. An empty dest is a
 // preview: the same table, nothing written.
-inline JobResult labBatch(const fs::path& in, bool trim, bool normalize, const fs::path& dest) {
+inline JobResult labBatch(const fs::path& in, bool trim, bool normalize, const fs::path& dest, bool convert = false) {
     lab::BatchOptions o;
     o.trim = trim;
     o.normalize = normalize;
+    o.convert = convert;   // P1: any PCM depth/rate into the Pa5X limits, with the before/after format per file
     const auto r = lab::runBatch(in, dest, o);
     if (!r.error.empty()) return {"Batch refused: " + r.error, std::nullopt, {}};
     if (dest.empty()) return {"Batch preview (nothing written)\n\n" + r.report, std::nullopt, {}};
