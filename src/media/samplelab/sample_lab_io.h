@@ -149,12 +149,12 @@ inline std::string writeSliceFolder(const SliceResult& r, const SliceOptions& o,
     std::string tsv = "slice\tkey\tstart_frame\tframes\tstart_ms\n", rep;
     char line[512];
     std::snprintf(line, sizeof line,
-                  "AIArranger Sample Lab: Time Slice (SOFTWARE evidence only)\n\nSource: %s\nSlices: %zu on keys %u-%zu, %.2f BPM, %u PPQ\n"
+                  "Slices: %zu on keys %u-%zu, %.2f BPM, %u PPQ\n"
                   "Onsets: energy rise >= %.1f dB over %u-frame windows (hop %u), gate %.1f dBFS, min gap %.0f ms\n\n"
                   "  slice  key  start frame   frames  start ms\n",
-                  source.c_str(), in.samples.size(), o.baseNote, o.baseNote + in.samples.size() - 1, o.bpm, o.ppq, o.onsets.riseDb,
+                  in.samples.size(), o.baseNote, o.baseNote + in.samples.size() - 1, o.bpm, o.ppq, o.onsets.riseDb,
                   o.onsets.window, o.onsets.hop, o.onsets.gateDb, o.onsets.minGapMs);
-    rep = line;
+    rep = "AIArranger Sample Lab: Time Slice (SOFTWARE evidence only)\n\nSource: " + source + "\n" + line;
     for (size_t i = 0; i < in.samples.size(); ++i) {
         const Sample& s = in.samples[i];
         const double ms = 1000.0 * r.starts[i] / s.rate;
@@ -231,6 +231,7 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
             std::ifstream f(p, std::ios::binary);
             const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             it.error = sound::readWav(b, &s, &noSmpl);
+            if (it.error.empty() && s.looped && !(s.loopStart < s.loopEnd && s.loopEnd <= s.frames())) it.error = "smpl loop lies outside the audio";
         }
         if (it.error.empty()) {
             std::vector<int16_t> mono(s.frames());

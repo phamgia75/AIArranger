@@ -121,6 +121,11 @@ int main() {
         l.looped = true; l.loopStart = 2000; l.loopEnd = 5000;   // loop runs into the silent tail
         trimSilence(l, -60, 16, 64);
         TEST("trim: never cuts into a loop; points follow the cut", l.loopStart == 999 && l.loopEnd == 3999 && l.frames() == 3999);
+        Sample bad = silence(1000);
+        addSine(bad, 0, 1000, 440, 10000);
+        bad.looped = true; bad.loopStart = 100; bad.loopEnd = 50000;   // as a crafted 'smpl' chunk can claim
+        trimSilence(bad, -60, 0, 0);
+        TEST("trim: a loop past the audio never extends the kept range past it", bad.frames() <= 1000);
         Sample z = silence(500);
         TEST("trim: silent sample reported and untouched", trimSilence(z).silent && z.frames() == 500);
     }
@@ -265,6 +270,13 @@ int main() {
         addNoise(n, 5000, rng);
         put(in / "noise.wav", sound::writeWav(n));
         put(in / "broken.wav", {'R', 'I', 'F', 'F', 0, 0});
+        Sample lp = silence(1000);
+        addSine(lp, 0, 1000, 440, 10000);
+        lp.looped = true; lp.loopStart = 100; lp.loopEnd = 900;
+        auto lb = sound::writeWav(lp);
+        const uint32_t far = 49999;   // smpl loop end (inclusive) far past the 1000 frames
+        std::memcpy(&lb[lb.size() - 24 + 12], &far, 4);
+        put(in / "zloop.wav", lb);
         BatchOptions o;
         o.trim = true;
         o.normalize = true;
@@ -274,7 +286,9 @@ int main() {
         TEST("batch dry run: report only, nothing written", dry.error.empty() && !dry.report.empty() && !fs::exists(root / "batch-out"));
         const BatchResult r = runBatch(in, root / "batch-out", o);
         TEST("batch: no error", r.error.empty());
-        TEST("batch: 4 items, broken one reported and left out", r.items.size() == 4 && r.items[1].file == "broken.wav" && !r.items[1].error.empty() &&
+        TEST("batch: a loop outside the audio is refused, not trimmed", r.items.size() == 5 && r.items[4].error.find("loop") != std::string::npos &&
+                                                                          !fs::exists(root / "batch-out" / "wav" / "zloop.wav"));
+        TEST("batch: broken one reported and left out", true && r.items[1].file == "broken.wav" && !r.items[1].error.empty() &&
                                                                    r.report.find("NOT READ: broken.wav") != std::string::npos);
         const auto& pi = r.items[0];
         TEST("batch: trimmed and normalized to -1 dBFS", pi.trim.cutStart > 4990 && near(pi.after.peakDb, -1, 0.01) && pi.gain.gainDb > 0);

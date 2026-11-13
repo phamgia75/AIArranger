@@ -7,7 +7,7 @@ check() { if sh -c "$2" >/dev/null 2>&1; then echo "  PASS: $1"; else echo "  FA
 W=$(ls "$T/demo/wav" | head -1)
 expect 0 "$B/aiarranger-samplelab" analyze --in "$T/demo/wav/$W"
 expect 0 "$B/aiarranger-samplelab" batch --in "$T/demo/wav"
-check "batch dry run writes nothing" "[ ! -e '$T/out' ]"
+check "batch dry run writes nothing" "[ \"\$(ls '$T')\" = demo ]"
 expect 0 "$B/aiarranger-samplelab" batch --in "$T/demo/wav" --trim -60 --normalize rms --target -18 --out "$T/batch"
 check "batch folder verifies" "cd '$T/batch' && shasum -a 256 -c PACKAGE.sha256"
 check "batch WAVs make a Sound package" "'$B/aiarranger-sound' wav --in '$T/batch/wav' --name 'Lab Organ' --layers AIA_Organ_Soft,AIA_Organ_Bright --splits 90 --out '$T/pkg'"

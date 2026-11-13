@@ -82,7 +82,7 @@ inline TrimReport trimSilence(Sample& s, double thresholdDb = -60, uint32_t fade
     if (a == n) { r.silent = true; return r; }
     while (b > a && !loud(b - 1)) --b;
     a = a > keepFrames ? a - keepFrames : 0;
-    if (s.looped) { a = std::min<size_t>(a, s.loopStart); b = std::max<size_t>(b, s.loopEnd); }
+    if (s.looped) { a = std::min<size_t>(a, s.loopStart); b = std::max<size_t>(b, std::min<size_t>(s.loopEnd, n)); }   // never past the audio
     r.cutStart = static_cast<uint32_t>(a);
     r.cutEnd = static_cast<uint32_t>(n - b);
     s.pcm = std::vector<int16_t>(s.pcm.begin() + a * ch, s.pcm.begin() + b * ch);
