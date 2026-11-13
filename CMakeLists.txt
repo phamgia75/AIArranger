@@ -118,6 +118,11 @@ add_library(exporter-korg STATIC
 target_include_directories(exporter-korg PUBLIC src)
 target_link_libraries(exporter-korg PUBLIC arranger-engine)
 
+# ── Style Studio editing core (non-real-time UASF edits, undo, SMF import/export) ──
+add_library(style-edit STATIC src/style_edit/style_editor.cpp)
+target_include_directories(style-edit PUBLIC src)
+target_link_libraries(style-edit PUBLIC exporter-korg arranger-engine)
+
 # ── Tests ─────────────────────────────────────────────────────────────
 # Each test file is a standalone program with its own main(). We build
 # one executable per file and register it with CTest, rather than linking
@@ -176,6 +181,17 @@ foreach(test_file ${EXPORTER_TEST_SRC})
         REPO_DIR="${CMAKE_SOURCE_DIR}"
         CONVERT_BIN="$<TARGET_FILE:aiarranger-convert>")
     add_dependencies(${test_name} aiarranger-convert)   # the CLI exit-code test runs it
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+# ── Style Studio editing core tests (synthetic styles built in-test) ──
+file(GLOB STYLE_EDIT_TEST_SRC tests/style_edit/*.cpp)
+foreach(test_file ${STYLE_EDIT_TEST_SRC})
+    get_filename_component(test_name ${test_file} NAME_WE)
+    add_executable(${test_name} ${test_file})
+    target_link_libraries(${test_name} style-edit Threads::Threads)
+    target_compile_definitions(${test_name} PRIVATE STYLE_BIN="$<TARGET_FILE:aiarranger-style>")
+    add_dependencies(${test_name} aiarranger-style)   # the CLI test runs it
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
@@ -292,6 +308,10 @@ target_link_libraries(sff1-parser importer-sff1 arranger-engine)
 # ── Genos -> Pa5X converter CLI ───────────────────────────────────────
 add_executable(aiarranger-convert tools/aiarranger_convert.cpp)
 target_link_libraries(aiarranger-convert exporter-korg importer-sff1 arranger-engine)
+
+# ── Style Studio CLI: inspect / edit / export-smf ──────────────────────
+add_executable(aiarranger-style tools/aiarranger_style.cpp)
+target_link_libraries(aiarranger-style style-edit)
 
 # ── KST inventory CLI (P1.9, read-only report) ─────────────────────────
 add_executable(kst-inventory tools/kst_inventory.cpp)
