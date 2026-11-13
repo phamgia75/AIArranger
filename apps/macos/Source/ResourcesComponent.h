@@ -94,7 +94,8 @@ private:
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     void pollBackup();      // the progress bar follows the backup job's state
-    PendingJob backupJob_;
+    PendingJobs backupJobs_;   // at most one (startBackup refuses while backingUp_), counted the same way as Generate
+    uint64_t backupId_ = 0;    // the running backup job, for Cancel Backup and the progress bar; 0 once it has landed
     JobRunner ownJobs_;     // destroyed first: closing the window cancels a backup (only NAME.INCOMPLETE stays, D17)
     JobPort port_ = ownJobs_.port();
 

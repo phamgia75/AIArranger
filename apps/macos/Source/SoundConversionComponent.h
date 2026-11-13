@@ -90,7 +90,7 @@ private:
     std::string ksfNotes_;   // KSF folder: REPORT source section measured on the previewed audio
     int jobs_ = 0;
     uint64_t generation_ = 0;
-    PendingJob genJob_;
+    PendingJobs genJobs_;
     void showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err, const std::string& mapping,
                      const std::string& ksfNotes);
 

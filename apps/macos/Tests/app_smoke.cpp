@@ -431,6 +431,13 @@ int main() {
                 cv.buildPreview();
                 for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
             }
+            {   // Codex L2 P1: two overlapping Generates (the button is enabled again by a preview) each count once and land once
+                cv.generate(juce::File(root.string() + "/out/Twice A"));
+                cv.generate(juce::File(root.string() + "/out/Twice B"));
+                for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
+                TEST("two overlapping Generates both land and leave the page idle (busy() false)", !cv.busy() &&
+                     fs::exists(root / "out/Twice A/RESOURCES.tsv") && fs::exists(root / "out/Twice B/RESOURCES.tsv"));
+            }
             TEST("generate refuses an existing folder", [&] { cv.generate(juce::File(root.string() + "/out/Big Sine"));
                  for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
         }

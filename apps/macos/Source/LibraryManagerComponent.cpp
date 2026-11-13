@@ -260,10 +260,10 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
     const juce::String d = dest.getFullPathName();
     std::weak_ptr<bool> alive = alive_;
     // E6 job: D18 refuses an output in or around either library, staged + verified before one publish, report beside it
-    planJob_ = UINT64_MAX;   // queued; `done` may already run inside enqueueJob when the job finishes at once
-    const auto id = enqueueJob(jobs::libraryPlan(a_.lib, b_.lib, plan_, d.toStdString()), [this, alive](const jobs::JobState& j) {
+    const auto token = planJobs_.start();   // `done` may already run inside enqueueJob when the job finishes at once
+    const auto id = enqueueJob(jobs::libraryPlan(a_.lib, b_.lib, plan_, d.toStdString()), [this, alive, token](const jobs::JobState& j) {
         if (alive.expired()) return;
-        if (j.id == planJob_ || planJob_ == UINT64_MAX) planJob_ = 0;
+        planJobs_.land(token);   // a re-run from the job list (same token) is only shown
         refresh(false);   // keep the export result: no view report replaces it
         const auto badge = u8(ui::studio::badgeLine(j.level));
         report_.setText(j.phase == jobs::Phase::Done
@@ -273,8 +273,7 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
                                   jobs::phaseName(j.stoppedAt) + ")\nNothing was written to either library.",
                         false);
     });
-    if (planJob_ == 0) return;   // already landed
-    planJob_ = id;
+    if (!*token) return;   // already landed
     report_.setText("Plan export queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + d, false);
     refresh(false);
 }

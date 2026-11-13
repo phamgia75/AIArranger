@@ -8,7 +8,7 @@
 // exporting run on worker threads; nothing here touches MIDI or audio.
 
 #include <juce_gui_extra/juce_gui_extra.h>
-#include "jobs/export_job.h"
+#include "JobPort.h"
 #include "library/latest_worker.h"
 #include "library/library_plan.h"
 
@@ -81,9 +81,9 @@ private:
     juce::TextButton *openA_ = nullptr, *openB_ = nullptr, *details_ = nullptr;
     juce::TextEditor search_, value_, report_;
     juce::Label hint_;
-    bool working() const { return jobs_ > 0 || planJob_ != 0; }
+    bool working() const { return jobs_ > 0 || planJobs_.waiting(); }
     int jobs_ = 0;   // message thread only
-    uint64_t planJob_ = 0;   // the plan export job in the studio's queue, until it has landed (message thread)
+    PendingJobs planJobs_;   // plan export jobs in the studio's queue, until each has landed (message thread)
     std::shared_ptr<std::atomic<bool>> stop_ = std::make_shared<std::atomic<bool>>(false);   // stopWork(): the running scan
     uint64_t reportGen_ = 0, deliveredGen_ = 0;   // newest report request / the one shown; older results are dropped (message thread)
     uint64_t planRev_ = 0;       // bumped on every plan edit: the Plan view's input

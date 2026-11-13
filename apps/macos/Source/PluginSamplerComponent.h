@@ -107,7 +107,7 @@ private:
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     int jobs_ = 0;
     uint64_t generation_ = 0;
-    PendingJob genJob_;
+    PendingJobs genJobs_;
     JobRunner ownJobs_;   // the destructor waits for its Generate copy before staging is deleted (a package is never half-copied)
     JobPort port_ = ownJobs_.port();
 

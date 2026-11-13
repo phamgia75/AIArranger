@@ -275,7 +275,7 @@ void ResourcesComponent::setJobPort(JobPort p) {
 
 void ResourcesComponent::cancelBackup() {
     cancelBackup_ = true;   // a Verify Backup
-    if (backupJob_.waiting() && backupJob_.id != UINT64_MAX) port_.cancel(backupJob_.id);
+    if (backupId_) port_.cancel(backupId_);
 }
 
 void ResourcesComponent::startBackup(const juce::File& source, const juce::File& newFolder) {
@@ -295,10 +295,11 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
     };
     // An export job (D17/D18): staged in NAME.INCOMPLETE, never inside the source, verified, then published with its manifest
     auto spec = jobs::kstBackup(source.getFullPathName().toStdString(), newFolder.getFullPathName().toStdString());
-    backupJob_.start([&] {
-        return port_.enqueue(std::move(spec), [this, alive, text](const jobs::JobState& j) {
+    const auto token = backupJobs_.start();
+    const auto id = port_.enqueue(std::move(spec), [this, alive, text, token](const jobs::JobState& j) {
             if (alive.expired()) return;
-            if (!backupJob_.land(j.id)) { kstOut_.setText(text(j), false); return; }   // a re-run from the studio's job list
+            if (!backupJobs_.land(token)) { kstOut_.setText(text(j), false); return; }   // a re-run from the studio's job list
+            backupId_ = 0;
             backingUp_ = false;
             backupProgress_ = j.phase == jobs::Phase::Done ? 1.0 : 0.0;
             backupBar_.setTextToDisplay(j.phase == jobs::Phase::Done ? "Verified" : j.phase == jobs::Phase::Cancelled ? "Cancelled" : "Not completed");
@@ -306,14 +307,14 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
             verifyBtn_.setEnabled(true);
             cancelBackupBtn_.setEnabled(false);
             kstOut_.setText(text(j), false);
-        });
     });
+    if (backupJobs_.waiting()) backupId_ = id;   // not when it already landed inside enqueue
     pollBackup();
 }
 
 void ResourcesComponent::pollBackup() {
-    if (!backupJob_.waiting()) return;
-    if (const auto j = backupJob_.id != UINT64_MAX ? port_.state(backupJob_.id) : std::nullopt; j && !jobs::finished(j->phase)) {
+    if (!backupJobs_.waiting()) return;
+    if (const auto j = backupId_ ? port_.state(backupId_) : std::nullopt; j && !jobs::finished(j->phase)) {
         backupProgress_ = j->progress;
         backupBar_.setTextToDisplay(juce::String(jobs::phaseName(j->phase)) + " " + juce::String(int(j->progress * 100)) + "%");
     }

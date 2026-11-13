@@ -65,22 +65,24 @@ private:
     }};
 };
 
-// The one job a page waits for: busy() until it lands. A later landing of another id (a re-run from the studio's job
-// list) is shown but does not change the count. start() copes with `done` running inside enqueue.
-struct PendingJob {
-    uint64_t id = 0;
-    bool waiting() const { return id != 0; }
-    template <class Enqueue> uint64_t start(Enqueue enqueue) {
-        id = UINT64_MAX;
-        const auto got = enqueue();
-        if (id != 0) id = got;
-        return got;
+// The jobs a page started and waits for: busy() until each has landed. Every start gets its own token, captured by that
+// job's `done`, so overlapping starts each count once and land once (Codex L2 P1: one stored id lost the first of two),
+// and a re-run from the studio's job list (the same `done` again) counts nothing.
+class PendingJobs {
+public:
+    bool waiting() const { return n_ > 0; }
+    std::shared_ptr<bool> start() {
+        ++n_;
+        return std::make_shared<bool>(true);
     }
-    bool land(uint64_t j) {
-        if (id != j && id != UINT64_MAX) return false;
-        id = 0;
+    bool land(const std::shared_ptr<bool>& token) {   // true once per token
+        if (!std::exchange(*token, false)) return false;
+        --n_;
         return true;
     }
+
+private:
+    int n_ = 0;   // message thread only
 };
 
 }  // namespace ai_arranger::app

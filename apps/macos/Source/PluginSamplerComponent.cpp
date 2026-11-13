@@ -354,17 +354,15 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
     // An export job (D17/D18): the copy is staged in NAME.INCOMPLETE, must equal the render and load back, then is published
-    genJob_.start([&] {
-        return port_.enqueue(jobs::stagedPackage(from, out), [this, alive, gen](const jobs::JobState& j) {
+    port_.enqueue(jobs::stagedPackage(from, out), [this, alive, gen, token = genJobs_.start()](const jobs::JobState& j) {
             if (alive.expired()) return;
-            if (genJob_.land(j.id)) --jobs_;
+            if (genJobs_.land(token)) --jobs_;
             settingsChanged();
             if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }
             if (gen != generation_) return;
             preview_.setText(j.writerText + preview_.getText().toStdString());
             status_.setText("Package written to " + juce::String(j.dest) + ". Opened in Resource Graph.", juce::dontSendNotification);
             if (openInResources_) openInResources_(juce::File(juce::String(j.dest)));
-        });
     });
 }
 
