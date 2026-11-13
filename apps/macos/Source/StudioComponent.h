@@ -12,6 +12,7 @@
 // guard). Every unavailable control shows its reason next to it. Never sends MIDI.
 
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "LibraryManagerComponent.h"
 #include "ResourcesComponent.h"
 #include "ui/studio/studio_models.h"
 #include "ui/studio/studio_tools.h"
@@ -86,6 +87,7 @@ public:
     juce::Component* currentPage() const { return segments_.at(domain_)[size_t(segment_)].page; }
 
     ResourcesComponent& resources() { return res_; }
+    LibraryManagerComponent& manager() { return manager_; }   // Library Workspace > Library Manager (E7)
     const ui::studio::Verification& verification() const { return verification_; }
     juce::String inspectorText() const { return inspector_.getText(); }
     juce::String libraryText() const { return libraryView_.getText(); }
@@ -147,6 +149,7 @@ private:
     juce::TextButton* toSampleLab_ = nullptr;
     juce::TextButton* paInspectBtn_ = nullptr;
     std::optional<ui::studio::SourceProbe> source_;
+    LibraryManagerComponent manager_;   // Library Workspace › Library Manager (E7): two read-only libraries, compare, plan
     // Import / Export Center
     FlowPage ioPage_;
     juce::Label* staged_ = nullptr;
