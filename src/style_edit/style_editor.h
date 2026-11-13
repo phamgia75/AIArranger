@@ -1,0 +1,162 @@
+#ifndef AI_ARRANGER_STYLE_EDIT_STYLE_EDITOR_H
+#define AI_ARRANGER_STYLE_EDIT_STYLE_EDITOR_H
+
+#include "engine/uasf/types.h"
+#include "engine/uasf/validator.h"
+#include "exporters/korg/korg_style_smf.h"
+#include "style_edit/undo_history.h"
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <vector>
+
+// Style Studio editing core (Module 5): a non-real-time, undoable edit layer over
+// the UASF style model. Never used on the audio/MIDI thread; an edited style
+// reaches the player only through the normal style load path.
+//
+// Addressing: element = UASF section index, track = index in that section,
+// event = index in TrackDefinition::events (kept sorted by tick). A note is its
+// NoteOn plus the NoteOff that closes it (FIFO per channel and pitch): deleting,
+// moving, copying, quantizing or transposing one end carries the other.
+//
+// Every op is a transaction: it edits a copy, the copy must pass the op's own
+// checks and the UASF validator (no ERROR issue), and only then replaces the
+// style and becomes one undo step. A rejected op changes nothing.
+
+namespace ai_arranger::style_edit {
+
+struct Selection {
+    std::optional<size_t> section;   // nullopt = every section
+    std::optional<size_t> track;     // nullopt = every track of the selected section(s)
+    uint64_t from = 0;               // note-on / event tick range [from, to)
+    uint64_t to = UINT64_MAX;
+};
+
+struct EditResult {
+    bool ok = false;
+    std::string error;                            // why it was rejected
+    std::vector<uasf::ValidationIssue> issues;    // validator output for the edited style
+    size_t changed = 0;                           // events changed (op specific)
+    size_t skipped_tracks = 0;                    // transpose: drum/percussion tracks left alone
+};
+
+enum class VelocityMode { Set, Offset, ScalePercent };
+
+// Events copied from one element, ticks relative to the copied range start.
+struct Clip {
+    uint32_t resolution = 0;
+    std::vector<uasf::MidiEvent> events;
+};
+
+// Grid in ticks for "1/4", "1/8", "1/16", "1/32" (and the triplet forms with a
+// trailing 't'). 0 = not a grid this parser knows or not a whole tick count.
+uint32_t gridTicks(uint32_t resolution, const std::string& grid);
+
+// Section length in ticks (bars x bar ticks); 0 when the meter is unset.
+uint64_t sectionLengthTicks(const uasf::SectionDefinition& s);
+
+class StyleEditor {
+public:
+    explicit StyleEditor(uasf::StyleDefinition style, size_t undoLimit = 64);
+
+    const uasf::StyleDefinition& style() const noexcept { return style_; }
+
+    // Note starts in the selection move toward the grid by strength% (0..100);
+    // each NoteOff moves with its NoteOn (length kept). A start rounding onto the
+    // element end goes to the previous grid line instead.
+    EditResult quantize(const Selection& sel, uint32_t gridTicks, uint32_t strengthPercent);
+    // Pitches of selected notes (and their poly pressure). Tracks with role
+    // Drum/Percussion or is_drum are skipped. A result outside 0..127 rejects the op.
+    EditResult transpose(const Selection& sel, int semitones);
+    // Velocity of selected NoteOns, clamped to 1..127 (never 0, which is a NoteOff).
+    EditResult velocity(const Selection& sel, VelocityMode mode, int value);
+    EditResult setTempo(uint32_t bpm);
+    // Bars are kept, so the element length changes; refused if events would end
+    // up at or past the new end. Denominator must be a power of two (1..32).
+    EditResult setMeter(size_t section, uint32_t num, uint32_t den);
+
+    // Channel is forced to the track's. A NoteOn needs noteLength > 0 and gets
+    // its NoteOff at tick + noteLength (clamped to the element end).
+    EditResult insertEvent(size_t section, size_t track, uasf::MidiEvent ev, uint64_t noteLength = 0);
+    EditResult deleteEvents(size_t section, size_t track, const std::vector<size_t>& indices);
+    EditResult moveEvents(size_t section, size_t track, const std::vector<size_t>& indices, int64_t deltaTicks);
+
+    // Copy notes starting (and other events) in [from, to); not an edit.
+    std::optional<Clip> copy(size_t section, size_t track, uint64_t from, uint64_t to, std::string* error = nullptr) const;
+    // Merge a clip at `at` (rescaled to the target resolution, channel = target track's).
+    EditResult paste(size_t section, size_t track, uint64_t at, const Clip& clip);
+    // Replace a track's events (SMF import uses this). Events are sorted; notes
+    // left sounding are closed at the element end.
+    EditResult replaceTrackEvents(size_t section, size_t track, std::vector<uasf::MidiEvent> events,
+                                  const std::string& label);
+
+    bool undo() { return history_.undo(style_); }
+    bool redo() { return history_.redo(style_); }
+    const UndoHistory<uasf::StyleDefinition>& history() const noexcept { return history_; }
+
+private:
+    using Mutator = std::function<std::string(uasf::StyleDefinition&, EditResult&)>;
+    EditResult apply(const std::string& label, const Mutator& m);
+
+    uasf::StyleDefinition style_;
+    UndoHistory<uasf::StyleDefinition> history_;
+};
+
+// ── Korg element model: Chord Variations ──────────────────────────────
+// UASF sections carry one chord variation (exported as cv1); Chord Variations
+// exist only in the Korg Pa element model (marker "EnCVn"). This editor works
+// on a parsed or exported Korg style, validated by the Korg exporter's validate().
+class KorgStyleEditor {
+public:
+    explicit KorgStyleEditor(exporters::korg::Style style, size_t undoLimit = 64);
+    const exporters::korg::Style& style() const noexcept { return style_; }
+
+    // Copy element `from` (e.g. "v1cv1") to `to` (e.g. "v1cv2"), replacing `to`
+    // if it exists, else appending it. Pa Style Edit "Copy" semantics.
+    EditResult copyChordVariation(const std::string& from, const std::string& to);
+
+    bool undo() { return history_.undo(style_); }
+    bool redo() { return history_.redo(style_); }
+    const UndoHistory<exporters::korg::Style>& history() const noexcept { return history_; }
+
+private:
+    exporters::korg::Style style_;
+    UndoHistory<exporters::korg::Style> history_;
+};
+
+// ── Plain SMF import / Pa5X SMF export ────────────────────────────────
+
+struct SmfEvent {
+    uint64_t tick = 0;     // absolute, at the file's PPQN
+    uint8_t status = 0;    // channel voice message 0x80..0xEF
+    uint8_t d1 = 0, d2 = 0;
+};
+struct SmfFile {
+    bool ok = false;
+    std::string error;
+    uint16_t ppqn = 0;
+    std::vector<std::vector<SmfEvent>> tracks;   // channel voice events per MTrk
+};
+// Format 0 or 1, PPQN time base. Meta and SysEx events are skipped.
+SmfFile readSmf(const std::vector<uint8_t>& bytes);
+
+// Events of SMF track `smfTrack` (only `channel` 0..15 if given) as UASF events
+// at `resolution`; events at or past `lengthTicks` are dropped (counted).
+std::vector<uasf::MidiEvent> smfTrackToUasf(const SmfFile& smf, size_t smfTrack, std::optional<uint8_t> channel,
+                                            uint32_t resolution, uint64_t lengthTicks, size_t* dropped = nullptr);
+
+struct SmfExport {
+    bool ok = false;
+    std::string error;
+    exporters::korg::Style korg;    // what was written
+    std::vector<uint8_t> bytes;     // Pa5X "Style as SMF separated by markers"
+    std::string report;             // mapper report
+};
+// UASF -> Korg mapper -> writer -> independent reader -> validator (as aiarranger-convert).
+SmfExport exportPa5xSmf(const uasf::StyleDefinition& style, uint16_t ppqn = 0);
+
+} // namespace ai_arranger::style_edit
+
+#endif // AI_ARRANGER_STYLE_EDIT_STYLE_EDITOR_H
