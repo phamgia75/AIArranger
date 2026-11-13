@@ -123,7 +123,8 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
                 const int cap = bankCapacity(D.format, src.type);
                 slot = st.slot;
                 if (slot < 0) { slot = 0; while (used.count(slot)) ++slot; }
-                if (cap && slot >= cap) conflict("bank " + bank + " is full (" + std::to_string(cap) + " per bank file, MAN4 p.975)");
+                if (cap && st.slot >= cap) conflict("slot " + std::to_string(st.slot + 1) + " is past the " + std::to_string(cap) + " slots of a bank file (MAN4 p.975)");
+                else if (cap && slot >= cap) conflict("bank " + bank + " is full (" + std::to_string(cap) + " per bank file, MAN4 p.975)");
                 else if (used.count(slot)) {
                     for (const auto& o : D.items) if (!o.gone && o.bank == bank && o.slot == slot)
                         conflict("slot " + std::to_string(slot + 1) + " of " + bank + " is taken by \"" + o.name + "\": the copy would replace it");

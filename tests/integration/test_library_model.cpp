@@ -164,6 +164,8 @@ int main() {
         TEST("steps see the effect of earlier steps (swap emptied the bank)", s[10].conflicts.empty() && s[10].summary.find("slot 1") != std::string::npos);
         TEST("copy B -> A works the other way", s[11].conflicts.empty() && s[11].summary.find("A:KEYBOARDSET/USER01") != std::string::npos);
         TEST("evaluation totals: blocked by 6 conflicts", ev.blocked() && ev.conflicts == 6);
+        TEST("an explicit slot past the 48 is a conflict that says so",
+             anyHas(evaluate(SA, SB, {{Op::Copy, 'A', rock, "STYLE/USER01", 48, ""}}).steps[0].conflicts, "slot 49 is past the 48 slots"));
         TEST("cross-format copy is a conflict", anyHas(evaluate(A, SB, {{Op::Copy, 'A', find(A, "Swing"), "STYLE/USER01", -1, ""}}).steps[0].conflicts, "formats differ"));
 
         // KST plans: a copy is a file at TYPE/BANK/<file>
