@@ -211,17 +211,17 @@ inline std::string pinRoot(const Item& it, std::shared_ptr<media::detail::Fd>* f
     return "";
 }
 
-// Copies `from` (below the pinned folder `root`, no link followed at any level) to the new file `to` with a bounded
-// buffer, hashing exactly the bytes read. Refuses a file above the FAT32 limit. "" = copied; *bytes and *sha256 set.
-inline std::string copyPinned(int root, const std::string& from, const fs::path& to, uint64_t* bytes, std::string* sha256) {
+// Copies `from` (below the pinned folder `root`, no link followed at any level) to the new file `to` of `set` (created
+// exclusively below its pinned root, no link followed: FileSet::createFile) with a bounded buffer, hashing exactly the
+// bytes read. Refuses a file above the FAT32 limit. "" = copied; *bytes and *sha256 set.
+inline std::string copyPinned(int root, const std::string& from, media::sound::pkgio::FileSet& set, const std::string& to, uint64_t* bytes,
+                              std::string* sha256) {
     const auto [dir, leaf] = media::detail::splitRel(from);
     media::detail::Fd d(dir.empty() ? ::dup(root) : media::detail::openDirBelow(root, dir));
     std::FILE* in = d.v < 0 ? nullptr : media::detail::openRegular(d.v, leaf.c_str());
     if (!in) return from + ": cannot open it without following a link (missing, swapped for a link, or not a regular file)";
-    std::error_code ec;
-    fs::create_directories(to.parent_path(), ec);
-    media::detail::Fd out(::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644));
-    if (out.v < 0) { std::fclose(in); return "cannot create " + to.string(); }
+    media::detail::Fd out(set.createFile(to));
+    if (out.v < 0) { std::fclose(in); return "cannot create " + to + " in the kit (it exists, or a folder on its way is a link)"; }
     media::Sha256 h;
     std::vector<char> buf(1 << 20);
     uint64_t n = 0;
@@ -231,38 +231,63 @@ inline std::string copyPinned(int root, const std::string& from, const fs::path&
         h.update(buf.data(), got);
         for (size_t w = 0; w < got;) {
             const ssize_t k = ::write(out.v, buf.data() + w, got - w);
-            if (k <= 0) { why = "write failed for " + to.string(); break; }
+            if (k <= 0) { why = "write failed for " + to; break; }
             w += size_t(k);
         }
     }
     if (why.empty() && std::ferror(in)) why = "read error in " + from;
     std::fclose(in);
     if (!why.empty()) return why;
+    const int closed = ::close(out.v);
+    out.v = -1;
+    if (closed != 0) return "write failed for " + to;
     *bytes = n;
     *sha256 = h.hex();
     return "";
 }
 
-// Every kit-relative path the kit will hold, checked for the stick: FAT names, the FAT32 4 GiB file limit, and two
-// names equal without case in one folder (FAT ignores case). "" or the first refusal.
+// FAT ignores case (E9 Codex r2): every path in the kit AND every folder on its way must be unique without case, a name
+// may not be a file in one place and a folder in another, and one folder may not be spelled two ways. `files`: every
+// file the kit will hold, relative. "" or the first collision. Pure (no disk access), so it is testable on any volume.
+inline std::string collisionRefusal(const std::vector<std::string>& files) {
+    std::map<std::string, std::pair<std::string, bool>> seen;   // folded prefix -> (as written, is a folder)
+    for (const auto& f : files)
+        for (size_t at = 0;;) {
+            const size_t slash = f.find('/', at);
+            const bool dir = slash != std::string::npos;
+            const std::string p = dir ? f.substr(0, slash) : f;
+            const auto [it, fresh] = seen.try_emplace(detail::lower(p), p, dir);
+            if (!fresh) {
+                if (it->second.second != dir) return "'" + p + "' and '" + it->second.first + "' would be a file and a folder of the same name (FAT ignores case)";
+                if (!dir) return "two files would both be " + p + " (FAT ignores case)";
+                if (it->second.first != p) return "two folders would both be " + p + " and " + it->second.first + " (FAT ignores case)";
+            }
+            if (!dir) break;
+            at = slash + 1;
+        }
+    return "";
+}
+
+// Every kit-relative path the kit will hold, checked for the stick: FAT names, the FAT32 4 GiB file limit, and
+// collisions without case (collisionRefusal). "" or the first refusal.
 inline std::string layoutRefusal(const std::vector<Item>& items, std::vector<Planned>* files, uint64_t* bytes) {
-    std::set<std::string> seen;
-    for (const auto* top : {"KIT.md", "manifest.json", "PACKAGE.sha256"}) seen.insert(detail::lower(top));
+    std::set<std::string> outputs;
+    std::vector<std::string> all = {"KIT.md", "manifest.json", "PACKAGE.sha256"};
     for (size_t i = 0; i < items.size(); ++i) {
         const Item& it = items[i];
         if (const auto e = detail::fatName(it.name); !e.empty()) return "'" + it.name + "' has " + e;
-        if (!seen.insert(detail::lower(it.kitPath())).second) return "two outputs would both be " + it.kitPath() + " (FAT ignores case): rename one";
+        if (!outputs.insert(detail::lower(it.kitPath())).second) return "two outputs would both be " + it.kitPath() + " (FAT ignores case): rename one";
         std::vector<Planned> f;
         if (const auto e = memberFiles(it, i, &f); !e.empty()) return e;
         for (const auto& x : f) {
             if (const auto e = detail::fatPath(x.to); !e.empty()) return e;
-            if (it.kind != Kind::Style && !seen.insert(detail::lower(x.to)).second) return "two files would both be " + x.to + " (FAT ignores case)";
             if (x.bytes > kFat32MaxFile) return x.to + " is 4 GiB or more, above the FAT32 file size limit";
             *bytes += x.bytes;
+            all.push_back(x.to);
         }
         files->insert(files->end(), f.begin(), f.end());
     }
-    return "";
+    return collisionRefusal(all);
 }
 
 // ── KIT.md and manifest.json ──
@@ -691,7 +716,7 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
             const auto& f = (*files)[i];
             uint64_t n = 0;
             std::string sha;
-            if (const auto e = copyPinned((*roots)[f.item]->v, f.from, out / f.to, &n, &sha); !e.empty())
+            if (const auto e = copyPinned((*roots)[f.item]->v, f.from, set, f.to, &n, &sha); !e.empty())
                 return {"cannot copy " + (*items)[f.item].kitPath() + ": " + e, ""};
             set.want[f.to] = {n, sha};
         }

@@ -244,6 +244,62 @@ int main() {
              named(root, "Swap Kit " + std::string(which)) == std::vector<std::string>{"Swap Kit " + std::string(which) + ".INCOMPLETE"});
     }
 
+    // ── Codex r2 P1: destination writes never follow a link planted in the kit while it is written ──
+    for (const char* how : {"KIT.md", "STYLES"}) {
+        const std::string tag = std::string(how) == "KIT.md" ? "file" : "dir";
+        const fs::path src = root / ("plant-src-" + tag), attack = root / ("plant-attack-" + tag);
+        fs::create_directories(src);
+        fs::create_directories(attack);
+        fs::copy(inputs[3], src / "Waltz.mid");
+        const auto srcBefore = hashes(src);
+        const std::string name = "Plant Kit " + tag;
+        const fs::path staged = root / (name + ".INCOMPLETE") / name;
+        JobState st;
+        st.id = 1;
+        bool planted = false;
+        runExport(k::importKit({src / "Waltz.mid"}, root / name), st, [&] {
+            if (st.phase == Phase::Run && !planted && fs::is_directory(staged)) {   // the kit folder exists, nothing in it yet
+                planted = true;
+                if (tag == "file") fs::create_symlink(src / "Waltz.mid", staged / "KIT.md");   // a SOURCE file as the target
+                else fs::create_directory_symlink(attack, staged / "STYLES");                  // a folder on the way, elsewhere
+            }
+            return false;
+        }, [](const JobState&) {});
+        TEST(("link planted at " + std::string(how) + " while writing: job FAILED, nothing published").c_str(), planted && st.phase == Phase::Failed &&
+             !fs::exists(root / name) && !fs::exists(root / (name + ".export.md")));
+        TEST(("link planted at " + std::string(how) + ": the source is byte-identical and nothing was written through the link").c_str(),
+             hashes(src) == srcBefore && fs::is_empty(attack));
+    }
+    {   // the shared writer itself (every package writer uses it)
+        const fs::path d = root / "fileset", victim = root / "fileset-victim.txt";
+        put(victim, "keep me");
+        fs::create_directories(d / "sub");
+        fs::create_symlink(victim, d / "link.txt");
+        fs::create_directory_symlink(root / "fileset-elsewhere", d / "linkdir");
+        fs::create_directories(root / "fileset-elsewhere");
+        media::sound::pkgio::FileSet set{d};
+        set.save("link.txt", std::string("overwritten"));
+        TEST("FileSet: a link at the file is not written through", !set.ok && slurp(victim) == "keep me");
+        media::sound::pkgio::FileSet set2{d};
+        set2.save("linkdir/x.txt", std::string("x"));
+        TEST("FileSet: a link on the way is not followed", !set2.ok && fs::is_empty(root / "fileset-elsewhere"));
+        media::sound::pkgio::FileSet set3{d};
+        set3.save("sub/a.txt", std::string("one"));
+        set3.save("sub/a.txt", std::string("two"));
+        TEST("FileSet: an existing file is never truncated (same file twice fails)", !set3.ok && slurp(d / "sub/a.txt") == "one");
+        media::sound::pkgio::FileSet set4{d / "fresh"};
+        set4.save("deep/er/b.txt", std::string("ok"));
+        TEST("FileSet: the root and its sub-folders are still made as before", set4.ok && slurp(d / "fresh/deep/er/b.txt") == "ok");
+    }
+
+    // ── Codex r2 P2: FAT collisions fold every folder on the way, not only whole file paths ──
+    TEST("collisions: a file and a folder of the same name without case are refused",
+         !k::collisionRefusal({"SOUNDS/a/extra", "SOUNDS/a/EXTRA/data.bin"}).empty() && !k::collisionRefusal({"SOUNDS/a/EXTRA/data.bin", "SOUNDS/a/extra"}).empty());
+    TEST("collisions: one folder spelled two ways is refused", has(k::collisionRefusal({"SOUNDS/x/Wav/a.wav", "SOUNDS/x/wav/b.wav"}), "two folders"));
+    TEST("collisions: two files equal without case are refused", has(k::collisionRefusal({"STYLES/Waltz.mid", "STYLES/waltz.mid"}), "two files"));
+    TEST("collisions: a member folder named like a top-level file is refused", !k::collisionRefusal({"KIT.md", "kit.md/x"}).empty());
+    TEST("collisions: distinct paths sharing folders pass", k::collisionRefusal({"KIT.md", "SOUNDS/a/wav/1.wav", "SOUNDS/a/wav/2.wav", "SOUNDS/b/x"}).empty());
+
     // ── Codex r1 P2: a Drum Kit's .txperf is read (garbage, re-signed, is refused) ──
     {
         const fs::path dk = root / "txperf" / "AIA Demo Kit";
@@ -259,6 +315,25 @@ int main() {
         replaceIn(dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", "tx:program=\"AIA Demo Kit.txprog\"", "tx:program=\"../x.txprog\"");
         resign(dk);
         TEST(".txperf naming a program outside its folder: refused", has(media::sound::verifyPackage(dk).text, "is not a .txprog file name"));
+        // ── Codex r2 P2: the .txperf must be well-formed XML, not only contain the right substrings ──
+        const fs::path perf = dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf";
+        const auto withPerf = [&](const std::function<void()>& edit) {
+            fs::copy_file(inputs[1] / "tx/AIA Demo Kit/AIA Demo Kit.txperf", perf, fs::copy_options::overwrite_existing);
+            edit();
+            resign(dk);
+            return media::sound::verifyPackage(dk).text;
+        };
+        TEST(".txperf without </tx:slot>: refused", has(withPerf([&] { replaceIn(perf, "</tx:slot>", ""); }), "not well-formed XML"));
+        TEST(".txperf with misnested tags: refused",
+             has(withPerf([&] { replaceIn(perf, "</tx:send>", "</tx:sendx>"); }), "not well-formed XML"));
+        TEST(".txperf with an unquoted attribute: refused", has(withPerf([&] { replaceIn(perf, "tx:channel=\"1\"", "tx:channel=1"); }), "not well-formed XML"));
+        TEST(".txperf with a second root: refused", has(withPerf([&] { auto t = slurp(perf); put(perf, t + "<tx:performance/>"); }), "not well-formed XML"));
+        TEST(".txperf with a bare '&': refused", has(withPerf([&] { replaceIn(perf, "Ch01", "Ch&01"); }), "not well-formed XML"));
+        std::string r;
+        TEST("XML scan: a well-formed document with a comment and entities passes",
+             media::sound::xmlWellFormed("<?xml version=\"1.0\"?>\n<!-- c --><a x='1 &amp; 2'><b/><c y=\"&#x41;\">t &lt; u</c></a>\n", &r).empty() && r == "a");
+        for (const char* bad : {"<a><b></a></b>", "<a>", "<a></a><b/>", "<a x=\"1\" x=\"2\"/>", "text<a/>", "<a><!DOCTYPE x></a>", "<a x=\"<\"/>", "<a>&foo;</a>"})
+            TEST((std::string("XML scan refuses: ") + bad).c_str(), !media::sound::xmlWellFormed(bad, &r).empty());
         fs::copy_file(inputs[1] / "tx/AIA Demo Kit/AIA Demo Kit.txperf", dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", fs::copy_options::overwrite_existing);
         resign(dk);
         TEST("the real .txperf passes", media::sound::verifyPackage(dk).ok);

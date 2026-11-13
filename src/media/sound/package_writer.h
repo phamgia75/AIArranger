@@ -16,7 +16,12 @@
 #include "media/sound/txprog_writer.h"
 #include "media/sound/txperf_writer.h"
 #include "media/sound/wav_writer.h"
+#include <cerrno>
+#include <fcntl.h>
 #include <filesystem>
+#include <memory>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <fstream>
 
 namespace ai_arranger::media::sound {
@@ -44,15 +49,52 @@ struct FileSet {
     std::filesystem::path root;
     std::map<std::string, std::pair<uint64_t, std::string>> want;   // relative path -> (bytes, SHA-256)
     bool ok = true;
+    std::shared_ptr<int> rootFd;   // `root`, opened once (no symlink) on the first write and kept open
+
+    // A NEW file root/rel, open for writing, or -1 (E9 Codex r2). `root` is made if missing (as before) and pinned; every
+    // folder below it is made and opened one component at a time without following a link (mkdirat + openat with
+    // O_NOFOLLOW|O_DIRECTORY), and the file is created exclusively (O_CREAT|O_EXCL|O_NOFOLLOW). So a link planted at the
+    // file or at any folder below `root` makes the write fail instead of writing through it, and an existing file is
+    // never truncated: saving the same rel twice fails. ".", ".." and empty components are refused.
+    int createFile(const std::string& rel) {
+        if (!rootFd) {
+            std::error_code ec;
+            std::filesystem::create_directories(root, ec);
+            rootFd = std::shared_ptr<int>(new int(::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)), [](int* p) {
+                if (*p >= 0) ::close(*p);
+                delete p;
+            });
+        }
+        if (*rootFd < 0) return -1;
+        int cur = ::dup(*rootFd);
+        size_t from = 0;
+        for (;;) {
+            const size_t to = rel.find('/', from);
+            const std::string part = rel.substr(from, to == std::string::npos ? std::string::npos : to - from);
+            if (cur < 0 || part.empty() || part == "." || part == "..") { if (cur >= 0) ::close(cur); return -1; }
+            if (to == std::string::npos) {
+                const int fd = ::openat(cur, part.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+                ::close(cur);
+                return fd;
+            }
+            if (::mkdirat(cur, part.c_str(), 0755) != 0 && errno != EEXIST) { ::close(cur); return -1; }
+            const int next = ::openat(cur, part.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            ::close(cur);
+            cur = next;
+            from = to + 1;
+        }
+    }
     void save(const std::string& rel, const void* data, size_t n) {
-        namespace fs = std::filesystem;
-        std::error_code ec;
-        const fs::path p = root / rel;
-        ok &= fs::create_directories(p.parent_path(), ec) || fs::is_directory(p.parent_path(), ec);
-        std::ofstream f(p, std::ios::binary);
-        f.write(static_cast<const char*>(data), static_cast<std::streamsize>(n));
-        f.close();   // the last buffered bytes are written here; a failure must stop publication
-        ok &= static_cast<bool>(f);
+        const int fd = createFile(rel);
+        bool good = fd >= 0;
+        const auto* p = static_cast<const char*>(data);
+        for (size_t w = 0; good && w < n;) {
+            const ssize_t k = ::write(fd, p + w, n - w);
+            if (k <= 0) good = false;
+            else w += size_t(k);
+        }
+        if (fd >= 0) good &= ::close(fd) == 0;   // a failure must stop publication
+        ok &= good;
         Sha256 h;
         h.update(data, n);
         want[rel] = {n, h.hex()};
