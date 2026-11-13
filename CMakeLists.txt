@@ -189,8 +189,8 @@ file(GLOB STYLE_EDIT_TEST_SRC tests/style_edit/*.cpp)
 foreach(test_file ${STYLE_EDIT_TEST_SRC})
     get_filename_component(test_name ${test_file} NAME_WE)
     add_executable(${test_name} ${test_file})
-    target_link_libraries(${test_name} style-edit Threads::Threads)
-    target_compile_definitions(${test_name} PRIVATE STYLE_BIN="$<TARGET_FILE:aiarranger-style>")
+    target_link_libraries(${test_name} style-edit importer-sff1 Threads::Threads)   # importer-sff1: the studio model opens .sty
+    target_compile_definitions(${test_name} PRIVATE STYLE_BIN="$<TARGET_FILE:aiarranger-style>" REPO_DIR="${CMAKE_SOURCE_DIR}")
     add_dependencies(${test_name} aiarranger-style)   # the CLI test runs it
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()

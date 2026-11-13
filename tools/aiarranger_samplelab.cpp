@@ -26,16 +26,6 @@ static int usage() {
     return 1;
 }
 
-static bool readFile(const std::string& path, Sample* s, std::string* err) {
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) > (16u << 20)) { *err = path + ": not a regular file of at most 16 MiB"; return false; }
-    std::ifstream f(path, std::ios::binary);
-    const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    bool noSmpl = false;
-    if (const auto e = sound::readWav(b, s, &noSmpl); !e.empty()) { *err = path + ": " + e; return false; }
-    return true;
-}
-
 static bool num(const std::map<std::string, std::string>& o, const char* k, double* v) {
     const auto it = o.find(k);
     if (it == o.end()) return true;
@@ -72,7 +62,7 @@ int main(int argc, char** argv) {
     }
 
     Sample s;
-    if (!readFile(opt["--in"], &s, &err)) return fail(err);
+    if (!readWavFile(opt["--in"], &s, &err)) return fail(err);
     if (cmd == "analyze" && opt.size() == 1) {
         const Level l = measureLevel(s);
         std::printf("%s: %zu frames, %u Hz, %u ch, peak %.2f dBFS, RMS %.2f dBFS\n", opt["--in"].c_str(), s.frames(), s.rate, s.channels, l.peakDb, l.rmsDb);

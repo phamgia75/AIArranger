@@ -33,7 +33,7 @@ inline const char* kindName(SourceProbe::Kind k) {
     switch (k) {
         case K::Pa5xUserData: return "Pa5X user data (folder layout)";
         case K::KstBackupCopy: return "Pa5X user data, verified copy made by Backup KST (folder layout)";
-        case K::Pa4xSet: return "Pa4X-family SET (folder layout; its files are not decoded)";
+        case K::Pa4xSet: return "Pa-family SET (folder layout; its files are not decoded)";
         case K::AiaPackage: return "AIArranger Sound / Drum Kit package";
         case K::KorgSamplingData: return "KRONOS-family sampling data (KMP/KSF)";
         case K::WavFolder: return "Folder of WAV samples";
@@ -66,13 +66,15 @@ inline SourceProbe probeSource(const fs::path& dir) {
         const bool setSuffix = upper.size() > 4 && upper.compare(upper.size() - 4, 4, ".SET") == 0;
         // Pa5X-only extensions (manual v1.4 p.721-722 type table, as in kst_inventory.h); .KMP/.WAV/.MID also occur elsewhere.
         const uint32_t pa5x = count({".STG", ".KSC", ".PDC", ".CSC", ".SBD", ".SBL", ".GBL", ".PCG", ".PCM"});
-        if (setSuffix) p.kind = K::Pa4xSet;
+        // E5 layout detection (kst_inventory.h): a .SET suffix, or Pa700/Pa1000 or Pa4X markers without one
+        if (setSuffix || media::isSetLayout(p.inv.layout)) p.kind = K::Pa4xSet;
         else if (pa5x > 0) p.kind = fs::exists(media::backupManifestPath(media::folderPath(dir)), ec) ? K::KstBackupCopy : K::Pa5xUserData;
         else if (count({".KSF", ".KMP"}) > 0) p.kind = K::KorgSamplingData;
         else if (count({".WAV"}) > 0 && count({".WAV"}) == p.inv.files) p.kind = K::WavFolder;
         p.layout = p.kind != K::NotRecognised;
     }
     p.detected = kindName(p.kind);
+    if (p.kind == K::Pa4xSet && !p.inv.layout.empty()) p.detected += ": " + p.inv.layout;
     if (!p.layout)
         p.error = "Not a keyboard backup: no Style, Pad or Sound files found. Choose the folder that ends in .KST, "
                   "a package folder, or a folder of KMP/KSF/WAV samples.";
@@ -97,7 +99,7 @@ inline std::string libraryView(const SourceProbe& p) {
     }
     o << "Content: not checked. Only names and sizes were read; no KST content validator exists yet.\n\n";
     if (p.kind == K::Pa4xSet)
-        o << "Pa4X-family SET: its .STY files are Korg Style banks (not Yamaha styles), and none of its files are decoded.\n"
+        o << "Pa-family SET (" << p.inv.layout << "): its .STY files are Korg Style banks (not Yamaha styles), and none of its files are decoded.\n"
              "Pa4X limits are not sourced here; the counts below are file counts only.\n\n";
     static const std::pair<const char*, const char*> types[] = {
         {"Style", "Styles"}, {"Keyboard Set", "Keyboard Sets"}, {"Pad", "Pads"}, {"Sound", "Sounds"},

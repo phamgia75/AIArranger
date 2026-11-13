@@ -166,6 +166,17 @@ inline SliceResult timeSlice(const Sample& loop, const std::string& name, const 
     return r;
 }
 
+// One 16-bit PCM WAV file of at most 16 MiB (regular file), as the CLI and the studio read their single inputs.
+inline bool readWavFile(const fs::path& path, Sample* s, std::string* err) {
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || fs::file_size(path, ec) > (16u << 20)) { *err = path.string() + ": not a regular file of at most 16 MiB"; return false; }
+    std::ifstream f(path, std::ios::binary);
+    const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    bool noSmpl = false;
+    if (const auto e = sound::readWav(b, s, &noSmpl); !e.empty()) { *err = path.string() + ": " + e; return false; }
+    return true;
+}
+
 // The Time Slice folder: wav/<NAME>_<k>_<k>_<k>.wav per slice, <NAME>.mid, SLICES.tsv, REPORT.txt, PACKAGE.sha256.
 // Returns the report, or "" with *error set.
 inline std::string writeSliceFolder(const SliceResult& r, const SliceOptions& o, const std::string& source, const fs::path& dest,

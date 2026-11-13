@@ -17,6 +17,7 @@
 #ifndef AI_ARRANGER_MEDIA_PANATIVE_READER_H
 #define AI_ARRANGER_MEDIA_PANATIVE_READER_H
 
+#include "media/kst_inventory.h"   // detail::listFiles (regular files, symlinks not followed)
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -175,6 +176,31 @@ inline std::string format(const Container& c, const std::string& label) {
         o += line + printable(it.name) + "\n";
     }
     return o;
+}
+
+// Every regular file of a folder (symlinks not followed) or one file, inspected read-only. Files without the wrapper
+// are listed, not errors. Shared by `aiarranger-resources panative inspect` and the studio's Library inspect view.
+// Returns "" with *error set when the folder cannot be listed.
+inline std::string inspect(const std::filesystem::path& path, int* invalid, int* unreadable, std::string* error) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<std::pair<std::string, fs::path>> files;
+    if (fs::is_directory(fs::symlink_status(path, ec))) {
+        media::detail::Listing l;
+        if (!media::detail::listFiles(path, l, *error)) return "";
+        for (const auto& [rel, e] : l.files) files.emplace_back(rel, e.abs);
+    } else files.emplace_back(path.string(), path);
+    std::string o = "Pa-native container inspection (READ-ONLY, EXPERIMENTAL; layout observed on one owner Pa700 SET, not documented by Korg)\n";
+    *invalid = *unreadable = 0;
+    for (const auto& [label, f] : files) {
+        const auto c = readFile(f);
+        *invalid += c.wrapper && !c.ok;
+        *unreadable += c.ioError;
+        o += format(c, label);
+    }
+    char t[160];
+    std::snprintf(t, sizeof t, "Files: %zu, invalid Pa-native containers: %d, unreadable: %d. Item payloads were not decoded.\n", files.size(), *invalid, *unreadable);
+    return o + t;
 }
 
 }  // namespace ai_arranger::media::panative

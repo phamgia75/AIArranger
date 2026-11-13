@@ -788,8 +788,12 @@ int main() {
             }
         };
         deep(st);
-        TEST("studio: the KMP/KSF writer segment is unavailable (falls back, says why)", st.segment() == 0 &&
-             writerSeg && !writerSeg->isEnabled() && writerSeg->getTooltip().contains("E1"));
+        TEST("studio: Sample Lab segments add KMP / KSF Writer and Tools",
+             st.segmentNames(D::SampleLab).joinIntoString("|") == "Convert Sound|Sample Plugin|Quality Report|KMP / KSF Writer|Tools");
+        auto* kmpBtn = st.currentPage() ? find<juce::Button>(*st.currentPage(), "Write KMP/KSF folder (EXPERIMENTAL, L1)...") : nullptr;
+        TEST("studio: the KMP/KSF writer segment is enabled (E1 wired in)", st.segment() == 3 && writerSeg && writerSeg->isEnabled());
+        TEST("studio: Write KMP/KSF folder waits for a previewed Sound and says so", kmpBtn && !kmpBtn->isEnabled() &&
+             kmpBtn->getTooltip().startsWith("Needs: a previewed Sound"));
         st.resources().tabs().setCurrentTabIndex(0);   // what Convert Sound does when a package is written
         pump(60);                                      // the tab bar announces the change asynchronously
         TEST("studio: a Resource Graph hand-off moves the studio to Library > Resource Graph", st.domain() == D::Library && st.segment() == 1);
@@ -816,6 +820,25 @@ int main() {
         TEST("studio: the source is unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
         auto* toLab = find<juce::Button>(st.page(D::Library), "Send to Sample Lab");
         TEST("studio: Send to Sample Lab unavailable for a KST, with its reason", toLab && !toLab->isEnabled() && toLab->getTooltip().startsWith("Needs:"));
+        auto* paInspect = find<juce::Button>(st.page(D::Library), "Inspect Pa-native (read-only)");
+        TEST("studio: Pa-native inspect unavailable for a Pa5X KST (container UNKNOWN), says why", paInspect && !paInspect->isEnabled() &&
+             paInspect->getTooltip().contains("UNKNOWN"));
+        {   // E5: a SET without a .SET suffix is recognised by its Pa700 markers; its Pa-native items are listed read-only
+            put(root / "Pa700copy/GLOBAL/LIMITER.AUD", "x");
+            put(root / "Pa700copy/SOUND/USERDK01.PCG", std::string("\x01\x00\x01\x14\x00\x00", 6));   // magic only: invalid
+            const auto setStamp = fs::last_write_time(root / "Pa700copy/SOUND/USERDK01.PCG");
+            st.openSource(juce::File((root / "Pa700copy").string()));
+            waitIdle(5000);
+            TEST("studio: SET recognised by its Pa700 layout", st.libraryText().contains("Pa-family SET") && st.libraryText().contains("Pa700"));
+            TEST("studio: Inspect Pa-native available for a SET", paInspect && paInspect->isEnabled());
+            st.inspectPaNative();
+            TEST("studio: Pa-native inspect runs off the message thread", st.busy());
+            waitIdle(5000);
+            TEST("studio: Pa-native inspect: READ-ONLY, every file listed, invalid container flagged", st.libraryText().contains("READ-ONLY, EXPERIMENTAL") &&
+                 st.libraryText().contains("Files: 2") && st.libraryText().contains("INVALID Pa-native container") &&
+                 st.libraryText().contains("no Pa-native wrapper"));
+            TEST("studio: the SET source is unchanged", fs::last_write_time(root / "Pa700copy/SOUND/USERDK01.PCG") == setStamp);
+        }
         {
             media::sound::Sample sm;
             sm.root = 60; sm.rate = 44100; sm.channels = 1;
@@ -831,6 +854,75 @@ int main() {
         pump(60);
         TEST("studio: Send to Sample Lab opens Convert Sound on that folder", st.domain() == D::SampleLab && st.segment() == 0 &&
              st.resources().converter().orderField().getText() == "Soft");
+        const auto l1only = juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3");
+        {   // E1: the previewed Sound written as an EXPERIMENTAL KMP/KSF folder through writeKorgFolder, at its real level L1
+            auto& cv = st.resources().converter();
+            cv.buildPreview();
+            for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+            TEST("studio: Convert Sound preview built for the KMP writer", cv.model().built() && st.kmpUnavailable().isEmpty());
+            st.showDomain(D::SampleLab, 3);
+            const fs::path kmp = root / "Soft KMP";
+            st.writeKmp(juce::File(kmp.string()));
+            TEST("studio: KMP/KSF folder written off the message thread", st.busy());
+            waitIdle(20000);
+            TEST("studio: KMP/KSF folder written via writeKorgFolder, EXPERIMENTAL, level L1", fs::is_regular_file(kmp / "PACKAGE.sha256") &&
+                 st.kmpText().contains("EXPERIMENTAL") && st.kmpText().contains("level L1"));
+            TEST("studio: the new KMP folder is the verification target at L1 only (no L2 claimed, no L3)", st.badgeText() == l1only &&
+                 st.verification().l2.detail.find("L1 only") != std::string::npos && st.jobsText().contains("KMP/KSF folder (EXPERIMENTAL)  done"));
+            st.writeKmp(juce::File(kmp.string()));
+            waitIdle(20000);
+            TEST("studio: an existing KMP folder is never overwritten", st.kmpText().contains("already exists"));
+            st.writeKmp(juce::File("/Volumes/AIA-SMOKE-" + juce::String(::getpid()) + "/x"));
+            waitIdle(20000);
+            TEST("studio: KMP onto a mounted volume refused", st.kmpText().contains("mounted volume"));
+            st.setValidationTarget(juce::File(kmp.string()));
+            st.runValidator(app::StudioComponent::Validator::VerifyPackage);
+            waitIdle(20000);
+            TEST("studio: Verify Package on a KMP folder -> L1 only (not a package L2 failure)", st.badgeText() == l1only);
+        }
+        {   // E4: Sample Lab tools; previews write nothing, every write is a new folder at L1
+            media::sound::Sample lp;
+            lp.rate = 44100;
+            lp.pcm.assign(11025 + 4 * 22050 + 11025, 0);
+            for (size_t b = 0; b < 4; ++b)
+                for (size_t i = 0; i < 8000; ++i)
+                    lp.pcm[11025 + b * 22050 + i] = int16_t(12000 * std::exp(-double(i) / 2000) * std::sin(2 * M_PI * 440 * double(i) / 44100));
+            const auto wb = media::sound::writeWav(lp);
+            for (const char* n : {"labin/Loop.wav", "labin/Copy.wav"}) {
+                fs::create_directories(root / "labin");
+                std::ofstream(root / n, std::ios::binary).write(reinterpret_cast<const char*>(wb.data()), std::streamsize(wb.size()));
+            }
+            using T = app::StudioComponent::LabTool;
+            st.showDomain(D::SampleLab, 4);
+            TEST("studio: Sample Lab tools need an input and say so", st.labUnavailable(T::Analyze).startsWith("Needs: a WAV file") &&
+                 st.labUnavailable(T::Batch).startsWith("Needs: a folder"));
+            st.setLabInput(juce::File((root / "labin/Loop.wav").string()));
+            st.runLabTool(T::Analyze);
+            waitIdle(10000);
+            TEST("studio: Analyze previews levels, onsets, normalize and trim; writes nothing", st.labText().contains("Onsets (4)") &&
+                 st.labText().contains("Normalize preview") && st.labText().contains("Trim preview") && !fs::exists(root / "labin/Loop slices"));
+            st.runLabTool(T::Slice, juce::File((root / "Loop slices").string()));
+            waitIdle(10000);
+            TEST("studio: Time Slice writes a new folder at L1", fs::is_regular_file(root / "Loop slices/SLICES.tsv") && st.badgeText() == l1only &&
+                 st.labText().contains("Slices: 5"));
+            st.labStart().setText("11025");
+            st.labEnd().setText("99225");
+            st.runLabTool(T::Loop, juce::File((root / "Loop loop").string()));
+            waitIdle(10000);
+            TEST("studio: Loop helper writes a new folder at L1", fs::exists(root / "Loop loop/wav/Loop.wav") && st.badgeText() == l1only);
+            st.setLabInput(juce::File((root / "labin").string()));
+            st.labTrim().setToggleState(true, juce::dontSendNotification);
+            st.labNormalize().setToggleState(true, juce::dontSendNotification);
+            st.runLabTool(T::BatchPreview);
+            waitIdle(10000);
+            TEST("studio: Batch Preview reports duplicates, writes nothing", st.labText().contains("Batch preview") && st.labText().contains("EXACT"));
+            st.runLabTool(T::Batch, juce::File((root / "labin batch").string()));
+            waitIdle(10000);
+            TEST("studio: Batch writes a new folder at L1", fs::is_regular_file(root / "labin batch/PACKAGE.sha256") && st.badgeText() == l1only);
+            st.runLabTool(T::Batch, juce::File((root / "labin/out").string()));
+            waitIdle(10000);
+            TEST("studio: Batch into its own input refused", st.labText().startsWith("Batch refused"));
+        }
         std::string err;
         media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ", "", &err);
         st.openSource(juce::File((root / "organ").string()));
@@ -849,7 +941,14 @@ int main() {
         auto* kstExport = find<juce::Button>(st.page(D::ImportExport), "Pa5X KST export");
         auto* kmpExport = find<juce::Button>(st.page(D::ImportExport), "KMP / KSF export");
         TEST("studio: Pa5X KST export unavailable: no writer, no L1 validator", kstExport && !kstExport->isEnabled() && kstExport->getTooltip().contains("KST writer"));
-        TEST("studio: KMP/KSF export left out of this milestone, says so", kmpExport && !kmpExport->isEnabled() && kmpExport->getTooltip().contains("E1"));
+        TEST("studio: KMP/KSF export is a route to the EXPERIMENTAL writer", kmpExport == nullptr &&
+             find<juce::Button>(st.page(D::ImportExport), "KMP / KSF folder (EXPERIMENTAL)") != nullptr);
+        click(st.page(D::ImportExport), "KMP / KSF folder (EXPERIMENTAL)");
+        TEST("studio: export route KMP/KSF -> Sample Lab > KMP / KSF Writer", st.domain() == D::SampleLab && st.segment() == 3);
+        st.showDomain(D::ImportExport);
+        click(st.page(D::ImportExport), "Style as Pa5X SMF (EXPERIMENTAL)");
+        TEST("studio: export route Style SMF -> Style Studio", st.domain() == D::StyleStudio);
+        st.showDomain(D::ImportExport);
         TEST("studio: staged change set and write rules stated", find<juce::Label>(st.page(D::ImportExport), "STAGED CHANGES: 0") != nullptr &&
              find<juce::Label>(st.page(D::ImportExport), "WRITE RULES: every write goes to NAME.INCOMPLETE") != nullptr);
 
@@ -858,8 +957,56 @@ int main() {
         st.openStyle(juce::File(AIARR_REPO_TOOLS_DIR "/../fixtures/synthetic/SYNTH_WALTZ_68.sty"));
         TEST("studio: Style Studio reports the style's sections, read-only", st.styleText().contains("SYNTH_WALTZ_68.sty") &&
              st.styleText().contains("Parse: SUCCESS") && st.styleText().contains("Main A") && st.styleText().contains("nothing is written"));
-        auto* edit = find<juce::Button>(st.page(D::StyleStudio), "Edit Style");
-        TEST("studio: Style editing unavailable with its reason", edit && !edit->isEnabled() && edit->getTooltip().contains("later phase"));
+        {   // E3: element/track browser, ops with undo/redo, SMF export (EXPERIMENTAL, L1) and import; the source is only read
+            const fs::path sty = AIARR_REPO_TOOLS_DIR "/../fixtures/synthetic/SYNTH_WALTZ_68.sty";
+            const auto styStamp = fs::last_write_time(sty);
+            auto& pg = st.page(D::StyleStudio);
+            TEST("studio: the Style opens for editing with an element/track browser", st.styleModel().loaded() &&
+                 st.styleText().contains("    [0] ch ") && st.styleStatus().startsWith("Opened for editing"));
+            const auto tempo = st.styleModel().style().tempo_bpm;
+            st.styleOp().setSelectedId(6);   // Tempo
+            st.styleValue().setText("97");
+            click(pg, "Apply");
+            TEST("studio: tempo edit applied and staged", st.styleModel().style().tempo_bpm == 97 && st.styleStatus().startsWith("Done") &&
+                 st.inspectorText().contains("1 Style Studio edit(s) not written yet") && find<juce::Label>(st.page(D::ImportExport), "STAGED CHANGES: 1") != nullptr);
+            TEST("studio: Undo names the op and restores", find<juce::Button>(pg, "Undo Tempo") != nullptr && st.styleUndo() &&
+                 st.styleModel().style().tempo_bpm == tempo && find<juce::Button>(pg, "Redo Tempo") != nullptr);
+            TEST("studio: Redo re-applies", st.styleRedo() && st.styleModel().style().tempo_bpm == 97);
+            st.styleValue().setText("fast");
+            click(pg, "Apply");
+            TEST("studio: a bad value is refused, nothing changed", st.styleStatus().startsWith("Refused, nothing changed") && st.styleModel().style().tempo_bpm == 97);
+            st.styleElement().setSelectedId(2, juce::sendNotificationSync);   // element [0]
+            st.styleOp().setSelectedId(1);   // Quantize
+            st.styleValue().setText("1/16 80");
+            click(pg, "Apply");
+            TEST("studio: quantize on one element", st.styleStatus().startsWith("Done: Quantize"));
+            st.styleTrack().setSelectedId(2, juce::sendNotificationSync);     // track [0]
+            st.styleOp().setSelectedId(2);   // Transpose
+            st.styleValue().setText("2");
+            click(pg, "Apply");
+            TEST("studio: transpose on one track", st.styleStatus().startsWith("Done: Transpose"));
+            st.styleOp().setSelectedId(5);   // Velocity scale
+            st.styleValue().setText("90");
+            click(pg, "Apply");
+            TEST("studio: velocity scale", st.styleStatus().startsWith("Done: Velocity"));
+            st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
+            TEST("studio: Pa5X SMF export writes a new file at L1 (validator), EXPERIMENTAL", fs::is_regular_file(root / "waltz.mid") &&
+                 st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") && st.inspectorText().contains("STAGED CHANGES\n0."));
+            st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
+            TEST("studio: an existing SMF is never overwritten", st.styleStatus().contains("already exists"));
+            st.exportStyleSmf(juce::File("/Volumes/AIA-SMOKE-" + juce::String(::getpid()) + "/w.mid"));
+            TEST("studio: SMF onto a mounted volume refused", st.styleStatus().contains("mounted volume"));
+            st.importSmfTrack(juce::File((root / "waltz.mid").string()));
+            TEST("studio: Import SMF Track replaces the chosen track (undoable)", st.styleStatus().startsWith("Imported") &&
+                 find<juce::Button>(pg, "Undo Import SMF track") != nullptr);
+            st.saveStyleUasf(juce::File((root / "waltz.uasf").string()));
+            TEST("studio: Save UASF writes a new file", fs::is_regular_file(root / "waltz.uasf"));
+            TEST("studio: the source Style is unchanged", fs::last_write_time(sty) == styStamp);
+            st.setValidationTarget(juce::File((root / "waltz.mid").string()));
+            st.runValidator(app::StudioComponent::Validator::StyleSmf);
+            waitIdle(5000);
+            TEST("studio: Style SMF Check -> L1 only", st.badgeText() == l1only && st.jobsText().contains("Style SMF Check"));
+        }
 
         // Validation & Reports: badges from the shared verifiers; L3 only from a matching owner record
         st.showDomain(D::Validation);

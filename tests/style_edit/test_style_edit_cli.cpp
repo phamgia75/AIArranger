@@ -99,6 +99,18 @@ int main() {
     TEST("existing temp path refused -> 1", run("edit " + q(in) + " --out " + q(blocked) + " --op tempo --bpm 90") == 1);
     TEST("existing temp file left as it was", readBytes(dir / "blocked.uasf.tmp") == std::vector<uint8_t>({1, 2, 3}));
 
+    // D15 P3: single-file outputs refuse a mounted volume like the package writers (shared output guard)
+    const std::string vol = "/Volumes/AIA-VOLTEST-" + std::to_string(::getpid());
+    TEST("/Volumes --out refused -> 1", run("export-smf " + q(in) + " --out " + q(vol + "/x.mid")) == 1);
+    TEST("/Volumes edit --out refused -> 1", run("edit " + q(in) + " --out " + q(vol + "/x.uasf") + " --op tempo --bpm 90") == 1);
+    std::error_code lec;
+    if (fs::is_directory("/Volumes")) {
+        fs::create_directory_symlink("/Volumes", dir / "vol", lec);
+        TEST("symlink into /Volumes refused -> 1",
+             !lec && run("export-smf " + q(in) + " --out " + q(dir / "vol" / ("AIA-VOLTEST-" + std::to_string(::getpid())) / "x.mid")) == 1);
+    }
+    TEST("nothing created on /Volumes", !fs::exists(vol));
+
     const fs::path qz = dir / "q.uasf";
     TEST("edit quantize -> 0", run("edit " + q(in) + " --out " + q(qz) + " --op quantize --section 0 --track 1 --grid 1/16") == 0);
     TEST("quantized to the grid", load(qz).sections[0].tracks[1].events[0].tick == 0);

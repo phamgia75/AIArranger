@@ -36,6 +36,7 @@ target_link_libraries(aiarranger-macos PRIVATE
     # reference makes the linker warn about a duplicate static library.
     platform-apple
     importer-sff1
+    style-edit   # Style Studio editing (E3)
     juce::juce_gui_extra
     juce::juce_audio_basics
     juce::juce_audio_devices)
@@ -49,7 +50,7 @@ target_sources(aiarranger-app-smoke PRIVATE Tests/app_smoke.cpp ${MACOS_APP_LIB_
 target_compile_definitions(aiarranger-app-smoke PRIVATE
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1 AIARR_REPO_TOOLS_DIR="${CMAKE_SOURCE_DIR}/tools")
 target_link_libraries(aiarranger-app-smoke PRIVATE
-    platform-apple importer-sff1
+    platform-apple importer-sff1 style-edit
     juce::juce_gui_extra juce::juce_audio_basics juce::juce_audio_devices)
 add_test(NAME test_app_smoke COMMAND aiarranger-app-smoke)
 # One ENVIRONMENT list: a second set_tests_properties(ENVIRONMENT ...) would replace the first.

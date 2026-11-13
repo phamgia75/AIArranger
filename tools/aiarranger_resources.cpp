@@ -42,26 +42,12 @@ static std::string edgeText(const graph::Edge& e) {
            (e.source == graph::Source::PaManagerReport ? "  [evidence: " + e.provenance + "]" : "");
 }
 
-// Every regular file of FOLDER (symlinks not followed) or one FILE. Files without the wrapper are listed, not errors.
 static int panativeInspect(const std::string& path) {
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    std::vector<std::pair<std::string, fs::path>> files;
-    if (fs::is_directory(fs::symlink_status(path, ec))) {
-        ai_arranger::media::detail::Listing l;
-        std::string err;
-        if (!ai_arranger::media::detail::listFiles(path, l, err)) { std::fprintf(stderr, "ERROR: %s\n", err.c_str()); return 1; }
-        for (const auto& [rel, e] : l.files) files.emplace_back(rel, e.abs);
-    } else files.emplace_back(path, path);
-    std::printf("Pa-native container inspection (READ-ONLY, EXPERIMENTAL; layout observed on one owner Pa700 SET, not documented by Korg)\n");
     int invalid = 0, unreadable = 0;
-    for (const auto& [label, f] : files) {
-        const auto c = panative::readFile(f);
-        invalid += c.wrapper && !c.ok;
-        unreadable += c.ioError;
-        std::fputs(panative::format(c, label).c_str(), stdout);
-    }
-    std::printf("Files: %zu, invalid Pa-native containers: %d, unreadable: %d. Item payloads were not decoded.\n", files.size(), invalid, unreadable);
+    std::string err;
+    const std::string rep = panative::inspect(path, &invalid, &unreadable, &err);
+    if (rep.empty()) { std::fprintf(stderr, "ERROR: %s\n", err.c_str()); return 1; }
+    std::fputs(rep.c_str(), stdout);
     return unreadable ? 1 : invalid ? 3 : 0;
 }
 

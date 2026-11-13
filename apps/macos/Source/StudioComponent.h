@@ -5,12 +5,17 @@
 // KST Library, Memory Check, Convert Sound, Sample Plugin) is the shared project context; its tab bar is hidden and
 // the sidebar plus segments choose its page. New here: source recognition with the read-only library view, the
 // Import/Export routes, the Style report, Validation & Reports with L1/L2/L3 badges (ui/studio/studio_models.h).
+// Phase 2 (ui/studio/studio_tools.h, style_studio_model.h): Sample Lab > KMP / KSF Writer (EXPERIMENTAL, L1) and Tools
+// (E4), Style Studio editing with undo/redo and SMF import/export (E3), Pa-native SET inspect (E5, read-only), and the
+// real level of every new output in Validation & Reports. Jobs run on worker threads, never the audio thread.
 // Sources are only read. Every write stays in the existing writers (new local folder, NAME.INCOMPLETE, output
 // guard). Every unavailable control shows its reason next to it. Never sends MIDI.
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "ResourcesComponent.h"
 #include "ui/studio/studio_models.h"
+#include "ui/studio/studio_tools.h"
+#include "ui/studio/style_studio_model.h"
 
 namespace ai_arranger::app {
 
@@ -35,11 +40,42 @@ public:
     void openSource(const juce::File& dir);       // asynchronous, read-only probe; busy() until it lands
     void openStyle(const juce::File& sty);        // read-only SFF1 report
     void setValidationTarget(const juce::File& f);
-    enum class Validator { VerifyPackage, KstInventory, Sf2Check, SoundPy, DrumKitPy };
+    enum class Validator { VerifyPackage, KstInventory, Sf2Check, StyleSmf, SoundPy, DrumKitPy };
     void runValidator(Validator v);               // asynchronous; busy() until it lands
     void attachL3Record(const juce::File& record);
     juce::String validatorUnavailable(Validator v) const;   // "" when it can run now
     bool busy() const { return jobs_ > 0; }
+
+    // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.
+    void inspectPaNative();                       // Library > Sources: read-only item list of an open SET
+    juce::String paNativeUnavailable() const;
+    void writeKmp(const juce::File& dest);        // Sample Lab > KMP / KSF Writer: the previewed Sound (EXPERIMENTAL, L1)
+    juce::String kmpUnavailable();
+    enum class LabTool { Analyze, Slice, Loop, BatchPreview, Batch };
+    void setLabInput(const juce::File& wavOrFolder);
+    void runLabTool(LabTool t, const juce::File& dest = {});
+    juce::String labUnavailable(LabTool t) const;
+    juce::TextEditor& labBars() { return labBars_; }
+    juce::TextEditor& labStart() { return labStart_; }
+    juce::TextEditor& labEnd() { return labEnd_; }
+    juce::ToggleButton& labTrim() { return labTrim_; }
+    juce::ToggleButton& labNormalize() { return labNorm_; }
+    // Style Studio editing (E3): element/track browser, ops, undo/redo, SMF import/export
+    juce::ComboBox& styleElement() { return styleElem_; }
+    juce::ComboBox& styleTrack() { return styleTrack_; }
+    juce::ComboBox& styleOp() { return styleOp_; }
+    juce::TextEditor& styleValue() { return styleValue_; }
+    void applyStyleOp();
+    bool styleUndo();
+    bool styleRedo();
+    void importSmfTrack(const juce::File& mid);
+    void exportStyleSmf(const juce::File& mid);
+    void saveStyleUasf(const juce::File& uasf);
+    const ui::studio::StyleStudioModel& styleModel() const { return style_; }
+    juce::String styleStatus() const { return styleStatus_.getText(); }
+    juce::String kmpText() const { return kmpReport_.getText(); }
+    juce::String labText() const { return labReport_.getText(); }
+    juce::Component* currentPage() const { return segments_.at(domain_)[size_t(segment_)].page; }
 
     ResourcesComponent& resources() { return res_; }
     const ui::studio::Verification& verification() const { return verification_; }
@@ -67,6 +103,10 @@ private:
     void refreshAvailability();
     void addJob(const juce::String& line);
     void runJob(const juce::String& name, std::function<std::pair<juce::String, std::optional<ui::studio::Verification>>()> work);
+    // A write/inspect job: its text goes to `out`; a written output becomes the verification target with its level.
+    void runOutputJob(const juce::String& name, juce::TextEditor& out, std::function<ui::studio::JobResult()> work);
+    void chooseSave(const juce::String& title, const juce::String& pattern, std::function<void(juce::File)> then);
+    void refreshStyle();
     void chooseFolder(const juce::String& title, std::function<void(juce::File)> then, bool files = false, const juce::String& pattern = {});
     juce::TextButton& button(const juce::String& text, std::function<void()> onClick);
     juce::Label& label(const juce::String& text, juce::Colour c);
@@ -96,9 +136,20 @@ private:
     FlowPage sourcesPage_;
     juce::TextEditor libraryView_;
     juce::TextButton* toSampleLab_ = nullptr;
+    juce::TextButton* paInspectBtn_ = nullptr;
     std::optional<ui::studio::SourceProbe> source_;
     // Import / Export Center
     FlowPage ioPage_;
+    juce::Label* staged_ = nullptr;
+    // Sample Lab › KMP / KSF Writer and Tools
+    FlowPage kmpPage_, labPage_;
+    juce::TextEditor kmpReport_, labReport_;
+    juce::TextButton* kmpBtn_ = nullptr;
+    std::map<LabTool, juce::TextButton*> labButtons_;
+    juce::TextEditor labBars_, labBeats_, labStart_, labEnd_, labSnap_, labXfade_;
+    juce::ToggleButton labTrim_{"Trim -60 dBFS"}, labNorm_{"Normalize peak -1 dBFS"};
+    juce::Label labInput_;
+    juce::File labIn_;
     // Sample Lab › Quality Report
     FlowPage qualityPage_;
     juce::TextEditor quality_;
@@ -106,6 +157,13 @@ private:
     FlowPage stylePage_;
     juce::TextEditor styleReport_;
     juce::TextButton* liveFromStyle_ = nullptr;
+    ui::studio::StyleStudioModel style_;
+    std::string sff1Report_;
+    juce::ComboBox styleElem_, styleTrack_, styleOp_;
+    juce::TextEditor styleValue_;
+    juce::Label styleStatus_;
+    juce::TextButton *applyBtn_ = nullptr, *undoBtn_ = nullptr, *redoBtn_ = nullptr, *importSmfBtn_ = nullptr, *exportSmfBtn_ = nullptr,
+                     *saveUasfBtn_ = nullptr;
     // Validation & Reports
     FlowPage validationPage_;
     juce::Label target_, badges_;

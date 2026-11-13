@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 namespace ai_arranger::media {
 
@@ -39,6 +41,22 @@ inline bool publishNewFolder(const std::filesystem::path& work, const std::files
 #else
     return ::renameat2(AT_FDCWD, work.c_str(), AT_FDCWD, folderPath(out).c_str(), RENAME_NOREPLACE) == 0;
 #endif
+}
+
+// A new single file (Style SMF, UASF): the same refusals as a folder (mounted volume, also through a link; an existing
+// path), then written to `path.tmp` and published by one rename that never replaces anything. "" = written.
+inline std::string writeNewFile(const std::filesystem::path& path, const std::vector<uint8_t>& bytes) {
+    if (auto why = outputFolderRefusal(path); !why.empty()) return why;
+    const std::filesystem::path tmp = path.string() + ".tmp";
+    std::error_code ec;
+    if (std::filesystem::exists(tmp, ec) || ec) return "refusing: " + tmp.string() + " already exists";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return "cannot write " + tmp.string(); }
+    }
+    if (!publishNewFolder(tmp, path)) { std::filesystem::remove(tmp, ec); return "refusing: " + path.string() + " appeared while writing"; }
+    return "";
 }
 
 }  // namespace ai_arranger::media

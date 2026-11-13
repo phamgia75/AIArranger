@@ -103,7 +103,9 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     toSampleLab_ = &button("Send to Sample Lab", [this] {
         if (source_ && res_.converter().inspectFolder(juce::File(source_->path))) showDomain(D::SampleLab, 0);
     });
-    sourcesPage_.rows = {{{&openSrc, 150}, {toSampleLab_, 150}, {&reasonFor(*toSampleLab_), 0}}};
+    paInspectBtn_ = &button("Inspect Pa-native (read-only)", [this] { inspectPaNative(); });
+    sourcesPage_.rows = {{{&openSrc, 150}, {toSampleLab_, 150}, {&reasonFor(*toSampleLab_), 0}},
+                         {{paInspectBtn_, 230}, {&reasonFor(*paInspectBtn_), 0}}};
     sourcesPage_.fill = &libraryView_;
     for (auto& row : sourcesPage_.rows) for (auto& [c, w] : row) sourcesPage_.addAndMakeVisible(c);
     sourcesPage_.addAndMakeVisible(libraryView_);
@@ -124,16 +126,18 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         route("AIArranger package", "Library Workspace > Resource Graph: Open Package...", D::Library, 1),
         route("KMP / KSF / WAV samples", "Sample Lab > Convert Sound: mapping editor, preview, quality checks", D::SampleLab, 0),
         route("AU / VST3 instrument", "Sample Lab > Sample Plugin: offline render into a package", D::SampleLab, 1),
-        route("Yamaha style (.sty)", "Style Studio: read-only report", D::StyleStudio, 0),
+        route("Yamaha style (.sty)", "Style Studio: report and EXPERIMENTAL editing (the source file is never changed)", D::StyleStudio, 0),
+        route("Pa-family SET folder", "Library Workspace > Sources: recognise it, then Inspect Pa-native (read-only, EXPERIMENTAL)", D::Library, 0),
         {{&label("EXPORT  (always a NEW local folder)", kAccent), 0}},
         route("Sound package (SF2, TXPROG, WAV)", "Sample Lab > Convert Sound: Generate Package...", D::SampleLab, 0),
         route("Verified KST backup", "Library Workspace > KST Library: Backup KST... (byte copy + SHA-256 manifest)", D::Library, 2),
         route("Check a USB copy (read-only)", "Validation & Reports: Verify Package against its manifest", D::Validation, 0),
         off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet."),
-        off("KMP / KSF export", "Not in this milestone: the KMP/KSF writer is a separate work item (E1) and is not in the app yet."),
-        off("Style as Pa5X SMF", "Command line only (aiarranger-convert); EXPERIMENTAL, Pa5X import not tested."),
-        {{&label("STAGED CHANGES: 0. Sources are never changed in place. Nothing can be staged yet: SET/KST Manager and Style "
-                 "editing are later phases.", kPending), 0}},
+        route("KMP / KSF folder (EXPERIMENTAL)", "Sample Lab > KMP / KSF Writer: the previewed Sound as .KMP + .KSF, verification level L1 only",
+              D::SampleLab, 3),
+        route("Style as Pa5X SMF (EXPERIMENTAL)", "Style Studio: Export Pa5X SMF... (L1 = our Korg Style validator; Pa5X import not tested)",
+              D::StyleStudio, 0),
+        {{(staged_ = &label("STAGED CHANGES: 0", kPending)), 0}},
         {{&label("WRITE RULES: every write goes to NAME.INCOMPLETE and is published by one rename only after its checks pass; "
                  "a cancelled or failed write leaves only NAME.INCOMPLETE.", kText2), 0}},
         {{&label("Mounted volumes (USB sticks) are refused: write locally, copy by hand in Finder, then Check a USB copy.", kText2), 0}},
@@ -145,22 +149,99 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     qualityPage_.fill = &quality_;
     qualityPage_.addAndMakeVisible(quality_);
 
-    // ── Style Studio (read-only; editing is a later phase) ──
+    // ── Sample Lab › KMP / KSF Writer (E1): the Sound previewed in Convert Sound, as KRONOS-format files ──
+    styleText(kmpReport_);
+    kmpReport_.setText("Nothing written yet.", false);
+    kmpBtn_ = &button("Write KMP/KSF folder (EXPERIMENTAL, L1)...", [this] {
+        chooseFolder("Parent folder for the new KMP/KSF folder (local disk)", [this](juce::File parent) {
+            const auto in = res_.converter().model().snapshot();
+            writeKmp(parent.getChildFile(juce::File::createLegalFileName(juce::String(in ? in->name : "Sound") + " KMP")));
+        });
+    });
+    kmpPage_.rows = {{{kmpBtn_, 300}, {&reasonFor(*kmpBtn_), 0}},
+                     {{&label("Writes the Sound previewed in Convert Sound as .KMP + .KSF files (KRONOS Parameter Guide format) into a NEW "
+                              "local folder, read back before it is published.", kText2), 0}},
+                     {{&label("EXPERIMENTAL. Verification level L1 only; not tested on a KRONOS or a Pa5X (L3 needs an owner hardware test).",
+                              kExperimental), 0}}};
+    kmpPage_.fill = &kmpReport_;
+    for (auto& row : kmpPage_.rows) for (auto& [c, w] : row) kmpPage_.addAndMakeVisible(c);
+    kmpPage_.addAndMakeVisible(kmpReport_);
+
+    // ── Sample Lab › Tools (E4): previews are read-only; every write is a new folder ──
+    styleText(labReport_);
+    labReport_.setText("Choose a WAV file (Analyze, Time Slice, Loop) or a folder of WAVs (Batch, duplicates).", false);
+    labInput_.setColour(juce::Label::textColourId, juce::Colours::white);
+    auto field = [this](juce::TextEditor& t, const char* text) { t.setText(text, false); t.setInputRestrictions(9, "0123456789."); };
+    field(labBars_, "1"); field(labBeats_, "4"); field(labStart_, "0"); field(labEnd_, "0"); field(labSnap_, "64"); field(labXfade_, "0");
+    auto& chooseWav = button("Choose WAV...", [this] {
+        chooseFolder("WAV file to work on (only read)", [this](juce::File f) { setLabInput(f); }, true, "*.wav;*.WAV");
+    });
+    auto& chooseWavDir = button("Choose WAV Folder...", [this] {
+        chooseFolder("Folder of WAVs for Batch (only read)", [this](juce::File f) { setLabInput(f); });
+    });
+    auto lab = [this](LabTool t, const juce::String& text, const char* suffix) -> juce::TextButton& {
+        return *(labButtons_[t] = &button(text, [this, t, suffix] {
+            if (t == LabTool::Analyze || t == LabTool::BatchPreview) { runLabTool(t); return; }
+            chooseFolder("Parent folder for the new output folder (local disk)", [this, t, suffix](juce::File parent) {
+                runLabTool(t, parent.getChildFile(juce::File::createLegalFileName(labIn_.getFileNameWithoutExtension() + suffix)));
+            });
+        }));
+    };
+    auto& an = lab(LabTool::Analyze, "Analyze (preview)", "");
+    auto& sl = lab(LabTool::Slice, "Time Slice...", " slices");
+    auto& lp = lab(LabTool::Loop, "Loop...", " loop");
+    auto& bp = lab(LabTool::BatchPreview, "Batch Preview (duplicates)", "");
+    auto& bw = lab(LabTool::Batch, "Batch...", " batch");
+    labPage_.rows = {
+        {{&chooseWav, 140}, {&chooseWavDir, 160}, {&labInput_, 0}},
+        {{&an, 200}, {&reasonFor(an), 0}},
+        {{&label("Bars", kText2), 40}, {&labBars_, 50}, {&label("Beats", kText2), 44}, {&labBeats_, 40}, {&sl, 130}, {&reasonFor(sl), 0}},
+        {{&label("Loop start", kText2), 70}, {&labStart_, 90}, {&label("end", kText2), 32}, {&labEnd_, 90}, {&label("snap", kText2), 36},
+         {&labSnap_, 50}, {&label("xfade", kText2), 40}, {&labXfade_, 60}},
+        {{&lp, 130}, {&reasonFor(lp), 0}},
+        {{&labTrim_, 130}, {&labNorm_, 190}, {&bp, 200}, {&reasonFor(bp), 0}},
+        {{&bw, 130}, {&reasonFor(bw), 0}},
+    };
+    labPage_.fill = &labReport_;
+    for (auto& row : labPage_.rows) for (auto& [c, w] : row) labPage_.addAndMakeVisible(c);
+    labPage_.addAndMakeVisible(labReport_);
+
+    // ── Style Studio (E3 editing: EXPERIMENTAL; the source Style is only read) ──
     styleText(styleReport_);
-    styleReport_.setText("No Style open. Open Style... reads a Yamaha SFF1 .sty file and reports its sections, tracks and what "
-                         "AIArranger understands of it. The file is only read.", false);
+    styleReport_.setText("No Style open. Open Style... reads a Yamaha SFF1 .sty (or an AIArranger .uasf) for the report and for "
+                         "editing. The file is only read; edits are written only as NEW files.", false);
     auto& openSty = button("Open Style...", [this] {
-        chooseFolder("Style file to read (.sty)", [this](juce::File f) { openStyle(f); }, true, "*.sty;*.STY");
+        chooseFolder("Style file to read (.sty or .uasf)", [this](juce::File f) { openStyle(f); }, true, "*.sty;*.STY;*.uasf");
     });
     liveFromStyle_ = &button("Open Live Arranger", [this] { if (showLiveHost_) showLiveHost_(); });
     setUnavailable(*liveFromStyle_, showLiveHost_ ? "" : "Needs: the Live Arranger window (open the Studio from it)");
-    auto& edit = button("Edit Style", {});
-    setUnavailable(edit, "Not available: Style editing is a later phase; this view only reads.");
-    auto& smf = button("Export as Pa5X SMF", {});
-    setUnavailable(smf, "Command line only (aiarranger-convert); EXPERIMENTAL, Pa5X import not tested.");
+    for (int i = 0; i < st::StyleStudioModel::kOps; ++i) styleOp_.addItem(st::StyleStudioModel::opName(st::StyleStudioModel::Op(i)), i + 1);
+    styleOp_.setSelectedId(1, juce::dontSendNotification);
+    styleOp_.onChange = [this] { styleValue_.setTextToShowWhenEmpty(st::StyleStudioModel::opHint(st::StyleStudioModel::Op(styleOp_.getSelectedId() - 1)), kText2); };
+    styleOp_.onChange();
+    styleElem_.onChange = [this] { refreshStyle(); };
+    styleTrack_.onChange = [this] { refreshAvailability(); };
+    styleStatus_.setColour(juce::Label::textColourId, kAccent);
+    applyBtn_ = &button("Apply", [this] { applyStyleOp(); });
+    undoBtn_ = &button("Undo", [this] { styleUndo(); });
+    redoBtn_ = &button("Redo", [this] { styleRedo(); });
+    importSmfBtn_ = &button("Import SMF Track...", [this] {
+        chooseFolder("Plain SMF (format 0/1) to import into the chosen track (only read)", [this](juce::File f) { importSmfTrack(f); }, true, "*.mid;*.MID");
+    });
+    exportSmfBtn_ = &button("Export Pa5X SMF (EXPERIMENTAL)...", [this] {
+        chooseSave("New Pa5X Style SMF file (never overwrites)", "*.mid", [this](juce::File f) { exportStyleSmf(f.withFileExtension("mid")); });
+    });
+    saveUasfBtn_ = &button("Save UASF...", [this] {
+        chooseSave("New UASF file (never overwrites)", "*.uasf", [this](juce::File f) { saveStyleUasf(f.withFileExtension("uasf")); });
+    });
     stylePage_.rows = {{{&openSty, 150}, {liveFromStyle_, 160}, {&label("Load the Style there with Load Style... to audition it.", kText2), 0}},
-                       {{&edit, 150}, {&reasonFor(edit), 0}},
-                       {{&smf, 150}, {&reasonFor(smf), 0}}};
+                       {{&label("Element", kText2), 60}, {&styleElem_, 220}, {&label("Track", kText2), 44}, {&styleTrack_, 220}},
+                       {{&styleOp_, 170}, {&styleValue_, 170}, {applyBtn_, 80}, {&reasonFor(*applyBtn_), 0}},
+                       {{&styleStatus_, 0}},
+                       {{undoBtn_, 170}, {&reasonFor(*undoBtn_), 150}, {redoBtn_, 170}, {&reasonFor(*redoBtn_), 0}},
+                       {{importSmfBtn_, 200}, {&reasonFor(*importSmfBtn_), 0}},
+                       {{exportSmfBtn_, 260}, {&reasonFor(*exportSmfBtn_), 0}},
+                       {{saveUasfBtn_, 200}, {&reasonFor(*saveUasfBtn_), 0}}};
     stylePage_.fill = &styleReport_;
     for (auto& row : stylePage_.rows) for (auto& [c, w] : row) stylePage_.addAndMakeVisible(c);
     stylePage_.addAndMakeVisible(styleReport_);
@@ -176,6 +257,9 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     auto& chooseSf2 = button("Choose SF2...", [this] {
         chooseFolder("SoundFont to check (read-only)", [this](juce::File f) { setValidationTarget(f); }, true, "*.sf2");
     });
+    auto& chooseMid = button("Choose MIDI...", [this] {
+        chooseFolder("Pa5X Style SMF to check (read-only)", [this](juce::File f) { setValidationTarget(f); }, true, "*.mid;*.MID");
+    });
     useSourceBtn_ = &button("Use Library Source", [this] { if (source_) setValidationTarget(juce::File(source_->path)); });
     auto validator = [this](Validator v, const juce::String& text) -> juce::TextButton& {
         return *(validatorButtons_[v] = &button(text, [this, v] { runValidator(v); }));
@@ -183,23 +267,27 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     auto& vp = validator(Validator::VerifyPackage, "Verify Package (L1, L2)");
     auto& ki = validator(Validator::KstInventory, "KST Inventory");
     auto& sc = validator(Validator::Sf2Check, "SF2 Check (L1)");
+    auto& sm = validator(Validator::StyleSmf, "Style SMF Check (L1)");
     auto& sp = validator(Validator::SoundPy, "Sound Validator (Python)");
     auto& dp = validator(Validator::DrumKitPy, "Drum Kit Validator (Python)");
     l3Btn_ = &button("Attach L3 Record...", [this] {
         chooseFolder("Owner's L3 hardware test record (aiarranger-l3-record)", [this](juce::File f) { attachL3Record(f); }, true, "*.txt;*.md");
     });
     validationPage_.rows = {
-        {{&chooseTarget, 150}, {&chooseSf2, 130}, {useSourceBtn_, 150}, {&reasonFor(*useSourceBtn_), 0}},
+        {{&chooseTarget, 150}, {&chooseSf2, 130}, {&chooseMid, 130}, {useSourceBtn_, 150}, {&reasonFor(*useSourceBtn_), 0}},
         {{&target_, 0}},
         {{&vp, 200}, {&reasonFor(vp), 0}},
         {{&ki, 200}, {&reasonFor(ki), 0}},
         {{&sc, 200}, {&reasonFor(sc), 0}},
+        {{&sm, 200}, {&reasonFor(sm), 0}},
         {{&sp, 200}, {&reasonFor(sp), 0}},
         {{&dp, 200}, {&reasonFor(dp), 0}},
         {{l3Btn_, 200}, {&reasonFor(*l3Btn_), 0}},
         {{&badges_, 0}},
         {{&label("L1 structural: our validator checked the files.  L2 app: our reader re-opened them.  "
                  "L3 hardware: only an owner's recorded test of this exact output.", kText2), 0}},
+        {{&label("Real levels: Sound/Drum Kit package L1+L2.  KMP/KSF folder, Sample Lab folder, Style SMF: L1 only.  L3: owner record only.",
+                 kText2), 0}},
     };
     validationPage_.fill = &jobsLog_;
     for (auto& row : validationPage_.rows) for (auto& [c, w] : row) validationPage_.addAndMakeVisible(c);
@@ -209,11 +297,11 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     segments_[D::Library] = {{"Sources", -1, &sourcesPage_}, {"Resource Graph", 0}, {"KST Library", 1}, {"Memory Check", 2}};
     segments_[D::ImportExport] = {{"Routes", -1, &ioPage_}};
     segments_[D::SampleLab] = {{"Convert Sound", 3}, {"Sample Plugin", 4}, {"Quality Report", -1, &qualityPage_},
-                               {"KMP / KSF Writer", -1, nullptr, "Not in this milestone: the KMP/KSF writer (E1) is not in the app yet."}};
-    segments_[D::StyleStudio] = {{"Style Report", -1, &stylePage_}};
+                               {"KMP / KSF Writer", -1, &kmpPage_}, {"Tools", -1, &labPage_}};
+    segments_[D::StyleStudio] = {{"Style Editor", -1, &stylePage_}};
     segments_[D::Validation] = {{"Checks", -1, &validationPage_}};
-    for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
-                    (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
+    for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
+                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
         addChildComponent(p);
     for (auto& [d, segs] : segments_)
         for (size_t i = 0; i < segs.size(); ++i) {
@@ -306,8 +394,8 @@ void StudioComponent::showDomain(Domain d, int segment) {
         }
 
     const auto& seg = segs[size_t(segment)];
-    for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
-                    (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
+    for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
+                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
         p->setVisible(p == seg.page);
     res_.setVisible(seg.resTab >= 0);
     if (seg.resTab >= 0) {
@@ -369,11 +457,25 @@ void StudioComponent::openSource(const juce::File& dir) {
 }
 
 void StudioComponent::openStyle(const juce::File& sty) {
-    importers::sff1::Sff1Reader reader;
-    const auto r = reader.parseFile(sty.getFullPathName().toStdString());
-    styleReport_.setText("Style: " + sty.getFileName() + "  (read-only; nothing is written)\n" + sty.getFullPathName() + "\n\n" +
-                             juce::String::fromUTF8(importers::sff1::Sff1ReportGenerator::generateReport(r).c_str()),
-                         false);
+    sff1Report_.clear();
+    if (!sty.hasFileExtension("uasf")) {
+        importers::sff1::Sff1Reader reader;
+        const auto r = reader.parseFile(sty.getFullPathName().toStdString());
+        sff1Report_ = "Style: " + sty.getFileName().toStdString() + "  (read-only; nothing is written to it)\n" + sty.getFullPathName().toStdString() +
+                      "\n\n" + importers::sff1::Sff1ReportGenerator::generateReport(r);
+    }
+    std::string err;
+    styleStatus_.setText(style_.load(sty.getFullPathName().toStdString(), &err) ? "Opened for editing: " + sty.getFileName()
+                                                                                : "Not editable: " + juce::String(err),
+                         juce::dontSendNotification);
+    styleElem_.clear(juce::dontSendNotification);
+    if (style_.loaded()) {
+        styleElem_.addItem("All elements", 1);
+        for (size_t i = 0; i < style_.style().sections.size(); ++i)
+            styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
+        styleElem_.setSelectedId(1, juce::dontSendNotification);
+    }
+    refreshStyle();
 }
 
 void StudioComponent::setValidationTarget(const juce::File& f) {
@@ -392,6 +494,7 @@ juce::String StudioComponent::validatorUnavailable(Validator v) const {
         case Validator::VerifyPackage:
         case Validator::KstInventory: return isDir ? "" : "Needs: a folder (the target is a file)";
         case Validator::Sf2Check: return !isDir && validationTarget_.hasFileExtension("sf2") ? "" : "Needs: an .sf2 file (Choose SF2...)";
+        case Validator::StyleSmf: return !isDir && validationTarget_.hasFileExtension("mid") ? "" : "Needs: a Style .mid file (Choose MIDI...)";
         case Validator::SoundPy:
         case Validator::DrumKitPy: {
             if (!isDir) return "Needs: a package folder";
@@ -412,9 +515,9 @@ void StudioComponent::runValidator(Validator v) {
     using Out = std::pair<juce::String, std::optional<st::Verification>>;
     switch (v) {
         case Validator::VerifyPackage:
-            runJob("Verify Package", [target, alive]() -> Out {
-                const auto c = media::sound::verifyPackage(target, [alive] { return !alive.expired(); });
-                return {c.text, st::fromPackageCheck(c)};
+            runJob("Verify Package", [target, alive]() -> Out {   // the real level of any output folder (package, KMP/KSF, Sample Lab)
+                const auto r = st::verifyOutput(target, [alive] { return !alive.expired(); });
+                return {r.text, r.level};
             });
             break;
         case Validator::KstInventory:
@@ -429,6 +532,12 @@ void StudioComponent::runValidator(Validator v) {
                 st::Verification ver;
                 ver.l1 = {r.ok && r.overlapping() == 0 ? st::Check::Passed : st::Check::Failed, "sf2-check"};
                 return {juce::String(media::sf2::format(r)), ver};
+            });
+            break;
+        case Validator::StyleSmf:
+            runJob("Style SMF Check", [target]() -> Out {
+                const auto v = st::StyleStudioModel::checkStyleSmf(target);
+                return {"Style SMF: " + juce::String(v.l1.detail) + " (EXPERIMENTAL; Pa5X import not tested)", v};
             });
             break;
         case Validator::SoundPy:
@@ -478,11 +587,181 @@ void StudioComponent::attachL3Record(const juce::File& record) {
     const auto out = validationTarget_.getFullPathName().toStdString(), rec = record.getFullPathName().toStdString();
     std::weak_ptr<bool> alive = alive_;
     runJob("L3 record", [out, rec, alive]() -> std::pair<juce::String, std::optional<st::Verification>> {
-        const auto c = media::sound::verifyPackage(out, [alive] { return !alive.expired(); });
-        auto v = st::fromPackageCheck(c);
+        const auto c = st::verifyOutput(out, [alive] { return !alive.expired(); });
+        auto v = *c.level;
         v.l3 = st::checkL3Record(rec, out, v.l1);
         return {"L3 record " + juce::String(rec) + ": " + juce::String(v.l3.detail) + "\nL1/L2 re-checked first: " + juce::String(c.text), v};
     });
+}
+
+void StudioComponent::runOutputJob(const juce::String& name, juce::TextEditor& out, std::function<st::JobResult()> work) {
+    ++jobs_;
+    out.setText(name + ": working...", false);
+    addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  running...");
+    refreshAvailability();
+    std::weak_ptr<bool> alive = alive_;
+    std::thread([this, alive, name, &out, work = std::move(work)] {
+        auto r = std::make_shared<st::JobResult>(work());
+        juce::MessageManager::callAsync([this, alive, name, &out, r] {
+            if (alive.expired()) return;
+            --jobs_;
+            out.setText(juce::String::fromUTF8(r->text.c_str()), false);
+            if (r->level && !r->output.empty()) {   // a new output: it becomes the verification target, at its real level
+                validationTarget_ = juce::File(juce::String::fromUTF8(r->output.c_str()));
+                verification_ = *r->level;
+                verificationIsPackage_ = true;   // it has a PACKAGE.sha256, so an owner L3 record can name it
+            }
+            addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  done" +
+                   (r->level ? "  " + juce::String::fromUTF8(st::badgeLine(*r->level).c_str()) + "  " + juce::String(r->output) : juce::String()) +
+                   "\n" + juce::String::fromUTF8(r->text.substr(0, r->text.find('\n')).c_str()) + "\n");
+            refreshInspector();
+        });
+    }).detach();
+}
+
+void StudioComponent::chooseSave(const juce::String& title, const juce::String& pattern, std::function<void(juce::File)> then) {
+    chooser_ = std::make_shared<juce::FileChooser>(title, juce::File(), pattern);
+    auto c = chooser_;
+    c->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
+                   [c, then, alive = std::weak_ptr<bool>(alive_)](const juce::FileChooser& fc) {
+                       if (!alive.expired() && fc.getResult() != juce::File()) then(fc.getResult());
+                   });
+}
+
+// ── Library › Sources: Pa-native SET inspect (E5) ──
+juce::String StudioComponent::paNativeUnavailable() const {
+    using K = st::SourceProbe::Kind;
+    if (jobs_ > 0) return "Needs: the running job to finish";
+    if (source_ && (source_->kind == K::Pa5xUserData || source_->kind == K::KstBackupCopy))
+        return "Not available for a Pa5X KST: its file container is UNKNOWN (no Pa5X-made file has been studied yet)";
+    return source_ && st::canInspectPaNative(*source_) ? "" : "Needs: a SET folder as the open source";
+}
+
+void StudioComponent::inspectPaNative() {
+    if (paNativeUnavailable().isNotEmpty()) return;
+    const auto probe = *source_;
+    runOutputJob("Pa-native inspect", libraryView_, [probe] {
+        auto r = st::paNativeInspect(probe.path);
+        r.text = st::libraryView(probe) + "\n" + r.text;
+        return r;
+    });
+}
+
+// ── Sample Lab › KMP / KSF Writer (E1) ──
+juce::String StudioComponent::kmpUnavailable() {
+    if (jobs_ > 0 || res_.converter().busy()) return "Needs: the running job to finish";
+    return res_.converter().model().built() ? "" : "Needs: a previewed Sound (Sample Lab > Convert Sound: choose a folder, Preview)";
+}
+
+void StudioComponent::writeKmp(const juce::File& dest) {
+    if (kmpUnavailable().isNotEmpty()) return;
+    const auto in = res_.converter().model().snapshot();   // immutable; shared with the worker without copying audio
+    runOutputJob("KMP/KSF folder (EXPERIMENTAL)", kmpReport_, [in, d = dest.getFullPathName().toStdString()] { return st::writeKmpFolder(*in, d); });
+}
+
+// ── Sample Lab › Tools (E4) ──
+void StudioComponent::setLabInput(const juce::File& f) {
+    labIn_ = f;
+    labInput_.setText((f.isDirectory() ? "Folder: " : "File: ") + f.getFullPathName() + "  (only read)", juce::dontSendNotification);
+    refreshAvailability();
+}
+
+juce::String StudioComponent::labUnavailable(LabTool t) const {
+    if (jobs_ > 0) return "Needs: the running job to finish";
+    const bool folder = t == LabTool::BatchPreview || t == LabTool::Batch;
+    if (folder) return labIn_.isDirectory() ? "" : "Needs: a folder of WAVs (Choose WAV Folder...)";
+    return labIn_.existsAsFile() && labIn_.hasFileExtension("wav") ? "" : "Needs: a WAV file (Choose WAV...)";
+}
+
+void StudioComponent::runLabTool(LabTool t, const juce::File& dest) {
+    if (labUnavailable(t).isNotEmpty()) return;
+    const auto in = labIn_.getFullPathName().toStdString(), out = dest.getFullPathName().toStdString();
+    const auto n = [](juce::TextEditor& e) { return e.getText().getDoubleValue(); };
+    switch (t) {
+        case LabTool::Analyze: runOutputJob("Sample Lab analyze", labReport_, [in] { return st::labAnalyze(in); }); break;
+        case LabTool::Slice:
+            runOutputJob("Sample Lab Time Slice", labReport_, [in, out, bars = n(labBars_), beats = n(labBeats_)] { return st::labSlice(in, bars, beats, out); });
+            break;
+        case LabTool::Loop:
+            runOutputJob("Sample Lab loop", labReport_, [in, out, a = uint32_t(n(labStart_)), b = uint32_t(n(labEnd_)), sn = uint32_t(n(labSnap_)),
+                                                         x = uint32_t(n(labXfade_))] { return st::labLoop(in, a, b, sn, x, out); });
+            break;
+        case LabTool::BatchPreview:
+        case LabTool::Batch:
+            runOutputJob(t == LabTool::Batch ? "Sample Lab batch" : "Sample Lab batch preview", labReport_,
+                         [in, out = t == LabTool::Batch ? out : std::string(), tr = labTrim_.getToggleState(), no = labNorm_.getToggleState()] {
+                             return st::labBatch(in, tr, no, out);
+                         });
+            break;
+    }
+}
+
+// ── Style Studio editing (E3) ──
+void StudioComponent::refreshStyle() {
+    if (style_.loaded()) {
+        const int keep = styleTrack_.getSelectedId(), sec = styleElem_.getSelectedId() - 2;
+        styleTrack_.clear(juce::dontSendNotification);
+        styleTrack_.addItem("All tracks", 1);
+        if (sec >= 0 && size_t(sec) < style_.style().sections.size())
+            for (size_t t = 0; t < style_.style().sections[size_t(sec)].tracks.size(); ++t)
+                styleTrack_.addItem("[" + juce::String(int(t)) + "] " + juce::String(style_.style().sections[size_t(sec)].tracks[t].name), int(t) + 2);
+        styleTrack_.setSelectedId(styleTrack_.indexOfItemId(keep) >= 0 ? keep : 1, juce::dontSendNotification);
+        styleReport_.setText(juce::String::fromUTF8((style_.browser() + (sff1Report_.empty() ? "" : "\n" + sff1Report_)).c_str()), false);
+    } else {
+        styleTrack_.clear(juce::dontSendNotification);
+        if (!sff1Report_.empty()) styleReport_.setText(juce::String::fromUTF8(sff1Report_.c_str()), false);
+    }
+    undoBtn_->setButtonText(style_.undoLabel().empty() ? juce::String("Undo") : "Undo " + juce::String(style_.undoLabel()));
+    redoBtn_->setButtonText(style_.redoLabel().empty() ? juce::String("Redo") : "Redo " + juce::String(style_.redoLabel()));
+    refreshInspector();
+}
+
+void StudioComponent::applyStyleOp() {
+    if (!style_.loaded()) return;
+    const int e = styleElem_.getSelectedId() - 2, t = styleTrack_.getSelectedId() - 2;
+    const auto op = st::StyleStudioModel::Op(styleOp_.getSelectedId() - 1);
+    const auto why = style_.apply(op, e >= 0 ? std::optional<size_t>(size_t(e)) : std::nullopt, t >= 0 ? std::optional<size_t>(size_t(t)) : std::nullopt,
+                                  styleValue_.getText().trim().toStdString());
+    styleStatus_.setText(why.empty() ? juce::String("Done: ") + st::StyleStudioModel::opName(op) + " (Undo to take it back; nothing written yet)"
+                                     : "Refused, nothing changed: " + juce::String(why),
+                         juce::dontSendNotification);
+    refreshStyle();
+}
+
+bool StudioComponent::styleUndo() { const bool ok = style_.undo(); refreshStyle(); return ok; }
+bool StudioComponent::styleRedo() { const bool ok = style_.redo(); refreshStyle(); return ok; }
+
+void StudioComponent::importSmfTrack(const juce::File& mid) {
+    const int e = styleElem_.getSelectedId() - 2, t = styleTrack_.getSelectedId() - 2;
+    if (!style_.loaded() || e < 0 || t < 0) return;
+    size_t dropped = 0;
+    const auto why = style_.importSmfTrack(mid.getFullPathName().toStdString(), size_t(e), size_t(t), &dropped);
+    styleStatus_.setText(why.empty() ? "Imported " + mid.getFileName() + " into the track" + (dropped ? " (" + juce::String(int(dropped)) + " events past the element end dropped)" : juce::String())
+                                     : "Refused, nothing changed: " + juce::String(why),
+                         juce::dontSendNotification);
+    refreshStyle();
+}
+
+void StudioComponent::exportStyleSmf(const juce::File& mid) {
+    st::Verification v;
+    const auto why = style_.exportSmf(mid.getFullPathName().toStdString(), &v);
+    if (why.empty()) {
+        validationTarget_ = mid;
+        verification_ = v;
+        verificationIsPackage_ = false;   // a single file has no PACKAGE.sha256 for an L3 record to name
+        addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  Style SMF export (EXPERIMENTAL)  done  " +
+               juce::String::fromUTF8(st::badgeLine(v).c_str()) + "  " + mid.getFullPathName() + "\n" + juce::String(v.l1.detail) + "\n");
+    }
+    styleStatus_.setText(why.empty() ? "Wrote " + mid.getFullPathName() + "  " + juce::String::fromUTF8(st::badgeLine(v).c_str()) + " (EXPERIMENTAL)"
+                                     : "Not written: " + juce::String(why),
+                         juce::dontSendNotification);
+    refreshStyle();
+}
+
+void StudioComponent::saveStyleUasf(const juce::File& f) {
+    const auto why = style_.saveUasf(f.getFullPathName().toStdString());
+    styleStatus_.setText(why.empty() ? "Wrote " + f.getFullPathName() : "Not written: " + juce::String(why), juce::dontSendNotification);
+    refreshStyle();
 }
 
 void StudioComponent::addJob(const juce::String& line) {
@@ -495,6 +774,17 @@ void StudioComponent::refreshAvailability() {
     const bool samples = source_ && (source_->kind == K::KorgSamplingData || source_->kind == K::WavFolder);
     setUnavailable(*toSampleLab_, samples ? "" : "Needs: a KMP/KSF or WAV folder as the open source");
     setUnavailable(*useSourceBtn_, source_ ? "" : "Needs: a source opened in Library Workspace");
+    setUnavailable(*paInspectBtn_, paNativeUnavailable());
+    setUnavailable(*kmpBtn_, kmpUnavailable());
+    for (auto& [t, b] : labButtons_) setUnavailable(*b, labUnavailable(t));
+    const juce::String noStyle = style_.loaded() ? "" : "Needs: a Style opened for editing (Open Style...)";
+    setUnavailable(*applyBtn_, noStyle);
+    setUnavailable(*undoBtn_, noStyle.isNotEmpty() ? noStyle : style_.undoLabel().empty() ? "Nothing to undo" : "");
+    setUnavailable(*redoBtn_, noStyle.isNotEmpty() ? noStyle : style_.redoLabel().empty() ? "Nothing to redo" : "");
+    setUnavailable(*importSmfBtn_, noStyle.isNotEmpty() ? noStyle
+                                   : styleElem_.getSelectedId() < 2 || styleTrack_.getSelectedId() < 2 ? "Needs: one element and one track chosen" : "");
+    setUnavailable(*exportSmfBtn_, noStyle);
+    setUnavailable(*saveUasfBtn_, noStyle);
     for (auto& [v, b] : validatorButtons_) setUnavailable(*b, validatorUnavailable(v));
     setUnavailable(*l3Btn_, jobs_ > 0 ? "Needs: the running job to finish"
                             : !verificationIsPackage_ || verification_.l1.state != st::Check::Passed
@@ -514,9 +804,14 @@ void StudioComponent::refreshInspector() {
       << (validationTarget_ == juce::File() ? juce::String("No target checked yet.") : validationTarget_.getFileName()) << "\n"
       << juce::String::fromUTF8(st::badgeLine(verification_).c_str()) << "\n"
       << juce::String::fromUTF8(st::spokenBadges(verification_).c_str())
-      << "\n\nSTAGED CHANGES\n0. Nothing is written until an export job runs, always into a new local folder."
+      << "\n\nSTAGED CHANGES\n"
+      << (style_.unsaved() > 0 ? juce::String(style_.unsaved()) + " Style Studio edit(s) not written yet. Export Pa5X SMF... or Save UASF... "
+                                                                  "writes a NEW file; the source Style is never changed."
+                               : juce::String("0. Nothing is written until an export job runs, always into a new local folder."))
       << "\n\nNOT VERIFIED\nLoading on a Pa5X. L3 comes only from an owner's recorded hardware test.";
     inspector_.setText(t, false);
+    staged_->setText("STAGED CHANGES: " + juce::String(style_.unsaved()) + ". Sources are never changed in place; Style Studio edits are staged "
+                     "until Export Pa5X SMF... or Save UASF... writes a new file.", juce::dontSendNotification);
     badges_.setTitle(st::spokenBadges(verification_));   // VoiceOver reads the meaning, not the glyphs
 }
 
@@ -555,7 +850,7 @@ void StudioComponent::resized() {
     }
     r.removeFromTop(10);
     for (auto* p : {(juce::Component*)&res_, (juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
-                    (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
+                    (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
         p->setBounds(r);
 }
 

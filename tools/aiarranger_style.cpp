@@ -23,6 +23,7 @@
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/serializer.h"
 #include "exporters/korg/genos_to_korg.h"
+#include "media/output_guard.h"
 #include "style_edit/style_editor.h"
 
 #include <filesystem>
@@ -89,19 +90,10 @@ bool loadStyle(const std::string& path, uasf::StyleDefinition& out) {
     return true;
 }
 
-// Never overwrites: refuses an existing path, writes a sibling temp file, renames.
+// Never overwrites and never writes onto a mounted volume (media/output_guard.h, shared with the package writers):
+// refuses an existing path or temp file, writes a sibling temp file, renames without replacing.
 bool writeNew(const std::string& path, const std::vector<uint8_t>& bytes) {
-    const std::string tmp = path + ".tmp";
-    for (const auto& p : {path, tmp})
-        if (fs::exists(p)) { std::cerr << p << " exists; refusing to overwrite\n"; return false; }
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!f) { std::cerr << "cannot write " << tmp << "\n"; fs::remove(tmp); return false; }
-    }
-    std::error_code ec;
-    fs::rename(tmp, path, ec);
-    if (ec) { std::cerr << "cannot rename to " << path << ": " << ec.message() << "\n"; fs::remove(tmp); return false; }
+    if (const auto why = media::writeNewFile(path, bytes); !why.empty()) { std::cerr << why << "\n"; return false; }
     return true;
 }
 
