@@ -60,9 +60,16 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
     mapping_.setTitle("Key mapping (proposed; edit and press Preview)");
     mapping_.setTextToShowWhenEmpty("Press Preview: AIArranger measures each sample's pitch and proposes a key map here.", juce::Colour(0xff9090a0));
     addChildComponent(mapping_);
-    for (auto* t : {&name_, &order_, &splits_, &mapping_}) {
+    zoneMap_.setMultiLine(true);
+    zoneMap_.setReturnKeyStartsNewLine(true);
+    zoneMap_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
+    zoneMap_.setTitle("Zone map (layers, splits, root, tune, level, loops; edit and press Preview)");
+    zoneMap_.setTextToShowWhenEmpty("Press Preview: the zone map of the Sound appears here. Edit split points, roots, tune, level, velocity "
+                                    "layers and loops (snap, xfade), then press Preview again.", juce::Colour(0xff9090a0));
+    for (auto* t : {&name_, &order_, &splits_, &mapping_, &zoneMap_}) {
         addAndMakeVisible(*t);
-        t->onTextChange = [this] {   // the preview no longer matches the settings: Generate must not write it
+        t->onTextChange = [this, t] {   // the preview no longer matches the settings: Generate must not write it
+            if (t == &order_ || t == &splits_ || t == &mapping_) zoneMap_.setText({}, false);   // the source changed: propose the zone map again
             ++generation_;
             model_.invalidate();
             generateBtn_.setEnabled(false);
@@ -110,6 +117,7 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
         return false;
     }
     mapping_.setText({}, false);
+    zoneMap_.setText({}, false);
     mapping_.setVisible(model_.ksf());
     resized();
     juce::String s = dir.getFullPathName() + "  -  " + (model_.korg() ? "KRONOS multisamples, " : "") + juce::String(model_.layers().size()) + " layer(s): ";
@@ -139,32 +147,36 @@ void SoundConversionComponent::buildPreview() {
     const auto gen = ++generation_;
     std::thread([this, alive, gen, dir = model_.folder(), name = name_.getText().trim().toStdString(),
                  order = order_.getText().toStdString(), splits = splits_.getText().toStdString(),
-                 mapping = std::make_shared<std::string>(mapping_.getText().toStdString()), notes = std::make_shared<std::string>()] {
+                 mapping = std::make_shared<std::string>(mapping_.getText().toStdString()), notes = std::make_shared<std::string>(),
+                 zoneMap = std::make_shared<std::string>(zoneMap_.getText().toStdString())] {
         auto in = std::make_shared<media::sound::Instrument>();
         auto texts = std::make_shared<std::array<std::string, 2>>();   // checks + preview, recipe
         std::string err;
-        const bool ok = SoundConversionModel::decode(dir, name, order, splits, *in, &err, mapping.get(), notes.get());
+        std::string zoneNotes;
+        const bool ok = SoundConversionModel::decode(dir, name, order, splits, *in, &err, mapping.get(), notes.get(), zoneMap.get(), &zoneNotes);
         if (ok) {   // text building is slow on big Sounds too: keep it off the message thread
             const auto checks = SoundConversionModel::checksOf(*in);
             std::string c = checks.empty() ? "Checks: nothing to report.\n\n" : "Checks (" + std::to_string(checks.size()) + "):\n";
             for (const auto& w : checks) c += "  - " + w + "\n";
-            (*texts)[0] = c + "\n" + SoundConversionModel::previewOf(*in);
+            (*texts)[0] = c + "\n" + (zoneNotes.empty() ? "" : "Zone map loop edits:\n" + zoneNotes + "\n") + SoundConversionModel::previewOf(*in);
             // a KSF folder: what is exact, measured, estimated and missing, before the recipe (the same text goes into REPORT.txt)
             (*texts)[1] = *notes + media::sound::formatRecipe(media::sound::recipeFromSamples(*in));
         }
-        juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err, mapping, notes] {
+        juce::MessageManager::callAsync([this, alive, gen, in, texts, ok, err, mapping, notes, zoneMap] {
             if (alive.expired()) return;
             --jobs_;
             previewBtn_.setEnabled(true);
             if (gen != generation_) return;   // another folder was chosen meanwhile
-            showPreview(ok ? in.get() : nullptr, *texts, err, *mapping, *notes);
+            showPreview(ok ? in.get() : nullptr, *texts, err, *mapping, *notes, *zoneMap);
         });
     }).detach();
 }
 
 void SoundConversionComponent::showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err,
-                                           const std::string& mapping, const std::string& ksfNotes) {
+                                           const std::string& mapping, const std::string& ksfNotes, const std::string& zoneMap) {
     ksfNotes_ = ksfNotes;
+    if (in && zoneMap_.getText().toStdString() != zoneMap)
+        zoneMap_.setText(zoneMap, false);   // the proposed zone map (no change notification: it is what the preview was built from)
     if (model_.ksf() && mapping_.getText().toStdString() != mapping)
         mapping_.setText(mapping, false);   // the proposal (no change notification: it is what the preview was built from)
     if (!in) {
@@ -227,6 +239,8 @@ void SoundConversionComponent::resized() {
     if (mapping_.isVisible()) { mapping_.setBounds(left.removeFromTop(left.getHeight() / 2)); left.removeFromTop(6); }
     preview_.setBounds(left);
     r.removeFromLeft(6);
+    zoneMap_.setBounds(r.removeFromTop(r.getHeight() / 2));
+    r.removeFromTop(6);
     recipe_.setBounds(r);
 }
 

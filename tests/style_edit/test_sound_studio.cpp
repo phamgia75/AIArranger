@@ -316,6 +316,31 @@ int main() {
         TEST("drum source folder unchanged (3 files)", std::distance(fs::directory_iterator(dk), fs::directory_iterator{}) == 3);
     }
 
+    // ── Drum Kit from a folder inside the job (the UI never reads the WAVs) ──
+    {
+        const auto j = run(drumKitFromFolder(root / "drumsrc", "Folder Kit", "36 Kick 1.wav level=-3\nF#2 HH Closed.wav choke=1\n", false, root / "kit-folder"));
+        TEST("drum kit from folder: built in the job, TXPERF published at L1 + L2, source noted",
+             j.phase == Phase::Done && j.level.l2.state == Check::Passed && has(j.writerText, "Source: WAV folder") && has(j.reportMd, "**EXACT** 2 key(s)"));
+        const auto k = run(drumKitFromFolder(root / "drumsrc", "Folder Kit", "36 Kick 1.wav\n", true, root / "kit-folder-kmp"));
+        TEST("drum kit from folder as KMP/KSF: published at L1", k.phase == Phase::Done && k.level.l1.state == Check::Passed && k.level.l2.state != Check::Passed);
+        const auto bad = run(drumKitFromFolder(root / "drumsrc", "Folder Kit", "36 Nope.wav\n", false, root / "kit-bad"));
+        TEST("drum kit from folder: a bad map fails at validate, nothing written", bad.phase == Phase::Failed && bad.stoppedAt == Phase::Validate &&
+                                                                                     has(bad.reason, "Drum Kit refused") && !fs::exists(root / "kit-bad"));
+        const auto in = run(drumKitFromFolder(root / "drumsrc", "Folder Kit", "36 Kick 1.wav\n", false, root / "drumsrc/out"));
+        TEST("drum kit from folder: output inside the source refused", in.phase == Phase::Failed && !fs::exists(root / "drumsrc/out"));
+    }
+
+    // ── Analyze shows the loop seam numerically ──
+    {
+        lab::Sample s;
+        s.rate = 48000;
+        for (size_t i = 0; i < 4800; ++i) s.pcm.push_back(int16_t(std::lround(10000 * std::sin(2 * kPi * double(i) / 100))));
+        s.looped = true; s.loopStart = 100; s.loopEnd = 4025;
+        putBytes(root / "seam.wav", sound::writeWav(s));
+        const auto a = ui::studio::labAnalyze(root / "seam.wav");
+        TEST("Analyze: loop seam jump vs the wave's step, flagged", has(a.text, "Loop seam: jump") && has(a.text, "may click"));
+    }
+
     // ── batch job with convert: conversion section ──
     {
         const auto b = run(labBatch(root / "convin", false, false, root / "convjob", true));

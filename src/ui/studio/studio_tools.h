@@ -77,6 +77,11 @@ inline JobResult labAnalyze(const fs::path& wav) {
     std::snprintf(b, sizeof b, "%zu frames, %u Hz, %u ch, peak %.2f dBFS, RMS %.2f dBFS\n", s.frames(), s.rate, unsigned(s.channels), l.peakDb, l.rmsDb);
     std::string o = "Sample Lab: analyze (read-only preview; nothing is written)\n" + wav.string() + "\n" + b;
     o += s.looped ? "Loop: " + std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd) + "\n" : std::string("Loop: none\n");
+    if (const auto seam = lab::loopSeam(s); seam.has) {   // audition-free: the step at the seam beside the wave's own step
+        std::snprintf(b, sizeof b, "Loop seam: jump %.0f vs the wave's own step %.0f (sample units)%s\n", seam.jump, seam.slope,
+                      seam.jump > 2 * seam.slope + 1 ? ": may click; try snap and/or a crossfade" : ": smooth");
+        o += b;
+    }
     const auto on = lab::detectOnsets(s);
     o += "Onsets (" + std::to_string(on.size()) + "):";
     for (size_t i = 0; i < on.size() && i < 64; ++i) o += " " + std::to_string(on[i]) + " (" + ms(s, on[i]) + ")";

@@ -81,7 +81,8 @@ void StudioComponent::FlowPage::resized() {
     auto r = getLocalBounds();
     for (const auto& row : rows) {
         if (!row.empty() && !row.front().first->isVisible() && std::count(collapse.begin(), collapse.end(), row.front().first)) continue;
-        auto line = r.removeFromTop(28);
+        const auto h = row.empty() ? heights.end() : heights.find(row.front().first);
+        auto line = r.removeFromTop(h == heights.end() ? 28 : h->second);
         for (const auto& [c, w] : row) {
             c->setBounds(w > 0 ? line.removeFromLeft(w) : line);
             if (w > 0) line.removeFromLeft(8);
@@ -261,7 +262,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     });
     auto lab = [this](LabTool t, const juce::String& text, const char* suffix) -> juce::TextButton& {
         return *(labButtons_[t] = &button(text, [this, t, suffix] {
-            if (t == LabTool::Analyze || t == LabTool::BatchPreview) { runLabTool(t); return; }
+            if (t == LabTool::Analyze || t == LabTool::BatchPreview || t == LabTool::DrumMap) { runLabTool(t); return; }
             chooseFolder("Parent folder for the new output folder (local disk)", [this, t, suffix](juce::File parent) {
                 runLabTool(t, parent.getChildFile(juce::File::createLegalFileName(labIn_.getFileNameWithoutExtension() + suffix)));
             });
@@ -272,6 +273,15 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     auto& lp = lab(LabTool::Loop, "Loop...", " loop");
     auto& bp = lab(LabTool::BatchPreview, "Batch Preview (duplicates)", "");
     auto& bw = lab(LabTool::Batch, "Batch...", " batch");
+    auto& dm = lab(LabTool::DrumMap, "Propose Drum Map", "");
+    auto& dt = lab(LabTool::DrumKitTx, "Drum Kit (TXPERF)...", " kit");
+    auto& dk = lab(LabTool::DrumKitKmp, "Drum Kit (KMP/KSF)...", " kit KMP");
+    labDrumMap_.setMultiLine(true);
+    labDrumMap_.setReturnKeyStartsNewLine(true);
+    labDrumMap_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
+    labDrumMap_.setTitle("Drum map (one sample per key; edit, then build)");
+    labDrumMap_.setTextToShowWhenEmpty("Choose a WAV folder and press Propose Drum Map: <key> <file> group= choke= level= pan= family=", kText2);
+    labDrumMap_.onTextChange = [this] { refreshAvailability(); };
     labPage_.rows = {
         {{&chooseWav, 140}, {&chooseWavDir, 160}, {&labInput_, 0}},
         {{&an, 200}, {&reasonFor(an), 0}},
@@ -279,9 +289,13 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         {{&label("Loop start", kText2), 70}, {&labStart_, 90}, {&label("end", kText2), 32}, {&labEnd_, 90}, {&label("snap", kText2), 36},
          {&labSnap_, 50}, {&label("xfade", kText2), 40}, {&labXfade_, 60}},
         {{&lp, 130}, {&reasonFor(lp), 0}},
-        {{&labTrim_, 130}, {&labNorm_, 190}, {&bp, 200}, {&reasonFor(bp), 0}},
+        {{&labTrim_, 130}, {&labNorm_, 190}, {&labConvert_, 240}, {&bp, 200}, {&reasonFor(bp), 0}},
         {{&bw, 130}, {&reasonFor(bw), 0}},
+        {{&labWave_, 0}},
+        {{&dm, 160}, {&dt, 170}, {&dk, 170}, {&reasonFor(dt), 0}},
+        {{&labDrumMap_, 0}},
     };
+    labPage_.heights = {{&labWave_, 110}, {&labDrumMap_, 110}};
     labPage_.fill = &labReport_;
     for (auto& row : labPage_.rows) for (auto& [c, w] : row) labPage_.addAndMakeVisible(c);
     labPage_.addAndMakeVisible(labReport_);
@@ -907,8 +921,10 @@ void StudioComponent::setLabInput(const juce::File& f) {
 
 juce::String StudioComponent::labUnavailable(LabTool t) const {
     if (jobs_ > 0) return "Needs: the running job to finish";
-    const bool folder = t == LabTool::BatchPreview || t == LabTool::Batch;
-    if (folder) return labIn_.isDirectory() ? "" : "Needs: a folder of WAVs (Choose WAV Folder...)";
+    const bool folder = t == LabTool::BatchPreview || t == LabTool::Batch || t == LabTool::DrumMap || t == LabTool::DrumKitTx || t == LabTool::DrumKitKmp;
+    if (folder && !labIn_.isDirectory()) return "Needs: a folder of WAVs (Choose WAV Folder...)";
+    if ((t == LabTool::DrumKitTx || t == LabTool::DrumKitKmp) && labDrumMap_.isEmpty()) return "Needs: a drum map (Propose Drum Map, then edit)";
+    if (folder) return "";
     return labIn_.existsAsFile() && labIn_.hasFileExtension("wav") ? "" : "Needs: a WAV file (Choose WAV...)";
 }
 
@@ -917,17 +933,56 @@ void StudioComponent::runLabTool(LabTool t, const juce::File& dest) {
     const auto in = labIn_.getFullPathName().toStdString(), out = dest.getFullPathName().toStdString();
     const auto n = [](juce::TextEditor& e) { return e.getText().getDoubleValue(); };
     switch (t) {
-        case LabTool::Analyze: runOutputJob("Sample Lab analyze", labReport_, [in] { return st::labAnalyze(in); }); break;
+        case LabTool::Analyze: {
+            runOutputJob("Sample Lab analyze", labReport_, [in] { return st::labAnalyze(in); });
+            ++jobs_;   // the waveform is read on a worker too
+            std::thread([this, alive = std::weak_ptr<bool>(alive_), in] {
+                std::string err;
+                auto d = WaveView::load(in, &err);
+                juce::MessageManager::callAsync([this, alive, d] {
+                    if (alive.expired()) return;
+                    --jobs_;
+                    labWave_.setData(d);
+                    refreshAvailability();
+                });
+            }).detach();
+            break;
+        }
+        case LabTool::DrumMap: {   // the folder listing is file work: a worker, then the text lands in the map editor
+            ++jobs_;
+            refreshAvailability();
+            std::thread([this, alive = std::weak_ptr<bool>(alive_), in] {
+                std::string text;
+                const auto err = media::samplelab::proposeDrumMap(in, &text);
+                juce::MessageManager::callAsync([this, alive, err, text] {
+                    if (alive.expired()) return;
+                    --jobs_;
+                    if (err.empty()) labDrumMap_.setText(juce::String::fromUTF8(text.c_str()), false);
+                    labReport_.setText(err.empty() ? juce::String("Drum map proposed (one key per WAV from C2). Edit groups, choke, level, pan, family; then build.")
+                                                   : "Drum map not proposed: " + juce::String::fromUTF8(err.c_str()), false);
+                    refreshAvailability();
+                });
+            }).detach();
+            break;
+        }
+        case LabTool::DrumKitTx:
+        case LabTool::DrumKitKmp: {
+            const auto name = labIn_.getFileName().substring(0, 20).trim().toStdString();
+            enqueue(jobs::drumKitFromFolder(in, name.empty() ? "Drum Kit" : name, labDrumMap_.getText().toStdString(), t == LabTool::DrumKitKmp, out), &labReport_);
+            break;
+        }
         case LabTool::Slice: enqueue(jobs::labSlice(in, n(labBars_), n(labBeats_), out), &labReport_); break;
         case LabTool::Loop:
             enqueue(jobs::labLoop(in, uint32_t(n(labStart_)), uint32_t(n(labEnd_)), uint32_t(n(labSnap_)), uint32_t(n(labXfade_)), out), &labReport_);
             break;
         case LabTool::BatchPreview:   // read-only: nothing is written, so no export job
-            runOutputJob("Sample Lab batch preview", labReport_, [in, tr = labTrim_.getToggleState(), no = labNorm_.getToggleState()] {
-                return st::labBatch(in, tr, no, {});
+            runOutputJob("Sample Lab batch preview", labReport_, [in, tr = labTrim_.getToggleState(), no = labNorm_.getToggleState(), cv = labConvert_.getToggleState()] {
+                return st::labBatch(in, tr, no, {}, cv);
             });
             break;
-        case LabTool::Batch: enqueue(jobs::labBatch(in, labTrim_.getToggleState(), labNorm_.getToggleState(), out), &labReport_); break;
+        case LabTool::Batch:
+            enqueue(jobs::labBatch(in, labTrim_.getToggleState(), labNorm_.getToggleState(), out, labConvert_.getToggleState()), &labReport_);
+            break;
     }
 }
 

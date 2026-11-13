@@ -169,6 +169,32 @@ inline ExportSpec drumKitKmp(std::shared_ptr<const snd::DrumKit> kit, std::strin
     return s;
 }
 
+// Drum Kit from a WAV folder and its drum map (samplelab/drum_builder.h), as a TXPERF package or (kmp) a KMP/KSF folder.
+// The WAVs are read inside the job (its validate phase, a worker thread), never on the caller's thread; then every
+// phase is the drumKit / drumKitKmp spec's own. The folder is a source (D18).
+inline ExportSpec drumKitFromFolder(fs::path dir, std::string name, std::string map, bool kmp, fs::path dest) {
+    ExportSpec s;
+    s.type = kmp ? "Drum Kit as KMP/KSF folder (EXPERIMENTAL)" : "Drum Kit package";
+    s.source = dir.string();
+    s.sources = {dir};
+    s.dest = dest;
+    auto in = std::make_shared<ExportSpec>();
+    s.validate = [=] {
+        auto kit = std::make_shared<snd::DrumKit>();
+        std::string notes;
+        if (const auto e = media::samplelab::buildDrumKit(dir, name, map, kit.get(), &notes); !e.empty()) return "Drum Kit refused: " + e;
+        notes = "Source: WAV folder " + dir.string() + " and its drum map\n" + (notes.empty() ? "" : "Converted to 16-bit / Pa5X rate:\n" + notes);
+        *in = kmp ? drumKitKmp(kit, notes, dest) : drumKit(kit, notes, dest);
+        return in->validate();
+    };
+    s.dependencies = [in](auto& n, auto& b) { return in->dependencies(n, b); };
+    s.preview = [in] { return in->preview(); };
+    s.write = [in](const fs::path& out, const auto& p) { return in->write(out, p); };
+    s.verify = [in](const fs::path& out) { return in->verify(out); };
+    s.conversion = [in] { return in->conversion(); };
+    return s;
+}
+
 // KMP/KSF folder (EXPERIMENTAL, verification level L1 only).
 inline ExportSpec kmpFolder(std::shared_ptr<const snd::Instrument> in, fs::path dest) {
     auto s = soundPackage(in, {}, {}, std::move(dest));
