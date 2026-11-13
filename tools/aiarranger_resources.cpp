@@ -6,6 +6,8 @@
 //   delete-check ID PKG...                  InUse / Unprovable / Unreferenced, with reasons
 //   remap FROM TO PKG...                    references a remap would rewrite, conflicts, warnings
 //   memory-compare BEFORE AFTER PKG...      transcribed Pa5X Memory Info readings vs the raw PCM prediction
+//   panative inspect FILE|FOLDER            READ-ONLY / EXPERIMENTAL: Pa-native (SET) container check + item
+//                                           names/slots (media/panative/panative_reader.h); exit 3 = an invalid file, 1 = unreadable
 // Every command also takes --evidence FILE (repeatable, before the other arguments): an owner-authorized
 // aiarranger-evidence file (media/sound/evidence_import.h) added as a separate evidence source.
 // PKG is a package folder written by aiarranger-sound (it holds RESOURCES.tsv); every sample is checked
@@ -13,6 +15,7 @@
 // unknown and never enter the graph or the sample count.
 // Exit 0 = ok (budget fits / delete provable / remap conflict-free), 3 = not, 1 = usage or input error.
 #include "media/kst_inventory.h"
+#include "media/panative/panative_reader.h"
 #include "media/sound/evidence_import.h"
 #include "media/sound/memory_check.h"
 #include <cstdio>
@@ -29,6 +32,7 @@ static int usage() {
                          "       aiarranger-resources delete-check ID PKG...\n"
                          "       aiarranger-resources remap FROM TO PKG...\n"
                          "       aiarranger-resources memory-compare BEFORE AFTER PKG...\n"
+                         "       aiarranger-resources panative inspect FILE|FOLDER   (read-only, experimental)\n"
                          "  any command: --evidence FILE (owner-authorized evidence, repeatable)\n");
     return 1;
 }
@@ -38,9 +42,33 @@ static std::string edgeText(const graph::Edge& e) {
            (e.source == graph::Source::PaManagerReport ? "  [evidence: " + e.provenance + "]" : "");
 }
 
+// Every regular file of FOLDER (symlinks not followed) or one FILE. Files without the wrapper are listed, not errors.
+static int panativeInspect(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<std::pair<std::string, fs::path>> files;
+    if (fs::is_directory(fs::symlink_status(path, ec))) {
+        ai_arranger::media::detail::Listing l;
+        std::string err;
+        if (!ai_arranger::media::detail::listFiles(path, l, err)) { std::fprintf(stderr, "ERROR: %s\n", err.c_str()); return 1; }
+        for (const auto& [rel, e] : l.files) files.emplace_back(rel, e.abs);
+    } else files.emplace_back(path, path);
+    std::printf("Pa-native container inspection (READ-ONLY, EXPERIMENTAL; layout observed on one owner Pa700 SET, not documented by Korg)\n");
+    int invalid = 0, unreadable = 0;
+    for (const auto& [label, f] : files) {
+        const auto c = panative::readFile(f);
+        invalid += c.wrapper && !c.ok;
+        unreadable += c.ioError;
+        std::fputs(panative::format(c, label).c_str(), stdout);
+    }
+    std::printf("Files: %zu, invalid Pa-native containers: %d, unreadable: %d. Item payloads were not decoded.\n", files.size(), invalid, unreadable);
+    return unreadable ? 1 : invalid ? 3 : 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
     const std::string cmd = argv[1];
+    if (cmd == "panative") return argc == 4 && std::string(argv[2]) == "inspect" ? panativeInspect(argv[3]) : usage();
     std::vector<std::string> args(argv + 2, argv + argc);
     bool json = false;
     std::string kst;
