@@ -192,7 +192,11 @@ std::string saveError(const StyleDefinition& s) {
         if (s.sections[i].tracks.size() > uasf::format::kMaxTracksPerSection)
             return "cannot be kept as UASF: element " + std::to_string(i) + " has " + std::to_string(s.sections[i].tracks.size()) +
                    " tracks, UASF holds at most " + std::to_string(uasf::format::kMaxTracksPerSection);
-    if (const auto w = uasf::UasfSerializer().serialize(s); !w.success) return "cannot be kept as UASF: " + w.error;
+    const auto w = uasf::UasfSerializer().serialize(s);
+    if (!w.success) return "cannot be kept as UASF: " + w.error;
+    if (w.data.size() > uasf::format::kMaxFileSize)   // the reader refuses it: a save would never reopen
+        return "cannot be kept as UASF: " + std::to_string((w.data.size() + (1u << 20) - 1) >> 20) + " MiB, a UASF file opens only up to " +
+               std::to_string(uasf::format::kMaxFileSize >> 20) + " MiB";
     return {};
 }
 
@@ -510,8 +514,11 @@ EditResult StyleEditor::setSound(uint8_t kch, std::optional<uasf::KorgSound> snd
         if (element && std::none_of(s.sections.begin(), s.sections.end(), [&](const auto& x) { return x.type == *element; }))
             return "no element " + std::string(sectionTypeName(*element));
         if (element) { if (snd) k.element_sounds[{*element, kch}] = *snd; else k.element_sounds.erase({*element, kch}); }
-        else if (snd) k.sounds[kch] = *snd;
-        else k.sounds.erase(kch);
+        else {   // style-wide = in every element: it replaces this track's element sounds (Codex r4 #3)
+            if (snd) k.sounds[kch] = *snd;
+            else k.sounds.erase(kch);
+            for (auto it = k.element_sounds.begin(); it != k.element_sounds.end();) it = it->first.second == kch ? k.element_sounds.erase(it) : std::next(it);
+        }
         r.changed = 1;
         return {};
     });

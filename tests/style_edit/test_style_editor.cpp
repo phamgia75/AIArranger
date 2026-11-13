@@ -710,6 +710,52 @@ static void testKorgSmfImport() {
     TEST("plain SMF without markers refused", !importKorgSmf(smf1(), "x").ok);
 }
 
+static void testR4() {
+    std::printf("Codex r4: the reader's 10 MiB file limit; a style-wide sound replaces element sounds\n");
+    {   // #2: one element of 16 tracks x 50,000 events fits (~6.4 MB); a copy of it would not reopen (> kMaxFileSize)
+        auto s = makeStyle();
+        s.sections.resize(1);
+        auto& sec = s.sections[0];
+        sec.bars = 16;   // 30,720 ticks
+        sec.tracks.clear();
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            uasf::TrackDefinition t{"T" + std::to_string(ch), ch, ch == 9 ? uasf::TrackRole::Drum : uasf::TrackRole::Chord, ch == 9, {}, {}};
+            for (uint64_t i = 0; i < 25000; ++i) note(t, i, 1, 60, 100);
+            sec.tracks.push_back(std::move(t));
+        }
+        const auto one = uasf::UasfSerializer().serialize(s);
+        TEST("r4#2: the one-element Style is within the reader's file limit", one.success && one.data.size() <= uasf::format::kMaxFileSize &&
+             saveError(s).empty());
+        auto two = s;
+        two.sections.push_back(s.sections[0]);
+        two.sections[1].type = uasf::SectionType::Main2;
+        const auto big = uasf::UasfSerializer().serialize(two);
+        TEST("r4#2: the copied Style serializes, past the reader's limit, and saveError says so", big.success &&
+             big.data.size() > uasf::format::kMaxFileSize && !saveError(two).empty());
+        StyleEditor ed(s);
+        const auto r = ed.copySection(0, uasf::SectionType::Main2);
+        TEST("r4#2: a copy past the reader's 10 MiB limit is refused with the reason, nothing changed",
+             !r.ok && r.error.find("MiB") != std::string::npos && ed.style().sections.size() == 1 && !ed.history().canUndo());
+    }
+    {   // #3: precedence: "Track: Pa5X sound" applies in every element, so it replaces that track's element sounds
+        StyleEditor ed(makeStyle());
+        ed.setSound(korg::kBassCh, uasf::KorgSound{8, 0, 5}, uasf::SectionType::Main2);
+        ed.setSound(korg::kDrumCh, uasf::KorgSound{120, 0, 1}, uasf::SectionType::Main2);
+        TEST("r4#3: style-wide sound set", ed.setSound(korg::kBassCh, uasf::KorgSound{121, 3, 34}, std::nullopt).ok);
+        const auto x = exportPa5xSmf(ed.style());
+        auto pc = [&](size_t el, uint8_t ch, uint8_t prog) {
+            return std::any_of(x.korg.elements[el].events.begin(), x.korg.elements[el].events.end(),
+                               [&](const auto& e) { return e.status == (0xC0 | ch) && e.d1 == prog; });
+        };
+        TEST("r4#3: the style-wide sound is exported in every element (the element sound is replaced)",
+             x.ok && pc(0, korg::kBassCh, 34) && pc(1, korg::kBassCh, 34) && !pc(1, korg::kBassCh, 5) &&
+             !ed.style().korg_export.element_sounds.count({uasf::SectionType::Main2, korg::kBassCh}));
+        TEST("r4#3: other tracks' element sounds are kept", ed.style().korg_export.element_sounds.count({uasf::SectionType::Main2, korg::kDrumCh}) == 1);
+        TEST("r4#3: one undo restores the element sound", ed.undo() &&
+             ed.style().korg_export.element_sounds.at({uasf::SectionType::Main2, korg::kBassCh}) == (uasf::KorgSound{8, 0, 5}));
+    }
+}
+
 int main() {
     std::printf("Test: Style Studio editing core\n");
     testGrid();
@@ -731,6 +777,7 @@ int main() {
     testSectionNames();
     testR2();
     testR3();
+    testR4();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

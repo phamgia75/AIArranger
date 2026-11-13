@@ -123,6 +123,7 @@ public:
     // Part: source channel -> the part channel it plays (the CASM route; korgChannelFor gives the Korg track).
     EditResult setPart(uint8_t sourceChannel, uint8_t partChannel);
     // Sound of a Korg track (8-15): in every element, or in `element` only; nullopt sound = unresolved (removed).
+    // Every element: that track's element sounds are removed too (style-wide wins; set element sounds after it).
     EditResult setSound(uint8_t korgChannel, std::optional<uasf::KorgSound> sound, std::optional<uasf::SectionType> element);
 
     bool undo() { return history_.undo(style_); }
