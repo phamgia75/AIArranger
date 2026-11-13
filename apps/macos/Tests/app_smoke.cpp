@@ -1050,6 +1050,43 @@ int main() {
             TEST("library manager: an existing plan folder is never overwritten", lm.reportText().contains("already exists"));
             TEST("library manager: the libraries are unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
             TEST("library manager: reasons still inline with libraries open", reasonsShown());
+            // E8: the validator view, and a plan executed at file level into a NEW library (a copy of the target)
+            lm.showView(V::Plan);
+            waitLm(5000);
+            TEST("library manager E8: a blocked plan says why Execute is refused", lm.reportText().contains("Execute Plan: refused: the plan has 1 conflict(s)"));
+            TEST("library manager E8: Reveal needs an executed plan", lm.unavailable(A::Reveal) == "Needs: an executed plan");
+            lm.clearPlan();
+            lm.showView(V::Validation);
+            waitLm(5000);
+            TEST("library manager E8: Validation view runs the structural validator on both sides", lm.reportText().contains("Library A: Structural validation") &&
+                 lm.reportText().contains("Rule table: Pa5X KST") && lm.reportText().contains("not verified on a keyboard"));
+            const auto bytesOf = [](const fs::path& d) {
+                std::map<std::string, std::string> m;
+                for (const auto& e : fs::recursive_directory_iterator(d))
+                    if (e.is_regular_file()) { std::ifstream f(e.path(), std::ios::binary); m[e.path().string()] = std::string(std::istreambuf_iterator<char>(f), {}); }
+                return m;
+            };
+            const auto mineBefore = bytesOf(root / "Mine.KST"), otherBefore = bytesOf(root / "Other.KST");
+            lm.selectRow('A', 0);   // Hit.PDC: B has no PAD/USER01, so the copy makes that bank in B's copy
+            lm.addStep(A::Copy);
+            waitLm(5000);
+            TEST("library manager E8: a conflict-free plan is ready to execute", lm.plan().size() == 1 && lm.reportText().contains("Execute Plan: ready") &&
+                 lm.unavailable(A::Execute).isEmpty());
+            fs::create_directories(root / "exec");
+            lm.executePlan(juce::File((root / "exec").string()));
+            TEST("library manager E8: execution queued as an export job, progress shown", lm.busy() && lm.progressText().contains("export job #"));
+            waitLm(10000);
+            const fs::path outLib = lm.lastOutput().getFullPathName().toStdString();
+            TEST("library manager E8: a NEW library named after the target, with the copied file",
+                 outLib.parent_path() == root / "exec" && outLib.filename().string().rfind("Other edited ", 0) == 0 && outLib.extension() == ".KST" &&
+                 fs::is_regular_file(outLib / "PAD/USER01/Hit.PDC") && fs::is_regular_file(outLib / "PAD/USER09/Kick.PDC") &&
+                 fs::is_regular_file(outLib.string() + ".manifest.sha256") && fs::is_regular_file(outLib.string() + ".export.md"));
+            TEST("library manager E8: result shown with its label and checks; Reveal available",
+                 lm.reportText().contains("Plan executed into a NEW library") && lm.reportText().contains("file-level operation; not verified on a keyboard") &&
+                 lm.reportText().contains("PASS  plan re-check") && lm.progressText().startsWith("Executed: ") && lm.unavailable(A::Reveal).isEmpty());
+            TEST("library manager E8: both sources byte-identical after the execution", bytesOf(root / "Mine.KST") == mineBefore &&
+                 bytesOf(root / "Other.KST") == otherBefore);
+            lm.clearPlan();
         }
         phase("studio: sample lab");
         {
@@ -1768,6 +1805,15 @@ int main() {
         waitIdle(5000);
         TEST("studio: KST Inventory runs in-process and sets no badge", st.jobsText().contains("File level only") &&
              st.badgeText() == juce::String::fromUTF8("\xE2\x97\x87 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3"));
+        put(root / "Loose.KST/STYLE/USER01/x.STG", "x");
+        put(root / "Loose.KST/NOTES.TXT", "n");   // a loose top-level file: R-06 WARN
+        st.setValidationTarget(juce::File((root / "Loose.KST").string()));
+        st.runValidator(app::StudioComponent::Validator::LibraryStructure);
+        waitIdle(5000);
+        TEST("studio E8: Library Structure validator: rule table, finding with its source, L1 from the validator, L2 not applicable",
+             st.jobsText().contains("Rule table: Pa5X KST") && st.jobsText().contains("WARN  R-06  NOTES.TXT") && st.jobsText().contains("[MAN5 p.738") &&
+             st.jobsText().contains("0 error(s), 1 warning(s)") && st.verification().l1.state == ui::studio::Check::Passed &&
+             st.verification().l2.state == ui::studio::Check::NotRun);
         media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ2", "", &err);
         juce::File sf2;
         for (const auto& e : fs::directory_iterator(root / "organ2")) if (e.path().extension() == ".sf2") sf2 = juce::File(e.path().string());

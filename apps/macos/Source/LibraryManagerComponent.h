@@ -3,21 +3,22 @@
 // Library Workspace > Library Manager (E7): two read-only libraries side by side (a Pa5X KST folder or a Pa-family SET
 // folder each), one search box over both, and four views: item Details (with evidenced dependencies only), Compare
 // (file level), Duplicates (SHA-256 files; names flagged as name-only) and Plan (staged copy / move / rename / bank
-// swap steps with their conflicts and warnings). Plans are EXPORT-ONLY documents written as a new local folder by an
-// export job (E6: the studio's queue, both libraries as its sources); no keyboard file is ever written. Every unavailable action shows its reason next to it. Loading, comparing and
+// swap steps with their conflicts and warnings) and Validation (the structural validator, E8). A plan is exported as a
+// document, or (E8) executed at file level into a NEW library, a copy of the target, by an export job (E6: the studio's
+// queue, both libraries as its sources); the sources are never written. Every unavailable action shows its reason next to it. Loading, comparing and
 // exporting run on worker threads; nothing here touches MIDI or audio.
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "JobPort.h"
 #include "library/latest_worker.h"
-#include "library/library_plan.h"
+#include "library/library_apply.h"
 
 namespace ai_arranger::app {
 
-class LibraryManagerComponent : public juce::Component {
+class LibraryManagerComponent : public juce::Component, private juce::Timer {
 public:
-    enum class View { Details, Compare, Duplicates, Plan };
-    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Export };
+    enum class View { Details, Compare, Duplicates, Plan, Validation };
+    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Export, Execute, Reveal, Validate };
 
     LibraryManagerComponent();
     ~LibraryManagerComponent() override;
@@ -33,8 +34,14 @@ public:
     void showView(View v);                                 // Compare is asynchronous
     void addStep(Action a);                                // Copy, Move, Rename or SwapBanks from the current selection
     void exportPlan(const juce::File& dest);               // an export job: a NEW local folder (plan.json, PLAN.txt)
+    void clearPlan() { plan_.clear(); ++planRev_; showView(View::Plan); }
+    void executePlan(const juce::File& parent);            // E8 export job: a NEW library "<target> edited <time>" in `parent`
+    juce::File lastOutput() const { return lastOutput_; }  // the last executed library (Reveal)
+    juce::ToggleButton& wholeFile() { return wholeFile_; } // SET: Copy / Move / Rename act on the whole bank file
+    juce::String progressText() const { return progress_.getText(); }
     // Set by the studio: queues an export job, `done` runs on the message thread once it has finished. Returns its id.
     std::function<uint64_t(jobs::ExportSpec, std::function<void(const jobs::JobState&)> done)> enqueueJob;
+    std::function<std::optional<jobs::JobState>(uint64_t)> jobState;   // set by the studio: progress of a running job
     juce::String unavailable(Action a) const;              // "" when it can run now
 
     juce::TextEditor& search() { return search_; }
@@ -80,7 +87,11 @@ private:
     std::vector<std::vector<std::pair<juce::Component*, int>>> actionRows_;   // rows between the lists and the report
     juce::TextButton *openA_ = nullptr, *openB_ = nullptr, *details_ = nullptr;
     juce::TextEditor search_, value_, report_;
-    juce::Label hint_;
+    juce::Label hint_, progress_;
+    juce::ToggleButton wholeFile_{"Whole bank file (SET)"};
+    juce::File lastOutput_;
+    uint64_t execJob_ = 0;   // the execution job shown in progress_ (message thread)
+    void timerCallback() override;
     bool working() const { return jobs_ > 0 || planJobs_.waiting(); }
     int jobs_ = 0;   // message thread only
     PendingJobs planJobs_;   // plan export jobs in the studio's queue, until each has landed (message thread)

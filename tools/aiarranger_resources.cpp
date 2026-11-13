@@ -8,12 +8,15 @@
 //   memory-compare BEFORE AFTER PKG...      transcribed Pa5X Memory Info readings vs the raw PCM prediction
 //   panative inspect FILE|FOLDER            READ-ONLY / EXPERIMENTAL: Pa-native (SET) container check + item
 //                                           names/slots (media/panative/panative_reader.h); exit 3 = an invalid file, 1 = unreadable
+//   validate FOLDER                         file-level structural check of a KST or SET folder against the rule table
+//                                           of its layout (library/library_validate.h); exit 3 = an ERROR finding, 1 = unreadable
 // Every command also takes --evidence FILE (repeatable, before the other arguments): an owner-authorized
 // aiarranger-evidence file (media/sound/evidence_import.h) added as a separate evidence source.
 // PKG is a package folder written by aiarranger-sound (it holds RESOURCES.tsv); every sample is checked
 // against its WAV. --kst only summarises an undecoded KST folder (kst-inventory): its resources are
 // unknown and never enter the graph or the sample count.
 // Exit 0 = ok (budget fits / delete provable / remap conflict-free), 3 = not, 1 = usage or input error.
+#include "library/library_validate.h"
 #include "media/kst_inventory.h"
 #include "media/panative/panative_reader.h"
 #include "media/sound/evidence_import.h"
@@ -33,6 +36,7 @@ static int usage() {
                          "       aiarranger-resources remap FROM TO PKG...\n"
                          "       aiarranger-resources memory-compare BEFORE AFTER PKG...\n"
                          "       aiarranger-resources panative inspect FILE|FOLDER   (read-only, experimental)\n"
+                         "       aiarranger-resources validate FOLDER   (KST or SET folder, file level, read-only)\n"
                          "  any command: --evidence FILE (owner-authorized evidence, repeatable)\n");
     return 1;
 }
@@ -54,6 +58,12 @@ static int panativeInspect(const std::string& path) {
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
     const std::string cmd = argv[1];
+    if (cmd == "validate") {
+        if (argc != 3) return usage();
+        const auto v = ai_arranger::library::validate(argv[2]);
+        std::fputs(ai_arranger::library::validationText(v).c_str(), v.ok ? stdout : stderr);
+        return !v.ok ? 1 : v.count(ai_arranger::library::Severity::Error) ? 3 : 0;
+    }
     if (cmd == "panative") return argc == 4 && std::string(argv[2]) == "inspect" ? panativeInspect(argv[3]) : usage();
     std::vector<std::string> args(argv + 2, argv + argc);
     bool json = false;

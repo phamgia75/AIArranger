@@ -318,6 +318,14 @@ inline std::string format(const Inventory& inv, const std::string& label, uintma
     }
     o << "\nSkipped (symlinks and special files, not followed): " << inv.skipped.size() << "\n";
     for (const auto& s : inv.skipped) o << "  " << s << "\n";
+    if (isSetLayout(inv.layout)) {   // the Pa5X budget and Media listing are Pa5X facts: not applied to a Pa4X/Pa700-family SET
+        const auto stat = [&](const char* t) { const auto it = inv.by_type.find(t); return it == inv.by_type.end() ? ExtStats{} : it->second; };
+        o << "\nSample data on disk (.PCM + .KMP file sizes): " << stat("Sample").bytes + stat("Multisample").bytes << " bytes\n"
+          << "  No Pa5X memory budget applied: this is a SET (Pa4X/Pa700 family); a Pa5X reads a SET only through its one-way\n"
+          << "  Data Conversion (Pa5X manual p.737). The SET's own keyboard limits are not modelled.\n"
+          << "\nFile contents were not interpreted. Compare against the keyboard's Media listing (HARDWARE VALIDATION PENDING).\n";
+        return o.str();
+    }
     o << formatMemoryEstimate(inv, budget);
     o << "\nFile contents were not interpreted. Compare against the Pa5X Media listing "
          "(HARDWARE VALIDATION PENDING).\n";

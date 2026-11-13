@@ -213,11 +213,11 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     ioPage_.collapse = {workStatus_, waitQuitBtn_};   // the quit prompt's rows take no space while it is hidden
     manager_.enqueueJob = [this](jobs::ExportSpec spec, std::function<void(const jobs::JobState&)> done) { return enqueue(std::move(spec), nullptr, std::move(done)); };
     // Backup KST, Convert Sound Generate and Sample Plugin Generate run in this window's one queue too (job list, busy(), Cancel Job)
-    res_.setJobPort({manager_.enqueueJob, [this](uint64_t id) { queue_->cancel(id); },
-                     [this](uint64_t id) -> std::optional<jobs::JobState> {
-                         for (const auto& j : queue_->snapshot()) if (j.id == id) return j;
-                         return std::nullopt;
-                     }});
+    manager_.jobState = [this](uint64_t id) -> std::optional<jobs::JobState> {
+        for (const auto& j : queue_->snapshot()) if (j.id == id) return j;
+        return std::nullopt;
+    };
+    res_.setJobPort({manager_.enqueueJob, [this](uint64_t id) { queue_->cancel(id); }, manager_.jobState});
     leftovers_.setColour(juce::Label::textColourId, kPending);
     leftovers_.setColour(juce::Label::backgroundColourId, kSurface2);
     leftovers_.setJustificationType(juce::Justification::centredLeft);
@@ -358,6 +358,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     auto& sm = validator(Validator::StyleSmf, "Style SMF Check (L1)");
     auto& sp = validator(Validator::SoundPy, "Sound Validator (Python)");
     auto& dp = validator(Validator::DrumKitPy, "Drum Kit Validator (Python)");
+    auto& ls = validator(Validator::LibraryStructure, "Library Structure (KST/SET)");
     l3Btn_ = &button("Attach L3 Record...", [this] {
         chooseFolder("Owner's L3 hardware test record (aiarranger-l3-record)", [this](juce::File f) { attachL3Record(f); }, true, "*.txt;*.md");
     });
@@ -370,6 +371,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         {{&sm, 200}, {&reasonFor(sm), 0}},
         {{&sp, 200}, {&reasonFor(sp), 0}},
         {{&dp, 200}, {&reasonFor(dp), 0}},
+        {{&ls, 200}, {&reasonFor(ls), 0}},
         {{l3Btn_, 200}, {&reasonFor(*l3Btn_), 0}},
         {{&badges_, 0}},
         {{&label("L1 structural: our validator checked the files.  L2 app: our reader re-opened them.  "
@@ -716,7 +718,8 @@ juce::String StudioComponent::validatorUnavailable(Validator v) const {
     const bool isDir = validationTarget_.isDirectory();
     switch (v) {
         case Validator::VerifyPackage:
-        case Validator::KstInventory: return isDir ? "" : "Needs: a folder (the target is a file)";
+        case Validator::KstInventory:
+        case Validator::LibraryStructure: return isDir ? "" : "Needs: a folder (the target is a file)";
         case Validator::Sf2Check: return !isDir && validationTarget_.hasFileExtension("sf2") ? "" : "Needs: an .sf2 file (Choose SF2...)";
         case Validator::StyleSmf: return !isDir && validationTarget_.hasFileExtension("mid") ? "" : "Needs: a Style .mid file (Choose MIDI...)";
         case Validator::SoundPy:
@@ -747,7 +750,17 @@ void StudioComponent::runValidator(Validator v) {
         case Validator::KstInventory:
             runJob("KST Inventory", [target]() -> Out {
                 return {juce::String(ui::ResourceBrowserModel::kst(ui::ResourceBrowserModel::KstAction::Inventory, target)) +
-                            "\nFile level only: no KST structural (L1) validator exists yet, so no badge is set.", std::nullopt};
+                            "\nFile level only: an inventory sets no badge (the structural check is Library Structure (KST/SET)).", std::nullopt};
+            });
+            break;
+        case Validator::LibraryStructure:
+            runJob("Library Structure", [target, alive]() -> Out {   // E8 validator: the rule table of the detected layout
+                const auto r = library::validate(target, [alive] { return !alive.expired(); });
+                st::Verification ver;
+                ver.l1 = {!r.ok ? st::Check::NotRun : r.count(library::Severity::Error) ? st::Check::Failed : st::Check::Passed,
+                          "library structure (file level): " + std::to_string(r.count(library::Severity::Error)) + " error(s)"};
+                ver.l2 = {st::Check::NotRun, "not applicable: file content is not decoded"};
+                return {juce::String(library::validationText(r)), r.ok ? std::optional<st::Verification>(ver) : std::nullopt};
             });
             break;
         case Validator::Sf2Check:

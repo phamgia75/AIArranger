@@ -114,6 +114,9 @@ int main() {
          i7.by_type.at("Multisample").files == 1);
     TEST("report names the layout and the SET table", format(i7, "x").find("Layout: Pa700/Pa1000-family SET") != std::string::npos &&
          format(i7, "x").find("By documented SET file type") != std::string::npos);
+    TEST("SET report: no Pa5X budget or Pa5X load warning (E8)", format(i7, "x").find("PA5X") == std::string::npos &&
+         format(i7, "x").find("Pa5X sample RAM") == std::string::npos && format(i7, "x").find("Pa5X Media listing") == std::string::npos &&
+         format(i7, "x").find("WHOLE KST") == std::string::npos && format(i7, "x").find("No Pa5X memory budget applied") != std::string::npos);
     const fs::path p4 = root / "MY.SET";
     put(p4 / "SOUND/USERDK.PCG", "d"); put(p4 / "KEYBOARDSET/USER01.PRF", "k");
     TEST("Pa4X manual layout -> Pa4X-family SET", scan(p4).layout == kLayoutPa4x);
