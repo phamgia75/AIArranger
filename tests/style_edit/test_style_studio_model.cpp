@@ -55,6 +55,10 @@ int main() {
     TEST("Style SMF real level: L1 only (validator), L2 not applicable, no L3",
          lvl.l1.state == Check::Passed && lvl.l2.state == Check::NotRun && lvl.l3.state == Check::NotRun && has(lvl.l1.detail, "validator"));
     TEST("existing SMF never overwritten", has(m.exportSmf(mid, &lvl), "already exists"));
+    TEST("element out of range refused", !m.apply(Op::Quantize, 99, {}, "1/16").empty() && !m.apply(Op::Meter, 99, {}, "3/4").empty());
+    fs::create_symlink(root / "victim", root / "linked.mid.tmp");   // dangling link at the temp path
+    TEST("a symlink at the temp path is never followed", has(m.exportSmf(root / "linked.mid", &lvl), "refusing") && !fs::exists(root / "victim") &&
+         !fs::exists(root / "linked.mid"));
     TEST("SMF onto /Volumes refused", has(m.exportSmf("/Volumes/AIA-STUDIO-TEST/x.mid", &lvl), "mounted volume"));
     size_t dropped = 0;
     TEST("import SMF track: needs a track", !m.importSmfTrack(mid, 99, 0).empty());

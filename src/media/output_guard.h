@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -50,11 +49,11 @@ inline std::string writeNewFile(const std::filesystem::path& path, const std::ve
     const std::filesystem::path tmp = path.string() + ".tmp";
     std::error_code ec;
     if (std::filesystem::exists(tmp, ec) || ec) return "refusing: " + tmp.string() + " already exists";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!f) { f.close(); std::filesystem::remove(tmp, ec); return "cannot write " + tmp.string(); }
-    }
+    // "x": exclusive create (O_EXCL), so a file or a symlink that appears at the temp path is never followed or truncated
+    std::FILE* f = std::fopen(tmp.c_str(), "wbx");
+    if (!f) return "refusing: cannot create " + tmp.string() + " (it may already exist)";
+    const bool ok = std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+    if (std::fclose(f) != 0 || !ok) { std::filesystem::remove(tmp, ec); return "cannot write " + tmp.string(); }
     if (!publishNewFolder(tmp, path)) { std::filesystem::remove(tmp, ec); return "refusing: " + path.string() + " appeared while writing"; }
     return "";
 }

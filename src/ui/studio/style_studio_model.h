@@ -91,6 +91,7 @@ public:
     // Applies one op to the selection (section/track nullopt = all). Returns "" or why it was refused (nothing changed).
     std::string apply(Op op, std::optional<size_t> section, std::optional<size_t> track, const std::string& value) {
         if (!ed_) return "open a Style first";
+        if (section && *section >= style().sections.size()) return "no element " + std::to_string(*section);
         style_edit::Selection sel;
         sel.section = section;
         sel.track = track;
