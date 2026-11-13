@@ -4,9 +4,10 @@
 // Route B of docs/research/KRONOS_KMP_KSF_IMPORT.md: an Instrument from KRONOS (and TRITON/OASYS/M3) Korg-format
 // multisamples, the .KMP + .KSF files written by the KRONOS "Save Sampling Data" (Parameter Guide En 3, p.855-856).
 // The layout is Korg's own documentation, KRONOS Parameter Guide En 3 p.1158-1159 "Korg format sample files":
-// chunked, big endian; KMP = MSP1 [NAME] RLP1 [RLP2] [RLP3] [MNO1]; KSF = SMP1 SMD1 [SNO1] [NAME]. The SMD1 attribute
+// chunked, big endian; KMP = MSP1 [NAME] RLP1 [RLP2] [RLP3] [MNO1]; KSF = SMP1 SMD1 [SMF1] [SNO1] [NAME]. The SMD1 attribute
 // bits are from the figure on p.1159 (MSB bit 7 Loop Off, 6 Reverse, 5 Not Use 2nd Start, 4 Compressed, 3-0
-// Compression ID; bit 0 = +12 dB for uncompressed data). Nothing is guessed: every chunk or value outside that
+// Compression ID; bit 0 = +12 dB for uncompressed data). SMF1 (p.1159, "shared sample data"): SMD1 holds only its 12
+// header bytes and the audio is the SMD1 data of the KSF named in SMF1, found in the same folder. Nothing is guessed: every chunk or value outside that
 // documentation is refused with the file and offset. Reads only; the source folder is never modified.
 //
 // Mapping (p.1158 and Sampling P2 p.709-710): a KMP holds one key-split multisample; region i plays from the previous
@@ -162,7 +163,8 @@ inline std::string smd1(const std::vector<uint8_t>& b, size_t o, size_t len, Ksf
     if (b[o + 6] != 1) return std::to_string(b[o + 6]) + " channels (the KRONOS documents 1; stereo is a -L/-R pair)";
     if (b[o + 7] != 16) return std::to_string(b[o + 7]) + "-bit data (only 16-bit is converted)";
     h->frames = be32(b, o + 8);
-    if (uint64_t(h->frames) * 2 != len - 12) return "sample count does not match the data length";
+    // len 12 = no audio here: only valid with SMF1 (shared data, p.1159), which readKsf checks
+    if (len != 12 && uint64_t(h->frames) * 2 != len - 12) return "sample count does not match the data length";
     return "";
 }
 inline std::string ranges(const KsfHead* h) {
@@ -174,12 +176,52 @@ inline std::string ranges(const KsfHead* h) {
 }
 }  // namespace korg
 
+namespace korg {
+inline std::filesystem::path findFile(const std::vector<std::filesystem::path>& dirs, const std::string& name, std::string* why);
+inline std::vector<uint8_t> slurp(const std::filesystem::path& p, std::string* e);
+}
+
+inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s, const std::filesystem::path& self = {});
+
+namespace korg {
+// SMF1 of the KSF at self names the file whose SMD1 holds the audio (p.1159). It must be a plain file name in the same
+// folder (no path, no link, not self, not SKIPPEDSAMPL/INTERNALnnnn), itself an ordinary KSF (no chain), with the same
+// rate and sample count as self's SMD1 header: p.1159 does not say which wins if they differ, so that is refused.
+inline std::string sharedData(const std::filesystem::path& self, const std::string& name, const KsfHead& h,
+                              std::vector<uint8_t>* out, size_t* dataAt) {
+    namespace fs = std::filesystem;
+    const std::string where = "SMF1 names '" + name + "'";
+    if (name == "SKIPPEDSAMPL") return where + ", a skipped sample: there is no audio to play";
+    if (name.rfind("INTERNAL", 0) == 0) return where + ", a sample built into an older Korg instrument";
+    if (name == "." || name == ".." || name.find_first_of("/\\:") != std::string::npos ||
+        std::any_of(name.begin(), name.end(), [](char c) { return c < 0x20 || c > 0x7E; }))
+        return where + ": not a plain file name in the same folder (refused: it could point outside the folder)";
+    std::string why;
+    const fs::path f = findFile({self.parent_path()}, name, &why);
+    if (f.empty()) return where + ": " + why;
+    std::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(f, ec)) || ec) return where + ": it is a link (refused: it could point outside the folder)";
+    if (fs::equivalent(f, self, ec)) return where + ": the file names itself";
+    std::string err;
+    *out = slurp(f, &err);
+    if (!err.empty()) return where + ": " + err;
+    KsfHead r;
+    if (const auto e = readKsf(*out, &r, nullptr); !e.empty()) return where + ", which is refused: " + e;
+    if (r.rate != h.rate || r.frames != h.frames)
+        return where + ", whose rate or sample count differs from this file's SMD1 header (p.1159 does not say which applies)";
+    walk(*out, [&](const std::string& id, size_t o, size_t) { if (id == "SMD1") *dataAt = o + 12; return std::string(); });
+    return "";
+}
+}  // namespace korg
+
 // Mono 16-bit uncompressed KSF -> Sample trimmed to Start..End (what plays), loop Loop Start..End inclusive.
-// head only (s == nullptr): the parameters, without copying audio.
-inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s) {
+// head only (s == nullptr): the parameters, without copying audio. self: the file's path, needed to resolve SMF1
+// (shared data); without it a shared KSF is refused.
+inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s, const std::filesystem::path& self) {
     *h = {};
     bool smp = false, smd = false;
-    size_t dataAt = 0;
+    size_t dataAt = 0, smdLen = 0;
+    std::string shared;
     const auto e = korg::walk(b, [&](const std::string& id, size_t o, size_t len) -> std::string {
         if (id == "SMP1") {
             if (const auto e = korg::smp1(b, o, len, h); !e.empty()) return e;
@@ -187,13 +229,16 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s)
         } else if (id == "SMD1") {
             if (const auto e = korg::smd1(b, o, len, h); !e.empty()) return e;
             dataAt = o + 12;
+            smdLen = len;
             smd = true;
         } else if (id == "SNO1") {
             if (len != 4) return "SNO1 must be 4 bytes";
         } else if (id == "NAME") {
             if (len != 24) return "NAME must be 24 bytes";
         } else if (id == "SMF1") {
-            return "shared sample data (SMF1): the audio is in another file; load and save it again on the KRONOS";
+            if (len != 12) return "SMF1 must be 12 bytes";
+            shared = korg::text(b, o, 12);
+            if (shared.empty()) return "shared sample data (SMF1) names no file";
         } else if (id == "SPD1" || id == "SDD1") {
             return "sample divided across several media; copy it to one medium on the KRONOS first";
         } else {
@@ -203,6 +248,18 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s)
     });
     if (!e.empty()) return e;
     if (!smp || !smd) return "not a KSF file (needs SMP1 and SMD1)";
+    const std::vector<uint8_t>* src = &b;
+    std::vector<uint8_t> other;
+    if (!shared.empty()) {
+        if (smdLen != 12) return "SMF1 (shared sample data) but SMD1 also holds audio (p.1159: the SMD1 data is empty then)";
+        if (self.empty()) return "shared sample data (chunk SMF1 names " + shared + ") is not resolved here: a shared file "
+                                 "pointing at another shared file, or a route that reads each KSF on its own (convert the "
+                                 "folder with its .KMP, or save the sample again on the KRONOS)";
+        if (const auto e = korg::sharedData(self, shared, *h, &other, &dataAt); !e.empty()) return e;
+        src = &other;
+    } else if (smdLen == 12 && h->frames) {
+        return "SMD1 holds no audio and there is no SMF1 chunk naming the file that does";
+    }
     if (const auto r = korg::ranges(h); !r.empty()) return r;
     if (!s) return "";
     s->rate = h->rate;
@@ -210,7 +267,7 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s)
     s->pcm.resize(h->end - h->start + 1);
     for (size_t i = 0; i < s->pcm.size(); ++i) {
         const size_t p = dataAt + 2 * (h->start + i);
-        s->pcm[i] = static_cast<int16_t>(uint16_t(b[p] << 8 | b[p + 1]));
+        s->pcm[i] = static_cast<int16_t>(uint16_t((*src)[p] << 8 | (*src)[p + 1]));
     }
     s->looped = h->loopOn;
     s->loopStart = h->loopOn ? h->loopStart - h->start : 0;
@@ -241,20 +298,26 @@ inline std::string lower(std::string s) { for (auto& c : s) c = static_cast<char
 // A KSF named in a KMP: next to it ("Save All") or in the folder named like it ("One Multisample", p.856). FAT is
 // case-insensitive, so the name is matched without case.
 // Two files that differ only in case (possible on a case-sensitive disk) are refused rather than picked.
-inline std::filesystem::path findKsf(const std::filesystem::path& kmp, const std::string& name, std::string* why) {
+inline std::filesystem::path findFile(const std::vector<std::filesystem::path>& dirs, const std::string& name, std::string* why) {
     std::error_code ec;
-    for (const auto& d : {kmp.parent_path(), kmp.parent_path() / kmp.stem()}) {
+    for (const auto& d : dirs) {
         std::vector<std::filesystem::path> hits;
         for (const auto& e : std::filesystem::directory_iterator(d, ec))
             if (lower(e.path().filename().string()) == lower(name) && e.is_regular_file(ec)) hits.push_back(e.path());
         if (hits.size() > 1) { *why = "several files named " + name + " (differing only in case) in " + d.string(); return {}; }
         if (hits.size() == 1) return hits.front();
     }
-    *why = name + " not found (looked next to it and in " + kmp.stem().string() + "/)";
+    *why = name + " not found";
     return {};
 }
+inline std::filesystem::path findKsf(const std::filesystem::path& kmp, const std::string& name, std::string* why) {
+    const auto f = findFile({kmp.parent_path(), kmp.parent_path() / kmp.stem()}, name, why);
+    if (f.empty()) *why += " (looked next to it and in " + kmp.stem().string() + "/)";
+    return f;
+}
 // The scan reads 60 bytes, not the audio: every documented KSF structure starts SMP1 (32) then SMD1 (p.1159), so any
-// other start is refused here. The conversion later parses the whole file.
+// other start is refused here. The conversion later parses the whole file. An SMD1 of only its 12 header bytes is
+// shared data (SMF1): that small file is parsed whole here, which also resolves the file it names.
 inline std::string ksfHead(const std::filesystem::path& p, KsfHead* h) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(p, ec);
@@ -263,6 +326,11 @@ inline std::string ksfHead(const std::filesystem::path& p, KsfHead* h) {
     std::ifstream is(p, std::ios::binary);
     if (size >= 60 && is.read(reinterpret_cast<char*>(b.data()), 60) && !std::memcmp(b.data(), "SMP1", 4) && be32(b, 4) == 32 &&
         !std::memcmp(&b[40], "SMD1", 4) && be32(b, 44) <= size - 48) {
+        if (be32(b, 44) == 12) {
+            std::string e;
+            const auto all = slurp(p, &e);
+            return e.empty() ? readKsf(all, h, nullptr, p) : e;
+        }
         *h = {};
         if (const auto e = smp1(b, 8, 32, h); !e.empty()) return e;
         if (const auto e = smd1(b, 48, be32(b, 44), h); !e.empty()) return e;
@@ -412,13 +480,13 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
                 KsfHead h;
                 const auto b = korg::slurp(it->ksf[i], &err);
                 if (!err.empty()) return err;
-                if (const auto e = readKsf(b, &h, &s); !e.empty()) return it->ksf[i].filename().string() + ": " + e;
+                if (const auto e = readKsf(b, &h, &s, it->ksf[i]); !e.empty()) return it->ksf[i].filename().string() + ": " + e;
                 if (!it->ksfR.empty()) {
                     Sample r2;
                     KsfHead hr;
                     const auto br = korg::slurp(it->ksfR[i], &err);
                     if (!err.empty()) return err;
-                    if (const auto e = readKsf(br, &hr, &r2); !e.empty()) return it->ksfR[i].filename().string() + ": " + e;
+                    if (const auto e = readKsf(br, &hr, &r2, it->ksfR[i]); !e.empty()) return it->ksfR[i].filename().string() + ": " + e;
                     // the full parse decides, not only the scan's header: the halves must play identically
                     const bool same = r2.pcm.size() == s.pcm.size() && hr.rate == h.rate && r2.looped == s.looped && r2.loopStart == s.loopStart &&
                                       r2.loopEnd == s.loopEnd && hr.plus12dB == h.plus12dB && hr.loopTune == h.loopTune &&

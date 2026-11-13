@@ -300,6 +300,80 @@ int main() {
         refuse("2nd Start 0xFFFFFFFF in use", K, bad2, "2nd Start outside the audio");
     }
 
+    std::printf("== SMF1 shared sample data (p.1159): SMD1 holds only its header, the audio is in the KSF that SMF1 names\n");
+    {
+        const auto src = tone(6000, 440, 9000, 11);
+        const Ksf sh{src, 48000, 200, 1000, 4999, 0x00};   // its own Start/Loop/End over the shared audio, loop on
+        const auto dir = [&](const std::string& n, const Bytes& shared, const std::string& kmpRef = "B.KSF") {
+            const fs::path d = root / ("smf1-" + n);
+            put(d / "S.KMP", kmp("Shared", {{60, 127, 0, 0, kmpRef}}));
+            put(d / "A.KSF", ksf({src, 48000, 0, 0, 5999, 0x80}));
+            put(d / "B.KSF", shared);
+            return d;
+        };
+        snd::Instrument x;
+        const fs::path d = dir("ok", ksfShared(sh, "a.ksf"));   // FAT: the name matches without case
+        const auto e = snd::buildFromKorgFolder(d, "Shared", {}, {}, &x);
+        TEST("a shared KSF converts with the named file's audio and its own Start/Loop/End: " + e,
+             e.empty() && x.samples.size() == 1 && x.samples[0].frames() == 4800 && x.samples[0].pcm.front() == src[200] &&
+             x.samples[0].pcm.back() == src[4999] && x.samples[0].looped && x.samples[0].loopStart == 800 && x.samples[0].loopEnd == 4800);
+        const auto smf = [&](const std::string& what, const Bytes& shared, const std::string& expect) {
+            snd::Instrument y;
+            const auto r = snd::buildFromKorgFolder(dir(std::to_string(std::hash<std::string>{}(what) % 100000), shared), "Shared", {}, {}, &y);
+            TEST(what + " -> " + r, r.find(expect) != std::string::npos && r.find("B.KSF") != std::string::npos);
+        };
+        smf("SMF1 with a parent path", ksfShared(sh, "../A.KSF"), "not a plain file name");
+        smf("SMF1 with a sub-folder path", ksfShared(sh, "sub/A.KSF"), "not a plain file name");
+        smf("SMF1 with a backslash path", ksfShared(sh, "..\\A.KSF"), "not a plain file name");
+        smf("SMF1 naming a missing file", ksfShared(sh, "GONE.KSF"), "GONE.KSF not found");
+        smf("SMF1 naming the file itself", ksfShared(sh, "B.KSF"), "names itself");
+        smf("SMF1 naming SKIPPEDSAMPL", ksfShared(sh, "SKIPPEDSAMPL"), "skipped sample");
+        smf("SMF1 naming an INTERNAL sample", ksfShared(sh, "INTERNAL0001"), "built into an older Korg");
+        smf("SMF1 with a different rate", ksfShared({src, 44100, 200, 1000, 4999, 0x00}, "A.KSF"), "rate or sample count differs");
+        smf("SMF1 with a different sample count", ksfShared({tone(5000, 440, 9000, 11), 48000, 200, 1000, 4999, 0x00}, "A.KSF"), "rate or sample count differs");
+        smf("SMF1 with an End past the shared audio", ksfShared({src, 48000, 200, 1000, 6000, 0x00}, "A.KSF"), "Start/End outside the audio");
+        {   // SMF1 plus audio in SMD1: p.1159 says the data is empty then
+            Bytes both = ksf({src, 48000, 0, 0, 5999, 0x80});
+            Bytes nm; str(nm, "A.KSF", 12); chunk(both, "SMF1", nm);
+            smf("SMF1 and audio in SMD1", both, "SMD1 also holds audio");
+        }
+        {   // SMD1 without audio and no SMF1
+            Bytes empty;
+            Bytes smp; str(smp, "X", 16); be32(smp, 0); be32(smp, 0); be32(smp, 0); be32(smp, 99);
+            chunk(empty, "SMP1", smp);
+            Bytes smd; be32(smd, 48000); smd.push_back(0x80); smd.push_back(0); smd.push_back(1); smd.push_back(16); be32(smd, 100);
+            chunk(empty, "SMD1", smd);
+            smf("SMD1 without audio and no SMF1", empty, "no SMF1 chunk naming the file");
+        }
+        {   // a chain: B shares C's data, C shares A's
+            const fs::path c = dir("chain", ksfShared(sh, "C.KSF"));
+            put(c / "C.KSF", ksfShared(sh, "A.KSF"));
+            snd::Instrument y;
+            const auto r = snd::buildFromKorgFolder(c, "Shared", {}, {}, &y);
+            TEST("SMF1 naming another shared KSF (a chain) is refused: " + r, r.find("SMF1 names 'C.KSF', which is refused: shared sample data") != std::string::npos);
+        }
+        {   // a link named like the KSF, pointing outside the folder
+            const fs::path l = dir("link", ksfShared(sh, "L.KSF"));
+            std::error_code ec;
+            fs::create_symlink(root / "smf1-ok" / "A.KSF", l / "L.KSF", ec);
+            snd::Instrument y;
+            const auto r = snd::buildFromKorgFolder(l, "Shared", {}, {}, &y);
+            TEST("SMF1 naming a symbolic link is refused: " + r, !ec && r.find("it is a link") != std::string::npos);
+        }
+        {   // SMP1 SNO1 SMF1 SMD1: chunks in another order than p.1159 lists; the header scan keeps refusing that start
+            std::vector<snd::KorgMultisample> m;
+            TEST("a shared KSF in another chunk order is refused by the scan (documented order only)",
+                 snd::scanKorgFolder(dir("order", ksfShared(sh, "A.KSF", true)), m).find("does not start with SMP1") != std::string::npos);
+        }
+        {   // the KSF-only route reads each file on its own: it names the chunk and the file it points at
+            snd::KsfHead h;
+            snd::Sample s;
+            const auto r = snd::readKsf(ksfShared(sh, "A.KSF"), &h, &s);
+            TEST("without the file's folder, SMF1 is refused naming the chunk and its target: " + r,
+                 r.find("shared sample data (chunk SMF1 names A.KSF)") != std::string::npos);
+        }
+    }
+
     fs::remove_all(root);
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

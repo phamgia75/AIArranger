@@ -49,6 +49,20 @@ inline Bytes ksf(const Ksf& k, const char* extra = nullptr, const std::string& n
     if (extra) { Bytes x(12, 0); chunk(b, extra, x); }
     return b;
 }
+// Shared sample data (p.1159): SMD1 holds only its 12 header bytes (frames = k.pcm.size()), SMF1 names the KSF with the
+// audio. snoFirst: SMP1 SNO1 SMF1 SMD1, another chunk order than the one p.1159 lists.
+inline Bytes ksfShared(const Ksf& k, const std::string& target, bool snoFirst = false) {
+    Bytes b, smp, smd, sno, smf;
+    str(smp, "SHARED", 16); be32(smp, k.start); be32(smp, k.start); be32(smp, k.loopStart); be32(smp, k.end);
+    be32(smd, k.rate); smd.push_back(k.attrs); smd.push_back(uint8_t(k.loopTune)); smd.push_back(k.ch); smd.push_back(k.bits);
+    be32(smd, uint32_t(k.pcm.size()));
+    be32(sno, 0);
+    str(smf, target, 12);
+    chunk(b, "SMP1", smp);
+    if (snoFirst) { chunk(b, "SNO1", sno); chunk(b, "SMF1", smf); chunk(b, "SMD1", smd); }
+    else { chunk(b, "SMD1", smd); chunk(b, "SMF1", smf); chunk(b, "SNO1", sno); }
+    return b;
+}
 inline std::vector<int16_t> tone(size_t n, double f, double amp, int salt) {
     std::vector<int16_t> v(n);
     for (size_t i = 0; i < n; ++i) v[i] = int16_t(std::lround(amp * std::sin(2 * 3.14159265358979 * f * double(i) / 48000) + (int(i * 7 + salt) % 5) - 2));
