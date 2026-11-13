@@ -980,6 +980,8 @@ int main() {
             TEST("library manager: a Library segment, shown", st.currentPage() == &lm && lm.isVisible());
             TEST("library manager: Compare and Copy say what they need", lm.unavailable(A::Compare) == "Needs: a library open on both sides" &&
                  lm.unavailable(A::Copy) == "Needs: an item selected in a list" && lm.unavailable(A::Export).startsWith("Needs: a plan step"));
+            TEST("library history: Undo and Where Used say what they need", lm.unavailable(A::Undo) == "Needs: a plan edit to undo" &&
+                 lm.unavailable(A::WhereUsed) == "Needs: an item selected in a list");
             TEST("library manager: unavailable actions show their reason inline", reasonsShown());
             put(root / "Other.KST/STYLE/USER01/Ballad.STG", "s");       // same bytes as Mine.KST's
             put(root / "Other.KST/STYLE/USER02/Ballad.STG", "other");   // same name, other bank
@@ -1072,6 +1074,30 @@ int main() {
             TEST("library manager E8: a blocked plan says why Execute is refused", lm.reportText().contains("Execute Plan: refused: the plan has 1 conflict(s)"));
             TEST("library manager E8: Reveal needs an executed plan", lm.unavailable(A::Reveal) == "Needs: an executed plan");
             lm.clearPlan();
+            TEST("library history: Clear Plan is undoable", lm.plan().empty() && lm.unavailable(A::Undo).isEmpty() &&
+                 lm.unavailable(A::Redo) == "Needs: an undone plan edit");
+            lm.undo();
+            waitLm(5000);
+            TEST("library history: Undo restores the cleared steps; history and per-step effects shown", lm.plan().size() == 2 &&
+                 lm.reportText().contains("(next: clear 2 step(s))") && lm.reportText().contains("effect    no file change") &&
+                 lm.reportText().contains("effect    none: blocked by its conflicts"));
+            lm.undo();
+            waitLm(5000);
+            TEST("library history: multi-step undo", lm.plan().size() == 1 && lm.plan()[0].op == library::Op::Copy && lm.reportText().contains("2 to redo"));
+            lm.redo();
+            lm.redo();
+            waitLm(5000);
+            TEST("library history: redo re-applies both edits, sources untouched", lm.plan().empty() && !lm.history().canRedo() &&
+                 fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
+            lm.selectRow('A', 1);   // Ballad
+            lm.showView(V::WhereUsed);
+            waitLm(5000);
+            TEST("where used: a Style's referrers are not modelled: UNKNOWN, none inferred", lm.reportText().contains("Where used: Style \"Ballad\"") &&
+                 lm.reportText().contains("references UNKNOWN") && lm.reportText().contains("Known references: none") &&
+                 lm.reportText().contains("what refers to a Style is not modelled"));
+            lm.selectRow('A', 0);   // Hit.PDC
+            waitLm(5000);
+            TEST("where used follows the selection", lm.reportText().contains("Where used: Pad \"Hit\""));
             lm.showView(V::Validation);
             waitLm(5000);
             TEST("library manager E8: Validation view runs the structural validator on both sides", lm.reportText().contains("Library A: Structural validation") &&

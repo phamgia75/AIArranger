@@ -24,7 +24,7 @@ void LibraryManagerComponent::Pane::selectedRowsChanged(int row) {
     if (owner.quiet_) return;   // the list was rebuilt by refilter(), not clicked
     selected = row >= 0 && row < int(rows.size()) ? int(rows[size_t(row)]) : -1;
     owner.active_ = side;
-    owner.view_ = View::Details;
+    if (owner.view_ != View::WhereUsed) owner.view_ = View::Details;   // Where Used follows the selection
     owner.refresh();
 }
 
@@ -66,7 +66,10 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto& mv = act(Action::Move, "Move to other side", [this] { addStep(Action::Move); });
     auto& rn = act(Action::Rename, "Rename to value", [this] { addStep(Action::Rename); });
     auto& sw = act(Action::SwapBanks, "Swap bank with value", [this] { addStep(Action::SwapBanks); });
-    auto& rm = act(Action::RemoveStep, "Remove Last Step", [this] { if (!plan_.empty()) plan_.pop_back(); ++planRev_; showView(View::Plan); });
+    auto& rm = act(Action::RemoveStep, "Remove Last Step", [this] { planEdit([this] { return history_.removeLast(); }); });
+    auto& un = act(Action::Undo, "Undo Step", [this] { undo(); });
+    auto& re = act(Action::Redo, "Redo Step", [this] { redo(); });
+    auto& wu = act(Action::WhereUsed, "Where Used", [this] { showView(View::WhereUsed); });
     auto& cl = act(Action::ClearPlan, "Clear Plan", [this] { clearPlan(); });
     auto& ex = act(Action::Export, "Export Plan (EXPORT-ONLY)...", [this] {
         chooseFolder("Parent folder for the new plan folder (local disk)", [this](juce::File parent) {
@@ -96,6 +99,7 @@ LibraryManagerComponent::LibraryManagerComponent() {
     actionRows_ = {{{&cp, 160}, {r(cp), 300}, {&mv, 160}, {r(mv), 220}, {&wholeFile_, 0}},
                    {{&value_, 300}, {&rn, 140}, {r(rn), 200}, {&sw, 170}, {r(sw), 0}},
                    {{&rm, 140}, {r(rm), 160}, {&cl, 100}, {r(cl), 160}, {&ex, 220}, {r(ex), 0}},
+                   {{&un, 100}, {r(un), 220}, {&re, 100}, {r(re), 220}, {&wu, 110}, {r(wu), 0}},
                    {{&exe, 140}, {r(exe), 300}, {&rev, 80}, {r(rev), 160}, {&progress_, 0}},
                    {{&hint_, 0}}};
     for (auto* rows : {&rows_, &actionRows_})
@@ -161,7 +165,7 @@ void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
             if (L->ok) {
                 p.lib = L;
                 p.selected = -1;
-                plan_.clear();
+                history_.reset();   // and its undo/redo: they name items of the library that was replaced
                 ++planRev_;   // steps name items by index into the libraries they were made for
             }
             view_ = View::Details;
@@ -216,12 +220,15 @@ juce::String LibraryManagerComponent::unavailable(Action a) const {
                    : a == Action::Rename ? "Needs: the new name in the value field" : "Needs: the other bank in the value field (e.g. STYLE/USER05)";
         case Action::RemoveStep:
         case Action::ClearPlan:
-        case Action::Export: return plan_.empty() ? "Needs: a plan step (Copy, Move, Rename or Swap)" : "";
+        case Action::Export: return history_.empty() ? "Needs: a plan step (Copy, Move, Rename or Swap)" : "";
         case Action::Execute:
-            if (plan_.empty()) return "Needs: a plan step (Copy, Move, Rename or Swap)";
+            if (history_.empty()) return "Needs: a plan step (Copy, Move, Rename or Swap)";
             return a_.lib && b_.lib ? "" : "Needs: a library open on both sides";
         case Action::Reveal: return lastOutput_.isDirectory() ? "" : "Needs: an executed plan";
         case Action::Validate: return a_.lib || b_.lib ? "" : "Needs: an open library";
+        case Action::Undo: return history_.canUndo() ? "" : "Needs: a plan edit to undo";
+        case Action::Redo: return history_.canRedo() ? "" : "Needs: an undone plan edit";
+        case Action::WhereUsed: return act.item() ? "" : "Needs: an item selected in a list";
     }
     return "";
 }
@@ -240,7 +247,13 @@ void LibraryManagerComponent::addStep(Action a) {
         case Action::SwapBanks: s.op = lib::Op::BankSwap; s.bank = p.item()->bank; s.text = value_.getText().trim().toStdString(); break;
         default: return;
     }
-    plan_.push_back(s);
+    history_.add(s, lib::stepLabel(*p.lib, s));
+    ++planRev_;
+    showView(View::Plan);
+}
+
+void LibraryManagerComponent::planEdit(const std::function<bool()>& edit) {
+    if (working() || !edit()) return;   // a running job holds the plan it was given; no plan change while it runs
     ++planRev_;
     showView(View::Plan);
 }
@@ -266,6 +279,7 @@ void LibraryManagerComponent::showView(View v) {
     }
     if (v == View::Duplicates && unavailable(Action::Duplicates).isNotEmpty()) return;
     if (v == View::Validation && unavailable(Action::Validate).isNotEmpty()) return;
+    if (v == View::WhereUsed && unavailable(Action::WhereUsed).isNotEmpty()) return;
     view_ = v;
     refresh();
 }
@@ -278,7 +292,7 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
     std::weak_ptr<bool> alive = alive_;
     // E6 job: D18 refuses an output in or around either library, staged + verified before one publish, report beside it
     const auto token = planJobs_.start();   // (defensive: a port could land `done` inside enqueueJob)
-    const auto id = enqueueJob(jobs::libraryPlan(a_.lib, b_.lib, plan_, d.toStdString()), [this, alive, token](const jobs::JobState& j) {
+    const auto id = enqueueJob(jobs::libraryPlan(a_.lib, b_.lib, plan(), d.toStdString()), [this, alive, token](const jobs::JobState& j) {
         if (alive.expired()) return;
         planJobs_.land(token);   // a re-run from the job list (same token) is only shown
         refresh(false);   // keep the export result: no view report replaces it
@@ -299,12 +313,12 @@ void LibraryManagerComponent::executePlan(const juce::File& parent) {
     if (unavailable(Action::Execute).isNotEmpty()) return;
     view_ = View::Plan;
     if (!enqueueJob) { report_.setText("Plan NOT executed: no export job queue.\nNothing was written to either library.", false); return; }
-    const auto& first = plan_.front();   // the target: Copy/Move write into the other side, Rename/Swap into their own (all steps must agree)
+    const auto& first = plan().front();   // the target: Copy/Move write into the other side, Rename/Swap into their own (all steps must agree)
     const char t = first.op == lib::Op::Copy || first.op == lib::Op::Move ? (first.side == 'A' ? 'B' : 'A') : first.side;
     const auto dest = parent.getChildFile(u8(lib::outputName(*pane(t).lib, juce::Time::getCurrentTime().formatted("%Y-%m-%d %H%M%S").toStdString())));
     std::weak_ptr<bool> alive = alive_;
     const auto token = planJobs_.start();
-    const auto id = enqueueJob(jobs::libraryApply(a_.lib, b_.lib, plan_, dest.getFullPathName().toStdString()), [this, alive, token](const jobs::JobState& j) {
+    const auto id = enqueueJob(jobs::libraryApply(a_.lib, b_.lib, plan(), dest.getFullPathName().toStdString()), [this, alive, token](const jobs::JobState& j) {
         if (alive.expired()) return;
         planJobs_.land(token);
         if (j.id == execJob_) { stopTimer(); execJob_ = 0; }
@@ -345,7 +359,8 @@ void LibraryManagerComponent::stopWork() {
 
 // The report text of the Details, Duplicates and Plan views, from immutable snapshots: runs on a worker thread.
 static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr<const lib::Library> A, std::shared_ptr<const lib::Library> B,
-                             const std::vector<lib::Step>& plan, char active, int selected, const std::function<bool()>& stale) {
+                             const std::vector<lib::Step>& plan, const std::string& history, char active, int selected,
+                             const std::function<bool()>& stale) {
     const std::function<bool()> going = [&] { return !stale(); };
     using View = LibraryManagerComponent::View;
     std::string t;
@@ -368,7 +383,7 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
             const auto ev = lib::evaluate(*A, *B, plan, going);
             if (stale()) return t;
             const auto x = lib::executable(*A, *B, plan, ev);
-            return lib::planReport(*A, *B, plan, ev) + "\nExecute Plan: " +
+            return history + lib::planReport(*A, *B, plan, ev) + "\nExecute Plan: " +
                    (x.refusal.empty() ? std::string("ready: writes a NEW library, a copy of ") + x.target + " with these steps (" + lib::kFileLevelLabel + ")"
                                       : "refused: " + x.refusal) + "\n";
         }
@@ -376,6 +391,9 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
             for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
                 if (L && !stale()) t += std::string("Library ") + side + ": " + lib::validationText(lib::validate(L->root, going)) + "\n";
             return t;
+        case View::WhereUsed:
+            if (act && selected >= 0) return std::string("Library ") + active + ": " + lib::whereUsedText(*act, act->items[size_t(selected)], (active == 'A' ? B : A).get());
+            return "Where Used needs an item selected in a list.";
         case View::Compare: break;
     }
     return t;
@@ -395,22 +413,22 @@ void LibraryManagerComponent::refresh(bool report) {
     const auto* sel = pane(active_).item();
     const auto ptr = [](const auto& p) { return std::to_string(reinterpret_cast<uintptr_t>(p.get())); };
     std::string key = std::to_string(int(view_)) + "|" + ptr(a_.lib) + "|" + ptr(b_.lib);
-    if (view_ == View::Details) key += std::string("|") + active_ + "|" + std::to_string(sel ? pane(active_).selected : -1);
+    if (view_ == View::Details || view_ == View::WhereUsed) key += std::string("|") + active_ + "|" + std::to_string(sel ? pane(active_).selected : -1);
     if (view_ == View::Plan) key += "|" + std::to_string(planRev_);
     if (key == shownKey_) return;
     shownKey_ = key;
     if (!a_.lib && !b_.lib) {   // no library open: a fixed text, no worker (else computing() reads as running work, e.g. at quit)
         deliveredGen_ = ++reportGen_;
-        report_.setText(u8(reportFor(view_, nullptr, nullptr, plan_, active_, -1, [] { return false; })), false);
+        report_.setText(u8(reportFor(view_, nullptr, nullptr, plan(), history_.text(), active_, -1, [] { return false; })), false);
         return;
     }
     // duplicates() and evaluate() can be slow on a large library: one background worker, latest request wins, a superseded
     // request stops inside their loops (library/latest_worker.h)
     const auto gen = ++reportGen_;
     std::weak_ptr<bool> alive = alive_;
-    const bool queued = reports_.submit([this, alive, gen, v = view_, A = a_.lib, B = b_.lib, plan = plan_, side = active_,
+    const bool queued = reports_.submit([this, alive, gen, v = view_, A = a_.lib, B = b_.lib, plan = plan(), hist = history_.text(), side = active_,
                                          selIdx = sel ? pane(active_).selected : -1](const std::function<bool()>& stale) {
-        auto text = std::make_shared<std::string>(reportFor(v, A, B, plan, side, selIdx, stale));
+        auto text = std::make_shared<std::string>(reportFor(v, A, B, plan, hist, side, selIdx, stale));
         if (stale()) return;   // superseded: its (possibly partial) text is never shown
         juce::MessageManager::callAsync([this, alive, gen, text] {
             if (alive.expired() || gen != reportGen_) return;

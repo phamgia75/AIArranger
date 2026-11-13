@@ -3,7 +3,8 @@
 // Library Workspace > Library Manager (E7): two read-only libraries side by side (a Pa5X KST folder or a Pa-family SET
 // folder each), one search box over both, and four views: item Details (with evidenced dependencies only), Compare
 // (file level), Duplicates (SHA-256 files; names flagged as name-only) and Plan (staged copy / move / rename / bank
-// swap steps with their conflicts and warnings) and Validation (the structural validator, E8). A plan is exported as a
+// swap steps with their conflicts, warnings and file effects; multi-step undo/redo before Execute) and Where Used (what may
+// refer to the selected item: UNKNOWN wherever the payloads are not decoded) and Validation (the structural validator, E8). A plan is exported as a
 // document, or (E8) executed at file level into a NEW library, a copy of the target, by an export job (E6: the studio's
 // queue, both libraries as its sources); the sources are never written. Every unavailable action shows its reason next to it. Loading, comparing and
 // exporting run on worker threads; nothing here touches MIDI or audio.
@@ -12,13 +13,15 @@
 #include "JobPort.h"
 #include "library/latest_worker.h"
 #include "library/library_apply.h"
+#include "library/library_history.h"
+#include "library/library_where_used.h"
 
 namespace ai_arranger::app {
 
 class LibraryManagerComponent : public juce::Component, private juce::Timer {
 public:
-    enum class View { Details, Compare, Duplicates, Plan, Validation };
-    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Export, Execute, Reveal, Validate };
+    enum class View { Details, Compare, Duplicates, Plan, Validation, WhereUsed };
+    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Undo, Redo, Export, Execute, Reveal, Validate, WhereUsed };
 
     LibraryManagerComponent();
     ~LibraryManagerComponent() override;
@@ -34,7 +37,9 @@ public:
     void showView(View v);                                 // Compare is asynchronous
     void addStep(Action a);                                // Copy, Move, Rename or SwapBanks from the current selection
     void exportPlan(const juce::File& dest);               // an export job: a NEW local folder (plan.json, PLAN.txt)
-    void clearPlan() { plan_.clear(); ++planRev_; showView(View::Plan); }
+    void clearPlan() { planEdit([this] { return history_.clear(); }); }
+    void undo() { planEdit([this] { return history_.undo(); }); }   // staged plan edits only: nothing on disk changes
+    void redo() { planEdit([this] { return history_.redo(); }); }
     void executePlan(const juce::File& parent);            // E8 export job: a NEW library "<target> edited <time>" in `parent`
     juce::File lastOutput() const { return lastOutput_; }  // the last executed library (Reveal)
     juce::ToggleButton& wholeFile() { return wholeFile_; } // SET: Copy / Move / Rename act on the whole bank file
@@ -49,7 +54,8 @@ public:
     juce::String reportText() const { return report_.getText(); }
     juce::String paneText(char side) const;
     juce::String headerText(char side) const;
-    const std::vector<library::Step>& plan() const { return plan_; }
+    const std::vector<library::Step>& plan() const { return history_.steps(); }
+    const library::PlanHistory& history() const { return history_; }
 
 private:
     struct Pane : juce::ListBoxModel {
@@ -71,6 +77,7 @@ private:
     void setUnavailable(juce::Button& b, const juce::String& reason);
     void refresh(bool report = true);   // action states now; the view report on a worker thread (newest wins)
     void refilter();
+    void planEdit(const std::function<bool()>& edit);   // a staged plan edit, then the Plan view
     void chooseFolder(const juce::String& title, std::function<void(juce::File)> then);
     Pane& pane(char side) { return side == 'A' ? a_ : b_; }
     const Pane& pane(char side) const { return side == 'A' ? a_ : b_; }
@@ -79,7 +86,7 @@ private:
     bool quiet_ = false;  // refilter() is rebuilding the lists: selection callbacks are not user clicks
     char active_ = 'A';   // the pane selected last: Copy / Move / Rename / Swap Banks act on its selection
     View view_ = View::Details;
-    std::vector<library::Step> plan_;
+    library::PlanHistory history_;   // the staged change set: steps plus undo/redo, in memory until Execute Plan
     juce::OwnedArray<juce::Component> owned_;
     std::map<juce::Button*, juce::Label*> reasons_;
     std::map<Action, juce::TextButton*> actions_;
