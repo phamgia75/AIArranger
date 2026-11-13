@@ -67,26 +67,36 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto& rn = act(Action::Rename, "Rename to value", [this] { addStep(Action::Rename); });
     auto& sw = act(Action::SwapBanks, "Swap bank with value", [this] { addStep(Action::SwapBanks); });
     auto& rm = act(Action::RemoveStep, "Remove Last Step", [this] { if (!plan_.empty()) plan_.pop_back(); ++planRev_; showView(View::Plan); });
-    auto& cl = act(Action::ClearPlan, "Clear Plan", [this] { plan_.clear(); ++planRev_; showView(View::Plan); });
+    auto& cl = act(Action::ClearPlan, "Clear Plan", [this] { clearPlan(); });
     auto& ex = act(Action::Export, "Export Plan (EXPORT-ONLY)...", [this] {
         chooseFolder("Parent folder for the new plan folder (local disk)", [this](juce::File parent) {
             exportPlan(parent.getChildFile("Library Plan " + juce::Time::getCurrentTime().formatted("%Y-%m-%d %H%M%S")));
         });
     });
+    auto& exe = act(Action::Execute, "Execute Plan...", [this] {
+        chooseFolder("Parent folder for the NEW library (local disk; the sources are never written)", [this](juce::File parent) { executePlan(parent); });
+    });
+    auto& rev = act(Action::Reveal, "Reveal", [this] { lastOutput_.revealToUser(); });
+    auto& val = act(Action::Validate, "Validate", [this] { showView(View::Validation); });
+    wholeFile_.setTooltip("SET only: Copy, Move and Rename act on the selected item's whole bank file (e.g. STYLE/USER03.STY) as a file. "
+                          "Item-level SET edits cannot be executed (payload and record trailer UNKNOWN).");
+    wholeFile_.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+    progress_.setColour(juce::Label::textColourId, kAccent);
     search_.setTextToShowWhenEmpty("Search names, banks, files (both sides)", kText2);
     search_.onTextChange = [this] { refilter(); };
     value_.setTextToShowWhenEmpty("value: new name, or the other bank (e.g. STYLE/USER05)", kText2);
     value_.onTextChange = [this] { refresh(); };
     hint_.setColour(juce::Label::textColourId, kText2);
     hint_.setText("Sources are only read. Copy/Move target: the bank of the item selected on the other side, else the same bank id; first free slot. "
-                  "Plans are EXPORT-ONLY documents: no keyboard file is written.", juce::dontSendNotification);
+                  "Execute Plan writes a NEW library (file-level operation; not verified on a keyboard).", juce::dontSendNotification);
     auto r = [this](juce::Component& c) -> juce::Component* { return reasons_.count(dynamic_cast<juce::Button*>(&c)) ? reasons_.at(dynamic_cast<juce::Button*>(&c)) : nullptr; };
     rows_ = {{{openA_, 150}, {r(*openA_), 140}, {&a_.header, 0}},
              {{openB_, 150}, {r(*openB_), 140}, {&b_.header, 0}},
-             {{&search_, 300}, {details_, 80}, {&cmp, 90}, {&dup, 100}, {&planBtn, 70}, {r(cmp), 260}, {r(dup), 0}}};
-    actionRows_ = {{{&cp, 160}, {r(cp), 300}, {&mv, 160}, {r(mv), 0}},
+             {{&search_, 300}, {details_, 80}, {&cmp, 90}, {&dup, 100}, {&planBtn, 70}, {&val, 90}, {r(cmp), 260}, {r(dup), 0}}};
+    actionRows_ = {{{&cp, 160}, {r(cp), 300}, {&mv, 160}, {r(mv), 220}, {&wholeFile_, 0}},
                    {{&value_, 300}, {&rn, 140}, {r(rn), 200}, {&sw, 170}, {r(sw), 0}},
                    {{&rm, 140}, {r(rm), 160}, {&cl, 100}, {r(cl), 160}, {&ex, 220}, {r(ex), 0}},
+                   {{&exe, 140}, {r(exe), 300}, {&rev, 80}, {r(rev), 160}, {&progress_, 0}},
                    {{&hint_, 0}}};
     for (auto* rows : {&rows_, &actionRows_})
         for (auto& row : *rows) for (auto& [c, w] : row) addAndMakeVisible(c);
@@ -102,6 +112,7 @@ LibraryManagerComponent::LibraryManagerComponent() {
 }
 
 LibraryManagerComponent::~LibraryManagerComponent() {
+    stopTimer();
     *alive_ = false;
     a_.list.setModel(nullptr);
     b_.list.setModel(nullptr);
@@ -206,6 +217,11 @@ juce::String LibraryManagerComponent::unavailable(Action a) const {
         case Action::RemoveStep:
         case Action::ClearPlan:
         case Action::Export: return plan_.empty() ? "Needs: a plan step (Copy, Move, Rename or Swap)" : "";
+        case Action::Execute:
+            if (plan_.empty()) return "Needs: a plan step (Copy, Move, Rename or Swap)";
+            return a_.lib && b_.lib ? "" : "Needs: a library open on both sides";
+        case Action::Reveal: return lastOutput_.isDirectory() ? "" : "Needs: an executed plan";
+        case Action::Validate: return a_.lib || b_.lib ? "" : "Needs: an open library";
     }
     return "";
 }
@@ -218,9 +234,9 @@ void LibraryManagerComponent::addStep(Action a) {
     s.side = active_;
     s.item = size_t(p.selected);
     switch (a) {
-        case Action::Copy: s.op = lib::Op::Copy; s.bank = target ? target->bank : ""; break;
-        case Action::Move: s.op = lib::Op::Move; s.bank = target ? target->bank : ""; break;
-        case Action::Rename: s.op = lib::Op::Rename; s.text = value_.getText().toStdString(); break;
+        case Action::Copy: s.op = lib::Op::Copy; s.bank = target ? target->bank : ""; s.wholeFile = wholeFile_.getToggleState(); break;
+        case Action::Move: s.op = lib::Op::Move; s.bank = target ? target->bank : ""; s.wholeFile = wholeFile_.getToggleState(); break;
+        case Action::Rename: s.op = lib::Op::Rename; s.text = value_.getText().toStdString(); s.wholeFile = wholeFile_.getToggleState(); break;
         case Action::SwapBanks: s.op = lib::Op::BankSwap; s.bank = p.item()->bank; s.text = value_.getText().trim().toStdString(); break;
         default: return;
     }
@@ -249,6 +265,7 @@ void LibraryManagerComponent::showView(View v) {
         return;
     }
     if (v == View::Duplicates && unavailable(Action::Duplicates).isNotEmpty()) return;
+    if (v == View::Validation && unavailable(Action::Validate).isNotEmpty()) return;
     view_ = v;
     refresh();
 }
@@ -276,6 +293,45 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
     if (!*token) return;   // already landed
     report_.setText("Plan export queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + d, false);
     refresh(false);
+}
+
+void LibraryManagerComponent::executePlan(const juce::File& parent) {
+    if (unavailable(Action::Execute).isNotEmpty()) return;
+    view_ = View::Plan;
+    if (!enqueueJob) { report_.setText("Plan NOT executed: no export job queue.\nNothing was written to either library.", false); return; }
+    const auto& first = plan_.front();   // the target: Copy/Move write into the other side, Rename/Swap into their own (all steps must agree)
+    const char t = first.op == lib::Op::Copy || first.op == lib::Op::Move ? (first.side == 'A' ? 'B' : 'A') : first.side;
+    const auto dest = parent.getChildFile(u8(lib::outputName(*pane(t).lib, juce::Time::getCurrentTime().formatted("%Y-%m-%d %H%M%S").toStdString())));
+    std::weak_ptr<bool> alive = alive_;
+    const auto token = planJobs_.start();
+    const auto id = enqueueJob(jobs::libraryApply(a_.lib, b_.lib, plan_, dest.getFullPathName().toStdString()), [this, alive, token](const jobs::JobState& j) {
+        if (alive.expired()) return;
+        planJobs_.land(token);
+        if (j.id == execJob_) { stopTimer(); execJob_ = 0; }
+        const bool done = j.phase == jobs::Phase::Done;
+        if (done) lastOutput_ = juce::File(u8(j.dest));
+        progress_.setText(done ? "Executed: " + u8(j.dest) : "Not executed (" + juce::String(jobs::phaseName(j.phase)) + ")", juce::dontSendNotification);
+        refresh(false);   // keep the result: no view report replaces it
+        report_.setText(done ? "Plan executed into a NEW library: " + u8(j.dest) + "\n" + u8(ui::studio::badgeLine(j.level)) + "   (" +
+                                   lib::kFileLevelLabel + ")\nExport job #" + juce::String(j.id) + ", report: " + u8(j.reportPath) +
+                                   "\nBoth sources were only read.\n\n" + u8(j.writerText) + "\nVerification:\n" + u8(j.verifyText)
+                             : "Plan NOT executed: " + u8(j.reason) + "\n(export job #" + juce::String(j.id) + " " + jobs::phaseName(j.phase) + " at " +
+                                   jobs::phaseName(j.stoppedAt) + ")\nNothing was written to either library." +
+                                   (j.verifyText.empty() ? juce::String() : "\n\nVerification:\n" + u8(j.verifyText)),
+                         false);
+    });
+    if (!*token) return;   // already landed
+    execJob_ = id;
+    progress_.setText("Queued as export job #" + juce::String(id), juce::dontSendNotification);
+    report_.setText("Plan execution queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + dest.getFullPathName(), false);
+    if (jobState) startTimer(200);
+    refresh(false);
+}
+
+void LibraryManagerComponent::timerCallback() {
+    const auto j = execJob_ && jobState ? jobState(execJob_) : std::nullopt;
+    if (!j || jobs::finished(j->phase)) { stopTimer(); return; }
+    progress_.setText("Executing: " + juce::String(int(j->progress * 100)) + "% (" + jobs::phaseName(j->phase) + ")", juce::dontSendNotification);
 }
 
 void LibraryManagerComponent::stopWork() {
@@ -307,8 +363,19 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
             for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
                 if (L) t += std::string("Library ") + side + ": " + lib::duplicatesView(*L, lib::duplicates(*L, going)) + "\n";
             return t;
-        case View::Plan:
-            return A && B ? lib::planReport(*A, *B, plan, lib::evaluate(*A, *B, plan, going)) : "A plan needs a library open on both sides.";
+        case View::Plan: {
+            if (!A || !B) return "A plan needs a library open on both sides.";
+            const auto ev = lib::evaluate(*A, *B, plan, going);
+            if (stale()) return t;
+            const auto x = lib::executable(*A, *B, plan, ev);
+            return lib::planReport(*A, *B, plan, ev) + "\nExecute Plan: " +
+                   (x.refusal.empty() ? std::string("ready: writes a NEW library, a copy of ") + x.target + " with these steps (" + lib::kFileLevelLabel + ")"
+                                      : "refused: " + x.refusal) + "\n";
+        }
+        case View::Validation:
+            for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
+                if (L && !stale()) t += std::string("Library ") + side + ": " + lib::validationText(lib::validate(L->root, going)) + "\n";
+            return t;
         case View::Compare: break;
     }
     return t;

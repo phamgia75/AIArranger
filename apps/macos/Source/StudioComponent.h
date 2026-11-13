@@ -42,7 +42,7 @@ public:
     void openSource(const juce::File& dir);       // asynchronous, read-only probe; busy() until it lands
     void openStyle(const juce::File& sty);        // read-only SFF1 report
     void setValidationTarget(const juce::File& f);
-    enum class Validator { VerifyPackage, KstInventory, Sf2Check, StyleSmf, SoundPy, DrumKitPy };
+    enum class Validator { VerifyPackage, KstInventory, Sf2Check, StyleSmf, SoundPy, DrumKitPy, LibraryStructure };
     void runValidator(Validator v);               // asynchronous; busy() until it lands
     void attachL3Record(const juce::File& record);
     juce::String validatorUnavailable(Validator v) const;   // "" when it can run now
