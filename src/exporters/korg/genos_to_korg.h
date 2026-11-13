@@ -20,6 +20,8 @@ struct MapOptions {
     uint16_t ppqn = 0;                    // 0 = keep the source resolution
     std::map<uint8_t, uint8_t> route;     // source channel -> CASM destination channel (0-based)
     std::map<uint8_t, SoundRef> sounds;   // Korg channel (0-based) -> user-supplied Pa5X sound
+    // (section type, Korg channel) -> that element's sound, written instead of `sounds` in that element only.
+    std::map<std::pair<uasf::SectionType, uint8_t>, SoundRef> element_sounds;
 };
 
 struct SectionRow {
@@ -53,6 +55,7 @@ struct Report {
     std::map<std::string, uint32_t> dropped;       // reason -> event count
     std::map<uint8_t, uint32_t> non_gm_drum_notes;  // drum/perc note outside GM 35..81 -> count
     std::vector<std::string> warnings;
+    std::vector<std::string> element_sounds;       // "marker Track: msb/lsb/pc" written for one element only
 };
 
 struct MapResult {

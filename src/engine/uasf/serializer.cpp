@@ -42,7 +42,41 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
                                      a.high_key, a.note_low, a.note_high});
         }
     }
-    header.flags = (style.tempo_bpm != 0 || !trns.empty() || !style.unknown_extensions.empty())
+    std::vector<uint8_t> snam;   // 'SNAM' payload: names the reader would not restore by itself
+    for (size_t si = 0; si < style.sections.size() && si < format::kMaxSections; ++si) {
+        const auto& n = style.sections[si].name;
+        if (!style.sections[si].keep_name || n.empty()) continue;   // importer names are not stored (files unchanged)
+        if (n.size() > 64) return {false, {}, "Section " + std::to_string(si) + ": name longer than 64 bytes"};
+        snam.push_back(static_cast<uint8_t>(si));
+        snam.push_back(static_cast<uint8_t>(n.size()));
+        snam.insert(snam.end(), n.begin(), n.end());
+    }
+    std::vector<uint8_t> kexp;   // 'KEXP' payload
+    if (!style.korg_export.empty()) {
+        const auto& k = style.korg_export;
+        if (k.route.size() > 16 || k.sounds.size() > 8 || k.element_sounds.size() > 15 * 8)
+            return {false, {}, "Korg export settings: too many entries"};
+        auto ok7 = [](const KorgSound& s) { return s.msb <= 127 && s.lsb <= 127 && s.pc <= 127; };
+        kexp.push_back(1);
+        kexp.push_back(static_cast<uint8_t>(k.route.size()));
+        for (const auto& [src, dst] : k.route) {
+            if (src > 15 || dst > 15) return {false, {}, "Korg export settings: route channel out of range"};
+            kexp.insert(kexp.end(), {src, dst});
+        }
+        kexp.push_back(static_cast<uint8_t>(k.sounds.size()));
+        for (const auto& [ch, s] : k.sounds) {
+            if (ch < 8 || ch > 15 || !ok7(s)) return {false, {}, "Korg export settings: invalid sound"};
+            kexp.insert(kexp.end(), {ch, s.msb, s.lsb, s.pc});
+        }
+        kexp.push_back(static_cast<uint8_t>(k.element_sounds.size() & 0xFF));
+        kexp.push_back(static_cast<uint8_t>(k.element_sounds.size() >> 8));
+        for (const auto& [key, s] : k.element_sounds) {
+            if (static_cast<uint8_t>(key.first) > static_cast<uint8_t>(SectionType::Break) || key.second < 8 || key.second > 15 || !ok7(s))
+                return {false, {}, "Korg export settings: invalid element sound"};
+            kexp.insert(kexp.end(), {static_cast<uint8_t>(key.first), key.second, s.msb, s.lsb, s.pc});
+        }
+    }
+    header.flags = (style.tempo_bpm != 0 || !trns.empty() || !kexp.empty() || !snam.empty() || !style.unknown_extensions.empty())
                        ? format::kFlagExtensions : 0;
     header.section_count = static_cast<uint32_t>(std::min(style.sections.size(),
                                                          size_t(format::kMaxSections)));
@@ -136,6 +170,16 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
         writeU32(format::kExtTranspose);
         writeU32(static_cast<uint32_t>(trns.size()));
         writeBytes(trns.data(), trns.size());
+    }
+    if (!snam.empty()) {
+        writeU32(format::kExtSectionNames);
+        writeU32(static_cast<uint32_t>(snam.size()));
+        writeBytes(snam.data(), snam.size());
+    }
+    if (!kexp.empty()) {
+        writeU32(format::kExtKorgExport);
+        writeU32(static_cast<uint32_t>(kexp.size()));
+        writeBytes(kexp.data(), kexp.size());
     }
     // Blocks a reader kept but did not understand, re-emitted verbatim.
     if (!style.unknown_extensions.empty())

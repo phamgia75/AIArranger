@@ -147,7 +147,7 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
     // ── Extension blocks (v1.1): only when flagged; v1.0 files never set the
     // flag, and trailing bytes without it are ignored as before. ─────────────
     if (header.flags & format::kFlagExtensions) {
-        bool haveTempo = false, haveTrns = false;
+        bool haveTempo = false, haveTrns = false, haveKexp = false, haveSnam = false;
         while (pos_ < size_) {
             if (!ensure(sizeof(format::ExtensionHeader))) {
                 result.error = "Truncated extension header";
@@ -176,6 +176,57 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                     a.high_key = hk; a.note_low = lo; a.note_high = hi;
                 }
                 haveTrns = true;
+                continue;
+            }
+            if (ext.tag == format::kExtSectionNames) {
+                const size_t end = pos_ + ext.length;
+                int last = -1;
+                if (haveSnam) { result.error = "Duplicate section name block"; return result; }
+                while (pos_ < end) {
+                    if (end - pos_ < 2) { result.error = "Malformed section name block"; return result; }
+                    const uint8_t si = readU8(), len = readU8();
+                    if (si <= last || si >= style.sections.size() || len < 1 || len > 64 || len > end - pos_) {
+                        result.error = "Invalid section name entry";
+                        return result;
+                    }
+                    style.sections[si].name = readString(len);
+                    style.sections[si].keep_name = true;
+                    last = si;
+                }
+                haveSnam = true;
+                continue;
+            }
+            if (ext.tag == format::kExtKorgExport) {
+                const size_t end = pos_ + ext.length;
+                auto bad = [&](const char* why) { result.error = std::string("Malformed Korg export block: ") + why; return result; };
+                if (haveKexp) return bad("duplicate");
+                auto& k = style.korg_export;
+                auto u8 = [&](uint8_t& v) { if (pos_ >= end) return false; v = readU8(); return true; };
+                uint8_t ver = 0, n = 0;
+                if (!u8(ver) || ver != 1) return bad("version");
+                if (!u8(n)) return bad("truncated");
+                for (uint8_t i = 0; i < n; ++i) {
+                    uint8_t a, b;
+                    if (!u8(a) || !u8(b)) return bad("truncated");
+                    if (a > 15 || b > 15 || !k.route.emplace(a, b).second) return bad("route entry");
+                }
+                if (!u8(n)) return bad("truncated");
+                for (uint8_t i = 0; i < n; ++i) {
+                    uint8_t ch, m, l, p;
+                    if (!u8(ch) || !u8(m) || !u8(l) || !u8(p)) return bad("truncated");
+                    if (ch < 8 || ch > 15 || m > 127 || l > 127 || p > 127 || !k.sounds.emplace(ch, KorgSound{m, l, p}).second) return bad("sound entry");
+                }
+                uint8_t lo, hi;
+                if (!u8(lo) || !u8(hi)) return bad("truncated");
+                for (uint32_t i = 0, e = lo | uint32_t{hi} << 8; i < e; ++i) {
+                    uint8_t t, ch, m, l, p;
+                    if (!u8(t) || !u8(ch) || !u8(m) || !u8(l) || !u8(p)) return bad("truncated");
+                    if (t > static_cast<uint8_t>(SectionType::Break) || ch < 8 || ch > 15 || m > 127 || l > 127 || p > 127 ||
+                        !k.element_sounds.emplace(std::make_pair(static_cast<SectionType>(t), ch), KorgSound{m, l, p}).second)
+                        return bad("element sound entry");
+                }
+                if (pos_ != end) return bad("trailing bytes");
+                haveKexp = true;
                 continue;
             }
             if (ext.tag != format::kExtTempo) {   // unknown: keep verbatim for the writer

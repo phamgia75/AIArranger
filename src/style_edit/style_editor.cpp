@@ -18,6 +18,7 @@ using uasf::MidiEventType;
 using uasf::SectionDefinition;
 using uasf::StyleDefinition;
 using uasf::TrackDefinition;
+using uasf::KorgSound;
 
 namespace {
 
@@ -421,8 +422,16 @@ EditResult StyleEditor::copySection(size_t from, uasf::SectionType to) {
             *it = std::move(copy);
         } else {
             copy.name = sectionTypeName(to);
+            copy.keep_name = true;
             s.sections.push_back(std::move(copy));
         }
+        // Pa Copy copies the element's sounds too: the target's own ones are replaced by the source's.
+        auto& es = s.korg_export.element_sounds;
+        const auto fromType = s.sections[from].type;
+        for (auto it = es.begin(); it != es.end();) it = it->first.first == to ? es.erase(it) : std::next(it);
+        std::vector<std::pair<uint8_t, uasf::KorgSound>> copied;
+        for (const auto& [key, snd] : es) if (key.first == fromType) copied.emplace_back(key.second, snd);
+        for (const auto& [ch, snd] : copied) es[{to, ch}] = snd;
         for (const auto& t : s.sections[from].tracks) r.changed += t.events.size();
         return {};
     });
@@ -441,6 +450,7 @@ EditResult StyleEditor::renameSection(size_t section, const std::string& name) {
     return apply("Rename element", [&](StyleDefinition& s, EditResult& r) -> std::string {
         if (section >= s.sections.size()) return "no section " + std::to_string(section);
         s.sections[section].name = name;
+        s.sections[section].keep_name = true;
         r.changed = 1;
         return {};
     });
@@ -466,6 +476,30 @@ EditResult StyleEditor::setChannelRole(uint8_t channel, uasf::TrackRole role) {
                     ++r.changed;
                 }
         return r.changed ? "" : "no track on channel " + std::to_string(channel + 1);
+    });
+}
+
+EditResult StyleEditor::setPart(uint8_t src, uint8_t part) {
+    if (src > 15 || part > 15) return {false, "channel must be 1-16"};
+    return apply("Pa5X part", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        s.korg_export.route[src] = part;
+        r.changed = 1;
+        return {};
+    });
+}
+
+EditResult StyleEditor::setSound(uint8_t kch, std::optional<uasf::KorgSound> snd, std::optional<uasf::SectionType> element) {
+    if (kch < 8 || kch > 15) return {false, "not a Korg style track (channels 9-16)"};
+    if (snd && (snd->msb > 127 || snd->lsb > 127 || snd->pc > 127)) return {false, "MSB, LSB and PC must be 0-127"};
+    return apply(element ? "Pa5X element sound" : "Pa5X sound", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        auto& k = s.korg_export;
+        if (element && std::none_of(s.sections.begin(), s.sections.end(), [&](const auto& x) { return x.type == *element; }))
+            return "no element " + std::string(sectionTypeName(*element));
+        if (element) { if (snd) k.element_sounds[{*element, kch}] = *snd; else k.element_sounds.erase({*element, kch}); }
+        else if (snd) k.sounds[kch] = *snd;
+        else k.sounds.erase(kch);
+        r.changed = 1;
+        return {};
     });
 }
 
@@ -603,10 +637,14 @@ std::vector<MidiEvent> smfTrackToUasf(const SmfFile& smf, size_t smfTrack, std::
     return out;
 }
 
-SmfExport exportPa5xSmf(const StyleDefinition& style, uint16_t ppqn, exporters::korg::MapOptions opt) {
+SmfExport exportPa5xSmf(const StyleDefinition& style, uint16_t ppqn) {
     namespace k = exporters::korg;
     SmfExport x;
+    k::MapOptions opt;
     opt.ppqn = ppqn;
+    opt.route = style.korg_export.route;
+    for (const auto& [ch, snd] : style.korg_export.sounds) opt.sounds[ch] = {snd.msb, snd.lsb, snd.pc};
+    for (const auto& [key, snd] : style.korg_export.element_sounds) opt.element_sounds[key] = {snd.msb, snd.lsb, snd.pc};
     const auto mapped = k::mapToKorg(style, opt);
     if (!mapped.ok) { x.error = "conversion failed: " + mapped.error; return x; }
     x.report = k::formatReport(mapped.report, mapped.style);
@@ -621,7 +659,7 @@ SmfExport exportPa5xSmf(const StyleDefinition& style, uint16_t ppqn, exporters::
     return x;
 }
 
-KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string& name) {
+KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string& name, SoundLoss policy) {
     namespace k = exporters::korg;
     KorgSmfImport out;
     const auto p = k::parse(bytes);
@@ -645,8 +683,7 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
             if (k::korgChannelFor(static_cast<uint8_t>(g)) == kch) return g;
         return -1;
     };
-    std::map<uint8_t, std::string> origin;   // Korg channel -> element its sound was taken from
-    auto ref = [](const k::SoundRef& r) { return std::to_string(r.msb) + "/" + std::to_string(r.lsb) + "/" + std::to_string(r.pc); };
+    auto& kx = s.korg_export;
     for (const auto& el : ks.elements) {
         std::optional<uasf::SectionType> type;
         for (int i = 0; i <= static_cast<int>(uasf::SectionType::Break); ++i)
@@ -696,22 +733,35 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
             out.notes.push_back(el.marker + ": " + std::to_string(chordNotes) +
                                 " notes C-1..B-1 on chord-driven tracks (Pa5X Chord events) kept as notes; the exporter drops them");
         if (dropped) out.notes.push_back(el.marker + ": " + std::to_string(dropped) + " events outside the 8 Korg style tracks not imported");
-        // One sound per Korg track (the exporter writes it in every element): anything else is reported, never silent.
+        // Each element keeps its own bank/program (the exporter writes it at that element's start).
         for (const auto& [kch, a] : sel) {
             const std::string trk = std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": ";
-            if (a[0] < 0 || a[1] < 0 || a[2] < 0) { out.notes.push_back(trk + "incomplete bank select / program change, no sound taken"); continue; }
-            const k::SoundRef r{uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2])};
-            if (auto it = out.sounds.find(kch); it == out.sounds.end()) { out.sounds[kch] = r; origin[kch] = el.marker; }
-            else if (ref(it->second) != ref(r))
-                out.notes.push_back(trk + "selects " + ref(r) + ", differs from " + ref(it->second) + " (from " + origin[kch] +
-                                    "); the export writes " + ref(it->second) + " in every element");
+            if (a[0] < 0 || a[1] < 0 || a[2] < 0) { out.losses.push_back(trk + "incomplete bank select / program change, no sound kept"); continue; }
+            kx.element_sounds[{*type, kch}] = {uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2])};
         }
         for (const auto& [kch, n] : later)
-            out.notes.push_back(std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": " + std::to_string(n) +
-                                " later bank/program events inside the element not kept (one sound per track)");
+            out.losses.push_back(std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": " + std::to_string(n) +
+                                 " further bank/program events at the element start not kept (first complete selection kept)");
         s.sections.push_back(std::move(sec));
     }
     if (s.sections.empty()) { out.error = "no element maps to a UASF section"; return out; }
+    if (!out.losses.empty() && policy == SoundLoss::Refuse) {
+        out.error = "bank/program cannot be kept exactly (" + out.losses.front() + (out.losses.size() > 1 ? ", +" + std::to_string(out.losses.size() - 1) + " more" : "") +
+                    "): open it with \"keep the first sound\" to accept the loss";
+        return out;
+    }
+    for (const auto& l : out.losses) out.notes.push_back("LOSS: " + l);
+    // A track with one sound in every element: style-wide (same export, and a style-wide edit then applies to it).
+    for (uint8_t kch = 8; kch <= 15; ++kch) {
+        std::optional<KorgSound> one;
+        size_t n = 0;
+        bool same = true;
+        for (const auto& [key, snd] : kx.element_sounds)
+            if (key.second == kch) { ++n; same = same && (!one || *one == snd); one = snd; }
+        if (!one || !same || n != s.sections.size()) continue;
+        kx.sounds[kch] = *one;
+        for (const auto& sec : s.sections) kx.element_sounds.erase({sec.type, kch});
+    }
     uasf::UasfValidator v;
     for (const auto& i : v.validate(s).issues)
         if (i.severity == uasf::ValidationIssue::ERROR) { out.error = "UASF validator: " + i.message; return out; }
