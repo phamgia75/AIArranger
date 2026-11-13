@@ -81,6 +81,14 @@ int main() {
         const auto& z = back.layers[0].zones;
         TEST("gaps stay silent: the soft layer keeps 3 zones (36-47, 60-72, 73-90), tune -99 and +99",
              z.size() == 3 && z[0].lo == 36 && z[0].hi == 47 && z[1].lo == 60 && z[2].hi == 90 && z[0].tuneCents == -99 && z[1].tuneCents == 99);
+        bool same = true;
+        for (size_t l = 0; l < in.layers.size(); ++l)
+            for (size_t i = 0; i < in.layers[l].zones.size(); ++i) {
+                std::vector<snd::Zone> zs = in.layers[l].zones;
+                std::sort(zs.begin(), zs.end(), [](const snd::Zone& a, const snd::Zone& b) { return a.lo < b.lo; });
+                same &= in.samples[size_t(zs[i].sample)].name == back.samples[size_t(back.layers[l].zones[i].sample)].name;
+            }
+        TEST("every sample name comes back (KSF NAME chunk), zone by zone", same);
         TEST("a looped sample plays to its loop end (End = last looped frame); the 100 frames after it are not played",
              back.samples[size_t(z[0].sample)].frames() == 8900 && back.samples[size_t(z[0].sample)].loopEnd == 8900);
     }
@@ -149,6 +157,27 @@ int main() {
     refuse("a sample rate the Pa5X model refuses (validate)", x, "rate outside 11025-48000");
     x = one; x.samples[0].name = "A twenty-one-char nam";
     refuse("a sample name longer than 20 (NAME holds 24; the model allows 20)", x, "1-20 printable");
+    x = one; x.layers[0].zones = {{0, 59, 0, 48, 0, 0}, {60, 127, 0, 60, 0, 0}};
+    refuse("one sample under two original keys (the reader splits it; its name could not come back)", x, "under two original keys");
+    x = one; x.samples[0].name = "S ";
+    refuse("a sample name ending with a space", x, "cannot end with a space");
+    x = one; x.samples.push_back(sample("A/B", 48000, 1, 4000, 300, false, 9)); x.samples[0].name = "A_B";
+    x.layers[0].zones = {{0, 59, 0, 60, 0, 0}, {60, 127, 1, 60, 0, 0}};
+    refuse("two sample names with the same file name (A_B, A/B)", x, "same file name");
+    x.samples[1].name = "a_b";
+    refuse("two sample names differing only in case (FAT)", x, "same file name");
+    std::printf("== Mounted volumes are refused before anything is created (media/output_guard.h)\n");
+    {
+        const fs::path vol = "/Volumes/AIA-E1-TEST-" + std::to_string(getpid());
+        std::string e;
+        TEST("--out under /Volumes is refused: " + e,
+             snd::writeKorgFolder(one, vol / "Keys", "", &e).empty() && e.find("mounted volume") != std::string::npos && !fs::exists(vol));
+        std::error_code ec;
+        fs::create_symlink("/Volumes", root / "vol", ec);
+        e.clear();
+        TEST("--out through a symlink into /Volumes is refused: " + e, !ec && snd::writeKorgFolder(one, root / "vol" / vol.filename() / "Keys", "", &e).empty() &&
+             e.find("mounted volume") != std::string::npos && !fs::exists(vol));
+    }
     {   // an apostrophe in a name: the printed read-back command must still be one shell word per argument
         x = one; x.name = "Bob's Lead";
         std::string e;

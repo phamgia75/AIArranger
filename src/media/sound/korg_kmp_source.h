@@ -18,6 +18,7 @@
 
 #include "media/sound/instrument.h"
 #include "media/sound/sound_recipe.h"
+#include "media/sound/txprog_writer.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -136,11 +137,13 @@ struct KsfHead {
     uint32_t rate = 0, frames = 0, start = 0, start2 = 0, loopStart = 0, end = 0;
     bool loopOn = false, plus12dB = false, use2ndStart = false;
     int8_t loopTune = 0;
+    std::string name;                 // sample name: NAME (24) when present, else SMP1 (16); trailing NULs/spaces dropped
 };
 
 namespace korg {
 inline std::string smp1(const std::vector<uint8_t>& b, size_t o, size_t len, KsfHead* h) {
     if (len != 32) return "SMP1 must be 32 bytes";
+    h->name = text(b, o, 16);
     h->start = be32(b, o + 16);
     h->start2 = be32(b, o + 20);
     h->loopStart = be32(b, o + 24);
@@ -221,7 +224,7 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s,
     *h = {};
     bool smp = false, smd = false;
     size_t dataAt = 0, smdLen = 0;
-    std::string shared;
+    std::string shared, name24;
     const auto e = korg::walk(b, [&](const std::string& id, size_t o, size_t len) -> std::string {
         if (id == "SMP1") {
             if (const auto e = korg::smp1(b, o, len, h); !e.empty()) return e;
@@ -235,6 +238,7 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s,
             if (len != 4) return "SNO1 must be 4 bytes";
         } else if (id == "NAME") {
             if (len != 24) return "NAME must be 24 bytes";
+            name24 = korg::text(b, o, 24);
         } else if (id == "SMF1") {
             if (len != 12) return "SMF1 must be 12 bytes";
             shared = korg::text(b, o, 12);
@@ -248,6 +252,7 @@ inline std::string readKsf(const std::vector<uint8_t>& b, KsfHead* h, Sample* s,
     });
     if (!e.empty()) return e;
     if (!smp || !smd) return "not a KSF file (needs SMP1 and SMD1)";
+    if (!name24.empty()) h->name = name24;
     const std::vector<uint8_t>* src = &b;
     std::vector<uint8_t> other;
     if (!shared.empty()) {
@@ -458,6 +463,7 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
     if (splits.size() + 1 != layers.size()) return "need one split per layer after the first";
     Instrument in;
     in.name = name;
+    std::map<std::string, int> loaded;   // a KSF used by several regions, also in several layers, becomes one sample
     for (size_t l = 0; l < layers.size(); ++l) {
         const auto it = std::find_if(ms.begin(), ms.end(), [&](const KorgMultisample& m) { return m.name == layers[l]; });
         if (it == ms.end()) return "no multisample called '" + layers[l] + "'";
@@ -465,7 +471,6 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
         L.name = it->name;
         L.velLo = l == 0 ? 0 : splits[l - 1];
         L.velHi = l + 1 == layers.size() ? 127 : static_cast<uint8_t>(splits[l] - 1);
-        std::map<std::string, int> loaded;   // a KSF used by several regions becomes one sample
         for (size_t i = 0; i < it->left.regions.size(); ++i) {
             const KmpRegion& r = it->left.regions[i];
             if (it->ksf[i].empty()) continue;   // SKIPPEDSAMPL: those keys stay silent (reported by the checks)
@@ -498,7 +503,16 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
                     s.channels = 2;
                 }
                 s.root = r.root;
-                s.name = L.name.substr(0, 16) + " " + std::to_string(in.samples.size() + 1);
+                // The KSF's own sample name (the -L half's for a pair) when the package can carry it: 1-20 printable
+                // characters and a WAV file name no other sample has (case-insensitive, as FAT). Otherwise, e.g. a
+                // name shared by several KSFs or a KSF reused under a second original key, "<layer> N" as before.
+                const auto taken = [&](const std::string& n) {
+                    for (const auto& o : in.samples) if (korg::lower(txw::fileSafe(o.name)) == korg::lower(txw::fileSafe(n))) return true;
+                    return false;
+                };
+                s.name = h.name;
+                for (int k = 0; !nameOk(s.name) || taken(s.name); ++k)
+                    s.name = L.name.substr(0, 16) + " " + std::to_string(in.samples.size() + 1 + k);
                 loaded[key] = static_cast<int>(in.samples.size());
                 in.samples.push_back(std::move(s));
             }

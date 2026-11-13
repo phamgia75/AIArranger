@@ -85,6 +85,8 @@ inline std::string korgFiles(const Instrument& in, std::vector<KorgFile>* out, s
     std::map<std::pair<int, int>, std::string> ksfOf;   // (sample, side) -> file name
     std::map<int, uint32_t> number;                     // sample -> nnnn of MSnnnn[L|R].KSF and its SNO1
     size_t levels = 0, tails = 0;
+    std::map<int, uint8_t> rootOf;                      // sample -> its one original key
+    std::map<std::string, std::string> wavName;         // the name the reader gives back must be this sample's own
     for (size_t l = 0; l < in.layers.size(); ++l) {
         const Layer& L = in.layers[l];
         const std::string what = "layer '" + L.name + "'";
@@ -102,6 +104,14 @@ inline std::string korgFiles(const Instrument& in, std::vector<KorgFile>* out, s
             if (s.channels != ch) return what + ": mixes mono and stereo samples (a stereo multisample is an -L/-R pair of mono ones, p.1161)";
             if (z.tuneCents < -99 || z.tuneCents > 99) return what + ": zone tune " + std::to_string(z.tuneCents) + " cents is outside -99..+99 (p.1158)";
             levels += z.levelCentibels != 0;
+            // the reader makes one sample per (KSF, original key) and gives each a name the package can use
+            if (!rootOf.emplace(z.sample, z.root).second && rootOf[z.sample] != z.root)
+                return "sample '" + s.name + "' is used under two original keys (a package sample has one root)";
+            if (s.name.back() == ' ')   // nameOk: 1-20 printable characters
+                return "sample '" + s.name + "': a sample name cannot end with a space (the KSF name field drops it)";
+            const auto wav = korg::lower(txw::fileSafe(s.name));
+            if (!wavName.emplace(wav, s.name).second && wavName[wav] != s.name)
+                return "samples '" + wavName[wav] + "' and '" + s.name + "' would have the same file name";
             for (auto& r : rs) {
                 if (z.lo > key) r.push_back({60, uint8_t(z.lo - 1), 0, "SKIPPEDSAMPL"});
                 const int side = &r - rs.data();
@@ -150,7 +160,7 @@ inline std::string korgReadBackDiffers(const Instrument& in, const Instrument& b
             const Zone &x = zs[z], &y = B.zones[z];
             const Sample &s = in.samples[size_t(x.sample)], &t = back.samples[size_t(y.sample)];
             const size_t keep = (s.looped ? s.loopEnd : s.frames()) * s.channels;
-            if (x.lo != y.lo || x.hi != y.hi || x.root != y.root || x.tuneCents != y.tuneCents || s.rate != t.rate || s.channels != t.channels ||
+            if (s.name != t.name || x.lo != y.lo || x.hi != y.hi || x.root != y.root || x.tuneCents != y.tuneCents || s.rate != t.rate || s.channels != t.channels ||
                 s.looped != t.looped || (s.looped && (s.loopStart != t.loopStart || s.loopEnd != t.loopEnd)) ||
                 !std::equal(s.pcm.begin(), s.pcm.begin() + std::ptrdiff_t(keep), t.pcm.begin(), t.pcm.end()))
                 return "layer " + A.name + " zone " + std::to_string(z + 1);
@@ -166,8 +176,9 @@ inline std::string writeKorgFolder(const Instrument& in, const std::filesystem::
     auto fail = [&](std::string m) { if (error) *error = std::move(m); return std::string(); };
     std::error_code ec;
     const fs::path dest = folderPath(destGiven), out = incompletePath(dest);
-    if (fs::exists(dest, ec) || ec) return fail("refusing: " + dest.string() + " already exists");
-    if (fs::exists(out, ec) || ec) return fail("refusing: " + out.string() + " already exists (an earlier write that did not finish)");
+    // a mounted volume (also through a link), an existing folder or an unfinished earlier write: refused before
+    // anything is created (media/output_guard.h, shared by every writer)
+    if (const auto why = outputFolderRefusal(dest); !why.empty()) return fail(why);
     std::vector<KorgFile> kf;
     std::string lost;
     if (const auto e = korgFiles(in, &kf, &lost); !e.empty()) return fail("refusing: " + e);

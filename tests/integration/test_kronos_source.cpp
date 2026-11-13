@@ -57,6 +57,8 @@ int main() {
         TEST("key zones: C-1..F#3, G3..F#4, G4..G9 (low = previous top + 1)", z[0].lo == 0 && z[0].hi == 54 && z[1].lo == 55 && z[1].hi == 66 && z[2].lo == 67 && z[2].hi == 127);
         TEST("original keys C3, C4, C5 and tune 0, -12, +7 cents", z[0].root == 48 && z[1].root == 60 && z[2].root == 72 && z[0].tuneCents == 0 && z[1].tuneCents == -12 && z[2].tuneCents == 7);
         const auto& s0 = in.samples[0], s1 = in.samples[1], s2 = in.samples[2];
+        TEST("sample names: the KSF's own name (SMP1 'SYNTH') when the package can carry it, else '<layer> N' for the KSFs sharing it",
+             in.samples[0].name == "SYNTH" && in.samples[1].name == "Soft Piano 2" && in.samples[2].name == "Soft Piano 3");
         TEST("Start 100..End 29999 is kept, audio exact (big endian decoded)", s0.frames() == 29900 && s0.pcm[0] == a[100] && s0.pcm.back() == a[29999]);
         TEST("loop Loop Start..End inclusive -> [11900, 29900)", s0.looped && s0.loopStart == 11900 && s0.loopEnd == 29900);
         TEST("Loop Off -> one-shot, all audio", !s1.looped && s1.frames() == 26000 && s1.pcm == b);
