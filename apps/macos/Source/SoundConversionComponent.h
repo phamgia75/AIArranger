@@ -65,6 +65,7 @@ public:
 
     bool busy() const { return jobs_ > 0; }
     ui::SoundConversionModel& model() { return model_; }
+    const std::string& ksfNotes() const { return ksfNotes_; }   // for a Sound package export job (Import / Export Center)
     juce::TextEditor& nameField() { return name_; }
     juce::TextEditor& orderField() { return order_; }
     juce::TextEditor& splitsField() { return splits_; }

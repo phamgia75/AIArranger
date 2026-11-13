@@ -14,6 +14,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "LibraryManagerComponent.h"
 #include "ResourcesComponent.h"
+#include "jobs/job_queue.h"
 #include "ui/studio/studio_models.h"
 #include "ui/studio/studio_tools.h"
 #include "ui/studio/style_studio_model.h"
@@ -45,7 +46,9 @@ public:
     void runValidator(Validator v);               // asynchronous; busy() until it lands
     void attachL3Record(const juce::File& record);
     juce::String validatorUnavailable(Validator v) const;   // "" when it can run now
-    bool busy() const { return jobs_ > 0; }
+    bool busy() const {   // a finished export job counts until it has landed on its page (message thread)
+        return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; });
+    }
 
     // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.
     void inspectPaNative();                       // Library > Sources: read-only item list of an open SET
@@ -85,6 +88,19 @@ public:
     juce::String kmpText() const { return kmpReport_.getText(); }
     juce::String labText() const { return labReport_.getText(); }
     juce::Component* currentPage() const { return segments_.at(domain_)[size_t(segment_)].page; }
+
+    // Import / Export Center job list (E6, jobs/): every export runs as a queued job off the message thread, one at a
+    // time: validate, dependencies, destination guard, preview, estimate, write into NAME.INCOMPLETE, publish, SHA-256,
+    // verify, report beside the output. The KMP/KSF writer and the Sample Lab writes enqueue jobs too.
+    enum class ExportJob { SoundPackage, KmpFolder, KstBackup, StyleSmf, StyleUasf };
+    uint64_t exportJob(ExportJob j, const juce::File& dest);   // 0 when unavailable
+    juce::String exportUnavailable(ExportJob j);
+    void selectJob(uint64_t id);
+    void cancelJob();                 // the selected job
+    void openJobReport();             // the selected job's report, shown under the job list
+    uint64_t rerunJobCleaning();      // the selected job, failed on a leftover NAME.INCOMPLETE: consent to move it aside (never deleted)
+    std::vector<jobs::JobState> jobList() const { return queue_->snapshot(); }
+    juce::String jobListText() const { return jobView_.getText(); }
 
     ResourcesComponent& resources() { return res_; }
     LibraryManagerComponent& manager() { return manager_; }   // Library Workspace > Library Manager (E7)
@@ -191,9 +207,23 @@ private:
     bool verificationIsPackage_ = false;
     Domain verificationDomain_ = Domain::Validation;   // the page whose output the badges describe
 
+    // Export jobs (E6)
+    uint64_t enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done = {});
+    void refreshJobs();   // message thread: job list, finished jobs land on their page and in the verification target
+    juce::String exportReason(ExportJob j, juce::String where);
+    struct JobHome { jobs::ExportSpec spec; juce::TextEditor* out = nullptr; Domain from; std::function<void(const jobs::JobState&)> done; bool landed = false; };
+    std::map<uint64_t, JobHome> jobHomes_;
+    std::map<ExportJob, std::pair<juce::TextButton*, juce::String>> exportButtons_;   // button, where it comes from
+    juce::TextEditor jobView_;
+    juce::ComboBox jobPick_;
+    juce::TextButton *cancelJobBtn_ = nullptr, *reportBtn_ = nullptr, *rerunBtn_ = nullptr;
+    uint64_t reportJob_ = 0;
+    std::shared_ptr<std::atomic<bool>> jobsPosted_ = std::make_shared<std::atomic<bool>>(false);
+
     int jobs_ = 0;   // message thread only
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    std::unique_ptr<jobs::JobQueue> queue_;   // after alive_: destroyed first, so no job reports into a half-destroyed window
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StudioComponent)
 };
