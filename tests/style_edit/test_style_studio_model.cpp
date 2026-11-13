@@ -2,6 +2,7 @@
 // undo/redo, import an SMF track, and write NEW files only (Style SMF with its real level L1, UASF). Synthetic data only.
 
 #include "ui/studio/style_studio_model.h"
+#include <algorithm>
 #include <cstdio>
 #include <unistd.h>
 
@@ -107,6 +108,62 @@ int main() {
         TEST("C2: open B while A has unwritten edits -> refused, A intact with its undo",
              !a.load(root / "edited.uasf", &why) && a.style().tempo_bpm == 88 && a.undoLabel() == "Tempo" && has(why, "not written"));
         TEST("C2: open B after an explicit discard", a.load(root / "edited.uasf", &why, true) && a.style().tempo_bpm == 97);
+    }
+    // ── P1: element/track ops, Pa5X part + sound mapping, Yamaha -> Korg conversion report, Korg SMF reopen ──
+    {
+        StyleStudioModel f;
+        std::string why;
+        TEST("P1: SFF2 Style opens", f.load(fs::path(REPO_DIR) / "fixtures/synthetic/SYNTH_FULL_SFF2.sty", &why));
+        TEST("P1: source format and CASM routing listed", has(f.browser(), "Source: Yamaha SFF2, ") && has(f.browser(), "CASM routing applied"));
+        const size_t n = f.style().sections.size();
+        TEST("P1: element op needs an element", !f.apply(Op::ElementClear, {}, {}, "").empty());
+        TEST("P1: copy to an unknown element refused", has(f.apply(Op::ElementCopy, 0, {}, "Verse"), "Intro 1-3"));
+        TEST("P1: copy element 0 to Intro 3", f.apply(Op::ElementCopy, 0, {}, "intro 3").empty() && f.style().sections.size() == n &&
+             f.undoLabel() == "Copy to Intro 3");
+        TEST("P1: rename + length + clear", f.apply(Op::ElementRename, 1, {}, "My Var").empty() && f.style().sections[1].name == "My Var" &&
+             f.apply(Op::ElementLength, 1, {}, "8").empty() && f.style().sections[1].bars == 8 && !f.apply(Op::ElementLength, 1, {}, "0").empty() &&
+             f.apply(Op::ElementClear, 1, {}, "").empty() && f.undoLabel() == "Clear element");
+        TEST("P1: track op needs a track", !f.apply(Op::TrackRole, 0, {}, "pad").empty());
+        TEST("P1: bad role refused", has(f.apply(Op::TrackRole, 0, 0, "lead"), "role must be"));
+        const uint8_t ch = f.style().sections[0].tracks.back().midi_channel;
+        const size_t last = f.style().sections[0].tracks.size() - 1;
+        TEST("P1: role is one undo step", f.apply(Op::TrackRole, 0, last, "melody").empty() && f.undoLabel() == "Track role" &&
+             f.style().sections[0].tracks[last].role == uasf::TrackRole::Melody);
+        TEST("P1: bad part refused", has(f.apply(Op::TrackPart, 0, last, "acc9"), "part must be"));
+        TEST("P1: part acc5", f.apply(Op::TrackPart, 0, last, "ACC5").empty() && f.exportOptions().route.at(ch) == 15 && has(f.browser(), "-> Pa5X Acc5"));
+        TEST("P1: bad sound refused", !f.apply(Op::TrackSound, 0, last, "200 0 0").empty() && !f.apply(Op::TrackSound, 0, last, "1 2").empty() &&
+             f.exportOptions().sounds.empty());
+        TEST("P1: sound set", f.apply(Op::TrackSound, 0, last, "121 1 34").empty() && f.exportOptions().sounds.at(15).pc == 34 &&
+             has(f.browser(), "Acc5 sound 121/1/34"));
+        const auto x = f.smfExport();
+        TEST("P1: export carries the sound", x.ok && std::any_of(x.korg.elements[0].events.begin(), x.korg.elements[0].events.end(),
+                                                                 [](const auto& e) { return e.status == 0xCF && e.d1 == 34; }));
+        TEST("P1: conversion report", has(x.report, "not verified on a Pa5X") && has(x.report, "SFF2") && has(x.report, "CASM/NTT") &&
+             has(x.report, "Section map") && has(x.report, "Dropped events") && has(x.report, "MSB 121 LSB 1 PC 34 (user map)"));
+        TEST("P1: part none = not exported", f.apply(Op::TrackPart, 0, last, "none").empty() && has(f.browser(), "none (not exported)") &&
+             has(f.apply(Op::TrackSound, 0, last, "1 2 3"), "not exported"));
+        TEST("P1: part back + sound unresolved", f.apply(Op::TrackPart, 0, last, "acc5").empty() &&
+             f.apply(Op::TrackSound, 0, last, "unresolved").empty() && f.exportOptions().sounds.empty());
+        f.apply(Op::TrackSound, 0, last, "121 1 34");
+        Verification lvl;
+        TEST("P1: Korg SMF written", f.exportSmf(root / "conv.mid", &lvl).empty() && lvl.l1.state == Check::Passed);
+
+        StyleStudioModel k;
+        TEST("P1: our Korg Style SMF reopens for editing", k.load(root / "conv.mid", &why) && has(k.browser(), "Korg Style SMF") &&
+             k.exportOptions().sounds.at(15).msb == 121);
+        TEST("P1: re-export of the reopened SMF is byte-identical", k.smfExport().bytes == f.smfExport().bytes);
+        std::ofstream(root / "plain.mid", std::ios::binary) << std::string("MThd\0\0\0\6\0\0\0\1\0\x60MTrk\0\0\0\4\0\xFF\x2F\0", 26);
+        TEST("P1: a plain SMF without markers is refused", !k.load(root / "plain.mid", &why, true) && has(why, "Korg"));
+
+        // An SFF1-tagged Style (no Ctb2 CASM): the report says nothing was routed.
+        const std::string trk = std::string("\0\xFF\x06\x04SFF1", 8) + std::string("\0\xFF\x06\x06Main A", 10) +
+                                std::string("\0\x9B\x3C\x64\x60\x8B\x3C\0\x82\x20\xFF\x2F\0", 13);   // ch 12 note, EOT at 384
+        std::string sff1 = std::string("MThd\0\0\0\6\0\0\0\1\0\x60MTrk\0\0\0", 21) + char(trk.size()) + trk;
+        std::ofstream(root / "old.sty", std::ios::binary) << sff1;
+        StyleStudioModel o;
+        TEST("P1: SFF1 Style opens", o.load(root / "old.sty", &why));
+        TEST("P1: SFF1 without CASM reported", has(o.browser(), "Source: Yamaha SFF1, 0 CASM track configs (none read") &&
+             has(o.smfExport().report, "SFF1 Ctab blocks are not parsed"));
     }
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);

@@ -170,7 +170,8 @@ inline ExportSpec labBatch(fs::path in, bool trim, bool normalize, fs::path dest
     return s;
 }
 
-// Style as Pa5X SMF (EXPERIMENTAL): `x` is exportPa5xSmf of the Style as it was when the job was made.
+// Style as Pa5X SMF (EXPERIMENTAL): `x` is exportPa5xSmf of the Style as it was when the job was made; its conversion
+// report (section map, parts, sounds, dropped events) becomes the writer report of the job.
 inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::path dest, fs::path sourceFile = {}) {
     ExportSpec s;
     s.type = "Style as Pa5X SMF (EXPERIMENTAL)";
@@ -184,7 +185,10 @@ inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::p
         return std::vector<std::string>{};
     };
     s.preview = [bytes, d = s.dest] { return std::vector<OutFile>{{d.filename().string(), bytes->size()}}; };
-    s.write = [bytes](const fs::path& out, auto&) { return WriteResult{media::writeNewFile(out, *bytes), ""}; };
+    s.write = [bytes, report = std::move(x.report)](const fs::path& out, auto&) {
+        auto e = media::writeNewFile(out, *bytes);
+        return WriteResult{e, e.empty() ? report : ""};
+    };
     s.verify = [bytes](const fs::path& out) {
         if (const auto bad = detail::readBackMismatch(out, *bytes); !bad.empty()) {
             Verification v;
@@ -192,7 +196,7 @@ inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::p
             return std::pair<Verification, std::string>{v, bad};
         }
         const auto v = st::StyleStudioModel::checkStyleSmf(out);
-        return std::pair<Verification, std::string>{v, "Style SMF: " + v.l1.detail + " (EXPERIMENTAL; Pa5X import not tested)"};
+        return std::pair<Verification, std::string>{v, "Style SMF: " + v.l1.detail + " (EXPERIMENTAL; structurally valid, not verified on a Pa5X)"};
     };
     return s;
 }

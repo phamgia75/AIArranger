@@ -175,7 +175,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         exportRow("KMP / KSF folder (EXPERIMENTAL)", D::SampleLab, 3, ExportJob::KmpFolder, "KMP job...",
                   "The previewed Sound as .KMP + .KSF (Sample Lab > KMP / KSF Writer), verification level L1 only"),
         exportRow("Style as Pa5X SMF (EXPERIMENTAL)", D::StyleStudio, 0, ExportJob::StyleSmf, "SMF job...",
-                  "The Style open in Style Studio (L1 = our Korg Style validator; Pa5X import not tested). UASF: our own format",
+                  "The Style open in Style Studio (L1 = our Korg Style validator; structurally valid, not verified on a Pa5X). UASF: our own format",
                   ExportJob::StyleUasf, "UASF job..."),
         {{(staged_ = &label("STAGED CHANGES: 0", kPending)), 0}},
         {{&label("WRITE RULES: every write goes to NAME.INCOMPLETE and is published by one rename only after its checks pass; "
@@ -291,7 +291,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     styleReport_.setText("No Style open. Open Style... reads a Yamaha SFF1 .sty (or an AIArranger .uasf) for the report and for "
                          "editing. The file is only read; edits are written only as NEW files.", false);
     auto& openSty = button("Open Style...", [this] {
-        chooseFolder("Style file to read (.sty or .uasf)", [this](juce::File f) { openStyle(f); }, true, "*.sty;*.STY;*.uasf");
+        chooseFolder("Style file to read (.sty, .uasf or a Korg Style SMF .mid)", [this](juce::File f) { openStyle(f); }, true, "*.sty;*.STY;*.uasf;*.mid;*.MID");
     });
     liveFromStyle_ = &button("Open Live Arranger", [this] { if (showLiveHost_) showLiveHost_(); });
     setUnavailable(*liveFromStyle_, showLiveHost_ ? "" : "Needs: the Live Arranger window (open the Studio from it)");
@@ -680,7 +680,7 @@ void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& sav
 
 void StudioComponent::loadStyle(const juce::File& sty, bool discard) {
     std::string report;
-    if (!sty.hasFileExtension("uasf")) {
+    if (!sty.hasFileExtension("uasf;mid")) {
         importers::sff1::Sff1Reader reader;
         const auto r = reader.parseFile(sty.getFullPathName().toStdString());
         report = "Style: " + sty.getFileName().toStdString() + "  (read-only; nothing is written to it)\n" + sty.getFullPathName().toStdString() +
@@ -774,7 +774,7 @@ void StudioComponent::runValidator(Validator v) {
         case Validator::StyleSmf:
             runJob("Style SMF Check", [target]() -> Out {
                 const auto v = st::StyleStudioModel::checkStyleSmf(target);
-                return {"Style SMF: " + juce::String(v.l1.detail) + " (EXPERIMENTAL; Pa5X import not tested)", v};
+                return {"Style SMF: " + juce::String(v.l1.detail) + " (EXPERIMENTAL; structurally valid, not verified on a Pa5X)", v};
             });
             break;
         case Validator::SoundPy:
@@ -1021,7 +1021,7 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
             // The Style as it is now (the editor keeps working); once written, these bytes count as written (staged -> 0)
             const auto uasf = style_.uasfBytes();
             const auto path = style_.path();
-            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_edit::exportPa5xSmf(style_.style()), d, path)
+            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_.smfExport(), d, path)
                                                  : jobs::styleUasf(path.filename().string(), uasf, d, path);
             const bool smf = j == ExportJob::StyleSmf;
             return enqueue(std::move(spec), nullptr, [this, uasf, path, smf](const jobs::JobState& s) {

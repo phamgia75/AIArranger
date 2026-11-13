@@ -1377,6 +1377,8 @@ int main() {
                      fs::is_regular_file(root / "waltz-job.mid.export.md") && ju.phase == jobs::Phase::Done && fs::is_regular_file(root / "waltz-job.uasf") &&
                      ju.level.l1.state == ui::studio::Check::NotRun);
                 TEST("jobs: after the Style jobs the edits count as written", !st.styleModel().dirty());
+                TEST("P1 jobs: the Style SMF job report is the conversion report, not verified on a Pa5X", js.writerText.find("Section map") != std::string::npos &&
+                     js.writerText.find("not verified on a Pa5X") != std::string::npos && js.verifyText.find("not verified on a Pa5X") != std::string::npos);
                 st.styleValue().setText("94");
                 click(pg, "Apply");
                 const auto bad = st.exportJob(EJ::StyleUasf, juce::File((root / "waltz-job.uasf").string()));   // exists: the job fails
@@ -1385,6 +1387,20 @@ int main() {
                 for (const auto& j : st.jobList()) if (j.id == bad) jb = j;
                 TEST("D17 jobs: a failed Style job leaves the Style dirty (only Done marks edits written)", jb.phase == jobs::Phase::Failed &&
                      st.styleModel().dirty());
+            }
+            {   // P1: element op from the page, then the Korg Style SMF reopens for editing (no SFF1 report for a .mid)
+                st.styleElement().setSelectedId(2, juce::sendNotificationSync);   // [0]
+                st.styleOp().setSelectedId(8);   // Element: copy to
+                st.styleValue().setText("Ending 3");
+                click(pg, "Apply");
+                TEST("P1 studio: Element copy applied from the page", st.styleStatus().startsWith("Done: Element: copy to") &&
+                     find<juce::Button>(pg, "Undo Copy to Ending 3") != nullptr);
+                st.styleUndo();
+                st.openStyle(juce::File((root / "waltz-job.mid").string()));
+                if (st.unsavedPromptShown()) st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
+                TEST("P1 studio: a Korg Style SMF opens for editing", st.styleStatus().startsWith("Opened for editing") &&
+                     st.styleModel().loaded() && st.styleText().contains("Korg Style SMF") && !st.styleText().contains("Parse: SUCCESS"));
+                st.openStyle(juce::File(sty.string()));
             }
             TEST("studio: the source Style is unchanged", fs::last_write_time(sty) == styStamp);
             st.setValidationTarget(juce::File((root / "waltz.mid").string()));

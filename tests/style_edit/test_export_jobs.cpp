@@ -307,6 +307,11 @@ int main() {
              u.level.l1.state == Check::NotRun);
         const auto again = run(styleSmf("SYNTH_WALTZ_68", style_edit::exportPa5xSmf(m.style()), root / "waltz.mid"));
         TEST("an existing Style SMF is never overwritten", again.phase == Phase::Failed && has(again.reason, "already exists"));
+        const auto conv = run(styleSmf("SYNTH_WALTZ_68", m.smfExport(), root / "conv.mid"));
+        TEST("Style SMF job: the conversion report is the writer report, labelled not verified on a Pa5X",
+             conv.phase == Phase::Done && has(conv.writerText, "Section map") && has(conv.writerText, "SFF2") &&
+             has(conv.writerText, "not verified on a Pa5X") && has(conv.verifyText, "not verified on a Pa5X") &&
+             has(slurp(root / "conv.mid.export.md"), "Dropped events"));
     }
 
     // ── KST backup: the manifest beside is published with the folder; cancel inside the copy ──
