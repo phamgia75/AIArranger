@@ -152,7 +152,12 @@ inline std::string upper(std::string s) {
 // Pa4X-family markers (MAN4 PDF p.975): .STY/.PRF/.PAD, SOUND/USERDK.PCG, MULTISMP/RAM.KMP.
 // Pa5X markers (MAN5 p.721): .STG/.KSC/.PDC.
 inline std::string detectLayout(const std::filesystem::path& root, const Listing& l) {
-    const std::string name = upper(root.filename().string().empty() ? root.parent_path().filename().string() : root.filename().string());
+    // The folder's own name, however it was spelled ("X.KST", "X.KST/", "X.KST/.", "."): resolve it first.
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::weakly_canonical(root, ec);
+    if (ec) dir = std::filesystem::absolute(root, ec).lexically_normal();
+    if (dir.filename().empty()) dir = dir.parent_path();
+    const std::string name = upper(dir.filename().string());
     auto ends = [&](const char* s) { const std::string x(s); return name.size() >= x.size() && name.compare(name.size() - x.size(), x.size(), x) == 0; };
     bool pa700 = false, pa4x = false, pa5x = false;
     for (const auto& d : l.dirs) pa700 |= upper(d) == "SONGBOOK/SONGDB.SBD";

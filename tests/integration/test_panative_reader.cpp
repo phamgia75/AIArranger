@@ -90,6 +90,9 @@ int main() {
     std::string grown = v1 + std::string(8, '\0'); setBe32(grown, 4, uint32_t(grown.size() - 8));
     TEST("a consistent wrapper around a stray chunk breaks the index check", !P(grown).ok);
     TEST("no wrapper: not reported as a Pa-native file", !P("RIFF....WAVE").wrapper && !P("").wrapper);
+    TEST("magic without a length: a Pa-native wrapper, rejected",
+         P(std::string("\x01\x00\x01\x14", 4)).wrapper && !P(std::string("\x01\x00\x01\x14\x00", 5)).ok &&
+         !P(std::string("\x01\x00\x01", 3)).wrapper);
 
     // Targeted corruptions.
     std::string s = v1; setBe32(s, 0x1C + 8 + 2 + 2, 0);   // record 0's name field header -> type 0, length 0

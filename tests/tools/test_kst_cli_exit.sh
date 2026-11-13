@@ -23,6 +23,8 @@ printf '\001\000\001\024\000\000\000\011' > "$T/pn/TRUNC.STY"
 expect 3 "$B/aiarranger-resources" panative inspect "$T/pn"
 expect 3 "$B/aiarranger-resources" panative inspect "$T/pn/TRUNC.STY"
 expect 1 "$B/aiarranger-resources" panative inspect "$T/missing"
+printf '\001\000\001\024' > "$T/MAGIC_ONLY.STY"   # full magic, no length: invalid, not "not Pa-native"
+expect 3 "$B/aiarranger-resources" panative inspect "$T/MAGIC_ONLY.STY"
 expect 1 "$B/aiarranger-resources" panative list "$T/pn"
 rm -rf "$T"
 [ "$fails" -eq 0 ]

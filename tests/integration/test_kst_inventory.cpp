@@ -76,6 +76,17 @@ int main() {
         TEST("symlink skipped, not followed or counted", inv.skipped == std::vector<std::string>{"LINK.STY"});
     TEST("scan wrote nothing", snapshot(kst) == before);
     TEST("deterministic", format(scan(kst), "x") == format(inv, "x"));
+    // Layout (and so by_type) must not depend on how the same folder is spelled.
+    TEST("MYSET.KST, MYSET.KST/. and MYSET.KST/ give the same layout and types",
+         inv.layout == kLayoutKst && format(scan(kst / "."), "x") == format(inv, "x") &&
+         format(scan(kst.string() + "/"), "x") == format(inv, "x"));
+    {
+        const fs::path cwd = fs::current_path();
+        fs::current_path(kst);
+        const Inventory dot = scan(".");
+        fs::current_path(cwd);
+        TEST("'.' inside MYSET.KST gives the same layout and types", format(dot, "x") == format(inv, "x"));
+    }
 
     TEST("missing folder is an error", !scan(root / "nope").ok);
     TEST("a file is not a folder", !scan(kst / "README").ok);

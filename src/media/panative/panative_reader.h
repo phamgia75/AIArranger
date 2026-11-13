@@ -61,8 +61,9 @@ inline Container parse(const uint8_t* p, size_t n) {
     using namespace detail;
     Container c;
     auto fail = [&](std::string e) { c.error = std::move(e); c.items.clear(); return c; };
-    if (n < 8 || be32(p) != 0x01000114u) return fail("not a Pa-native wrapper (bytes 0-3 are not 01 00 01 14)");
+    if (n < 4 || be32(p) != 0x01000114u) return fail("not a Pa-native wrapper (bytes 0-3 are not 01 00 01 14)");
     c.wrapper = true;
+    if (n < 8) return fail("wrapper length missing (file shorter than 8 bytes)");
     if (n > kMaxFileBytes) return fail("file larger than the reader's limit");
     if (be32(p + 4) != n - 8) return fail("wrapper length does not match the file size (truncated or padded)");
 
