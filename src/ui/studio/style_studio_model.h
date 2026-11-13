@@ -99,6 +99,8 @@ public:
         for (const auto& i : v.validate(s).issues)
             if (i.severity == uasf::ValidationIssue::ERROR)
                 return fail(error, path.string() + ": refused by the UASF validator: " + i.message + (i.location.empty() ? "" : " (" + i.location + ")"));
+        // A Style UASF cannot store exactly (a .sty with 33 elements, ...) would lose edits on Save UASF: refused here.
+        if (auto e = style_edit::saveError(s); !e.empty()) return fail(error, path.string() + ": " + e);
         ed_ = std::make_unique<style_edit::StyleEditor>(std::move(s));
         notes_ = std::move(notes);
         path_ = path;

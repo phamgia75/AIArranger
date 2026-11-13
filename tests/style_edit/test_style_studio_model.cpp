@@ -209,6 +209,28 @@ int main() {
         std::ofstream(root / "plain.mid", std::ios::binary) << std::string("MThd\0\0\0\6\0\0\0\1\0\x60MTrk\0\0\0\4\0\xFF\x2F\0", 26);
         TEST("P1: a plain SMF without markers is refused", !k.load(root / "plain.mid", &why, true) && has(why, "Korg"));
 
+        // Codex r3 / own limit: a .sty that UASF cannot save (33 elements: the serializer would drop the 33rd) is refused at open
+        {
+            // Evidence that a .sty cannot open as an unsaveable Style: the SFF mapper ignores duplicate markers (at most
+            // 15 elements) and replaces a tempo outside 20-400 BPM by the default; the open-time saveError() check stays
+            // as the guard for every source.
+            auto sty = [&](const fs::path& p, bool tempo500) {
+                std::string trk = std::string("\0\xFF\x06\x04SFF2", 8);
+                if (tempo500) trk += std::string("\0\xFF\x51\x03\x01\xD4\xC0", 7);   // 120000 us/q = 500 BPM
+                for (int i = 0; i < 33; ++i) trk += std::string(i ? "\x83\x00" : "\x00", i ? 2 : 1) + std::string("\xFF\x06\x06Main A", 9) +
+                                                    std::string("\0\x9B\x3C\x64\x30\x8B\x3C\0", 8);
+                trk += std::string("\x83\x00\xFF\x2F\0", 5);
+                std::string smf = std::string("MThd\0\0\0\6\0\0\0\1\0\x60MTrk", 18);
+                const uint32_t n = uint32_t(trk.size());
+                smf += char(n >> 24); smf += char(n >> 16); smf += char(n >> 8); smf += char(n);
+                std::ofstream(p, std::ios::binary) << smf + trk;
+            };
+            sty(root / "many.sty", true);
+            StyleStudioModel m33;
+            TEST("r3: a .sty with 33 'Main A' markers and 500 BPM opens as 1 element at the default tempo, and saves",
+                 m33.load(root / "many.sty", &why) && m33.style().sections.size() == 1 && m33.style().tempo_bpm == uasf::kDefaultTempoBpm &&
+                 m33.saveUasf(root / "many.uasf").empty());
+        }
         // An SFF1-tagged Style (no Ctb2 CASM): the report says nothing was routed.
         const std::string trk = std::string("\0\xFF\x06\x04SFF1", 8) + std::string("\0\xFF\x06\x06Main A", 10) +
                                 std::string("\0\x9B\x3C\x64\x60\x8B\x3C\0\x82\x20\xFF\x2F\0", 13);   // ch 12 note, EOT at 384
