@@ -192,6 +192,7 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
         return stop(Phase::Failed, "not enough free space: " + fmtBytes(space.available) + " available, " + fmtBytes(st.plannedBytes) + " + 10% needed");
 
     if (!enter(Phase::Run)) return;
+    fs::create_directories(dest.parent_path(), ec);   // as the writers did themselves (the guard has refused mounted volumes)
     if (!fs::create_directory(work, ec)) return stop(Phase::Failed, "cannot create " + work.string() + (ec ? ": " + ec.message() : ""));
     if (!(std::ofstream(work / kJobMarker) << "export job " << st.id << " " << st.type << " -> " << st.dest << "\n"))
         return stop(Phase::Failed, "cannot write in " + work.string() + kept());
@@ -208,14 +209,20 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
     if (!enter(Phase::Publish)) return;
     // Side files the writer put next to its output (the KST backup's NAME.manifest.sha256) go first, the output last,
     // as backupKst publishes: until that last rename nothing is under the output's name.
+    std::vector<fs::path> entries;   // listed first: the folder is not changed while it is being iterated
+    for (const auto& e : fs::directory_iterator(work, ec)) entries.push_back(e.path());
     std::vector<std::pair<fs::path, fs::path>> moved;
-    for (const auto& e : fs::directory_iterator(work, ec)) {
-        const std::string n = e.path().filename().string(), base = dest.filename().string();
-        if (n == kJobMarker || n == base) continue;
-        if (n.rfind(base, 0) != 0) return stop(Phase::Failed, "unexpected " + e.path().string() + " in the job folder" + kept());
-        const fs::path to = dest.parent_path() / (dest.filename().string() + n.substr(base.size()));
-        if (!media::publishNewFolder(e.path(), to)) return stop(Phase::Failed, "refusing: " + to.string() + " appeared while writing" + kept());
-        moved.push_back({to, e.path()});
+    const std::string leaf = dest.filename().string();
+    for (const auto& from : entries) {
+        const std::string n = from.filename().string();
+        if (n == kJobMarker || n == leaf) continue;
+        if (n.rfind(leaf, 0) != 0) return stop(Phase::Failed, "unexpected " + from.string() + " in the job folder" + kept());
+        const fs::path to = dest.parent_path() / (leaf + n.substr(leaf.size()));
+        if (!media::publishNewFolder(from, to)) {
+            for (const auto& [t, back] : moved) media::publishNewFolder(t, back);
+            return stop(Phase::Failed, "refusing: " + to.string() + " appeared while writing" + kept());
+        }
+        moved.push_back({to, from});
     }
     if (!media::publishNewFolder(staged, dest)) {
         for (const auto& [to, back] : moved) media::publishNewFolder(to, back);

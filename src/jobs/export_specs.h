@@ -199,7 +199,12 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
     s.type = "Verified KST backup";
     s.source = source.string();
     s.dest = std::move(dest);
-    s.validate = [source] { return fs::is_directory(source) ? "" : "refusing: " + source.string() + " is not a folder"; };
+    // checked before the job folder is made, so nothing is ever created inside the source (backupKst refuses it too, but later)
+    s.validate = [source, d = media::folderPath(fs::absolute(s.dest))] {
+        if (!fs::is_directory(source)) return "refusing: " + source.string() + " is not a folder";
+        if (media::samplelab::sameOrBelow(d, source)) return "refusing: the backup may not be inside the source " + source.string();
+        return std::string();
+    };
     s.dependencies = [source](auto& notes, auto&) {
         const auto inv = media::scan(source);
         if (!inv.ok) return std::vector<std::string>{"cannot list the source: " + inv.error};

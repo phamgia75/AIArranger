@@ -191,6 +191,9 @@ int main() {
         TEST("KST backup job: folder and manifest published, L1 from the manifest, no L2", k.phase == Phase::Done &&
              fs::is_regular_file(root / "backup/STYLE/BANK01.STY") && fs::is_regular_file(root / "backup.manifest.sha256") &&
              k.level.l1.state == Check::Passed && k.level.l2.state == Check::NotRun && k.planned.size() == 2);
+        const auto in = run(kstBackup(root / "Mine.KST", root / "Mine.KST/STYLE/copy"));
+        TEST("KST backup into its own source: refused before anything is created in the source", in.phase == Phase::Failed &&
+             in.stoppedAt == Phase::Validate && named(root / "Mine.KST/STYLE", "copy").empty());
         auto s = kstBackup(root / "Mine.KST", root / "backup2");
         JobState st;
         bool inWrite = false;
