@@ -77,6 +77,9 @@ public:
     juce::ComboBox& styleTrack() { return styleTrack_; }
     juce::ComboBox& styleOp() { return styleOp_; }
     juce::TextEditor& styleValue() { return styleValue_; }
+    // Opening a Korg Style SMF whose bank/program cannot be kept exactly: refused unless the user ticks this (keep the
+    // first complete selection; every loss is listed in the report).
+    juce::ToggleButton& styleKeepFirstSound() { return styleKeepFirst_; }
     void applyStyleOp();
     // Opening another Style while the open one has unwritten edits asks first (inline, on the Style page): Save UASF...
     // (then open), Discard (then open) or Cancel (the open Style stays as it is, undo included).
@@ -231,6 +234,7 @@ private:
     juce::TextButton *pendSave_ = nullptr, *pendDiscard_ = nullptr, *pendCancel_ = nullptr;
     juce::ComboBox styleElem_, styleTrack_, styleOp_;
     juce::TextEditor styleValue_;
+    juce::ToggleButton styleKeepFirst_{"Korg SMF: if a bank/program cannot be kept exactly, keep the first one (losses reported)"};
     juce::Label styleStatus_;
     juce::TextButton *applyBtn_ = nullptr, *undoBtn_ = nullptr, *redoBtn_ = nullptr, *importSmfBtn_ = nullptr, *exportSmfBtn_ = nullptr,
                      *saveUasfBtn_ = nullptr;

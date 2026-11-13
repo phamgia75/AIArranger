@@ -242,7 +242,14 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 el.events.push_back({n.off, off, n.pitch, 0});
             }
         }
-        for (const auto& [kch, s] : opt.sounds) {
+        std::map<uint8_t, SoundRef> sounds = opt.sounds;
+        for (const auto& [key, s] : opt.element_sounds)
+            if (key.first == sec.type) {
+                sounds[key.second] = s;
+                rep.element_sounds.push_back(std::string(marker) + " " + korgTrackName(key.second) + ": MSB " + std::to_string(s.msb) +
+                                             " LSB " + std::to_string(s.lsb) + " PC " + std::to_string(s.pc));
+            }
+        for (const auto& [kch, s] : sounds) {
             el.events.push_back({0, static_cast<uint8_t>(0xB0 | kch), 0, s.msb});
             el.events.push_back({0, static_cast<uint8_t>(0xB0 | kch), 32, s.lsb});
             el.events.push_back({0, static_cast<uint8_t>(0xC0 | kch), s.pc, 0});
@@ -312,6 +319,11 @@ std::string formatReport(const Report& r, const Style& s) {
              std::to_string(t.ntt) + " | " + std::to_string(t.msb) + "/" + std::to_string(t.lsb) + "/" +
              std::to_string(t.pc) + " | " + t.family + " -> " + korgTrackName(t.korg_ch) + " | " + t.target);
     line("");
+    if (!r.element_sounds.empty()) {
+        line("Element-specific Pa5X sounds (user map, in that element only):");
+        for (const auto& e : r.element_sounds) line("  " + e);
+        line("");
+    }
     line("MegaVoice / articulation candidates (Yamaha articulations do not carry over; confirm by ear):");
     bool anyMega = false;
     for (const auto& t : r.tracks)

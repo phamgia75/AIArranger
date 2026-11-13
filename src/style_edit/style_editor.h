@@ -3,11 +3,13 @@
 
 #include "engine/uasf/types.h"
 #include "engine/uasf/validator.h"
+#include "exporters/korg/genos_to_korg.h"
 #include "exporters/korg/korg_style_smf.h"
 #include "style_edit/undo_history.h"
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -57,6 +59,19 @@ uint32_t gridTicks(uint32_t resolution, const std::string& grid);
 // Section length in ticks (bars x bar ticks); 0 when the meter is unset.
 uint64_t sectionLengthTicks(const uasf::SectionDefinition& s);
 
+// "" when UASF can store the Style exactly, else why not ("cannot be kept as UASF: ..."): the serializer's own refusals
+// (tempo 20-400 BPM, bars/resolution <= 65535, ...) and the counts it would silently cut (32 elements, 16 tracks).
+// Every edit, the Korg SMF import and every Studio open are held to it.
+std::string saveError(const uasf::StyleDefinition& s);
+
+// Pa Style element names ("Intro 1".."Intro 3", "Variation 1".."Variation 4", "Fill 1".."Fill 4", "Break",
+// "Ending 1".."Ending 3"); the parser also takes "Main n" and ignores case and spaces.
+const char* sectionTypeName(uasf::SectionType t) noexcept;
+std::optional<uasf::SectionType> sectionTypeFromName(const std::string& name);
+// UASF track role names, lower case ("drum", "percussion", "bass", "accompaniment", "chord", "pad", ...).
+const char* trackRoleName(uasf::TrackRole r) noexcept;
+std::optional<uasf::TrackRole> trackRoleFromName(const std::string& name);
+
 class StyleEditor {
 public:
     explicit StyleEditor(uasf::StyleDefinition style, size_t undoLimit = 64);
@@ -91,6 +106,24 @@ public:
     // left sounding are closed at the element end.
     EditResult replaceTrackEvents(size_t section, size_t track, std::vector<uasf::MidiEvent> events,
                                   const std::string& label);
+
+    // ── Element (section) and track edits, Pa Style Edit element set ──
+    // Copy element `from` over the element of type `to`, or append it as a new element named
+    // sectionTypeName(to) when the Style has none (Pa "Copy"). The target keeps its type and name.
+    EditResult copySection(size_t from, uasf::SectionType to);
+    // Remove every event of the element; its length and meter stay.
+    EditResult clearSection(size_t section);
+    EditResult renameSection(size_t section, const std::string& name);
+    // Length in whole bars (1..256); refused if events would end up at or past the new end.
+    EditResult setSectionBars(size_t section, uint32_t bars);
+    // Role of every track on `channel` in every element (style-wide, like a Pa track);
+    // Drum/Percussion also set is_drum, any other role clears it.
+    EditResult setChannelRole(uint8_t channel, uasf::TrackRole role);
+    // Pa5X Style SMF export settings, kept in the Style (UASF 'KEXP'), so they undo and save like any edit.
+    // Part: source channel -> the part channel it plays (the CASM route; korgChannelFor gives the Korg track).
+    EditResult setPart(uint8_t sourceChannel, uint8_t partChannel);
+    // Sound of a Korg track (8-15): in every element, or in `element` only; nullopt sound = unresolved (removed).
+    EditResult setSound(uint8_t korgChannel, std::optional<uasf::KorgSound> sound, std::optional<uasf::SectionType> element);
 
     bool undo() { return history_.undo(style_); }
     bool redo() { return history_.redo(style_); }
@@ -155,7 +188,28 @@ struct SmfExport {
     std::string report;             // mapper report
 };
 // UASF -> Korg mapper -> writer -> independent reader -> validator (as aiarranger-convert).
+// The Style's korg_export settings (route, sounds, element sounds) drive the mapper.
 SmfExport exportPa5xSmf(const uasf::StyleDefinition& style, uint16_t ppqn = 0);
+
+// Korg Pa "Style as SMF separated by markers" -> UASF, the inverse of the exporter's element and
+// track layout: marker EnCV1 -> section type, Korg track channel -> the source channel the
+// exporter maps onto it (so re-export gives the same tracks). Bank/program (CC0/CC32/PC, only at
+// element start in a valid file) -> style.korg_export: a track with the same sound in every element
+// gets it style-wide, else each element keeps its own (re-export writes exactly those). Chord
+// Variations other than cv1 and unknown markers are not imported (UASF holds one per element) and
+// listed in `notes`. Refuses a file the Korg validator rejects.
+// A selection that cannot be kept exactly (an incomplete CC0/CC32/PC triple, or a second one for
+// the same track in one element) is a loss: SoundLoss::Refuse refuses the file and names it;
+// KeepFirst (the user's explicit choice) keeps the first complete selection and lists every loss.
+enum class SoundLoss { Refuse, KeepFirst };
+struct KorgSmfImport {
+    bool ok = false;
+    std::string error;
+    uasf::StyleDefinition style;
+    std::vector<std::string> notes;
+    std::vector<std::string> losses;   // bank/program not kept (empty unless KeepFirst)
+};
+KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string& name, SoundLoss policy = SoundLoss::Refuse);
 
 } // namespace ai_arranger::style_edit
 

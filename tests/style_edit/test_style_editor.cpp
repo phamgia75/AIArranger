@@ -447,6 +447,269 @@ static void testGolden() {
     TEST("golden SMF bytes", x.ok && x.bytes.size() == GOLDEN_SIZE && h == GOLDEN_HASH);
 }
 
+static void testElementOps() {
+    std::printf("element and track-role ops\n");
+    TEST("element names", std::string(sectionTypeName(uasf::SectionType::Main3)) == "Variation 3" &&
+                          sectionTypeFromName("variation 2") == uasf::SectionType::Main2 &&
+                          sectionTypeFromName("Main 4") == uasf::SectionType::Main4 &&
+                          sectionTypeFromName("ending3") == uasf::SectionType::Ending3 &&
+                          sectionTypeFromName("Break") == uasf::SectionType::Break && !sectionTypeFromName("Verse"));
+    TEST("role names", trackRoleFromName("Percussion") == uasf::TrackRole::Percussion && !trackRoleFromName("lead"));
+    const auto s0 = makeStyle();
+    StyleEditor ed(s0);
+    // copy onto a missing element appends it, onto an existing one replaces it (keeping its name)
+    TEST("copy Variation 1 to Intro 3 (new)", ed.copySection(0, uasf::SectionType::Intro3).ok && ed.style().sections.size() == 3 &&
+         ed.style().sections[2].type == uasf::SectionType::Intro3 && ed.style().sections[2].name == "Intro 3" &&
+         ed.style().sections[2].tracks.size() == 3 && ed.style().sections[2].tracks[0].events == s0.sections[0].tracks[0].events);
+    TEST("copy undo label", ed.history().undoLabel() == "Copy to Intro 3");
+    TEST("copy over Variation 2 keeps its name", ed.copySection(2, uasf::SectionType::Main2).ok && ed.style().sections[1].name == "Main B" &&
+         ed.style().sections[1].tracks[1].events == s0.sections[0].tracks[1].events && ed.style().sections.size() == 3);
+    TEST("copy onto itself refused", !ed.copySection(0, uasf::SectionType::Main1).ok);
+    TEST("copy from a missing element refused", !ed.copySection(9, uasf::SectionType::Fill1).ok);
+    TEST("clear element", ed.clearSection(2).ok && ed.style().sections[2].tracks[0].events.empty() &&
+         ed.style().sections[2].bars == 2 && ed.style().sections[0].tracks[0].events.size() == 16);
+    TEST("rename element", ed.renameSection(0, "Groove A").ok && ed.style().sections[0].name == "Groove A");
+    TEST("empty name refused", !ed.renameSection(0, "").ok);
+    TEST("lengthen element", ed.setSectionBars(0, 4).ok && ed.style().sections[0].bars == 4);
+    TEST("shorten past events refused, nothing changed", !ed.setSectionBars(1, 1).ok && ed.style().sections[1].bars == 2);
+    TEST("length 0 refused", !ed.setSectionBars(0, 0).ok);
+    TEST("role is style-wide per channel", ed.setChannelRole(11, uasf::TrackRole::Pad).ok &&
+         std::all_of(ed.style().sections.begin(), ed.style().sections.end(),
+                     [](const auto& sec) { return sec.tracks[2].role == uasf::TrackRole::Pad && !sec.tracks[2].is_drum; }));
+    TEST("percussion role sets is_drum", ed.setChannelRole(10, uasf::TrackRole::Percussion).ok && ed.style().sections[0].tracks[1].is_drum);
+    const auto percBefore = ed.style().sections[0].tracks[1].events;
+    TEST("transpose now skips the percussion track", ed.transpose(Selection{}, 1).ok &&
+         ed.style().sections[0].tracks[1].events == percBefore && ed.style().sections[0].tracks[2].events[0].data1 != percBefore[0].data1);
+    TEST("role on an unused channel refused", !ed.setChannelRole(3, uasf::TrackRole::Bass).ok);
+    while (ed.undo()) {}
+    TEST("everything undoes to the original", sameStyle(ed.style(), s0));
+}
+
+static void testSoundsAndRoute() {
+    std::printf("export with user sounds and CASM route (kept in the Style)\n");
+    StyleEditor ed(makeStyle());
+    TEST("sound out of range refused", !ed.setSound(korg::kBassCh, uasf::KorgSound{128, 0, 0}, std::nullopt).ok &&
+                                       !ed.setSound(3, uasf::KorgSound{1, 2, 3}, std::nullopt).ok);
+    TEST("set style-wide sound", ed.setSound(korg::kBassCh, uasf::KorgSound{121, 3, 34}, std::nullopt).ok && ed.history().undoLabel() == "Pa5X sound");
+    TEST("set part (route)", ed.setPart(11, 15).ok && ed.history().undoLabel() == "Pa5X part");   // Chord1 (ch 12) -> Phrase2 -> Korg Acc5
+    TEST("element sound needs an existing element", !ed.setSound(korg::kBassCh, uasf::KorgSound{1, 1, 1}, uasf::SectionType::Intro1).ok);
+    TEST("element sound", ed.setSound(korg::kBassCh, uasf::KorgSound{8, 0, 5}, uasf::SectionType::Main2).ok);
+    const auto x = exportPa5xSmf(ed.style());
+    TEST("export ok", x.ok);
+    auto has = [&](size_t el, uint8_t st, uint8_t d1, uint8_t d2) {
+        for (const auto& e : x.korg.elements[el].events)
+            if (e.tick == 0 && e.status == st && e.d1 == d1 && (st >= 0xC0 || e.d2 == d2)) return true;
+        return false;
+    };
+    TEST("bank select + program change at element start", has(0, 0xB0 | korg::kBassCh, 0, 121) && has(0, 0xB0 | korg::kBassCh, 32, 3) &&
+                                                          has(0, 0xC0 | korg::kBassCh, 34, 0));
+    TEST("element sound written in its element only", has(1, 0xB0 | korg::kBassCh, 0, 8) && has(1, 0xC0 | korg::kBassCh, 5, 0) &&
+                                                      !has(1, 0xC0 | korg::kBassCh, 34, 0) && !has(0, 0xC0 | korg::kBassCh, 5, 0));
+    TEST("routed track lands on Acc5, not Acc1",
+         std::any_of(x.korg.elements[0].events.begin(), x.korg.elements[0].events.end(), [](const auto& e) { return e.status == 0x9F; }) &&
+         std::none_of(x.korg.elements[0].events.begin(), x.korg.elements[0].events.end(), [](const auto& e) { return e.status == 0x9B; }));
+    TEST("report names the user sound and the element sound", x.report.find("MSB 121 LSB 3 PC 34 (user map)") != std::string::npos &&
+                                                             x.report.find("v2cv1 Bass: MSB 8 LSB 0 PC 5") != std::string::npos);
+    // Pa Copy carries the element's sounds
+    TEST("copy carries element sounds", ed.copySection(1, uasf::SectionType::Fill3).ok &&
+         ed.style().korg_export.element_sounds.at({uasf::SectionType::Fill3, korg::kBassCh}) == (uasf::KorgSound{8, 0, 5}));
+    // UASF 'KEXP' round trip: settings survive save -> reload, and the reloaded Style exports the same bytes
+    uasf::UasfSerializer ser;
+    uasf::UasfDeserializer de;
+    const auto bin = ser.serialize(ed.style());
+    const auto back = de.deserialize(bin.data);
+    TEST("KEXP: save -> reload keeps route, sounds and element sounds", bin.success && back.success &&
+         back.style.korg_export.route == ed.style().korg_export.route && back.style.korg_export.sounds == ed.style().korg_export.sounds &&
+         back.style.korg_export.element_sounds == ed.style().korg_export.element_sounds);
+    TEST("KEXP: reloaded Style exports the same SMF", exportPa5xSmf(back.style).bytes == exportPa5xSmf(ed.style()).bytes);
+    // Malformed blocks are refused (trust boundary): bad version, channel out of range, trailing byte
+    const auto kexpAt = [&] {
+        for (size_t i = 0; i + 8 < bin.data.size(); ++i)
+            if (std::equal(bin.data.begin() + long(i), bin.data.begin() + long(i) + 4, "KEXP")) return i;
+        return size_t(0);
+    }();
+    TEST("KEXP block present", kexpAt > 0);
+    auto mutate = [&](size_t off, uint8_t v) { auto b = bin.data; b[kexpAt + 8 + off] = v; return de.deserialize(b); };
+    TEST("KEXP: bad version refused", !mutate(0, 2).success);
+    TEST("KEXP: route channel 16 refused", !mutate(2, 16).success);
+    TEST("KEXP: sound channel outside 9-16 refused", !mutate(2 + 2 * ed.style().korg_export.route.size() + 1, 3).success);
+    {
+        auto b = bin.data;
+        b.insert(b.begin() + long(kexpAt + 8 + (b[kexpAt + 4] | b[kexpAt + 5] << 8)), uint8_t{0});
+        b[kexpAt + 4] = uint8_t(b[kexpAt + 4] + 1);
+        TEST("KEXP: trailing byte refused", !de.deserialize(b).success);
+    }
+    while (ed.undo()) {}
+    TEST("undo removes every setting", ed.style().korg_export.empty());
+    TEST("no settings: no KEXP block (older files unchanged)", [&] {
+        const auto plain = ser.serialize(ed.style()).data;
+        return std::search(plain.begin(), plain.end(), std::begin("KEXP"), std::begin("KEXP") + 4) == plain.end(); }());
+}
+
+static void testR2() {
+    std::printf("Codex r2: copy keeps a renamed target's name; Korg import refuses what UASF cannot save\n");
+    uasf::UasfSerializer ser;
+    uasf::UasfDeserializer de;
+    {
+        StyleEditor ed(makeStyle());
+        ed.renameSection(1, "My Var 2");
+        TEST("r2#1: copy over a renamed element keeps its name", ed.copySection(0, uasf::SectionType::Main2).ok && ed.style().sections[1].name == "My Var 2");
+        const auto back = de.deserialize(ser.serialize(ed.style()).data);
+        TEST("r2#1: ... through Save UASF + reload", back.success && back.style.sections[1].name == "My Var 2");
+        StyleEditor e2(makeStyle());
+        e2.renameSection(0, "Src A");
+        e2.copySection(0, uasf::SectionType::Main2);
+        const auto b2 = de.deserialize(ser.serialize(e2.style()).data);
+        TEST("r2#1: unrenamed target stays unstored (importer name, as before)", b2.success && b2.style.sections[1].name == "Section 1" &&
+             !e2.style().sections[1].keep_name);
+    }
+    auto korgStyle = [](uint32_t mpqn, uint32_t bars) {
+        korg::Style k;
+        k.ppqn = 96;
+        k.mpqn = mpqn;
+        korg::Element el;
+        el.marker = "v1cv1";
+        el.length = bars * 384;
+        el.events = {{0, 0x9B, 60, 100}, {48, 0x8B, 60, 0}};
+        k.elements.push_back(el);
+        return korg::write(k);
+    };
+    const auto ok = korgStyle(500000, 2);
+    TEST("r2#2: a 120 BPM file imports", ok.ok && importKorgSmf(ok.bytes, "ok").ok);
+    for (uint32_t mpqn : {120000u, 4000000u}) {   // 500 BPM, 15 BPM
+        const auto w = korgStyle(mpqn, 2);
+        const auto in = importKorgSmf(w.bytes, "t");
+        TEST((std::string("r2#2: tempo outside 20-400 BPM refused with the reason, mpqn ") + std::to_string(mpqn)).c_str(),
+             w.ok && !in.ok && in.error.find("BPM") != std::string::npos && in.error.find("20-400") != std::string::npos);
+    }
+    const auto longEl = korgStyle(500000, 70000);
+    const auto li = importKorgSmf(longEl.bytes, "long");
+    TEST("r2#2: an element longer than UASF's 65535 bars refused", longEl.ok && !li.ok && li.error.find("65535") != std::string::npos);
+}
+
+static void testR3() {
+    std::printf("Codex r3: the 32-element UASF limit; KeepFirst follows MIDI bank state\n");
+    auto s = makeStyle();
+    while (s.sections.size() < 32) s.sections.push_back(s.sections[s.sections.size() % 2]);   // repeated types: valid UASF
+    StyleEditor ed(s);
+    const auto r = ed.copySection(0, uasf::SectionType::Intro1);
+    TEST("r3#1: append at 32 elements refused with the reason, nothing changed", !r.ok && r.error.find("32") != std::string::npos &&
+         ed.style().sections.size() == 32 && !ed.history().canUndo());
+    TEST("r3#1: copy over an existing element still works at the limit", ed.copySection(0, uasf::SectionType::Main2).ok);
+    // KeepFirst: CC0=1, CC0=2, CC32=3, PC=4 -> a MIDI device selects 2/3/4
+    auto file = [](std::vector<korg::Event> head) {
+        korg::Style k;
+        k.ppqn = 96;
+        k.mpqn = 500000;
+        korg::Element el;
+        el.marker = "v1cv1";
+        el.length = 384;
+        el.events = std::move(head);
+        el.events.push_back({0, 0x9B, 60, 100});
+        el.events.push_back({48, 0x8B, 60, 0});
+        k.elements.push_back(el);
+        return korg::write(k).bytes;
+    };
+    const uint8_t cc = 0xB0 | korg::kDrumCh, pc = 0xC0 | korg::kDrumCh;
+    const auto twoMsb = file({{0, cc, 0, 1}, {0, cc, 0, 2}, {0, cc, 32, 3}, {0, pc, 4, 0}});
+    TEST("r3#2: extra bank event refused by default", !importKorgSmf(twoMsb, "x").ok);
+    const auto k1 = importKorgSmf(twoMsb, "x", SoundLoss::KeepFirst);
+    TEST("r3#2: KeepFirst stores the selection active at the program change (2/3/4), loss listed", k1.ok &&
+         k1.style.korg_export.sounds.at(korg::kDrumCh) == (uasf::KorgSound{2, 3, 4}) && k1.losses.size() == 1);
+    const auto pcFirst = file({{0, pc, 4, 0}, {0, cc, 0, 1}, {0, cc, 32, 3}});
+    const auto k2 = importKorgSmf(pcFirst, "x", SoundLoss::KeepFirst);
+    TEST("r3#2: a program change before any bank select is no complete selection", k2.ok && k2.style.korg_export.sounds.empty() &&
+         k2.style.korg_export.element_sounds.empty() && k2.losses.size() == 1);
+    const auto twoPc = file({{0, cc, 0, 1}, {0, cc, 32, 3}, {0, pc, 4, 0}, {0, cc, 0, 9}, {0, pc, 7, 0}});
+    const auto k3 = importKorgSmf(twoPc, "x", SoundLoss::KeepFirst);
+    TEST("r3#2: the first complete selection is kept, the later one listed", k3.ok &&
+         k3.style.korg_export.sounds.at(korg::kDrumCh) == (uasf::KorgSound{1, 3, 4}) && k3.losses.size() == 1);
+    TEST("r3#2: an exact selection (CC32, CC0, PC) has no loss", [&] {
+        const auto e = importKorgSmf(file({{0, cc, 0, 5}, {0, cc, 32, 6}, {0, pc, 7, 0}}), "x");
+        return e.ok && e.losses.empty() && e.style.korg_export.sounds.at(korg::kDrumCh) == (uasf::KorgSound{5, 6, 7}); }());
+}
+
+static void testSectionNames() {
+    std::printf("UASF 'SNAM': element names survive save -> reload\n");
+    StyleEditor ed(makeStyle());
+    ed.renameSection(1, "Groove B");
+    uasf::UasfSerializer ser;
+    uasf::UasfDeserializer de;
+    const auto bin = ser.serialize(ed.style());
+    const auto back = de.deserialize(bin.data);
+    TEST("SNAM: the renamed name is kept, the importer's is not stored (as before)", back.success && back.style.sections[0].name == "Section 0" &&
+         back.style.sections[1].name == "Groove B" && back.style.sections[1].keep_name);
+    ed.copySection(0, uasf::SectionType::Intro2);
+    const auto b2 = de.deserialize(ser.serialize(ed.style()).data);
+    TEST("SNAM: a new element keeps its name", b2.success && b2.style.sections[2].name == "Intro 2");
+    auto at = std::search(bin.data.begin(), bin.data.end(), std::begin("SNAM"), std::begin("SNAM") + 4) - bin.data.begin();
+    auto b = bin.data;
+    b[size_t(at) + 8] = 7;   // first entry's section index out of range
+    TEST("SNAM: bad section index refused", !de.deserialize(b).success);
+    const auto p = ser.serialize(makeStyle()).data;
+    TEST("SNAM: importer names write no block (files unchanged)", std::search(p.begin(), p.end(), std::begin("SNAM"), std::begin("SNAM") + 4) == p.end());
+}
+
+static void testKorgSmfImport() {
+    std::printf("Korg marker SMF -> UASF import\n");
+    StyleEditor ed(makeStyle());
+    ed.copySection(0, uasf::SectionType::Fill2);
+    ed.copySection(0, uasf::SectionType::Ending1);
+    ed.setSound(korg::kDrumCh, uasf::KorgSound{120, 0, 16}, std::nullopt);
+    const auto x = exportPa5xSmf(ed.style());
+    const auto in = importKorgSmf(x.bytes, "Back");
+    TEST("import ok", in.ok && in.style.name == "Back" && in.style.tempo_bpm == 120 && in.style.resolution == 480);
+    TEST("elements by marker", in.style.sections.size() == 4 && in.style.sections[2].type == uasf::SectionType::Fill2 &&
+                               in.style.sections[3].name == "Ending 1" && in.style.sections[0].bars == 2);
+    TEST("tracks with Korg roles", in.style.sections[0].tracks.size() == 3 && in.style.sections[0].tracks[0].role == uasf::TrackRole::Bass &&
+                                   in.style.sections[0].tracks[1].is_drum && in.style.sections[0].tracks[1].midi_channel == 9);
+    const auto& kx = in.style.korg_export;
+    TEST("same sound in every element -> style-wide, taken out of the events", kx.sounds.size() == 1 && kx.element_sounds.empty() &&
+         kx.sounds.at(korg::kDrumCh) == (uasf::KorgSound{120, 0, 16}) &&
+         std::none_of(in.style.sections[0].tracks[1].events.begin(), in.style.sections[0].tracks[1].events.end(),
+                      [](const auto& e) { return e.type == MidiEventType::ProgramChange || e.type == MidiEventType::ControlChange; }));
+    const auto y = exportPa5xSmf(in.style);
+    TEST("re-export equals the first export", y.ok && korg::compareStyles(x.korg, y.korg).differences.empty() && y.bytes == x.bytes);
+    // A Chord Variation 2 element is reported, not imported.
+    KorgStyleEditor kd(x.korg);
+    kd.copyChordVariation("v1cv1", "v1cv2");
+    const auto cv = importKorgSmf(korg::write(kd.style()).bytes, "CV");
+    TEST("cv2 listed in notes, not imported", cv.ok && cv.style.sections.size() == 4 &&
+         std::any_of(cv.notes.begin(), cv.notes.end(), [](const std::string& n) { return n.find("v1cv2 not imported") != std::string::npos; }));
+    // Codex r1 #2 / owner gate 2: element-specific bank/program is preserved exactly
+    {
+        korg::Style ks = x.korg;
+        for (auto& e : ks.elements[1].events) if (e.status == (0xC0 | korg::kDrumCh)) e.d1 = 25;
+        const auto bytes = korg::write(ks).bytes;
+        const auto diff = importKorgSmf(bytes, "Diff");
+        TEST("r1#2: per-element sounds kept per element", diff.ok && diff.style.korg_export.sounds.empty() &&
+             diff.style.korg_export.element_sounds.size() == 4 &&
+             diff.style.korg_export.element_sounds.at({uasf::SectionType::Main2, korg::kDrumCh}) == (uasf::KorgSound{120, 0, 25}) &&
+             diff.style.korg_export.element_sounds.at({uasf::SectionType::Main1, korg::kDrumCh}) == (uasf::KorgSound{120, 0, 16}));
+        const auto re = exportPa5xSmf(diff.style);
+        TEST("r1#2: re-export is byte-identical (each element keeps its sound)", re.ok && re.bytes == bytes);
+        // Owner gate 3: what cannot be kept exactly needs the user's explicit policy
+        ks.elements[0].events.insert(ks.elements[0].events.begin(), {0, static_cast<uint8_t>(0xC0 | korg::kDrumCh), 40, 0});
+        const auto refused = importKorgSmf(korg::write(ks).bytes, "Mid");
+        TEST("r1#2: a second selection in one element is refused by default, naming the loss", !refused.ok &&
+             refused.error.find("cannot be kept exactly") != std::string::npos && refused.error.find("v1cv1") != std::string::npos);
+        const auto kept = importKorgSmf(korg::write(ks).bytes, "Mid", SoundLoss::KeepFirst);
+        // PC 40 comes before any bank select (no complete selection); the first complete one is CC0 120, CC32 0, PC 16 (r3#2)
+        TEST("r1#2: KeepFirst keeps the first complete selection and lists the loss", kept.ok && kept.losses.size() == 1 &&
+             kept.style.korg_export.element_sounds.at({uasf::SectionType::Main1, korg::kDrumCh}) == (uasf::KorgSound{120, 0, 16}) &&
+             std::any_of(kept.notes.begin(), kept.notes.end(), [](const std::string& n) { return n.rfind("LOSS: ", 0) == 0; }));
+        korg::Style inc = x.korg;   // CC0 without CC32/PC
+        auto& ev = inc.elements[2].events;
+        ev.erase(std::remove_if(ev.begin(), ev.end(), [](const auto& e) { return e.status == (0xC0 | korg::kDrumCh); }), ev.end());
+        TEST("r1#2: an incomplete selection is refused by default", !importKorgSmf(korg::write(inc).bytes, "Inc").ok);
+        const auto incKept = importKorgSmf(korg::write(inc).bytes, "Inc", SoundLoss::KeepFirst);
+        TEST("r1#2: KeepFirst drops it and says so", incKept.ok && incKept.losses.size() == 1 &&
+             incKept.losses[0].find("incomplete") != std::string::npos && !incKept.style.korg_export.element_sounds.count({uasf::SectionType::Fill2, korg::kDrumCh}));
+    }
+    TEST("plain garbage refused", !importKorgSmf({'M', 'T', 'h', 'd'}, "x").ok);
+    TEST("plain SMF without markers refused", !importKorgSmf(smf1(), "x").ok);
+}
+
 int main() {
     std::printf("Test: Style Studio editing core\n");
     testGrid();
@@ -462,6 +725,12 @@ int main() {
     testSmfImport();
     testRoundTrip();
     testGolden();
+    testElementOps();
+    testSoundsAndRoute();
+    testKorgSmfImport();
+    testSectionNames();
+    testR2();
+    testR3();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

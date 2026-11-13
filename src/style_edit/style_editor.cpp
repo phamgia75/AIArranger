@@ -1,8 +1,11 @@
 #include "style_edit/style_editor.h"
 
+#include "engine/uasf/serializer.h"
 #include "exporters/korg/genos_to_korg.h"
 
 #include <algorithm>
+#include <cctype>
+#include <iterator>
 #include <deque>
 #include <map>
 #include <set>
@@ -15,6 +18,7 @@ using uasf::MidiEventType;
 using uasf::SectionDefinition;
 using uasf::StyleDefinition;
 using uasf::TrackDefinition;
+using uasf::KorgSound;
 
 namespace {
 
@@ -110,6 +114,25 @@ std::string withPartners(const std::vector<MidiEvent>& ev, const std::vector<siz
     return {};
 }
 
+// Refusal when an event of the element lies at or past its end (NoteOffs may sit on it).
+std::string pastEnd(const SectionDefinition& sec) {
+    const uint64_t len = sectionLengthTicks(sec);
+    if (len == 0) return {};   // a 0-tick bar: the UASF validator rejects it
+    for (const auto& t : sec.tracks)
+        for (const auto& e : t.events)
+            if (isOff(e) ? e.tick > len : e.tick >= len)
+                return "track '" + t.name + "' has events past the new element end (" + std::to_string(len) +
+                       " ticks); delete them first";
+    return {};
+}
+
+std::string squash(const std::string& s) {   // lower case, no spaces: "Variation 1" -> "variation1"
+    std::string o;
+    for (char c : s)
+        if (c != ' ') o += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return o;
+}
+
 uasf::ValidationIssue firstError(const std::vector<uasf::ValidationIssue>& issues) {
     for (const auto& i : issues)
         if (i.severity == uasf::ValidationIssue::ERROR) return i;
@@ -133,6 +156,46 @@ uint64_t sectionLengthTicks(const SectionDefinition& s) {
     return uint64_t{s.bars} * s.resolution * 4 * s.beats_per_bar / s.beat_note;
 }
 
+const char* sectionTypeName(uasf::SectionType t) noexcept {
+    static const char* n[] = {"Intro 1", "Intro 2", "Intro 3", "Variation 1", "Variation 2", "Variation 3", "Variation 4",
+                              "Fill 1", "Fill 2", "Fill 3", "Fill 4", "Ending 1", "Ending 2", "Ending 3", "Break"};
+    const auto i = static_cast<size_t>(t);
+    return i < std::size(n) ? n[i] : "?";
+}
+
+std::optional<uasf::SectionType> sectionTypeFromName(const std::string& name) {
+    std::string k = squash(name);
+    if (k.rfind("main", 0) == 0) k = "variation" + k.substr(4);
+    for (int i = 0; i <= static_cast<int>(uasf::SectionType::Break); ++i)
+        if (squash(sectionTypeName(static_cast<uasf::SectionType>(i))) == k) return static_cast<uasf::SectionType>(i);
+    return std::nullopt;
+}
+
+const char* trackRoleName(uasf::TrackRole r) noexcept {
+    static const char* n[] = {"accompaniment", "chord", "bass", "drum", "percussion",
+                              "phrase1", "phrase2", "pad", "melody", "articulation"};
+    const auto i = static_cast<size_t>(r);
+    return i < std::size(n) ? n[i] : "?";
+}
+
+std::optional<uasf::TrackRole> trackRoleFromName(const std::string& name) {
+    for (int i = 0; i <= static_cast<int>(uasf::TrackRole::Articulation); ++i)
+        if (squash(name) == trackRoleName(static_cast<uasf::TrackRole>(i))) return static_cast<uasf::TrackRole>(i);
+    return std::nullopt;
+}
+
+std::string saveError(const StyleDefinition& s) {
+    if (s.sections.size() > uasf::format::kMaxSections)
+        return "cannot be kept as UASF: " + std::to_string(s.sections.size()) + " elements, UASF holds at most " +
+               std::to_string(uasf::format::kMaxSections);
+    for (size_t i = 0; i < s.sections.size(); ++i)
+        if (s.sections[i].tracks.size() > uasf::format::kMaxTracksPerSection)
+            return "cannot be kept as UASF: element " + std::to_string(i) + " has " + std::to_string(s.sections[i].tracks.size()) +
+                   " tracks, UASF holds at most " + std::to_string(uasf::format::kMaxTracksPerSection);
+    if (const auto w = uasf::UasfSerializer().serialize(s); !w.success) return "cannot be kept as UASF: " + w.error;
+    return {};
+}
+
 StyleEditor::StyleEditor(StyleDefinition style, size_t undoLimit)
     : style_(std::move(style)), history_(undoLimit) {}
 
@@ -148,6 +211,7 @@ EditResult StyleEditor::apply(const std::string& label, const Mutator& m) {
         r.error = "UASF validator: " + e.message + (e.location.empty() ? "" : " (" + e.location + ")");
         return r;
     }
+    if (auto e = saveError(next); !e.empty()) { r.error = std::move(e); return r; }   // e.g. a 33rd element
     history_.record(label, std::move(style_));
     style_ = std::move(next);
     r.ok = true;
@@ -248,15 +312,8 @@ EditResult StyleEditor::setMeter(size_t section, uint32_t num, uint32_t den) {
         auto& sec = s.sections[section];
         sec.beats_per_bar = num;
         sec.beat_note = den;
-        const uint64_t len = sectionLengthTicks(sec);
-        if (len == 0) return {};   // a 0-tick bar: the UASF validator rejects it
-        for (const auto& t : sec.tracks)
-            for (const auto& e : t.events)
-                if (isOff(e) ? e.tick > len : e.tick >= len)
-                    return "track '" + t.name + "' has events past the new element end (" + std::to_string(len) +
-                           " ticks); delete them first";
         r.changed = 1;
-        return {};
+        return pastEnd(sec);
     });
 }
 
@@ -361,6 +418,102 @@ EditResult StyleEditor::replaceTrackEvents(size_t section, size_t track, std::ve
         t->events = std::move(events);
         r.changed = t->events.size();
         return finishTrack(t->events, len);
+    });
+}
+
+// ── Elements and track roles ──────────────────────────────────────────
+
+EditResult StyleEditor::copySection(size_t from, uasf::SectionType to) {
+    return apply(std::string("Copy to ") + sectionTypeName(to), [&](StyleDefinition& s, EditResult& r) -> std::string {
+        if (from >= s.sections.size()) return "no section " + std::to_string(from);
+        if (s.sections[from].type == to) return "source and destination are the same element";
+        SectionDefinition copy = s.sections[from];
+        copy.type = to;
+        auto it = std::find_if(s.sections.begin(), s.sections.end(), [&](const auto& x) { return x.type == to; });
+        if (it != s.sections.end()) {
+            copy.name = it->name;
+            copy.keep_name = it->keep_name;   // the target's name and whether it is stored stay together
+            *it = std::move(copy);
+        } else {
+            copy.name = sectionTypeName(to);
+            copy.keep_name = true;
+            s.sections.push_back(std::move(copy));
+        }
+        // Pa Copy copies the element's sounds too: the target's own ones are replaced by the source's.
+        auto& es = s.korg_export.element_sounds;
+        const auto fromType = s.sections[from].type;
+        for (auto it = es.begin(); it != es.end();) it = it->first.first == to ? es.erase(it) : std::next(it);
+        std::vector<std::pair<uint8_t, uasf::KorgSound>> copied;
+        for (const auto& [key, snd] : es) if (key.first == fromType) copied.emplace_back(key.second, snd);
+        for (const auto& [ch, snd] : copied) es[{to, ch}] = snd;
+        for (const auto& t : s.sections[from].tracks) r.changed += t.events.size();
+        return {};
+    });
+}
+
+EditResult StyleEditor::clearSection(size_t section) {
+    return apply("Clear element", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        if (section >= s.sections.size()) return "no section " + std::to_string(section);
+        for (auto& t : s.sections[section].tracks) { r.changed += t.events.size(); t.events.clear(); }
+        return {};
+    });
+}
+
+EditResult StyleEditor::renameSection(size_t section, const std::string& name) {
+    if (name.empty() || name.size() > 64) return {false, "name must be 1..64 characters"};
+    return apply("Rename element", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        if (section >= s.sections.size()) return "no section " + std::to_string(section);
+        s.sections[section].name = name;
+        s.sections[section].keep_name = true;
+        r.changed = 1;
+        return {};
+    });
+}
+
+EditResult StyleEditor::setSectionBars(size_t section, uint32_t bars) {
+    if (bars < 1 || bars > 256) return {false, "length must be 1..256 bars"};
+    return apply("Element length", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        if (section >= s.sections.size()) return "no section " + std::to_string(section);
+        s.sections[section].bars = bars;
+        r.changed = 1;
+        return pastEnd(s.sections[section]);
+    });
+}
+
+EditResult StyleEditor::setChannelRole(uint8_t channel, uasf::TrackRole role) {
+    return apply("Track role", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        for (auto& sec : s.sections)
+            for (auto& t : sec.tracks)
+                if (t.midi_channel == channel) {
+                    t.role = role;
+                    t.is_drum = role == uasf::TrackRole::Drum || role == uasf::TrackRole::Percussion;
+                    ++r.changed;
+                }
+        return r.changed ? "" : "no track on channel " + std::to_string(channel + 1);
+    });
+}
+
+EditResult StyleEditor::setPart(uint8_t src, uint8_t part) {
+    if (src > 15 || part > 15) return {false, "channel must be 1-16"};
+    return apply("Pa5X part", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        s.korg_export.route[src] = part;
+        r.changed = 1;
+        return {};
+    });
+}
+
+EditResult StyleEditor::setSound(uint8_t kch, std::optional<uasf::KorgSound> snd, std::optional<uasf::SectionType> element) {
+    if (kch < 8 || kch > 15) return {false, "not a Korg style track (channels 9-16)"};
+    if (snd && (snd->msb > 127 || snd->lsb > 127 || snd->pc > 127)) return {false, "MSB, LSB and PC must be 0-127"};
+    return apply(element ? "Pa5X element sound" : "Pa5X sound", [&](StyleDefinition& s, EditResult& r) -> std::string {
+        auto& k = s.korg_export;
+        if (element && std::none_of(s.sections.begin(), s.sections.end(), [&](const auto& x) { return x.type == *element; }))
+            return "no element " + std::string(sectionTypeName(*element));
+        if (element) { if (snd) k.element_sounds[{*element, kch}] = *snd; else k.element_sounds.erase({*element, kch}); }
+        else if (snd) k.sounds[kch] = *snd;
+        else k.sounds.erase(kch);
+        r.changed = 1;
+        return {};
     });
 }
 
@@ -503,6 +656,9 @@ SmfExport exportPa5xSmf(const StyleDefinition& style, uint16_t ppqn) {
     SmfExport x;
     k::MapOptions opt;
     opt.ppqn = ppqn;
+    opt.route = style.korg_export.route;
+    for (const auto& [ch, snd] : style.korg_export.sounds) opt.sounds[ch] = {snd.msb, snd.lsb, snd.pc};
+    for (const auto& [key, snd] : style.korg_export.element_sounds) opt.element_sounds[key] = {snd.msb, snd.lsb, snd.pc};
     const auto mapped = k::mapToKorg(style, opt);
     if (!mapped.ok) { x.error = "conversion failed: " + mapped.error; return x; }
     x.report = k::formatReport(mapped.report, mapped.style);
@@ -515,6 +671,121 @@ SmfExport exportPa5xSmf(const StyleDefinition& style, uint16_t ppqn) {
     x.bytes = w.bytes;
     x.ok = true;
     return x;
+}
+
+KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string& name, SoundLoss policy) {
+    namespace k = exporters::korg;
+    KorgSmfImport out;
+    const auto p = k::parse(bytes);
+    if (!p.ok) { out.error = "not a Korg Style SMF: " + p.error; return out; }
+    if (const auto errs = k::validate(p.style); !errs.empty()) { out.error = "Korg validator: " + errs.front(); return out; }
+    out.notes = p.notes;
+    const auto& ks = p.style;
+    // UASF resolution is 1..1920: a finer file is rescaled (exact rational, per absolute tick).
+    const uint32_t res = std::min<uint32_t>(ks.ppqn, 1920);
+    auto conv = [&](uint64_t t) { return (t * res + ks.ppqn / 2) / ks.ppqn; };
+    if (res != ks.ppqn) out.notes.push_back("PPQN " + std::to_string(ks.ppqn) + " rescaled to 1920");
+    StyleDefinition& s = out.style;
+    s.name = name;
+    s.format_version = "1.0";
+    s.resolution = res;
+    s.tempo_bpm = ks.mpqn ? (60'000'000u + ks.mpqn / 2) / ks.mpqn : 120;
+    if (!ks.mpqn) out.notes.push_back("no tempo in the file: 120 BPM set");
+    // Korg track channel -> the source channel the exporter maps onto it (korgChannelFor inverse).
+    auto sourceCh = [](uint8_t kch) -> int {
+        for (int g = 0; g < 16; ++g)
+            if (k::korgChannelFor(static_cast<uint8_t>(g)) == kch) return g;
+        return -1;
+    };
+    auto& kx = s.korg_export;
+    for (const auto& el : ks.elements) {
+        std::optional<uasf::SectionType> type;
+        for (int i = 0; i <= static_cast<int>(uasf::SectionType::Break); ++i)
+            if (const char* m = k::korgMarkerFor(static_cast<uasf::SectionType>(i)); m && el.marker == m)
+                type = static_cast<uasf::SectionType>(i);
+        if (!type || std::any_of(s.sections.begin(), s.sections.end(), [&](const auto& x) { return x.type == *type; })) {
+            out.notes.push_back("element " + el.marker + " not imported (UASF keeps one chord variation per element)");
+            continue;
+        }
+        SectionDefinition sec;
+        sec.type = *type;
+        sec.name = sectionTypeName(*type);
+        sec.resolution = res;
+        sec.beats_per_bar = el.num;
+        sec.beat_note = el.den;
+        const uint64_t bar = uint64_t{ks.ppqn} * 4 * el.num / el.den;
+        sec.bars = bar ? static_cast<uint32_t>(el.length / bar) : 0;
+        std::map<uint8_t, TrackDefinition> tracks;
+        size_t chordNotes = 0, dropped = 0;
+        // MIDI running bank state per Korg channel in this element: the sound a device selects is the CC0/CC32 value
+        // current when a Program Change arrives. The first such complete selection is the element's sound.
+        struct Bank { int msb = -1, lsb = -1; std::optional<KorgSound> got; size_t events = 0; };
+        std::map<uint8_t, Bank> bank;
+        for (const auto& e : el.events) {
+            const uint8_t kch = e.status & 0x0F, hi = e.status & 0xF0;
+            const int g = sourceCh(kch);
+            if (g < 0) { ++dropped; continue; }
+            if (hi == 0xC0 || (hi == 0xB0 && (e.d1 == 0 || e.d1 == 32))) {
+                auto& b = bank[kch];
+                ++b.events;
+                if (hi == 0xB0) (e.d1 == 0 ? b.msb : b.lsb) = e.d2;
+                else if (!b.got && b.msb >= 0 && b.lsb >= 0) b.got = KorgSound{uint8_t(b.msb), uint8_t(b.lsb), e.d1};
+                continue;
+            }
+            auto [it, fresh] = tracks.try_emplace(kch);
+            TrackDefinition& t = it->second;
+            if (fresh) {
+                t.name = k::korgTrackName(kch);
+                t.midi_channel = static_cast<uint8_t>(g);
+                t.is_drum = kch == k::kDrumCh || kch == k::kPercCh;
+                t.role = kch == k::kDrumCh ? uasf::TrackRole::Drum : kch == k::kPercCh ? uasf::TrackRole::Percussion
+                         : kch == k::kBassCh ? uasf::TrackRole::Bass : uasf::TrackRole::Accompaniment;
+            }
+            if (hi == 0x90 && e.d2 && k::isChordDriven(kch) && e.d1 <= k::kChordEventNoteMax) ++chordNotes;
+            t.events.push_back({static_cast<MidiEventType>(hi), static_cast<uint8_t>(g), e.d1, e.d2, conv(e.tick)});
+        }
+        for (auto& [kch, t] : tracks) sec.tracks.push_back(std::move(t));
+        if (chordNotes)
+            out.notes.push_back(el.marker + ": " + std::to_string(chordNotes) +
+                                " notes C-1..B-1 on chord-driven tracks (Pa5X Chord events) kept as notes; the exporter drops them");
+        if (dropped) out.notes.push_back(el.marker + ": " + std::to_string(dropped) + " events outside the 8 Korg style tracks not imported");
+        // Each element keeps its own bank/program (the exporter writes it at that element's start).
+        // Exact = one CC0, one CC32 and a Program Change after both; anything else is a loss.
+        for (const auto& [kch, b] : bank) {
+            const std::string trk = std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": ";
+            if (!b.got) { out.losses.push_back(trk + "no Program Change after both CC0 and CC32 (incomplete selection), no sound kept"); continue; }
+            kx.element_sounds[{*type, kch}] = *b.got;
+            if (b.events != 3)
+                out.losses.push_back(trk + std::to_string(b.events) + " bank/program events, kept the first complete selection " +
+                                     std::to_string(b.got->msb) + "/" + std::to_string(b.got->lsb) + "/" + std::to_string(b.got->pc) +
+                                     " (bank state at its Program Change); the rest not kept");
+        }
+        s.sections.push_back(std::move(sec));
+    }
+    if (s.sections.empty()) { out.error = "no element maps to a UASF section"; return out; }
+    if (!out.losses.empty() && policy == SoundLoss::Refuse) {
+        out.error = "bank/program cannot be kept exactly (" + out.losses.front() + (out.losses.size() > 1 ? ", +" + std::to_string(out.losses.size() - 1) + " more" : "") +
+                    "): open it with \"keep the first sound\" to accept the loss";
+        return out;
+    }
+    for (const auto& l : out.losses) out.notes.push_back("LOSS: " + l);
+    // A track with one sound in every element: style-wide (same export, and a style-wide edit then applies to it).
+    for (uint8_t kch = 8; kch <= 15; ++kch) {
+        std::optional<KorgSound> one;
+        size_t n = 0;
+        bool same = true;
+        for (const auto& [key, snd] : kx.element_sounds)
+            if (key.second == kch) { ++n; same = same && (!one || *one == snd); one = snd; }
+        if (!one || !same || n != s.sections.size()) continue;
+        kx.sounds[kch] = *one;
+        for (const auto& sec : s.sections) kx.element_sounds.erase({sec.type, kch});
+    }
+    uasf::UasfValidator v;
+    for (const auto& i : v.validate(s).issues)
+        if (i.severity == uasf::ValidationIssue::ERROR) { out.error = "UASF validator: " + i.message; return out; }
+    if (auto e = saveError(s); !e.empty()) { out.error = std::move(e); return out; }
+    out.ok = true;
+    return out;
 }
 
 } // namespace ai_arranger::style_edit

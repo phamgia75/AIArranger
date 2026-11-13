@@ -176,7 +176,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         exportRow("KMP / KSF folder (EXPERIMENTAL)", D::SampleLab, 3, ExportJob::KmpFolder, "KMP job...",
                   "The previewed Sound as .KMP + .KSF (Sample Lab > KMP / KSF Writer), verification level L1 only"),
         exportRow("Style as Pa5X SMF (EXPERIMENTAL)", D::StyleStudio, 0, ExportJob::StyleSmf, "SMF job...",
-                  "The Style open in Style Studio (L1 = our Korg Style validator; Pa5X import not tested). UASF: our own format",
+                  "The Style open in Style Studio (L1 = our Korg Style validator; structurally valid, not verified on a Pa5X). UASF: our own format",
                   ExportJob::StyleUasf, "UASF job..."),
         {{(staged_ = &label("STAGED CHANGES: 0", kPending)), 0}},
         {{&label("WRITE RULES: every write goes to NAME.INCOMPLETE and is published by one rename only after its checks pass; "
@@ -305,7 +305,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     styleReport_.setText("No Style open. Open Style... reads a Yamaha SFF1 .sty (or an AIArranger .uasf) for the report and for "
                          "editing. The file is only read; edits are written only as NEW files.", false);
     auto& openSty = button("Open Style...", [this] {
-        chooseFolder("Style file to read (.sty or .uasf)", [this](juce::File f) { openStyle(f); }, true, "*.sty;*.STY;*.uasf");
+        chooseFolder("Style file to read (.sty, .uasf or a Korg Style SMF .mid)", [this](juce::File f) { openStyle(f); }, true, "*.sty;*.STY;*.uasf;*.mid;*.MID");
     });
     liveFromStyle_ = &button("Open Live Arranger", [this] { if (showLiveHost_) showLiveHost_(); });
     setUnavailable(*liveFromStyle_, showLiveHost_ ? "" : "Needs: the Live Arranger window (open the Studio from it)");
@@ -335,6 +335,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     pendDiscard_ = &button("Discard Edits and Open", [this] { resolveUnsavedStyle(UnsavedChoice::Discard); });
     pendCancel_ = &button("Cancel", [this] { resolveUnsavedStyle(UnsavedChoice::Cancel); });
     stylePage_.rows = {{{&openSty, 150}, {liveFromStyle_, 160}, {&label("Load the Style there with Load Style... to audition it.", kText2), 0}},
+                       {{&styleKeepFirst_, 0}},
                        {{&label("Element", kText2), 60}, {&styleElem_, 220}, {&label("Track", kText2), 44}, {&styleTrack_, 220}},
                        {{&styleOp_, 170}, {&styleValue_, 170}, {applyBtn_, 80}, {&reasonFor(*applyBtn_), 0}},
                        {{&styleStatus_, 0}},
@@ -694,14 +695,15 @@ void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& sav
 
 void StudioComponent::loadStyle(const juce::File& sty, bool discard) {
     std::string report;
-    if (!sty.hasFileExtension("uasf")) {
+    if (!sty.hasFileExtension("uasf;mid")) {
         importers::sff1::Sff1Reader reader;
         const auto r = reader.parseFile(sty.getFullPathName().toStdString());
         report = "Style: " + sty.getFileName().toStdString() + "  (read-only; nothing is written to it)\n" + sty.getFullPathName().toStdString() +
                  "\n\n" + importers::sff1::Sff1ReportGenerator::generateReport(r);
     }
     std::string err;
-    const bool ok = style_.load(sty.getFullPathName().toStdString(), &err, discard);
+    const bool ok = style_.load(sty.getFullPathName().toStdString(), &err, discard,
+                                styleKeepFirst_.getToggleState() ? style_edit::SoundLoss::KeepFirst : style_edit::SoundLoss::Refuse);
     styleStatus_.setText(ok ? "Opened for editing: " + sty.getFileName() : "Not editable: " + juce::String(err), juce::dontSendNotification);
     if (!ok) {   // the read-only report may still be shown, but only when no other Style is open for editing
         if (!style_.loaded()) sff1Report_ = report;
@@ -709,12 +711,9 @@ void StudioComponent::loadStyle(const juce::File& sty, bool discard) {
         return;
     }
     sff1Report_ = report;
-    styleElem_.clear(juce::dontSendNotification);
-    styleElem_.addItem("All elements", 1);
-    for (size_t i = 0; i < style_.style().sections.size(); ++i)
-        styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
-    styleElem_.setSelectedId(1, juce::dontSendNotification);
+    styleElem_.clear(juce::dontSendNotification);   // refreshStyle() fills the element choices of the new Style
     refreshStyle();
+    styleElem_.setSelectedId(1, juce::dontSendNotification);
 }
 
 void StudioComponent::setValidationTarget(const juce::File& f) {
@@ -788,7 +787,7 @@ void StudioComponent::runValidator(Validator v) {
         case Validator::StyleSmf:
             runJob("Style SMF Check", [target]() -> Out {
                 const auto v = st::StyleStudioModel::checkStyleSmf(target);
-                return {"Style SMF: " + juce::String(v.l1.detail) + " (EXPERIMENTAL; Pa5X import not tested)", v};
+                return {"Style SMF: " + juce::String(v.l1.detail) + " (EXPERIMENTAL; structurally valid, not verified on a Pa5X)", v};
             });
             break;
         case Validator::SoundPy:
@@ -989,6 +988,14 @@ void StudioComponent::runLabTool(LabTool t, const juce::File& dest) {
 // ── Style Studio editing (E3) ──
 void StudioComponent::refreshStyle() {
     if (style_.loaded()) {
+        // Element choices follow the Style after every edit, undo and redo (copy adds one, rename relabels it); the chosen
+        // one stays chosen while it exists, else All elements.
+        const int keepElem = styleElem_.getSelectedId();
+        styleElem_.clear(juce::dontSendNotification);
+        styleElem_.addItem("All elements", 1);
+        for (size_t i = 0; i < style_.style().sections.size(); ++i)
+            styleElem_.addItem("[" + juce::String(int(i)) + "] " + juce::String(style_.style().sections[i].name), int(i) + 2);
+        styleElem_.setSelectedId(styleElem_.indexOfItemId(keepElem) >= 0 ? keepElem : 1, juce::dontSendNotification);
         const int keep = styleTrack_.getSelectedId(), sec = styleElem_.getSelectedId() - 2;
         styleTrack_.clear(juce::dontSendNotification);
         styleTrack_.addItem("All tracks", 1);
@@ -999,6 +1006,7 @@ void StudioComponent::refreshStyle() {
         styleReport_.setText(juce::String::fromUTF8((style_.browser() + (sff1Report_.empty() ? "" : "\n" + sff1Report_)).c_str()), false);
     } else {
         styleTrack_.clear(juce::dontSendNotification);
+        styleElem_.clear(juce::dontSendNotification);
         if (!sff1Report_.empty()) styleReport_.setText(juce::String::fromUTF8(sff1Report_.c_str()), false);
     }
     undoBtn_->setButtonText(style_.undoLabel().empty() ? juce::String("Undo") : "Undo " + juce::String(style_.undoLabel()));
@@ -1076,7 +1084,7 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
             // The Style as it is now (the editor keeps working); once written, these bytes count as written (staged -> 0)
             const auto uasf = style_.uasfBytes();
             const auto path = style_.path();
-            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_edit::exportPa5xSmf(style_.style()), d, path)
+            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_.smfExport(), d, path)
                                                  : jobs::styleUasf(path.filename().string(), uasf, d, path);
             const bool smf = j == ExportJob::StyleSmf;
             return enqueue(std::move(spec), nullptr, [this, uasf, path, smf](const jobs::JobState& s) {
