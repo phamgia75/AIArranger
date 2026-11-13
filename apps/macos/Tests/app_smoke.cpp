@@ -1390,7 +1390,8 @@ int main() {
                      all.back().writerThread != jobs::thisThread());
             }
             TEST("studio: Pa5X SMF export writes a new file at L1 (validator), EXPERIMENTAL", fs::is_regular_file(root / "waltz.mid") &&
-                 st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") && st.inspectorText().contains("STAGED CHANGES\n0.") &&
+                 st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") &&
+                 st.inspectorText().contains("STAGED CHANGES\nStyle Studio edits not written yet. Save UASF... writes them all") &&   // r4 #1: SMF is lossy
                  st.inspectorText().contains("waltz.mid") && st.inspectorText().contains(l1only));
             st.exportStyleSmf(juce::File((root / "waltz.mid").string()));
             waitIdle(10000);
