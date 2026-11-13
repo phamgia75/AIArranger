@@ -360,6 +360,25 @@ inline std::pair<std::string, char> side(const std::string& n) {
 }
 }  // namespace korg
 
+namespace korg {
+// A package sample name: stored when it is 1-20 printable characters and not taken, else "<layer> N" with the layer
+// name shortened so the whole fits 20 characters, N counting up from n. Tries at most limit + 1 numbers: with limit
+// = the number of names already taken, one of those distinct candidates is free. "" = none found (never loops).
+template <class Taken>
+inline std::string sampleName(const std::string& stored, const std::string& layer, size_t n, size_t limit, Taken taken) {
+    if (nameOk(stored) && !taken(stored)) return stored;
+    for (size_t k = 0; k <= limit; ++k) {
+        const std::string suffix = " " + std::to_string(n + k);
+        if (suffix.size() >= 20) return "";
+        std::string prefix = layer.substr(0, 20 - suffix.size());
+        while (!prefix.empty() && prefix.back() == ' ') prefix.pop_back();
+        const std::string c = (prefix.empty() ? "Sample" : prefix) + suffix;
+        if (nameOk(c) && !taken(c)) return c;
+    }
+    return "";
+}
+}  // namespace korg
+
 inline bool isKorgFolder(const std::filesystem::path& dir) {
     std::error_code ec;
     for (const auto& e : std::filesystem::directory_iterator(dir, ec))
@@ -510,9 +529,8 @@ inline std::string buildFromKorgFolder(const std::filesystem::path& dir, const s
                     for (const auto& o : in.samples) if (korg::lower(txw::fileSafe(o.name)) == korg::lower(txw::fileSafe(n))) return true;
                     return false;
                 };
-                s.name = h.name;
-                for (int k = 0; !nameOk(s.name) || taken(s.name); ++k)
-                    s.name = L.name.substr(0, 16) + " " + std::to_string(in.samples.size() + 1 + k);
+                s.name = korg::sampleName(h.name, L.name, in.samples.size() + 1, in.samples.size(), taken);
+                if (s.name.empty()) return it->kmp.filename().string() + " region " + std::to_string(i + 1) + ": no unique sample name fits 20 characters";
                 loaded[key] = static_cast<int>(in.samples.size());
                 in.samples.push_back(std::move(s));
             }

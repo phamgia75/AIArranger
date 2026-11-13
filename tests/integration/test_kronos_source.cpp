@@ -11,6 +11,7 @@
 #include "ui/sound/sound_conversion_model.h"
 #include "../support/korg_fixture.h"
 #include <cmath>
+#include <set>
 #include <cstdio>
 #include <unistd.h>
 
@@ -374,6 +375,35 @@ int main() {
             TEST("without the file's folder, SMF1 is refused naming the chunk and its target: " + r,
                  r.find("shared sample data (chunk SMF1 names A.KSF)") != std::string::npos);
         }
+    }
+
+    std::printf("== Fallback sample names always fit 20 characters and never loop (Codex re-check, P1)\n");
+    {   // 8 layers x 128 regions of one KSF under 128 original keys = 1024 samples; layer names of 16+ characters, so the
+        // old "<16 chars> N" fallback reached 21 characters at N = 1000 and retried forever
+        const fs::path d = root / "many";
+        std::vector<std::string> names;
+        std::vector<uint8_t> splits;
+        for (int l = 0; l < 8; ++l) {
+            std::vector<Reg> rs;
+            for (int k = 0; k < 128; ++k) rs.push_back({uint8_t(k), uint8_t(k), 0, 0, "M" + std::to_string(l) + ".KSF"});
+            names.push_back("Long Layer Name " + std::string(1, char('A' + l)));
+            if (l) splits.push_back(uint8_t(16 * l));
+            put(d / ("M" + std::to_string(l) + ".KMP"), kmp(names.back(), rs));
+            put(d / ("M" + std::to_string(l) + ".KSF"), ksf({tone(64, 440, 5000, l), 48000, 0, 0, 63, 0x80}));
+        }
+        snd::Instrument x;
+        const auto e = snd::buildFromKorgFolder(d, "Many", names, splits, &x);
+        bool fit = true;
+        std::set<std::string> seen;
+        for (const auto& s : x.samples) fit &= snd::nameOk(s.name) && seen.insert(s.name).second;
+        TEST("1024 samples from 16+ character layer names convert, every name 1-20 characters and unique: " + e,
+             e.empty() && x.samples.size() == 1024 && fit && x.samples[1000].name == "Long Layer Name 1001");
+        const auto none = [](const std::string&) { return true; };
+        TEST("no free name: the helper gives up after its bound instead of looping",
+             snd::korg::sampleName("", "Long Layer Name A", 1000, 5, none).empty());
+        const auto first5 = [](const std::string& n) { return n.size() > 2 && n.substr(n.size() - 2) < " 6" && n.substr(n.size() - 2, 1) == " "; };
+        TEST("taken candidates are skipped: ' 1'..' 5' taken gives 'Long Layer Name A 6'",
+             snd::korg::sampleName("", "Long Layer Name A", 1, 10, first5) == "Long Layer Name A 6");
     }
 
     fs::remove_all(root);
