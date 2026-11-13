@@ -1469,10 +1469,41 @@ int main() {
             }
             {   // the standalone Sounds & Resources window's work goes through the same quit prompt (not cancelled silently)
                 using W = app::StudioComponent::WorkChoice;
+                // Owner gate A/B: the sources' SHA-256 manifest before and after each choice, and the output folder's listing
+                auto manifest = [](const fs::path& dir) {
+                    std::map<std::string, std::string> m;
+                    for (const auto& e : fs::recursive_directory_iterator(dir)) {
+                        if (!e.is_regular_file()) continue;
+                        bool c = false;
+                        std::string err;
+                        m[fs::relative(e.path(), dir).string()] = media::detail::sha256File(e.path(), [](size_t) { return true; }, &c, &err);
+                    }
+                    return m;
+                };
+                auto outputs = [&](const std::string& name) {   // every entry NAME* in root
+                    std::vector<std::string> r;
+                    for (const auto& e : fs::directory_iterator(root)) if (e.path().filename().string().rfind(name, 0) == 0) r.push_back(e.path().filename().string());
+                    std::sort(r.begin(), r.end());
+                    return r;
+                };
+                auto evidence = [&](const char* choice, const std::string& name, const fs::path& src, const std::map<std::string, std::string>& before) {
+                    const auto after = manifest(src);
+                    std::printf("  evidence: %s: source %s: %zu files, SHA-256 manifest %s; outputs %s*:", choice, src.filename().c_str(), after.size(),
+                                after == before ? "unchanged" : "CHANGED", name.c_str());
+                    for (const auto& o : outputs(name)) std::printf(" %s", o.c_str());
+                    std::printf("\n");
+                    for (const auto& [f, h] : after) std::printf("  evidence:   %s  %s\n", h.substr(0, 16).c_str(), f.c_str());
+                    std::fflush(stdout);
+                    std::system(("ls -la '" + root.string() + "' | grep -E ' " + name + "' | sed 's/^/  evidence:   /'").c_str());
+                    for (const auto& o : outputs(name))
+                        std::system(("ls -la '" + (root / o).string() + "' | sed 's/^/  evidence:     " + o + ": /'").c_str());
+                    return after == before;
+                };
                 app::LiveHostComponent h;
                 find<juce::Button>(h, "Sound Tools...")->onClick();
                 auto* rw = h.resources();
                 int hq = 0;
+                const auto mineBefore = manifest(root / "Mine.KST");
                 rw->startBackup(juce::File((root / "Mine.KST").string()), juce::File((root / "host-backup").string()));
                 h.confirmQuit([&hq] { ++hq; });
                 auto* hs = h.studio();
@@ -1482,8 +1513,13 @@ int main() {
                 hs->resolveRunningWork(W::Wait);
                 for (int i = 0; i < 500 && hq == 0; ++i) pump(20);
                 TEST("quit: Wait lets that backup finish and publish, then quits", hq == 1 && !rw->busy() && fs::is_directory(root / "host-backup"));
+                TEST("quit: Wait: the final backup published with its report, no NAME.INCOMPLETE, the source unchanged (SHA-256 manifest)",
+                     evidence("Wait", "host-backup", root / "Mine.KST", mineBefore) && !fs::exists(root / "host-backup.INCOMPLETE") &&
+                     fs::is_regular_file(root / "host-backup.export.md") && media::verifyBackup(root / "host-backup").empty());
                 fs::create_directories(root / "bigkst2/PCM");
                 { std::ofstream big(root / "bigkst2/PCM/RAM01.PCM", std::ios::binary); std::string mb(1 << 20, 'p'); for (int i = 0; i < 128; ++i) big << mb; }
+                put(root / "bigkst2/PCM/RAM02.PCM", "second source file");
+                const auto bigBefore = manifest(root / "bigkst2");
                 {   // closing (hiding) the Sounds & Resources window does not cancel its backup
                     auto* win = dynamic_cast<juce::DocumentWindow*>(rw->getTopLevelComponent());
                     rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup3").string()));
@@ -1491,7 +1527,8 @@ int main() {
                     TEST("closing the Sounds & Resources window hides it; its backup keeps running", win && !win->isVisible() && rw->busy());
                     for (int i = 0; i < 1500 && rw->busy(); ++i) pump(20);
                     TEST("the hidden window's backup finishes and publishes (not cancelled)", !rw->busy() && fs::is_directory(root / "host-backup3") &&
-                         rw->lastBackupJob().phase == jobs::Phase::Done && hq == 1);
+                         rw->lastBackupJob().phase == jobs::Phase::Done && hq == 1 && !fs::exists(root / "host-backup3.INCOMPLETE") &&
+                         manifest(root / "bigkst2") == bigBefore);
                     fs::remove_all(root / "host-backup3");
                 }
                 rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup2").string()));
@@ -1504,10 +1541,26 @@ int main() {
                 TEST("quit: Keep Working closes the prompt; the standalone backup keeps running", hq == 1 && !hs->workPromptShown() && rw->busy());
                 h.confirmQuit([&hq] { ++hq; });
                 TEST("quit: quitting again after Keep Working asks again", hq == 1 && hs->workPromptShown());
+                hs->resolveRunningWork(W::KeepWorking);
+                for (int i = 0; i < 1500 && rw->busy(); ++i) pump(20);
+                pump(300);
+                TEST("quit: Keep Working: the job continues and publishes normally; no quit; no NAME.INCOMPLETE; the source unchanged",
+                     hq == 1 && !rw->busy() && rw->lastBackupJob().phase == jobs::Phase::Done && !hs->workPromptShown() &&
+                     evidence("Keep Working", "host-backup2", root / "bigkst2", bigBefore) && fs::is_directory(root / "host-backup2") &&
+                     !fs::exists(root / "host-backup2.INCOMPLETE") && media::verifyBackup(root / "host-backup2").empty());
+                rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup5").string()));
+                h.confirmQuit([&hq] { ++hq; });
                 hs->resolveRunningWork(W::CancelJobsAndQuit);
                 for (int i = 0; i < 500 && hq == 1; ++i) pump(20);
                 TEST("quit: Cancel Jobs and Quit cancels that backup, then quits; nothing published", hq == 2 && !rw->busy() &&
-                     rw->kstText().contains("cancelled") && !fs::exists(root / "host-backup2"));
+                     rw->kstText().contains("cancelled") && !fs::exists(root / "host-backup5"));
+                {
+                    const auto left = outputs("host-backup5");   // the cancelled job's NAME.INCOMPLETE if it had started writing; never a NAME
+                    TEST("quit: Cancel: only NAME.INCOMPLETE may remain (never deleted, never published), the source unchanged (SHA-256 manifest)",
+                         evidence("Cancel Jobs and Quit", "host-backup5", root / "bigkst2", bigBefore) &&
+                         std::all_of(left.begin(), left.end(), [](const std::string& n) { return n == "host-backup5.INCOMPLETE"; }) &&
+                         rw->lastBackupJob().phase == jobs::Phase::Cancelled);
+                }
                 pump(300);
                 TEST("quit: that quit ran exactly once", hq == 2);
                 rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup4").string()));
@@ -1519,7 +1572,7 @@ int main() {
                 for (int i = 0; i < 1500 && hq == 2; ++i) pump(20);
                 pump(300);
                 TEST("quit: the Wait finishes the backup, publishes it and quits exactly once", hq == 3 && !rw->busy() &&
-                     fs::is_directory(root / "host-backup4"));
+                     fs::is_directory(root / "host-backup4") && !fs::exists(root / "host-backup4.INCOMPLETE") && manifest(root / "bigkst2") == bigBefore);
                 fs::remove_all(root / "bigkst2");
             }
         }
