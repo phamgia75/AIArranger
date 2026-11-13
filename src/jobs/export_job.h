@@ -24,7 +24,9 @@
 #include "media/sound/resource_graph.h"   // jsonEscape
 #include "ui/studio/studio_models.h"      // Verification, badgeLine
 #include <atomic>
+#include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <fstream>
 #include <functional>
 #include <sys/stat.h>
@@ -60,7 +62,11 @@ struct ExportSpec {
     std::function<std::vector<std::string>(std::vector<std::string>& notes, uint64_t& sampleBytes)> dependencies;   // missing = blocking
     std::function<std::vector<OutFile>()> preview;
     std::function<WriteResult(const fs::path& out, const std::function<bool(double)>& progress)> write;
+    // Instead of write, for a folder output (E9 Codex r3): the runner makes `out` below its pinned job folder and hands
+    // the writer that folder open (O_DIRECTORY|O_NOFOLLOW); the writer writes through the fd only, never re-resolving `out`.
+    std::function<WriteResult(int outFd, const fs::path& out, const std::function<bool(double)>& progress)> writeAt;
     std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;   // runs on the STAGED output; L1 Failed = not published
+    std::function<std::string(const fs::path& out)> beforePublish;   // right before the publishing renames: "" = publish, else why not
 };
 
 struct JobState {
@@ -314,19 +320,41 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
     if (!enter(Phase::Run)) return;
     fs::create_directories(dest.parent_path(), ec);   // as the writers did themselves (the guard has refused mounted volumes)
-    if (!fs::create_directory(work, ec)) return stop(Phase::Failed, "cannot create " + work.string() + (ec ? ": " + ec.message() : ""));
-    if (!(std::ofstream(work / kJobMarker) << "export job " << st.id << " " << st.type << " -> " << st.dest << "\n"))
-        return stop(Phase::Failed, "cannot write in " + work.string() + kept());
+    // E9 Codex r3: the job folder is made and opened below the pinned output folder, and published from there by fd, so a
+    // NAME.INCOMPLETE or a staged output swapped by path is never written through or published.
+    using media::detail::Fd;
+    const std::string workName = work.filename().string(), leaf = dest.filename().string();
+    const Fd parentFd(::open(dest.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (parentFd.v < 0 || ::mkdirat(parentFd.v, workName.c_str(), 0755) != 0)
+        return stop(Phase::Failed, "cannot create " + work.string() + ": " + std::strerror(errno));
+    const Fd workFd(::openat(parentFd.v, workName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    {
+        const std::string m = "export job " + std::to_string(st.id) + " " + st.type + " -> " + st.dest + "\n";
+        const int fd = workFd.v < 0 ? -1 : ::openat(workFd.v, kJobMarker, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+        const bool good = fd >= 0 && ::write(fd, m.data(), m.size()) == ssize_t(m.size());
+        if (fd < 0 || !(good & (::close(fd) == 0))) return stop(Phase::Failed, "cannot write in " + work.string() + kept());
+    }
     const double base = st.progress, share = 1.0 / double(int(Phase::Done) - 1);
     st.writerThread = thisThread();
-    const auto wr = spec.write(staged, [&](double f) {
+    const auto progress = [&](double f) {
         const double now = base + share * std::clamp(f, 0.0, 1.0);
         if (now - st.progress >= 0.005) { st.progress = now; update(st); }   // throttled: a writer may call this per chunk
         return !cancelled();
-    });
+    };
+    struct stat staging {};   // the identity of the staged output: only that one is published
+    WriteResult wr;
+    if (spec.writeAt) {
+        if (::mkdirat(workFd.v, leaf.c_str(), 0755) != 0) return stop(Phase::Failed, "cannot create " + staged.string() + kept());
+        const Fd out(::openat(workFd.v, leaf.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        if (out.v < 0 || ::fstat(out.v, &staging) != 0) return stop(Phase::Failed, "cannot open " + staged.string() + kept());
+        wr = spec.writeAt(out.v, staged, progress);
+    } else {
+        wr = spec.write(staged, progress);
+        if (wr.error.empty() && ::fstatat(workFd.v, leaf.c_str(), &staging, AT_SYMLINK_NOFOLLOW) != 0)
+            return stop(Phase::Failed, "the writer reported success but wrote nothing" + kept());
+    }
     st.writerText = wr.text;
     if (!wr.error.empty()) return stop(cancelled() ? Phase::Cancelled : Phase::Failed, wr.error + "; nothing was published" + kept());
-    if (!fs::exists(fs::symlink_status(staged, ec))) return stop(Phase::Failed, "the writer reported success but wrote nothing" + kept());
 
     // Checks on the STAGED output (D17): the files that will be published are the files that were checked.
     if (!enter(Phase::Manifest)) return;
@@ -348,30 +376,67 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         return stop(Phase::Failed, "the written output failed its check (L1: " + st.level.l1.detail + "); nothing was published" + kept());
 
     if (!enter(Phase::Publish)) return;
+    if (spec.beforePublish)
+        if (const auto e = spec.beforePublish(staged); !e.empty()) return stop(Phase::Failed, "refusing to publish: " + e + "; nothing was published" + kept());
+    // Only what was verified is published: the job folder and the staged output are still the ones made and checked
+    // (device + inode, no link followed), and the staged files still have the listed names and sizes.
+    const auto same = [](const struct stat& a, const struct stat& b) { return a.st_dev == b.st_dev && a.st_ino == b.st_ino; };
+    const auto identity = [&] {   // the job folder and the staged output by device + inode, no link followed
+        struct stat w {}, wn {}, o {};
+        return ::fstat(workFd.v, &w) == 0 && ::fstatat(parentFd.v, workName.c_str(), &wn, AT_SYMLINK_NOFOLLOW) == 0 && same(w, wn) &&
+               ::fstatat(workFd.v, leaf.c_str(), &o, AT_SYMLINK_NOFOLLOW) == 0 && same(o, staging);
+    };
+    const auto unchanged = [&] {
+        if (!identity()) return false;
+        const auto now = listFiles(staged);
+        if (now.size() != st.files.size()) return false;
+        for (size_t i = 0; i < now.size(); ++i)
+            if (now[i].rel != st.files[i].rel || now[i].bytes != st.files[i].bytes) return false;
+        return true;
+    };
+    if (!unchanged()) return stop(Phase::Failed, "refusing: the staged output changed after it was verified; nothing was published" + kept());
+    const auto move = [](int from, const std::string& a, int to, const std::string& b) {   // never replaces an entry
+#ifdef __APPLE__
+        return ::renameatx_np(from, a.c_str(), to, b.c_str(), RENAME_EXCL) == 0;
+#else
+        return ::renameat2(from, a.c_str(), to, b.c_str(), RENAME_NOREPLACE) == 0;
+#endif
+    };
     // Side files the writer put next to its output (the KST backup's NAME.manifest.sha256) go first, the output last,
     // as backupKst publishes: until that last rename nothing is under the output's name.
-    std::vector<fs::path> entries;   // listed first: the folder is not changed while it is being iterated
-    for (const auto& e : fs::directory_iterator(work, ec)) entries.push_back(e.path());
-    std::vector<std::pair<fs::path, fs::path>> moved;
-    const std::string leaf = dest.filename().string();
-    for (const auto& from : entries) {
-        const std::string n = from.filename().string();
+    std::vector<std::string> entries;   // listed first: the folder is not changed while it is being iterated
+    for (const auto& e : fs::directory_iterator(work, ec)) entries.push_back(e.path().filename().string());
+    std::vector<std::string> moved;
+    const auto rollback = [&] { for (const auto& n : moved) move(parentFd.v, n, workFd.v, n); };
+    for (const auto& n : entries) {
         if (n == kJobMarker || n == leaf) continue;
-        if (n.rfind(leaf, 0) != 0) return stop(Phase::Failed, "unexpected " + from.string() + " in the job folder" + kept());
-        const fs::path to = dest.parent_path() / (leaf + n.substr(leaf.size()));
-        if (!media::publishNewFolder(from, to)) {
-            for (const auto& [t, back] : moved) media::publishNewFolder(t, back);
-            return stop(Phase::Failed, "refusing: " + to.string() + " appeared while writing" + kept());
+        if (n.rfind(leaf, 0) != 0) { rollback(); return stop(Phase::Failed, "unexpected " + (work / n).string() + " in the job folder" + kept()); }
+        if (!move(workFd.v, n, parentFd.v, n)) {
+            rollback();
+            return stop(Phase::Failed, "refusing: " + (dest.parent_path() / n).string() + " appeared while writing" + kept());
         }
-        moved.push_back({to, from});
+        moved.push_back(n);
     }
-    if (!media::publishNewFolder(staged, dest)) {
-        for (const auto& [to, back] : moved) media::publishNewFolder(to, back);
+    // shortcut: the identity is checked right before the rename, but macOS has no rename-by-fd, so a swap in the window
+    // between this check and renameat is caught only after it (the published entry is compared again and moved back).
+    if (!identity()) {
+        rollback();
+        return stop(Phase::Failed, "refusing: the staged output changed after it was verified; nothing was published" + kept());
+    }
+    if (!move(workFd.v, leaf, parentFd.v, leaf)) {
+        rollback();
         return stop(Phase::Failed, "refusing: " + dest.string() + " appeared while writing" + kept());
     }
+    struct stat pub {};
+    if (::fstatat(parentFd.v, leaf.c_str(), &pub, AT_SYMLINK_NOFOLLOW) != 0 || !same(pub, staging)) {   // swapped during the rename
+        const bool back = move(parentFd.v, leaf, workFd.v, leaf);
+        rollback();
+        return stop(Phase::Failed, "refusing: the output at " + dest.string() + " is not the verified one" +
+                                       (back ? "; it was moved back" : "; it could NOT be moved back") + kept());
+    }
     // The job's own marker file and its now empty folder (rmdir: refused when anything else is in it)
-    fs::remove(work / kJobMarker, ec);
-    if (!fs::remove(work, ec)) st.warnings.push_back("could not remove the empty job folder " + work.string());
+    ::unlinkat(workFd.v, kJobMarker, 0);
+    if (::unlinkat(parentFd.v, workName.c_str(), AT_REMOVEDIR) != 0) st.warnings.push_back("could not remove the empty job folder " + work.string());
 
     st.phase = Phase::Report;   // published: from here on the job runs to its end
     update(st);

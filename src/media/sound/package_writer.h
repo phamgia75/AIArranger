@@ -60,10 +60,7 @@ struct FileSet {
         if (!rootFd) {
             std::error_code ec;
             std::filesystem::create_directories(root, ec);
-            rootFd = std::shared_ptr<int>(new int(::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)), [](int* p) {
-                if (*p >= 0) ::close(*p);
-                delete p;
-            });
+            pin(::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), false);
         }
         if (*rootFd < 0) return -1;
         int cur = ::dup(*rootFd);
@@ -83,6 +80,14 @@ struct FileSet {
             cur = next;
             from = to + 1;
         }
+    }
+    // Writes go below this open folder from now on (E9 Codex r3): a caller that made and pinned `root` itself hands it
+    // over, so `root` is never resolved by path for a write. dup = the caller keeps its own fd.
+    void pin(int fd, bool dup = true) {
+        rootFd = std::shared_ptr<int>(new int(dup && fd >= 0 ? ::dup(fd) : fd), [](int* p) {
+            if (*p >= 0) ::close(*p);
+            delete p;
+        });
     }
     void save(const std::string& rel, const void* data, size_t n) {
         const int fd = createFile(rel);

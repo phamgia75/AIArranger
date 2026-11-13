@@ -637,12 +637,23 @@ inline std::string verifyKit(const fs::path& dir, const std::vector<Item>* expec
 }
 
 // The candidates in a folder of outputs (the app's "folder holding the outputs"): its visible entries, sorted. Read-only.
-inline std::vector<fs::path> outputsIn(const fs::path& folder) {
-    std::vector<fs::path> r;
+// The export reports the job runner writes beside each output (X.export.md, X.export.json) are not candidates when X is
+// in the same folder: they go to `skipped` and are never copied (E9 Codex r3).
+inline std::vector<fs::path> outputsIn(const fs::path& folder, std::vector<std::string>* skipped = nullptr) {
+    std::vector<fs::path> all, r;
+    std::set<std::string> names;
     std::error_code ec;
     for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
-        if (it->path().filename().string().rfind('.', 0) != 0) r.push_back(it->path());
-    std::sort(r.begin(), r.end());
+        if (it->path().filename().string().rfind('.', 0) != 0) { all.push_back(it->path()); names.insert(it->path().filename().string()); }
+    std::sort(all.begin(), all.end());
+    for (const auto& p : all) {
+        const std::string n = p.filename().string();
+        bool report = false;
+        for (const std::string ext : {".export.md", ".export.json"})
+            report |= n.size() > ext.size() && n.compare(n.size() - ext.size(), ext.size(), ext) == 0 && names.count(n.substr(0, n.size() - ext.size()));
+        if (!report) r.push_back(p);
+        else if (skipped) skipped->push_back(n);
+    }
     return r;
 }
 
@@ -664,10 +675,12 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
     auto roots = std::make_shared<std::vector<std::shared_ptr<media::detail::Fd>>>();   // pinned per member, in item order
     auto files = std::make_shared<std::vector<Planned>>();
     auto bytes = std::make_shared<uint64_t>(0);
-    s.validate = [in, outputsFolder, items, roots, files, bytes, kitName = media::folderPath(s.dest).filename().string()] {
+    auto reports = std::make_shared<std::vector<std::string>>();   // export reports in the folder of outputs, not copied
+    s.validate = [in, outputsFolder, items, roots, files, bytes, reports, kitName = media::folderPath(s.dest).filename().string()] {
         if (!outputsFolder.empty()) {
             lastListingThread = thisThread();
-            *in = outputsIn(outputsFolder);
+            reports->clear();
+            *in = outputsIn(outputsFolder, reports.get());
         }
         if (in->empty()) return std::string("refusing: no outputs chosen for the kit");
         if (const auto e = detail::fatName(kitName); !e.empty()) return "refusing: the kit name '" + kitName + "' has " + e;
@@ -687,8 +700,9 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
         return std::string();
     };
     // Per-member status on the SOURCE: the job report lists every one; a FAILED member stops the kit (fail closed).
-    s.dependencies = [items](std::vector<std::string>& notes, uint64_t&) {
+    s.dependencies = [items, reports](std::vector<std::string>& notes, uint64_t&) {
         std::vector<std::string> failed;
+        for (const auto& n : *reports) notes.push_back("skipped " + n + " (the export report of an output beside it; not copied)");
         for (auto& it : *items) {
             std::string d;
             const auto e = checkMember(it.kind, it.source, &d);
@@ -706,10 +720,10 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
         r.front().bytes = *bytes;   // shortcut: the members' total is shown on the first line, sizes per member are not split
         return r;
     };
-    s.write = [items, roots, files](const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
-        std::error_code ec;
-        if (!fs::create_directory(out, ec)) return {"cannot create " + out.string(), ""};
+    // The runner makes the kit folder below its pinned job folder and hands it over open: no write resolves `out` (r3)
+    s.writeAt = [items, roots, files](int outFd, const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
         media::sound::pkgio::FileSet set{out};
+        set.pin(outFd);
         // Every file read once, from the pinned member folders without following a link, streamed and hashed as it is read
         for (size_t i = 0; i < files->size(); ++i) {
             if (!progress(double(i) / double(files->size() + 1))) return {"cancelled by the user while copying; nothing was published", ""};

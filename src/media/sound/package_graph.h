@@ -209,8 +209,10 @@ inline bool parseManifest(const std::string& textIn, graph::Graph& out, std::str
 // most 64 deep, at most 100 000 tags); attribute names unique per element, values quoted without '<'; every '&' in text
 // or a value is one of the five predefined entities or a character reference; no DOCTYPE, CDATA or processing
 // instruction after the declaration; only white space outside the root. "" and *root = the root element's name, or why
-// the document is not well-formed.
-inline std::string xmlWellFormed(const std::string& x, std::string* root) {
+// the document is not well-formed. `elems` (optional) receives every start tag in document order, outside comments, with
+// its attributes' raw values (entities not decoded): a caller reads elements from these, never from the raw text (r3).
+using XmlTag = std::pair<std::string, std::map<std::string, std::string>>;
+inline std::string xmlWellFormed(const std::string& x, std::string* root, std::vector<XmlTag>* elems = nullptr) {
     const size_t n = x.size();
     size_t i = 0;
     const auto ws = [&](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
@@ -268,7 +270,7 @@ inline std::string xmlWellFormed(const std::string& x, std::string* root) {
             continue;
         }
         if (open.empty() && seen) return "a second root element <" + name + ">";
-        std::set<std::string> attrs;
+        std::map<std::string, std::string> attrs;
         for (;;) {
             const size_t before = j;
             while (j < n && ws(x[j])) ++j;
@@ -277,6 +279,7 @@ inline std::string xmlWellFormed(const std::string& x, std::string* root) {
                 const bool empty = x[j] == '/';
                 i = j + (empty ? 2 : 1);
                 if (open.empty()) { seen = true; *root = name; }
+                if (elems) elems->push_back({name, attrs});
                 if (!empty) {
                     if (open.size() >= 64) return "elements nested deeper than 64";
                     open.push_back(name);
@@ -287,7 +290,7 @@ inline std::string xmlWellFormed(const std::string& x, std::string* root) {
             const size_t ab = j;
             while (j < n && nameChar(x[j])) ++j;
             const std::string an = x.substr(ab, j - ab);
-            if (!attrs.insert(an).second) return "the attribute " + an + " twice in <" + name + ">";
+            if (attrs.count(an)) return "the attribute " + an + " twice in <" + name + ">";
             while (j < n && ws(x[j])) ++j;
             if (j >= n || x[j] != '=') return "the attribute " + an + " has no value";
             ++j;
@@ -297,6 +300,7 @@ inline std::string xmlWellFormed(const std::string& x, std::string* root) {
             if (q == std::string::npos) return "the value of " + an + " is not closed";
             if (x.find('<', j + 1) < q) return "a '<' in the value of " + an;
             if (const auto e = entities(j + 1, q); !e.empty()) return e;
+            attrs[an] = x.substr(j + 1, q - j - 1);
             j = q + 1;
         }
     }
@@ -394,17 +398,17 @@ inline bool loadPackage(const std::filesystem::path& dir, graph::Graph& g, std::
         if (x.rfind("\xEF\xBB\xBF", 0) == 0) x.erase(0, 3);
         while (!x.empty() && std::isspace(static_cast<unsigned char>(x.back()))) x.pop_back();
         std::string root;
+        std::vector<XmlTag> tags;
         if (x.rfind("<?xml", 0) != 0) return bad("not an XML document (no <?xml declaration)");
-        if (const auto e = xmlWellFormed(x, &root); !e.empty()) return bad("not well-formed XML: " + e);
+        if (const auto e = xmlWellFormed(x, &root, &tags); !e.empty()) return bad("not well-formed XML: " + e);
         if (root != "tx:performance") return bad("the root element is <" + root + ">, not <tx:performance> (a TX16Wx Performance)");
-        if (x.find("xmlns:tx=\"http://www.tx16wx.com/3.0/performance\"") == std::string::npos) return bad("not in the TX16Wx performance namespace");
+        if (tags.front().second["xmlns:tx"] != "http://www.tx16wx.com/3.0/performance") return bad("not in the TX16Wx performance namespace");
         if (std::count(b.begin(), b.end(), uint8_t(0))) return bad("contains a NUL byte");
         size_t slots = 0;
-        for (size_t at = 0; (at = x.find("<tx:slot", at)) != std::string::npos; ++at) {
-            const size_t close = x.find('>', at), p = x.find("tx:program=\"", at);
-            if (close == std::string::npos || p == std::string::npos || p > close) return bad("a tx:slot has no tx:program");
-            const size_t q = x.find('"', p + 12);
-            std::string v = x.substr(p + 12, q == std::string::npos ? 0 : q - p - 12);
+        for (auto& [tag, attrs] : tags) {   // real elements only: a slot inside a comment is not a slot
+            if (tag != "tx:slot") continue;
+            if (!attrs.count("tx:program")) return bad("a tx:slot has no tx:program");
+            std::string v = attrs["tx:program"];
             for (const auto& [ent, ch] : std::vector<std::pair<std::string, std::string>>{{"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"}})
                 for (size_t i; (i = v.find(ent)) != std::string::npos;) v.replace(i, ent.size(), ch);
             if (v.size() <= 7 || v.compare(v.size() - 7, 7, ".txprog") != 0 || v.find_first_of("/\\") != std::string::npos || v == "..")

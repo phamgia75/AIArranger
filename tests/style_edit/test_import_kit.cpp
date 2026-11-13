@@ -2,6 +2,7 @@
 // round trip through the independent readers, fail-closed on a corrupted member, interruption leaves only NAME.INCOMPLETE,
 // sources unchanged. Synthetic data only (demo organ, demo drum kit, the repo's synthetic Style).
 
+#include "jobs/export_specs.h"
 #include "jobs/import_kit.h"
 #include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
@@ -334,9 +335,94 @@ int main() {
              media::sound::xmlWellFormed("<?xml version=\"1.0\"?>\n<!-- c --><a x='1 &amp; 2'><b/><c y=\"&#x41;\">t &lt; u</c></a>\n", &r).empty() && r == "a");
         for (const char* bad : {"<a><b></a></b>", "<a>", "<a></a><b/>", "<a x=\"1\" x=\"2\"/>", "text<a/>", "<a><!DOCTYPE x></a>", "<a x=\"<\"/>", "<a>&foo;</a>"})
             TEST((std::string("XML scan refuses: ") + bad).c_str(), !media::sound::xmlWellFormed(bad, &r).empty());
+        // ── Codex r3 P2: slots are counted from real elements: a slot inside a comment is no slot ──
+        TEST(".txperf whose only tx:slot is commented out: refused", has(withPerf([&] {
+                 auto t = slurp(perf);
+                 const size_t a = t.find("<tx:slot"), b = t.find("</tx:slot>") + 10;
+                 put(perf, t.substr(0, a) + "<!--" + t.substr(a, b - a) + "-->" + t.substr(b));
+             }), "no tx:slot"));
+        TEST(".txperf whose namespace is only in a comment: refused", has(withPerf([&] {
+                 replaceIn(perf, "xmlns:tx=\"http://www.tx16wx.com/3.0/performance\"", "xmlns:tx=\"urn:other\"");
+                 replaceIn(perf, "</tx:performance>", "<!-- xmlns:tx=\"http://www.tx16wx.com/3.0/performance\" --></tx:performance>");
+             }), "namespace"));
         fs::copy_file(inputs[1] / "tx/AIA Demo Kit/AIA Demo Kit.txperf", dk / "tx/AIA Demo Kit/AIA Demo Kit.txperf", fs::copy_options::overwrite_existing);
         resign(dk);
         TEST("the real .txperf passes", media::sound::verifyPackage(dk).ok);
+    }
+
+    // ── Codex r3 P2: a folder of real exports (each output with the runner's X.export.md/.json) makes a kit ──
+    {
+        const fs::path ex = root / "exported";
+        fs::create_directories(ex);
+        const auto a = run(jobs::styleSmf("Waltz", style_edit::exportPa5xSmf(m.style()), ex / "Waltz.mid"));
+        const auto b = run(jobs::drumKit(std::make_shared<const media::sound::DrumKit>(media::sound::buildDemoKit()), "synthetic", ex / "AIA Demo Kit"));
+        put(ex / "notes.export.md", "an export report whose output is not here");
+        TEST("exported layout: two outputs with their export reports", a.phase == Phase::Done && b.phase == Phase::Done &&
+             fs::is_regular_file(ex / "Waltz.mid.export.json") && fs::is_regular_file(ex / "AIA Demo Kit.export.md"));
+        std::vector<std::string> skipped;
+        TEST("outputsIn: the reports of outputs beside them are skipped, an orphan report is not",
+             (k::outputsIn(ex, &skipped) == std::vector<fs::path>{ex / "AIA Demo Kit", ex / "Waltz.mid", ex / "notes.export.md"} &&
+              skipped == std::vector<std::string>{"AIA Demo Kit.export.json", "AIA Demo Kit.export.md", "Waltz.mid.export.json", "Waltz.mid.export.md"}));
+        fs::remove(ex / "notes.export.md");
+        const auto st = run(k::importKit({}, root / "Exported Kit", ex));
+        TEST("exported layout: the kit is done, the reports are named as skipped", st.phase == Phase::Done &&
+             std::count_if(st.notes.begin(), st.notes.end(), [](const std::string& n) { return n.rfind("skipped ", 0) == 0 && has(n, ".export."); }) == 4);
+        bool copied = false;
+        if (fs::is_directory(root / "Exported Kit"))
+            for (const auto& e : fs::recursive_directory_iterator(root / "Exported Kit")) copied |= has(e.path().filename().string(), ".export.");
+        TEST("exported layout: no export report is copied into the kit", fs::is_regular_file(root / "Exported Kit/STYLES/Waltz.mid") && !copied);
+    }
+
+    // ── Codex r3 P1: the kit folder is written through the fd the runner made, never by path ──
+    {
+        const fs::path src = root / "r3-src";
+        fs::create_directories(src);
+        fs::copy(inputs[3], src / "Waltz.mid");
+        const auto srcBefore = hashes(src);
+        const fs::path work = root / "Swapped Kit.INCOMPLETE";
+        JobState st;
+        st.id = 1;
+        bool swapped = false;
+        runExport(k::importKit({src / "Waltz.mid"}, root / "Swapped Kit"), st, [&] {
+            if (st.phase == Phase::Run && !swapped && fs::is_directory(work / "Swapped Kit")) {   // staged, nothing copied yet
+                swapped = true;
+                fs::rename(work, root / "Swapped Kit.moved");
+                fs::create_directory_symlink(src, work);   // NAME.INCOMPLETE now leads into a SOURCE folder
+            }
+            return false;
+        }, [](const JobState&) {});
+        TEST("job folder swapped for a link to a source while writing: FAILED, nothing published", swapped && st.phase == Phase::Failed &&
+             !fs::exists(root / "Swapped Kit"));
+        TEST("job folder swapped: nothing was written into the source", (hashes(src) == srcBefore && named(src, "") == std::vector<std::string>{"Waltz.mid"}));
+        fs::remove(work);
+    }
+    // ── Codex r3 P1 (shared runner): only the verified staged output is published ──
+    {
+        const fs::path staged = root / "Late Kit.INCOMPLETE/Late Kit";
+        JobState st;
+        st.id = 1;
+        bool replaced = false;
+        runExport(k::importKit({inputs[3]}, root / "Late Kit"), st, [] { return false; }, [&](const JobState& s) {
+            if (s.phase == Phase::Publish && !replaced) {   // after verify, before the renames
+                replaced = true;
+                fs::rename(staged, root / "Late Kit.verified");
+                put(staged / "KIT.md", "not the verified kit");
+            }
+        });
+        TEST("staged output replaced after verify: FAILED, not published", replaced && st.phase == Phase::Failed && st.stoppedAt == Phase::Publish &&
+             !fs::exists(root / "Late Kit") && has(st.reason, "changed after it was verified"));
+    }
+    {   // ... also when the swap happens inside the beforePublish hook (shared with feat/e8-library-ops): checked after it
+        auto s = k::importKit({inputs[3]}, root / "Hook Kit");
+        const fs::path staged = root / "Hook Kit.INCOMPLETE/Hook Kit";
+        s.beforePublish = [&](const fs::path& o) {
+            fs::rename(o, root / "Hook Kit.verified");
+            put(staged / "KIT.md", "not the verified kit");
+            return std::string();
+        };
+        const auto st = run(s);
+        TEST("staged output replaced inside beforePublish: FAILED, not published", st.phase == Phase::Failed && !fs::exists(root / "Hook Kit") &&
+             has(st.reason, "changed after it was verified"));
     }
 
     // ── Codex r1 P2: a member file above 64 MiB is streamed, not refused (sparse 70 MiB SF2) ──
@@ -382,10 +468,10 @@ int main() {
     // ── fail closed: the copy differs from what was checked (the disk returns other bytes) -> not published ──
     for (const char* member : {"SOUNDS/AIA Demo Organ/wav", "KMP/AIA Organ KMP", "STYLES/Waltz.mid"}) {
         auto s = k::importKit(inputs, root / "Torn Kit");
-        const auto real = s.write;
+        const auto real = s.writeAt;
         const std::string mem = member;
-        s.write = [real, mem](const fs::path& o, const std::function<bool(double)>& p) {
-            auto r = real(o, p);
+        s.writeAt = [real, mem](int fd, const fs::path& o, const std::function<bool(double)>& p) {
+            auto r = real(fd, o, p);
             fs::path victim = o / mem;
             if (fs::is_directory(victim)) for (const auto& e : fs::directory_iterator(victim)) if (e.is_regular_file()) { victim = e.path(); break; }
             flipLastByte(victim);
