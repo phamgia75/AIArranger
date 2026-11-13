@@ -83,6 +83,25 @@ inline std::string badName(const std::string& n) {
     for (unsigned char c : n) if (std::string(":*?\"<>|").find(char(c)) != std::string::npos) return "the new name holds a character a FAT/exFAT USB stick does not allow (: * ? \" < > |)";
     return "";
 }
+// A bank id typed or taken from a plan: TYPE or TYPE/BANK, relative and normalized (no root, no "." or ".." component, no
+// backslash or control character), so every path made from it stays inside its library. "" = fine, else why not.
+inline std::string badBank(const std::string& b) {
+    if (b == "(root)") return "";
+    if (b.empty()) return "the bank is empty";
+    if (b[0] == '/') return "bank \"" + b + "\" is an absolute path: a bank is TYPE/BANK inside the library";
+    size_t parts = 0;
+    for (size_t from = 0; from <= b.size();) {
+        const size_t to = std::min(b.find('/', from), b.size());
+        const std::string c = b.substr(from, to - from);
+        if (c.empty() || c == "." || c == "..") return "bank \"" + b + "\" is not a plain TYPE/BANK path (empty, . or .. component)";
+        ++parts;
+        from = to + 1;
+    }
+    for (unsigned char ch : b) if (ch < 0x20 || ch == 0x7F || ch == '\\') return "bank \"" + b + "\" holds a control character or a backslash";
+    return parts <= 2 ? "" : "bank \"" + b + "\" is deeper than TYPE/BANK";
+}
+inline std::string typeFolder(const std::string& bank) { return lower(bank.substr(0, bank.find('/'))); }
+
 // Bank file names the keyboard uses: PREFIXnn (MAN4 PDF p.975 BANKnn/USERnn/FAVORITEnn; OBSERVED Pa700 USERnn).
 inline bool bankFileName(const std::string& stem) {
     const std::string s = media::detail::upper(stem);
@@ -114,10 +133,13 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
                 if (detail::same(it.bank, st.bank)) { tx = it.type; bx = it.bank; fx = it.file; }
                 if (detail::same(it.bank, st.text)) { ty = it.type; by = it.bank; fy = it.file; }
             }
-            if (detail::same(st.bank, st.text)) conflict("both banks are the same bank");
+            if (const auto why = !detail::badBank(st.bank).empty() ? detail::badBank(st.bank) : detail::badBank(st.text); !why.empty()) conflict(why);
+            else if (detail::same(st.bank, st.text)) conflict("both banks are the same bank");
             else if (st.bank == "(root)" || st.text == "(root)") conflict("files at the library root are not a bank");
             else if (tx.empty() && ty.empty()) conflict("neither bank holds an item in " + std::string(1, st.side));
             else if (!tx.empty() && !ty.empty() && tx != ty) conflict("the banks hold different types (" + tx + ", " + ty + ")");
+            else if (detail::typeFolder(st.bank) != detail::typeFolder(st.text))
+                conflict("the banks are in different type folders (" + st.bank + ", " + st.text + "): a bank swap stays inside one type folder");
             else {
                 for (auto& it : S.items) {   // gone items too: their paths must not shadow the swapped ones
                     if (detail::same(it.bank, bx)) { it.bank = by; detail::rebank(it.file, bx, by); }
@@ -172,6 +194,7 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             const auto& src = S.items[st.item];
             const std::string bank = st.bank.empty() ? src.bank : st.bank;
             c.summary = std::string(opName(st.op)) + " " + st.side + ":" + src.bank + detail::slotText(src.slot) + " \"" + src.name + "\" -> " + other + ":" + bank;
+            if (const auto why = detail::badBank(bank); !why.empty()) conflict(why);
             if (S.format != D.format) conflict(std::string("formats differ (") + formatName(S.format) + " -> " + formatName(D.format) + "): converting is not available");
             else if (S.format == Format::PaSet && S.layout != D.layout)
                 conflict("SET generations differ (" + S.layout + " -> " + D.layout + "): their files are not known to be interchangeable");

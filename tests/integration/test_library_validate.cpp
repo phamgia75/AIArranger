@@ -135,6 +135,19 @@ int main() {
     const auto u = validate(make(root / "plain", {{"notes/a.txt", "x"}}));
     TEST("unknown layout: no rule table, one R-01 ERROR", u.ok && u.table == "none" && rules(u, 0) == std::set<std::string>{"R-01"});
     TEST("a missing folder is not validated", !validate(root / "missing").ok);
+    {   // Codex r1 P2: an unreadable file makes the validation INCOMPLETE (not a pass)
+        const fs::path k = make(root / "UNREAD.KST", kst);
+        fs::permissions(k / "SOUND/USER01.PCG", fs::perms::none);
+        const auto v = validate(k);
+        fs::permissions(k / "SOUND/USER01.PCG", fs::perms::owner_read | fs::perms::owner_write);
+        TEST("KST: an unreadable file -> not validated (incomplete), says which file", !v.ok && v.error.find("SOUND/USER01.PCG") != std::string::npos &&
+             validationText(v).find("NOT validated") != std::string::npos);
+        const fs::path s7 = make(root / "unread700", p700);
+        fs::permissions(s7 / "STYLE/USER01.STY", fs::perms::none);
+        const auto v7 = validate(s7);
+        fs::permissions(s7 / "STYLE/USER01.STY", fs::perms::owner_read | fs::perms::owner_write);
+        TEST("SET: an unreadable bank file -> not validated (incomplete)", !v7.ok && v7.error.find("STYLE/USER01.STY") != std::string::npos);
+    }
     TEST("text: summary line says file level, not verified on a keyboard",
          validationText(good).find("not verified on a keyboard") != std::string::npos && validationText(good).find("[MAN5 p.736") != std::string::npos);
 

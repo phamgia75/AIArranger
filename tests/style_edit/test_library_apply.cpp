@@ -238,6 +238,48 @@ int main() {
         fs::create_symlink(ka / "STYLE/USER01/Ballad.STG", l / "STYLE/USER01/link.STG");
         refused({{Op::Copy, 'A', item(A, "Swing"), "STYLE/USER01", -1, ""}}, "never followed", "link in target", A, open(l));
     }
+    // ── Codex r1 P1: a destination path from the plan may not leave the staging root (absolute, ../) ──
+    {
+        const std::string absA = (ka / "STYLE/USER01").string();
+        const std::vector<std::pair<std::string, std::vector<Step>>> bad = {
+            {"absolute swap destination", {{Op::BankSwap, 'B', 0, "STYLE/USER01", -1, absA}}},
+            {"../ swap destination", {{Op::BankSwap, 'B', 0, "STYLE/USER01", -1, "../../A.KST/STYLE/USER01"}}},
+            {"absolute copy bank", {{Op::Copy, 'A', item(A, "Swing"), (root / "escape").string(), -1, ""}}},
+            {"../ copy bank", {{Op::Copy, 'A', item(A, "Swing"), "STYLE/../../../escape", -1, ""}}},
+        };
+        int k = 0;
+        for (const auto& [label, plan] : bad) {
+            const auto ev = library::evaluate(*A, *B, plan);
+            TEST(("plan: " + label + " is a conflict").c_str(), ev.blocked());
+            const fs::path stage = out / ("direct" + std::to_string(k++));
+            const auto r = library::applyPlan(*A, *B, plan, stage);   // execution itself, without the job's Validate phase
+            TEST(("execute: " + label + " refused, both sources byte-identical, nothing outside staging").c_str(),
+                 !r.error.empty() && untouched() && !fs::exists(root / "escape") && !fs::exists(out / "escape"));
+            const auto st = run(libraryApply(A, B, plan, out / ("job " + label)));
+            TEST(("job: " + label + " refused, nothing published").c_str(), st.phase == Phase::Failed && !fs::exists(out / ("job " + label)) && untouched());
+        }
+    }
+    // ── Codex r1 P1: a staged folder swapped for a symlink to a source mid-job never redirects a write ──
+    {
+        const fs::path dest = out / "symlinked.KST";
+        const fs::path staged = media::incompletePath(dest) / dest.filename();
+        ExportSpec s = libraryApply(A, B, {{Op::Copy, 'A', item(A, "Swing"), "STYLE/USER03", -1, ""}}, dest);
+        const auto w = s.write;
+        bool swapped = false;
+        s.write = [&](const fs::path& o, const std::function<bool(double)>& progress) {
+            return w(o, [&](double f) {
+                if (!swapped && fs::is_directory(staged / "STYLE/USER03")) {   // after the first copied file: STYLE/USER03 -> link to A's STYLE/USER01
+                    swapped = true;
+                    fs::rename(staged / "STYLE/USER03", staged / "STYLE/moved-aside");
+                    fs::create_directory_symlink(ka / "STYLE/USER01", staged / "STYLE/USER03");
+                }
+                return progress(f);
+            });
+        };
+        const auto st = run(s);
+        TEST("staged folder swapped for a symlink: job fails, nothing published, both sources byte-identical",
+             swapped && st.phase == Phase::Failed && !fs::exists(dest) && untouched());
+    }
     TEST("all cases: sources byte-identical", untouched() && setsUntouched());
 
     // Optional, never in CI: AIARR_LIBRARY_OWNER_SET names a local COPY of an owner SET folder. It is only read; the

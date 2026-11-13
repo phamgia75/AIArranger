@@ -26,7 +26,7 @@ inline const char* severityName(Severity s) { return s == Severity::Error ? "ERR
 struct Finding { Severity severity; std::string rule, path, message, source; };
 
 struct Validation {
-    bool ok = false;           // the folder was listed (the findings are complete)
+    bool ok = false;           // every entry was listed and read: the findings are complete (false = NOT validated, never a pass)
     std::string error, root, layout, table;
     std::vector<Finding> findings;
     size_t count(Severity s) const { return size_t(std::count_if(findings.begin(), findings.end(), [&](const Finding& f) { return f.severity == s; })); }
@@ -158,12 +158,15 @@ inline bool fatBad(const std::string& n) {
 inline bool macMeta(const std::string& n) {
     return n.rfind("._", 0) == 0 || n == ".DS_Store" || n == ".Spotlight-V100" || n == ".fseventsd" || n == ".Trashes";
 }
-inline bool placeholder(const fs::path& p) {
+// 1 = starts with the placeholder marker, 0 = does not, -1 = cannot be read (the validation is then incomplete).
+inline int placeholder(const fs::path& p) {
     std::FILE* f = media::detail::openRegular(AT_FDCWD, p.c_str());   // no symlink followed; bounded read
-    if (!f) return false;
+    if (!f) return -1;
     char b[64] = {};
     const size_t n = std::fread(b, 1, std::strlen(kPlaceholder), f);
+    const bool err = std::ferror(f) != 0;
     std::fclose(f);
+    if (err) return -1;
     return n == std::strlen(kPlaceholder) && std::memcmp(b, kPlaceholder, n) == 0;
 }
 // PREFIXnn (two digits), case-insensitive.
@@ -230,7 +233,9 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
         for (const auto& c : p) parts.push_back(media::detail::upper(c.string()));
         const std::string ext = media::detail::upper(p.extension().string());
         if (e.size == 0) add("R-07", rel, "empty file");
-        if (detail::placeholder(e.abs)) add("R-10", rel, "AIArranger synthetic placeholder bytes: never load this on a keyboard");
+        const int ph = detail::placeholder(e.abs);
+        if (ph < 0) { v.error = "cannot read " + rel + ": validation incomplete"; return v; }   // ok stays false: never a pass
+        if (ph) add("R-10", rel, "AIArranger synthetic placeholder bytes: never load this on a keyboard");
         if (parts.size() == 1) {
             if (!t->topFiles.count(parts[0])) add("R-06", rel, "loose file at the top level");
             continue;
@@ -253,6 +258,7 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
         }
         if (expected && t->rules.count("R-15")) {
             const auto c = media::panative::readFile(e.abs);   // bounded (panative::kMaxFileBytes), no symlink followed
+            if (c.ioError) { v.error = "cannot read " + rel + " (" + c.error + "): validation incomplete"; return v; }
             if (!c.ok) add("R-15", rel, c.ioError ? "unreadable: " + c.error : c.wrapper ? "INVALID Pa-native container: " + c.error : "no Pa-native wrapper");
             else if (t->bankFileTypes.count(type))
                 for (const auto& it : c.items)

@@ -263,7 +263,7 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_synthetic_kst_library.py --self-test)
     # E8: the generator follows the observed layout, so `validate` reports only its placeholder bytes (R-10, exit 3)
     add_test(NAME test_validate_cli
-             COMMAND sh -c "T=$(mktemp -d) && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_synthetic_kst_library.py \"$T/s\" && $<TARGET_FILE:aiarranger-resources> validate \"$T/s/SYNTH_A.KST\" > \"$T/out\"; rc=$?; test $rc -eq 3 && test $(grep -c '^  ERROR  R-10' \"$T/out\") -eq 7 && ! grep -q '  WARN  ' \"$T/out\" && $<TARGET_FILE:aiarranger-resources> validate \"$T/none\" 2>/dev/null; rc2=$?; rm -rf \"$T\"; test $rc -eq 3 && test $rc2 -eq 1")
+             COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_validate_cli.sh ${CMAKE_BINARY_DIR} ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR})
     add_test(NAME test_validate_sound_package
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_sound_package.py --self-test)
 endif()

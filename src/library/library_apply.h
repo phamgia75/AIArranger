@@ -25,6 +25,21 @@ namespace ai_arranger::library {
 
 inline constexpr const char* kFileLevelLabel = "file-level operation; not verified on a keyboard";
 
+namespace detail {
+// A relative, normalized path: no root, no empty, "." or ".." component, no backslash or control character.
+inline bool plainRel(const std::string& r) {
+    if (r.empty() || r[0] == '/') return false;
+    for (unsigned char ch : r) if (ch < 0x20 || ch == 0x7F || ch == '\\') return false;
+    for (size_t from = 0; from <= r.size();) {
+        const size_t to = std::min(r.find('/', from), r.size());
+        const std::string c = r.substr(from, to - from);
+        if (c.empty() || c == "." || c == "..") return false;
+        from = to + 1;
+    }
+    return true;
+}
+}  // namespace detail
+
 struct Executable {
     char target = 0;                       // 'A' or 'B': the library the output is a copy of
     std::string refusal;                   // "" = the plan can be executed
@@ -61,6 +76,10 @@ inline Executable executable(const Library& A, const Library& B, const std::vect
             x.stepRefusals[i] = "item-level edit inside a Pa-native container: refused (the item payload and the 4-byte directory record trailer "
                                 "are UNKNOWN); use a whole bank file step instead";
     }
+    for (size_t i = 0; i < plan.size(); ++i)   // every path an op writes must stay inside the staging root (and every source path inside S)
+        for (const auto& op : ev.steps[i].ops)
+            for (const auto* rel : {&op.from, &op.to})
+                if (!detail::plainRel(*rel)) x.stepRefusals[i] = "the path \"" + *rel + "\" is not a plain relative path inside the library: refused";
     for (size_t i = 0; i < plan.size(); ++i)
         if (!x.stepRefusals[i].empty()) { x.refusal = "step " + std::to_string(i + 1) + ": " + x.stepRefusals[i]; break; }
     return x;
@@ -98,14 +117,58 @@ inline std::map<std::string, std::string> expectedFiles(const Library& T, const 
 struct ApplyResult { std::string error, text; };
 
 namespace detail {
-// Copies `from` (a regular file; no symlink followed) to the NEW file `to` (O_EXCL: nothing is replaced), hashing as it
-// reads; the bytes must have the SHA-256 the library had when it was opened. "" = copied and matching.
-inline std::string copyChecked(const fs::path& from, const fs::path& to, const std::string& sha, const std::function<bool(size_t)>& more) {
+using media::detail::Fd;
+// Opens folder `rel` below the open folder `root` one component at a time (O_NOFOLLOW | O_DIRECTORY: a component that is
+// a symlink, or was swapped for one, fails instead of being followed), creating missing components with mkdirat when
+// `create`. "" = root itself. -1 on failure or for a path that is not plainRel. Codex E8 r1: writes never resolve a
+// parent folder by pathname.
+inline int openDirIn(int root, const std::string& rel, bool create) {
+    if (rel.empty()) return ::dup(root);
+    if (!plainRel(rel)) return -1;
+    int cur = ::dup(root);
+    for (size_t from = 0; cur >= 0 && from <= rel.size();) {
+        const size_t to = std::min(rel.find('/', from), rel.size());
+        const std::string c = rel.substr(from, to - from);
+        from = to + 1;
+        if (create) ::mkdirat(cur, c.c_str(), 0755);   // EEXIST is fine: the open below decides
+        const int next = ::openat(cur, c.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        ::close(cur);
+        cur = next;
+    }
+    return cur;
+}
+inline std::pair<std::string, std::string> split(const std::string& rel) { return media::detail::splitRel(rel); }
+// True when `rel` names an entry (any kind, not followed) below `root`.
+inline bool existsIn(int root, const std::string& rel) {
+    const auto [dir, leaf] = split(rel);
+    Fd d(openDirIn(root, dir, false));
+    struct stat st {};
+    return d.v >= 0 && ::fstatat(d.v, leaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) == 0;
+}
+// Rename below `root` that never replaces anything; both parents opened descriptor by descriptor (to's created).
+inline bool renameIn(int root, const std::string& from, const std::string& to) {
+    const auto [fd, fl] = split(from);
+    const auto [td, tl] = split(to);
+    Fd a(openDirIn(root, fd, false)), b(openDirIn(root, td, true));
+    if (a.v < 0 || b.v < 0) return false;
+#ifdef __APPLE__
+    return ::renameatx_np(a.v, fl.c_str(), b.v, tl.c_str(), RENAME_EXCL) == 0;
+#else
+    return ::renameat2(a.v, fl.c_str(), b.v, tl.c_str(), RENAME_NOREPLACE) == 0;
+#endif
+}
+// Copies `from` (a regular file; no symlink followed) to the NEW file `to` below `root` (parents opened by descriptor,
+// O_EXCL | O_NOFOLLOW: nothing is replaced or followed), hashing as it reads; the bytes must have the SHA-256 the
+// library had when it was opened. "" = copied and matching.
+inline std::string copyChecked(const fs::path& from, int root, const std::string& to, const std::string& sha, const std::function<bool(size_t)>& more) {
+    const auto [dir, leaf] = split(to);
+    Fd d(openDirIn(root, dir, true));
+    if (d.v < 0) return "cannot open the staged folder for " + to + " (missing, or not a plain folder: links are never followed)";
     std::FILE* in = media::detail::openRegular(AT_FDCWD, from.c_str());
     if (!in) return "cannot read " + from.string() + " (missing, or no longer a regular file)";
-    const int fd = ::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    const int fd = ::openat(d.v, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     std::FILE* out = fd >= 0 ? ::fdopen(fd, "wb") : nullptr;
-    if (!out) { if (fd >= 0) ::close(fd); std::fclose(in); return "cannot create " + to.string() + " (it may already exist)"; }
+    if (!out) { if (fd >= 0) ::close(fd); std::fclose(in); return "cannot create " + to + " (it may already exist)"; }
     bool cancelled = false;
     std::string err;
     const auto got = media::detail::sha256Stream(in, out, more, &cancelled, &err, from.string());
@@ -113,11 +176,10 @@ inline std::string copyChecked(const fs::path& from, const fs::path& to, const s
     const bool closed = std::fclose(out) == 0;
     if (cancelled) return "cancelled";
     if (got.empty()) return err;
-    if (!closed) return "cannot write " + to.string() + " (disk full?)";
+    if (!closed) return "cannot write " + to + " (disk full?)";
     if (got != sha) return from.string() + " changed since its library was opened (SHA-256 differs): open both libraries again";
     return "";
 }
-inline bool renameNew(const fs::path& from, const fs::path& to) { return media::publishNewFolder(from, to); }   // never replaces
 }  // namespace detail
 
 // Writes the new library at `out` (which must not exist; the export job's staged path) and `out`.manifest.sha256 beside
@@ -145,11 +207,16 @@ inline ApplyResult applyPlan(const Library& A, const Library& B, const std::vect
 
     std::error_code ec;
     if (!fs::create_directory(out, ec)) return {"cannot create " + out.string() + (ec ? ": " + ec.message() : ""), ""};
+    // the staging root is opened once; every write below goes through descriptors from it, never through a pathname
+    const detail::Fd root(::open(out.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (root.v < 0) return {"cannot open " + out.string(), ""};
     std::sort(ls.dirs.begin(), ls.dirs.end());   // parents before children
-    for (const auto& d : ls.dirs)
-        if (!fs::create_directory(out / d, ec)) return {"cannot create " + (out / d).string() + (ec ? ": " + ec.message() : ""), ""};
+    for (const auto& d : ls.dirs) {
+        const detail::Fd f(detail::openDirIn(root.v, d, true));
+        if (f.v < 0) return {"cannot create " + (out / d).string() + " (or it is not a plain folder)", ""};
+    }
     for (const auto& [rel, e] : ls.files)
-        if (const auto e2 = detail::copyChecked(e.abs, out / rel, T.files.at(rel).sha256, more); !e2.empty()) return {e2 == "cancelled" ? "cancelled" : e2, ""};
+        if (const auto e2 = detail::copyChecked(e.abs, root.v, rel, T.files.at(rel).sha256, more); !e2.empty()) return {e2 == "cancelled" ? "cancelled" : e2, ""};
 
     std::ostringstream o;
     o << "Executed plan into a NEW library (" << kFileLevelLabel << ")\nTarget (copied, only read): " << std::string(1, x.target) << ": " << T.root
@@ -162,23 +229,21 @@ inline ApplyResult applyPlan(const Library& A, const Library& B, const std::vect
             const auto& op = sc.ops[k];
             if (progress && !progress(double(done) / double(total))) return {"cancelled", ""};
             std::string why;
-            if (op.kind == FileOp::CopyIn) {
-                fs::create_directories((out / op.to).parent_path(), ec);
-                why = detail::copyChecked(fs::path(S.root) / op.from, out / op.to, op.sha, more);
+            if (!detail::plainRel(op.from) || !detail::plainRel(op.to)) why = "a path is not a plain relative path inside the library";   // executable() refused it already
+            else if (op.kind == FileOp::CopyIn) {
+                why = detail::copyChecked(fs::path(S.root) / op.from, root.v, op.to, op.sha, more);
                 if (why.empty()) o << (k ? "; " : "") << "copied " << op.from << " -> " << op.to;
             } else if (op.kind == FileOp::Rename) {
-                fs::create_directories((out / op.to).parent_path(), ec);
-                if (!detail::renameNew(out / op.from, out / op.to)) why = "cannot rename " + op.from + " to " + op.to + " (missing, or the new name exists)";
+                if (!detail::renameIn(root.v, op.from, op.to)) why = "cannot rename " + op.from + " to " + op.to + " (missing, or the new name exists)";
                 else o << (k ? "; " : "") << "renamed " << op.from << " -> " << op.to;
             } else {
-                const fs::path a = out / op.from, b = out / op.to, tmp = out / (op.from + ".e8-swap");
-                const bool ha = fs::exists(fs::symlink_status(a, ec)), hb = fs::exists(fs::symlink_status(b, ec));
-                fs::create_directories(a.parent_path(), ec);
-                fs::create_directories(b.parent_path(), ec);
+                const std::string tmp = op.from + ".e8-swap";
+                const bool ha = detail::existsIn(root.v, op.from), hb = detail::existsIn(root.v, op.to);
                 if (ha && hb) {
-                    if (!detail::renameNew(a, tmp) || !detail::renameNew(b, a) || !detail::renameNew(tmp, b)) why = "cannot swap " + op.from + " and " + op.to;
-                } else if (ha) { if (!detail::renameNew(a, b)) why = "cannot rename " + op.from + " to " + op.to; }
-                else if (hb) { if (!detail::renameNew(b, a)) why = "cannot rename " + op.to + " to " + op.from; }
+                    if (!detail::renameIn(root.v, op.from, tmp) || !detail::renameIn(root.v, op.to, op.from) || !detail::renameIn(root.v, tmp, op.to))
+                        why = "cannot swap " + op.from + " and " + op.to;
+                } else if (ha) { if (!detail::renameIn(root.v, op.from, op.to)) why = "cannot rename " + op.from + " to " + op.to; }
+                else if (hb) { if (!detail::renameIn(root.v, op.to, op.from)) why = "cannot rename " + op.to + " to " + op.from; }
                 else why = "neither " + op.from + " nor " + op.to + " exists";
                 if (why.empty()) o << (k ? "; " : "") << "swapped " << op.from << " <-> " << op.to << (op.folder ? " (bank folders)" : " (bank files)");
             }
