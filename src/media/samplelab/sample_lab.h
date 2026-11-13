@@ -7,7 +7,7 @@
 //   normalize          peak or RMS target with headroom; reports the gain
 //   trimSilence        cuts leading/trailing silence, adds linear fades; never cuts into a loop
 //   detectOnsets       energy-rise onsets for drum hits (thresholds in OnsetOptions)
-//   findDuplicates     exact (SHA-256 of format + PCM) and near (normalised cross-correlation)
+//   findDuplicates     exact (SHA-256 of format + PCM) and near (normalised cross-correlation of bounded fingerprints)
 //   zeroCrossingNear / snapLoop / crossfadeLoop   loop helpers
 
 #include "media/sha256.h"
@@ -156,51 +156,62 @@ inline std::string pcmHash(const Sample& s) {
     return h.hex();
 }
 
-// Normalised cross-correlation of the mono mixes, each taken from its first frame at 10 % of its own peak, over the
-// shorter remainder, best of lags -maxLag..maxLag. Gain-independent: a louder copy still scores 1. 0 when the rates
-// differ, the lengths differ by more than 10 %, either is silent, or fewer than 64 frames overlap.
-inline double similarity(const Sample& x, const Sample& y, uint32_t maxLag = 16) {
-    if (x.rate != y.rate || !x.frames() || !y.frames()) return 0;
-    const double lx = double(x.frames()), ly = double(y.frames());
+// What duplicate detection keeps of a sample, bounded in size so a batch never holds whole files: the SHA-256 (pcmHash),
+// rate, length, and the mono mix from its first frame at 10 % of its own peak (the attack), at most kFingerprintFrames
+// frames (4096 = 93 ms at 44.1 kHz). Empty head = silent.
+inline constexpr size_t kFingerprintFrames = 4096;
+struct Fingerprint { std::string hash; uint32_t rate = 0; size_t frames = 0; std::vector<int16_t> head; };
+inline Fingerprint fingerprint(const Sample& s) {
+    Fingerprint f{pcmHash(s), s.rate, s.frames(), {}};
+    double pk = 0;
+    for (size_t i = 0; i < f.frames; ++i) pk = std::max(pk, std::abs(monoAt(s, i)));
+    size_t i = 0;
+    while (pk > 0 && i < f.frames && std::abs(monoAt(s, i)) < 0.1 * pk) ++i;
+    for (size_t k = i; pk > 0 && k < f.frames && f.head.size() < kFingerprintFrames; ++k) f.head.push_back(int16_t(std::lround(monoAt(s, k))));
+    return f;
+}
+
+// Normalised cross-correlation of the two attack heads over their overlap, best of lags -maxLag..maxLag.
+// Gain-independent: a louder copy still scores 1. 0 when the rates differ, the lengths differ by more than 10 %, either
+// is silent, or fewer than 64 frames overlap. Only the first kFingerprintFrames after the attack are compared: two
+// samples that differ only later (same attack, different tail) also score high; the length check catches most.
+inline double similarity(const Fingerprint& x, const Fingerprint& y, uint32_t maxLag = 16) {
+    if (x.rate != y.rate || x.head.empty() || y.head.empty()) return 0;
+    const double lx = double(x.frames), ly = double(y.frames);
     if (std::abs(lx - ly) > 0.1 * std::max(lx, ly)) return 0;
-    const std::vector<double> a = monoMix(x), b = monoMix(y);
-    auto start = [](const std::vector<double>& v) {
-        double pk = 0;
-        for (double d : v) pk = std::max(pk, std::abs(d));
-        size_t i = 0;
-        while (i < v.size() && std::abs(v[i]) < 0.1 * pk) ++i;
-        return pk > 0 ? i : v.size();
-    };
-    const size_t sa = start(a), sb = start(b);
-    if (sa == a.size() || sb == b.size()) return 0;
+    const auto &a = x.head, &b = y.head;
     double best = 0;
     for (long d = -long(maxLag); d <= long(maxLag); ++d) {
-        const long ia = long(sa) + std::max(0L, -d), ib = long(sb) + std::max(0L, d);
-        if (ia >= long(a.size()) || ib >= long(b.size())) continue;
-        const size_t L = std::min(a.size() - size_t(ia), b.size() - size_t(ib));
+        const size_t ia = size_t(std::max(0L, -d)), ib = size_t(std::max(0L, d));
+        if (ia >= a.size() || ib >= b.size()) continue;
+        const size_t L = std::min(a.size() - ia, b.size() - ib);
         if (L < 64) continue;
         double ab = 0, aa = 0, bb = 0;
-        for (size_t i = 0; i < L; ++i) { const double p = a[size_t(ia) + i], q = b[size_t(ib) + i]; ab += p * q; aa += p * p; bb += q * q; }
+        for (size_t i = 0; i < L; ++i) { const double p = a[ia + i], q = b[ib + i]; ab += p * q; aa += p * p; bb += q * q; }
         if (aa > 0 && bb > 0) best = std::max(best, ab / std::sqrt(aa * bb));
     }
     return best;
 }
+inline double similarity(const Sample& x, const Sample& y, uint32_t maxLag = 16) { return similarity(fingerprint(x), fingerprint(y), maxLag); }
 
 struct DuplicatePair { size_t a, b; bool exact; double correlation; };
 
 // Every pair (a < b) that is bit-identical (exact, correlation 1) or whose similarity() reaches nearThreshold.
-// shortcut: all pairs are compared (O(n^2) correlations, each prefiltered by rate and length); index by an envelope
-// fingerprint if folders of thousands of samples become slow.
-inline std::vector<DuplicatePair> findDuplicates(const std::vector<Sample>& v, double nearThreshold = 0.98) {
-    std::vector<std::string> h;
-    for (const Sample& s : v) h.push_back(pcmHash(s));
+// All pairs are compared: O(n^2) correlations of at most kFingerprintFrames, prefiltered by rate and length
+// (runBatch caps n at kMaxBatchFiles).
+inline std::vector<DuplicatePair> findDuplicates(const std::vector<Fingerprint>& v, double nearThreshold = 0.98) {
     std::vector<DuplicatePair> out;
     for (size_t a = 0; a < v.size(); ++a)
         for (size_t b = a + 1; b < v.size(); ++b) {
-            if (h[a] == h[b]) { out.push_back({a, b, true, 1.0}); continue; }
+            if (v[a].hash == v[b].hash) { out.push_back({a, b, true, 1.0}); continue; }
             if (const double c = similarity(v[a], v[b]); c >= nearThreshold) out.push_back({a, b, false, c});
         }
     return out;
+}
+inline std::vector<DuplicatePair> findDuplicates(const std::vector<Sample>& v, double nearThreshold = 0.98) {
+    std::vector<Fingerprint> f;
+    for (const Sample& s : v) f.push_back(fingerprint(s));
+    return findDuplicates(f, nearThreshold);
 }
 
 // The rising zero crossing nearest to `frame` within `radius` frames: f with mono(f - 1) < 0 <= mono(f). Returns

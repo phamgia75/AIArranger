@@ -26,25 +26,52 @@ namespace ai_arranger::media::samplelab {
 namespace fs = std::filesystem;
 using sound::Instrument;
 
-// Writes `files` (relative path -> bytes) as the new folder `dest`. "" on success or the reason; on a failure after the
-// work folder was made it stays as DEST.INCOMPLETE, as with every other writer.
+// A new folder written one file at a time: begin() makes DEST.INCOMPLETE, add() writes and hashes one file (nothing is
+// kept in memory but its hash), finish() writes PACKAGE.sha256, checks the folder against it and publishes it. On a
+// failure after begin() the work folder stays as DEST.INCOMPLETE, as with every other writer.
+struct LabFolder {
+    fs::path dest, work;
+    sound::pkgio::FileSet files{};
+    std::string begin(const fs::path& destGiven) {
+        dest = folderPath(destGiven);
+        work = incompletePath(dest);
+        if (const auto why = outputFolderRefusal(dest); !why.empty()) return why;
+        std::error_code ec;
+        fs::create_directories(dest.parent_path(), ec);
+        if (!fs::create_directory(work, ec)) return "cannot create " + work.string();
+        files.root = work;
+        return "";
+    }
+    void add(const std::string& rel, const std::vector<uint8_t>& b) { files.save(rel, b); }
+    std::string finish() {
+        const size_t want = files.want.size();
+        files.saveManifest();
+        const std::string kept = "; the unfinished folder stays at " + work.string() + " (delete it)";
+        if (!files.ok) return "write failed" + kept;
+        size_t n = 0;
+        const std::string bad = verifyManifest(work, work / sound::pkgio::FileSet::kPackageManifest, {}, &n,
+                                               [](const std::string& rel) { return rel == sound::pkgio::FileSet::kPackageManifest; }, true);
+        if (!bad.empty() || n != want) return "the written folder does not check against PACKAGE.sha256 (" + bad + ")" + kept;
+        if (!publishNewFolder(work, dest)) return "refusing: " + dest.string() + " appeared while writing" + kept;
+        return "";
+    }
+};
+
+// Writes `files` (relative path -> bytes) as the new folder `dest`. "" on success or the reason.
 inline std::string writeLabFolder(const fs::path& destGiven, const std::vector<std::pair<std::string, std::vector<uint8_t>>>& files) {
-    const fs::path dest = folderPath(destGiven), work = incompletePath(dest);
-    if (const auto why = outputFolderRefusal(dest); !why.empty()) return why;
-    std::error_code ec;
-    fs::create_directories(dest.parent_path(), ec);
-    if (!fs::create_directory(work, ec)) return "cannot create " + work.string();
-    sound::pkgio::FileSet out{work};
-    for (const auto& [rel, b] : files) out.save(rel, b);
-    out.saveManifest();
-    const std::string kept = "; the unfinished folder stays at " + work.string() + " (delete it)";
-    if (!out.ok) return "write failed" + kept;
-    size_t n = 0;
-    const std::string bad = verifyManifest(work, work / sound::pkgio::FileSet::kPackageManifest, {}, &n,
-                                           [](const std::string& rel) { return rel == sound::pkgio::FileSet::kPackageManifest; }, true);
-    if (!bad.empty() || n != files.size()) return "the written folder does not check against PACKAGE.sha256 (" + bad + ")" + kept;
-    if (!publishNewFolder(work, dest)) return "refusing: " + dest.string() + " appeared while writing" + kept;
-    return "";
+    LabFolder f;
+    if (const auto e = f.begin(destGiven); !e.empty()) return e;
+    for (const auto& [rel, b] : files) f.add(rel, b);
+    return f.finish();
+}
+
+// True when `a` is `b` or lies below it, after resolving symlinks in the existing part of each path.
+inline bool sameOrBelow(const fs::path& a, const fs::path& b) {
+    std::error_code ea, eb;
+    const fs::path ca = fs::weakly_canonical(fs::absolute(a), ea), cb = fs::weakly_canonical(fs::absolute(b), eb);
+    if (ea || eb) return true;   // cannot tell: treat as overlapping (callers refuse)
+    const fs::path rel = ca.lexically_relative(cb);
+    return !rel.empty() && *rel.begin() != "..";
 }
 
 inline std::vector<uint8_t> bytesOf(const std::string& s) { return {s.begin(), s.end()}; }
@@ -187,6 +214,13 @@ struct BatchOptions {
     double nearThreshold = 0.98;   // findDuplicates
 };
 
+// Batch limits, checked up front from the folder listing (file sizes only, nothing read): a batch reads, processes and
+// writes one file at a time and keeps only a bounded Fingerprint per file, so memory stays at one file plus
+// kMaxBatchFiles * kFingerprintFrames; these caps bound the run time (duplicates compare all pairs) and the disk written.
+// Each WAV is also limited to 16 MiB, 11 025-48 000 Hz and 1 048 576 frames (the Pa5X sample limits, MAN p.1155).
+inline constexpr size_t kMaxBatchFiles = 512;
+inline constexpr uint64_t kMaxBatchBytes = 2ull << 30;   // 2 GiB of .wav files
+
 struct BatchItem {
     std::string file, error;   // error: not read (the file is skipped)
     Level before, after;
@@ -202,23 +236,39 @@ struct BatchResult { std::string error; std::vector<BatchItem> items; std::vecto
 
 // Processes every .wav directly in `in` (sorted by name; `in` is only read): trim, then normalize, as `o` says.
 // Duplicates are found on the input audio. `out` empty = analysis only, nothing is written; otherwise the new folder
-// holds wav/<same file names>, REPORT.txt and PACKAGE.sha256. Files that cannot be read are reported and left out.
+// holds wav/<same file names>, REPORT.txt and PACKAGE.sha256, and may not lie inside `in` (nor `in` inside it). Files
+// that cannot be read, or break the per-file limits above, are reported and left out. One file at a time is in memory.
 inline BatchResult runBatch(const fs::path& in, const fs::path& out, const BatchOptions& o) {
     BatchResult r;
     std::error_code ec;
     std::vector<fs::path> paths;
+    uint64_t bytes = 0;
     for (const auto& e : fs::directory_iterator(in, ec)) {
         std::string ext = e.path().extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".wav") paths.push_back(e.path());
+        if (ext != ".wav") continue;
+        paths.push_back(e.path());
+        std::error_code se;
+        if (fs::is_regular_file(fs::symlink_status(e.path(), se))) { const auto n = fs::file_size(e.path(), se); if (!se) bytes += n; }
     }
     if (ec) { r.error = "cannot read " + in.string(); return r; }
+    if (paths.size() > kMaxBatchFiles || bytes > kMaxBatchBytes) {
+        r.error = in.string() + " holds " + std::to_string(paths.size()) + " .wav files, " + std::to_string(bytes >> 20) + " MiB: a batch takes at most " +
+                  std::to_string(kMaxBatchFiles) + " files and " + std::to_string(kMaxBatchBytes >> 20) + " MiB; split the folder";
+        return r;
+    }
+    if (!out.empty()) {
+        if (sameOrBelow(folderPath(out), in) || sameOrBelow(in, folderPath(out))) { r.error = "refusing: the output folder may not be inside the input folder, or contain it"; return r; }
+        if (const auto why = outputFolderRefusal(folderPath(out)); !why.empty()) { r.error = why; return r; }
+    }
     std::sort(paths.begin(), paths.end());
     std::map<std::string, uint8_t> named;   // Pa5X-style names state the root (only when every WAV is named so)
     if (std::map<std::string, std::vector<sound::WavFile>> by; sound::scanWavFolder(in, by).empty())
         for (const auto& [p, v] : by) for (const auto& f : v) named[f.p.filename().string()] = f.org;
-    std::vector<Sample> inputs, outputs;
-    std::vector<size_t> idx;   // items index of each input
+    std::vector<Fingerprint> prints;
+    std::vector<size_t> idx;   // items index of each fingerprint
+    LabFolder folder;
+    bool begun = false;        // the work folder is made at the first readable file, so a batch of none writes nothing
     for (const fs::path& p : paths) {
         BatchItem it;
         it.file = p.filename().string();
@@ -231,7 +281,10 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
             std::ifstream f(p, std::ios::binary);
             const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
             it.error = sound::readWav(b, &s, &noSmpl);
-            if (it.error.empty() && s.looped && !(s.loopStart < s.loopEnd && s.loopEnd <= s.frames())) it.error = "smpl loop lies outside the audio";
+            // Format limits before any analysis: the rate sets the cost of the pitch search.
+            if (it.error.empty() && (s.rate < 11025 || s.rate > 48000)) it.error = "sample rate " + std::to_string(s.rate) + " Hz outside 11025-48000 Hz";
+            else if (it.error.empty() && (s.frames() == 0 || s.frames() > 1048576)) it.error = "no audio, or longer than 1 048 576 frames";
+            else if (it.error.empty() && s.looped && !(s.loopStart < s.loopEnd && s.loopEnd <= s.frames())) it.error = "smpl loop lies outside the audio";
         }
         if (it.error.empty()) {
             std::vector<int16_t> mono(s.frames());
@@ -244,20 +297,26 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
             else { s.root = 60; it.rootFrom = "default"; }
             it.root = s.root;
             it.before = measureLevel(s);
-            inputs.push_back(s);
+            prints.push_back(fingerprint(s));
+            idx.push_back(r.items.size());
             if (o.trim) it.trim = trimSilence(s, o.trimDb, o.fadeIn, o.fadeOut);
             if (o.normalize) it.gain = normalize(s, o.mode, o.targetDb, o.headroomDb);
             it.after = measureLevel(s);
             s.name = it.file.substr(0, 20);   // validateSample needs a name; the file keeps its own
             for (char& c : s.name) if (c < 0x20 || c > 0x7E) c = '_';
             sound::validateSample(s, 0, it.limits);
-            outputs.push_back(std::move(s));
-            idx.push_back(r.items.size());
+            if (!out.empty()) {
+                if (!begun) {
+                    if (const auto e = folder.begin(out); !e.empty()) { r.error = e; return r; }
+                    begun = true;
+                }
+                folder.add("wav/" + it.file, sound::writeWav(s));
+            }
         }
         r.items.push_back(std::move(it));
     }
-    if (inputs.empty()) { r.error = "no readable 16-bit PCM .wav files in " + in.string(); return r; }
-    r.duplicates = findDuplicates(inputs, o.nearThreshold);
+    if (prints.empty()) { r.error = "no readable 16-bit PCM .wav files in " + in.string(); return r; }
+    r.duplicates = findDuplicates(prints, o.nearThreshold);
     for (auto& d : r.duplicates) { d.a = idx[d.a]; d.b = idx[d.b]; }
 
     char line[768];
@@ -287,10 +346,8 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
     rep += "  Nothing is removed: keep or delete duplicates by hand.\n";
     if (out.empty()) { r.report = rep; return r; }
     rep += "\n" + std::to_string(written) + " WAVs written to wav/ (16-bit, 'smpl' root as above). Check a copy: shasum -a 256 -c PACKAGE.sha256\n";
-    std::vector<std::pair<std::string, std::vector<uint8_t>>> files;
-    for (size_t k = 0; k < outputs.size(); ++k) files.push_back({"wav/" + r.items[idx[k]].file, sound::writeWav(outputs[k])});
-    files.push_back({"REPORT.txt", bytesOf(rep)});
-    if (const auto e = writeLabFolder(out, files); !e.empty()) { r.error = e; return r; }
+    folder.add("REPORT.txt", bytesOf(rep));
+    if (const auto e = folder.finish(); !e.empty()) { r.error = e; return r; }
     r.report = rep;
     return r;
 }

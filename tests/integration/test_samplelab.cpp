@@ -301,6 +301,37 @@ int main() {
         TEST("batch WAV reads back with the smpl root it was written with",
              sound::readWav(slurp(root / "batch-out" / "wav" / "copy.wav"), &back).empty() && back.root == 0 && near(measureLevel(back).peakDb, -1, 0.01));
         TEST("batch: existing destination refused", !runBatch(in, root / "batch-out", o).error.empty());
+        // Codex C2: an unchecked rate drove the pitch search (8 M frames at 200 MHz: ~1.6e10 steps) before any validation.
+        const fs::path hz = root / "batch-hz";
+        fs::create_directories(hz);
+        Sample big = silence(8010000);
+        addSine(big, 0, 8010000, 440, 8000);
+        big.rate = 200000000;
+        put(hz / "fast.wav", sound::writeWav(big));
+        put(hz / "ok.wav", sound::writeWav(q));
+        const BatchResult rh = runBatch(hz, "", o);
+        TEST("batch: a 200 MHz rate is refused before analysis", rh.items.size() == 2 && rh.items[0].error.find("sample rate 200000000") != std::string::npos);
+        // Codex C3: the output folder may not land inside the input folder, directly or through a symlinked parent.
+        std::string why = runBatch(in, in / "processed", o).error;
+        TEST("batch: output inside the input refused, nothing written", why.find("inside the input") != std::string::npos && !fs::exists(in / "processed") &&
+                                                                          !fs::exists(in / "processed.INCOMPLETE"));
+        fs::create_directory_symlink(in, root / "in-link");
+        why = runBatch(in, root / "in-link" / "processed", o).error;
+        TEST("batch: output inside the input through a symlink refused", why.find("inside the input") != std::string::npos && !fs::exists(in / "processed"));
+        TEST("sameOrBelow: itself, below, not a sibling", sameOrBelow(in, in) && sameOrBelow(in / "a" / "b", in) && !sameOrBelow(root / "batch-in2", in) &&
+                                                            !sameOrBelow(root, in) && sameOrBelow(root / "in-link" / "x", in));
+        // Codex C1: limits checked up front from the listing; nothing is read.
+        const fs::path many = root / "batch-many";
+        fs::create_directories(many);
+        for (size_t i = 0; i <= kMaxBatchFiles; ++i) put(many / ("s" + std::to_string(i) + ".wav"), {});
+        TEST("batch: more than kMaxBatchFiles WAVs refused up front", runBatch(many, root / "many-out", o).error.find("at most 512 files") != std::string::npos &&
+                                                                        !fs::exists(root / "many-out.INCOMPLETE"));
+        const fs::path huge = root / "batch-huge";
+        fs::create_directories(huge);
+        put(huge / "big.wav", {});
+        fs::resize_file(huge / "big.wav", kMaxBatchBytes + 1);   // sparse: no disk used
+        TEST("batch: more than kMaxBatchBytes refused up front", runBatch(huge, "", o).error.find("2048 MiB") != std::string::npos);
+        TEST("fingerprint holds at most kFingerprintFrames, not the file", fingerprint(big).head.size() == kFingerprintFrames);
         TEST("batch: empty folder refused", !runBatch(root / "slice" / "nothing", "", o).error.empty());
     }
 
