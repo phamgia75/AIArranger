@@ -447,6 +447,95 @@ static void testGolden() {
     TEST("golden SMF bytes", x.ok && x.bytes.size() == GOLDEN_SIZE && h == GOLDEN_HASH);
 }
 
+static void testElementOps() {
+    std::printf("element and track-role ops\n");
+    TEST("element names", std::string(sectionTypeName(uasf::SectionType::Main3)) == "Variation 3" &&
+                          sectionTypeFromName("variation 2") == uasf::SectionType::Main2 &&
+                          sectionTypeFromName("Main 4") == uasf::SectionType::Main4 &&
+                          sectionTypeFromName("ending3") == uasf::SectionType::Ending3 &&
+                          sectionTypeFromName("Break") == uasf::SectionType::Break && !sectionTypeFromName("Verse"));
+    TEST("role names", trackRoleFromName("Percussion") == uasf::TrackRole::Percussion && !trackRoleFromName("lead"));
+    const auto s0 = makeStyle();
+    StyleEditor ed(s0);
+    // copy onto a missing element appends it, onto an existing one replaces it (keeping its name)
+    TEST("copy Variation 1 to Intro 3 (new)", ed.copySection(0, uasf::SectionType::Intro3).ok && ed.style().sections.size() == 3 &&
+         ed.style().sections[2].type == uasf::SectionType::Intro3 && ed.style().sections[2].name == "Intro 3" &&
+         ed.style().sections[2].tracks.size() == 3 && ed.style().sections[2].tracks[0].events == s0.sections[0].tracks[0].events);
+    TEST("copy undo label", ed.history().undoLabel() == "Copy to Intro 3");
+    TEST("copy over Variation 2 keeps its name", ed.copySection(2, uasf::SectionType::Main2).ok && ed.style().sections[1].name == "Main B" &&
+         ed.style().sections[1].tracks[1].events == s0.sections[0].tracks[1].events && ed.style().sections.size() == 3);
+    TEST("copy onto itself refused", !ed.copySection(0, uasf::SectionType::Main1).ok);
+    TEST("copy from a missing element refused", !ed.copySection(9, uasf::SectionType::Fill1).ok);
+    TEST("clear element", ed.clearSection(2).ok && ed.style().sections[2].tracks[0].events.empty() &&
+         ed.style().sections[2].bars == 2 && ed.style().sections[0].tracks[0].events.size() == 16);
+    TEST("rename element", ed.renameSection(0, "Groove A").ok && ed.style().sections[0].name == "Groove A");
+    TEST("empty name refused", !ed.renameSection(0, "").ok);
+    TEST("lengthen element", ed.setSectionBars(0, 4).ok && ed.style().sections[0].bars == 4);
+    TEST("shorten past events refused, nothing changed", !ed.setSectionBars(1, 1).ok && ed.style().sections[1].bars == 2);
+    TEST("length 0 refused", !ed.setSectionBars(0, 0).ok);
+    TEST("role is style-wide per channel", ed.setChannelRole(11, uasf::TrackRole::Pad).ok &&
+         std::all_of(ed.style().sections.begin(), ed.style().sections.end(),
+                     [](const auto& sec) { return sec.tracks[2].role == uasf::TrackRole::Pad && !sec.tracks[2].is_drum; }));
+    TEST("percussion role sets is_drum", ed.setChannelRole(10, uasf::TrackRole::Percussion).ok && ed.style().sections[0].tracks[1].is_drum);
+    const auto percBefore = ed.style().sections[0].tracks[1].events;
+    TEST("transpose now skips the percussion track", ed.transpose(Selection{}, 1).ok &&
+         ed.style().sections[0].tracks[1].events == percBefore && ed.style().sections[0].tracks[2].events[0].data1 != percBefore[0].data1);
+    TEST("role on an unused channel refused", !ed.setChannelRole(3, uasf::TrackRole::Bass).ok);
+    while (ed.undo()) {}
+    TEST("everything undoes to the original", sameStyle(ed.style(), s0));
+}
+
+static void testSoundsAndRoute() {
+    std::printf("export with user sounds and CASM route\n");
+    korg::MapOptions opt;
+    opt.sounds[korg::kBassCh] = {121, 3, 34};
+    opt.route[11] = 15;   // Chord1 (ch 12) routed to Phrase2 -> Korg Acc5
+    const auto x = exportPa5xSmf(makeStyle(), 0, opt);
+    TEST("export ok", x.ok);
+    auto has = [&](uint8_t st, uint8_t d1, uint8_t d2) {
+        for (const auto& e : x.korg.elements[0].events)
+            if (e.tick == 0 && e.status == st && e.d1 == d1 && (st >= 0xC0 || e.d2 == d2)) return true;
+        return false;
+    };
+    TEST("bank select + program change at element start", has(0xB0 | korg::kBassCh, 0, 121) && has(0xB0 | korg::kBassCh, 32, 3) &&
+                                                          has(0xC0 | korg::kBassCh, 34, 0));
+    TEST("routed track lands on Acc5, not Acc1",
+         std::any_of(x.korg.elements[0].events.begin(), x.korg.elements[0].events.end(), [](const auto& e) { return e.status == 0x9F; }) &&
+         std::none_of(x.korg.elements[0].events.begin(), x.korg.elements[0].events.end(), [](const auto& e) { return e.status == 0x9B; }));
+    TEST("report names the user sound", x.report.find("MSB 121 LSB 3 PC 34 (user map)") != std::string::npos);
+}
+
+static void testKorgSmfImport() {
+    std::printf("Korg marker SMF -> UASF import\n");
+    korg::MapOptions opt;
+    opt.sounds[korg::kDrumCh] = {120, 0, 16};
+    StyleEditor ed(makeStyle());
+    ed.copySection(0, uasf::SectionType::Fill2);
+    ed.copySection(0, uasf::SectionType::Ending1);
+    const auto x = exportPa5xSmf(ed.style(), 0, opt);
+    const auto in = importKorgSmf(x.bytes, "Back");
+    TEST("import ok", in.ok && in.style.name == "Back" && in.style.tempo_bpm == 120 && in.style.resolution == 480);
+    TEST("elements by marker", in.style.sections.size() == 4 && in.style.sections[2].type == uasf::SectionType::Fill2 &&
+                               in.style.sections[3].name == "Ending 1" && in.style.sections[0].bars == 2);
+    TEST("tracks with Korg roles", in.style.sections[0].tracks.size() == 3 && in.style.sections[0].tracks[0].role == uasf::TrackRole::Bass &&
+                                   in.style.sections[0].tracks[1].is_drum && in.style.sections[0].tracks[1].midi_channel == 9);
+    TEST("sound taken out of the events", in.sounds.size() == 1 && in.sounds.at(korg::kDrumCh).msb == 120 && in.sounds.at(korg::kDrumCh).pc == 16 &&
+         std::none_of(in.style.sections[0].tracks[1].events.begin(), in.style.sections[0].tracks[1].events.end(),
+                      [](const auto& e) { return e.type == MidiEventType::ProgramChange || e.type == MidiEventType::ControlChange; }));
+    korg::MapOptions back;
+    back.sounds = in.sounds;
+    const auto y = exportPa5xSmf(in.style, 0, back);
+    TEST("re-export equals the first export", y.ok && korg::compareStyles(x.korg, y.korg).differences.empty() && y.bytes == x.bytes);
+    // A Chord Variation 2 element is reported, not imported.
+    KorgStyleEditor kd(x.korg);
+    kd.copyChordVariation("v1cv1", "v1cv2");
+    const auto cv = importKorgSmf(korg::write(kd.style()).bytes, "CV");
+    TEST("cv2 listed in notes, not imported", cv.ok && cv.style.sections.size() == 4 &&
+         std::any_of(cv.notes.begin(), cv.notes.end(), [](const std::string& n) { return n.find("v1cv2 not imported") != std::string::npos; }));
+    TEST("plain garbage refused", !importKorgSmf({'M', 'T', 'h', 'd'}, "x").ok);
+    TEST("plain SMF without markers refused", !importKorgSmf(smf1(), "x").ok);
+}
+
 int main() {
     std::printf("Test: Style Studio editing core\n");
     testGrid();
@@ -462,6 +551,9 @@ int main() {
     testSmfImport();
     testRoundTrip();
     testGolden();
+    testElementOps();
+    testSoundsAndRoute();
+    testKorgSmfImport();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }
