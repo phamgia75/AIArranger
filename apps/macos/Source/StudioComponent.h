@@ -108,6 +108,7 @@ public:
     enum class ExportJob { SoundPackage, KmpFolder, KstBackup, StyleSmf, StyleUasf };
     uint64_t exportJob(ExportJob j, const juce::File& dest);   // 0 when unavailable
     juce::String exportUnavailable(ExportJob j);
+    uint64_t importKitJob(const juce::File& outputs, const juce::File& dest);   // E9 Pa5X Import Kit from a folder of outputs
     void selectJob(uint64_t id);
     void cancelJob();                 // the selected job
     void openJobReport();             // the selected job's report, shown under the job list

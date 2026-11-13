@@ -2,6 +2,7 @@
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_report.h"
 #include "jobs/export_specs.h"
+#include "jobs/import_kit.h"
 #include "media/sf2_check.h"
 #include <thread>
 
@@ -161,7 +162,16 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         exportRow("Verified KST backup", D::Library, 2, ExportJob::KstBackup, "Backup job...",
                   "The KST opened in Library Workspace > Sources: byte copy + SHA-256 manifest (also: Backup KST... in KST Library)"),
         route("Check a USB copy (read-only)", "Validation & Reports: Verify Package against its manifest", D::Validation, 0),
-        off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet."),
+        off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet (docs/PA5X_KST_EXPORT_PLAN.md)."),
+        {{&button("Pa5X Import Kit...", [this] {
+              chooseFolder("Folder holding the AIArranger outputs for the kit (only read)", [this](juce::File in) {
+                  chooseFolder("Parent folder for the new kit (local disk)", [this, in](juce::File parent) {
+                      importKitJob(in, parent.getChildFile(juce::File::createLegalFileName(in.getFileName() + " Pa5X Kit")));
+                  });
+              });
+          }), 260},
+         {&label("Sound/Drum Kit packages, KMP folders and Style SMFs in one USB folder with KIT.md (import steps, manual pages): "
+                 "STRUCTURALLY VALID, not verified on a Pa5X", kText2), 0}},
         exportRow("KMP / KSF folder (EXPERIMENTAL)", D::SampleLab, 3, ExportJob::KmpFolder, "KMP job...",
                   "The previewed Sound as .KMP + .KSF (Sample Lab > KMP / KSF Writer), verification level L1 only"),
         exportRow("Style as Pa5X SMF (EXPERIMENTAL)", D::StyleStudio, 0, ExportJob::StyleSmf, "SMF job...",
@@ -1012,6 +1022,11 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
         }
     }
     return 0;
+}
+
+// E9: every visible entry of `outputs` (packages, KMP folders, Style .mid files) into the new kit `dest`, as a job
+uint64_t StudioComponent::importKitJob(const juce::File& outputs, const juce::File& dest) {
+    return enqueue(jobs::kit::importKit(jobs::kit::outputsIn(outputs.getFullPathName().toStdString()), dest.getFullPathName().toStdString()), nullptr);
 }
 
 // shortcut: lists the recorded output folders (at most jobs::kRecordedFolders) on the message thread (fast on a local
