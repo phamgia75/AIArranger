@@ -43,6 +43,19 @@ inline std::string writerReport(const std::string& t) {
     const auto k = t.find("\n\n");
     return t.rfind("Written: ", 0) == 0 && k != std::string::npos ? t.substr(k + 2) : t;
 }
+// D17: a single file read back and compared with the bytes it was written from (SHA-256), before it is published.
+inline std::string readBackMismatch(const fs::path& out, const std::vector<uint8_t>& want) {
+    bool c = false;
+    std::string err;
+    const auto got = media::detail::sha256File(out, [](size_t) { return true; }, &c, &err);
+    media::Sha256 h;
+    h.update(want.data(), want.size());
+    if (got.empty()) return "cannot read back " + out.filename().string() + ": " + err;
+    return got == h.hex() ? "" : "read back of " + out.filename().string() + " does not match the bytes written (SHA-256)";
+}
+inline bool isFile(const fs::path& p) { std::error_code ec; return fs::is_regular_file(p, ec); }
+inline bool isDir(const fs::path& p) { std::error_code ec; return fs::is_directory(p, ec); }
+inline fs::path absFolder(const fs::path& p) { std::error_code ec; return media::folderPath(fs::absolute(p, ec)); }
 inline WriteResult labResult(const st::JobResult& r) { return r.level ? WriteResult{"", writerReport(r.text)} : WriteResult{r.text, ""}; }
 }  // namespace detail
 
@@ -131,21 +144,21 @@ inline ExportSpec labSpec(std::string type, fs::path input, fs::path dest) {
 }
 inline ExportSpec labSlice(fs::path wav, double bars, double beats, fs::path dest) {
     auto s = labSpec("Sample Lab Time Slice", wav, std::move(dest));
-    s.validate = [wav] { return fs::is_regular_file(wav) ? "" : "Time Slice refused: " + wav.string() + " is not a file"; };
+    s.validate = [wav] { return detail::isFile(wav) ? "" : "Time Slice refused: " + wav.string() + " is not a file"; };
     s.write = [wav, bars, beats](const fs::path& out, auto&) { return detail::labResult(st::labSlice(wav, bars, beats, out)); };
     return s;
 }
 inline ExportSpec labLoop(fs::path wav, uint32_t start, uint32_t end, uint32_t snap, uint32_t xfade, fs::path dest) {
     auto s = labSpec("Sample Lab loop", wav, std::move(dest));
-    s.validate = [wav] { return fs::is_regular_file(wav) ? "" : "Loop refused: " + wav.string() + " is not a file"; };
+    s.validate = [wav] { return detail::isFile(wav) ? "" : "Loop refused: " + wav.string() + " is not a file"; };
     s.write = [=](const fs::path& out, auto&) { return detail::labResult(st::labLoop(wav, start, end, snap, xfade, out)); };
     return s;
 }
 inline ExportSpec labBatch(fs::path in, bool trim, bool normalize, fs::path dest) {
     auto s = labSpec("Sample Lab batch", in, dest);
     // checked before the job folder is made, so nothing is ever created inside the input folder
-    s.validate = [in, d = media::folderPath(fs::absolute(dest))] {
-        if (!fs::is_directory(in)) return "Batch refused: " + in.string() + " is not a folder";
+    s.validate = [in, d = detail::absFolder(dest)] {
+        if (!detail::isDir(in)) return "Batch refused: " + in.string() + " is not a folder";
         if (media::samplelab::sameOrBelow(d, in) || media::samplelab::sameOrBelow(in, d))
             return std::string("Batch refused: refusing: the output folder may not be inside the input folder, or contain it");
         return std::string();
@@ -168,7 +181,12 @@ inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::p
     };
     s.preview = [bytes, d = s.dest] { return std::vector<OutFile>{{d.filename().string(), bytes->size()}}; };
     s.write = [bytes](const fs::path& out, auto&) { return WriteResult{media::writeNewFile(out, *bytes), ""}; };
-    s.verify = [](const fs::path& out) {
+    s.verify = [bytes](const fs::path& out) {
+        if (const auto bad = detail::readBackMismatch(out, *bytes); !bad.empty()) {
+            Verification v;
+            v.l1 = {Check::Failed, bad};
+            return std::pair<Verification, std::string>{v, bad};
+        }
         const auto v = st::StyleStudioModel::checkStyleSmf(out);
         return std::pair<Verification, std::string>{v, "Style SMF: " + v.l1.detail + " (EXPERIMENTAL; Pa5X import not tested)"};
     };
@@ -185,9 +203,13 @@ inline ExportSpec styleUasf(std::string styleName, std::vector<uint8_t> uasf, fs
     s.validate = [bytes] { return bytes->empty() ? "the Style cannot be serialized as UASF" : ""; };
     s.preview = [bytes, d = s.dest] { return std::vector<OutFile>{{d.filename().string(), bytes->size()}}; };
     s.write = [bytes](const fs::path& out, auto&) { return WriteResult{media::writeNewFile(out, *bytes), ""}; };
-    s.verify = [](const fs::path&) {
+    s.verify = [bytes](const fs::path& out) {
         Verification v;
-        v.l1.detail = "not applicable: UASF is AIArranger's own format, not a Pa5X file";
+        if (const auto bad = detail::readBackMismatch(out, *bytes); !bad.empty()) {
+            v.l1 = {Check::Failed, bad};
+            return std::pair<Verification, std::string>{v, bad};
+        }
+        v.l1.detail = "not applicable: UASF is AIArranger's own format, not a Pa5X file (read back matches the bytes written)";
         return std::pair<Verification, std::string>{v, "UASF written; it was checked by the UASF validator on every edit. No Pa5X level applies."};
     };
     return s;
@@ -200,8 +222,8 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
     s.source = source.string();
     s.dest = std::move(dest);
     // checked before the job folder is made, so nothing is ever created inside the source (backupKst refuses it too, but later)
-    s.validate = [source, d = media::folderPath(fs::absolute(s.dest))] {
-        if (!fs::is_directory(source)) return "refusing: " + source.string() + " is not a folder";
+    s.validate = [source, d = detail::absFolder(s.dest)] {
+        if (!detail::isDir(source)) return "refusing: " + source.string() + " is not a folder";
         if (media::samplelab::sameOrBelow(d, source)) return "refusing: the backup may not be inside the source " + source.string();
         return std::string();
     };

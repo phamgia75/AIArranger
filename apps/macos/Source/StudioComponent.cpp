@@ -178,7 +178,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     jobPick_.onChange = [this] { refreshJobs(); };
     cancelJobBtn_ = &button("Cancel Job", [this] { cancelJob(); });
     reportBtn_ = &button("Open Report", [this] { openJobReport(); });
-    rerunBtn_ = &button("Remove Leftover and Re-run", [this] { rerunJobCleaning(); });
+    rerunBtn_ = &button("Move Leftover Aside and Re-run", [this] { rerunJobCleaning(); });
     ioPage_.rows.push_back({{&label("JOBS  (run one at a time in the order added; this window never waits for them)", kAccent), 0}});
     ioPage_.rows.push_back({{&jobPick_, 300}, {cancelJobBtn_, 100}, {reportBtn_, 110}, {rerunBtn_, 200}});
     ioPage_.fill = &jobView_;
@@ -994,7 +994,7 @@ uint64_t StudioComponent::rerunJobCleaning() {
     const auto h = jobHomes_.find(uint64_t(std::max(0, jobPick_.getSelectedId())));
     if (h == jobHomes_.end() || !rerunBtn_->isVisible()) return 0;
     auto spec = h->second.spec;
-    spec.cleanOwnIncomplete = true;   // the user's explicit consent, for this one job
+    spec.moveLeftoverAside = true;   // the user's explicit consent, for this one job (renamed aside, never deleted: D17)
     return enqueue(std::move(spec), h->second.out, h->second.done);
 }
 

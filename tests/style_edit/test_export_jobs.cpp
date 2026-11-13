@@ -51,7 +51,7 @@ int main() {
         std::vector<Phase> seen;
         const auto st = run(soundPackage(organ, root / "src", "", root / "organ"), &seen);
         const std::vector<Phase> want = {Phase::Validate, Phase::Dependencies, Phase::Destination, Phase::Preview, Phase::Estimate, Phase::Run,
-                                         Phase::Publish, Phase::Manifest, Phase::Verify, Phase::Report, Phase::Done};
+                                         Phase::Manifest, Phase::Verify, Phase::Publish, Phase::Report, Phase::Done};
         TEST("sound package job: every phase in order, done", st.phase == Phase::Done && seen == want && st.progress == 1 && st.reason.empty());
         TEST("published under its name; no NAME.INCOMPLETE left", fs::is_regular_file(root / "organ/PACKAGE.sha256") && !fs::exists(root / "organ.INCOMPLETE"));
         TEST("dependencies via the resource graph: none missing, memory note", st.missing.empty() && !st.notes.empty() && has(st.notes[0], "sample memory") &&
@@ -76,18 +76,19 @@ int main() {
     }
 
     // ── cancel at each phase before publication: nothing published, at most NAME.INCOMPLETE ──
-    for (Phase p : {Phase::Validate, Phase::Dependencies, Phase::Destination, Phase::Preview, Phase::Estimate, Phase::Run, Phase::Publish}) {
+    for (Phase p : {Phase::Validate, Phase::Dependencies, Phase::Destination, Phase::Preview, Phase::Estimate, Phase::Run, Phase::Manifest,
+                    Phase::Verify, Phase::Publish}) {
         const std::string name = std::string("cancel-") + std::to_string(int(p));
         const auto st = run(soundPackage(organ, {}, "", root / name), nullptr, p);
         const auto left = named(root, name);
-        const bool onlyWork = p == Phase::Publish ? left == std::vector<std::string>{name + ".INCOMPLETE"} &&
+        const bool onlyWork = p > Phase::Run ? left == std::vector<std::string>{name + ".INCOMPLETE"} &&
                                                         fs::is_regular_file(root / (name + ".INCOMPLETE") / kJobMarker)
                                                   : left.empty();
         TEST((std::string("cancel at ") + phaseName(p) + ": cancelled, nothing published").c_str(),
              st.phase == Phase::Cancelled && st.stoppedAt == p && onlyWork && has(st.reason, "nothing was published") && st.reportPath.empty());
     }
     {   // after the publish rename a job cannot be cancelled any more: it finishes
-        const auto st = run(soundPackage(organ, {}, "", root / "late"), nullptr, Phase::Manifest);
+        const auto st = run(soundPackage(organ, {}, "", root / "late"), nullptr, Phase::Report);
         TEST("cancel after publication is ignored: the job completes", st.phase == Phase::Done && fs::exists(root / "late/PACKAGE.sha256"));
     }
 
@@ -107,16 +108,106 @@ int main() {
         TEST("re-run without consent refuses the leftover", again.phase == Phase::Failed && again.stoppedAt == Phase::Destination &&
              has(again.reason, "Re-run with consent") && fs::exists(root / "faulty.INCOMPLETE"));
         auto ok = soundPackage(organ, {}, "", root / "faulty");
-        ok.cleanOwnIncomplete = true;
+        ok.moveLeftoverAside = true;
         const auto st2 = run(ok);
-        TEST("re-run with consent removes its own leftover and publishes", st2.phase == Phase::Done && fs::exists(root / "faulty/PACKAGE.sha256") &&
-             !fs::exists(root / "faulty.INCOMPLETE") && !st2.warnings.empty() && has(st2.warnings[0], "with consent"));
-        put(root / "foreign.INCOMPLETE/keep.txt", "not made by a job");
-        auto f = soundPackage(organ, {}, "", root / "foreign");
-        f.cleanOwnIncomplete = true;
-        const auto st3 = run(f);
-        TEST("a NAME.INCOMPLETE not made by a job is never removed, even with consent", st3.phase == Phase::Failed &&
-             has(st3.reason, "not made by an export job") && slurp(root / "foreign.INCOMPLETE/keep.txt") == "not made by a job");
+        const auto stale = named(root, "faulty.INCOMPLETE.stale-");
+        TEST("D17 re-run with consent moves the leftover aside (never deletes) and publishes", st2.phase == Phase::Done &&
+             fs::exists(root / "faulty/PACKAGE.sha256") && !fs::exists(root / "faulty.INCOMPLETE") && stale.size() == 1 &&
+             fs::is_regular_file(root / stale[0] / "faulty/PACKAGE.sha256") && !st2.warnings.empty() && has(st2.warnings[0], stale[0].c_str()) &&
+             has(st2.warnings[0], "delete it by hand"));
+    }
+
+    // ── D17 (Codex C1+C2): a job never deletes; the guard runs before any leftover is touched ──
+    {
+        // a leftover next to an output the guard refuses (it already exists): untouched, even with consent
+        put(root / "guarded/PACKAGE.sha256", "existing output\n");
+        put(root / "guarded.INCOMPLETE" / kJobMarker, "export job 9\n");
+        put(root / "guarded.INCOMPLETE/user.txt", "user data");
+        auto g = soundPackage(organ, {}, "", root / "guarded");
+        g.moveLeftoverAside = true;
+        const auto gs = run(g);
+        TEST("C1 leftover on a guarded path: refused by the output guard first, leftover untouched", gs.phase == Phase::Failed &&
+             has(gs.reason, "guarded already exists") && slurp(root / "guarded.INCOMPLETE/user.txt") == "user data" &&
+             fs::is_regular_file(root / "guarded.INCOMPLETE" / kJobMarker) && named(root, "guarded.INCOMPLETE.stale").empty());
+        // a symlink in the destination's path: refused, leftover untouched
+        put(root / "realp/x.INCOMPLETE" / kJobMarker, "export job 9\n");
+        put(root / "realp/x.INCOMPLETE/user.txt", "user data");
+        fs::create_directory_symlink(root / "realp", root / "linkp");
+        auto l = soundPackage(organ, {}, "", root / "linkp/x");
+        l.moveLeftoverAside = true;
+        const auto ls = run(l);
+        TEST("C1 symlinked parent: refused, the leftover is not moved or removed", ls.phase == Phase::Failed && has(ls.reason, "symlink") &&
+             slurp(root / "realp/x.INCOMPLETE/user.txt") == "user data" && named(root / "realp", "x.INCOMPLETE.stale").empty() && !fs::exists(root / "realp/x"));
+        // a folder swapped in under the leftover's name, holding user files (marker present): moved aside, never deleted
+        put(root / "swap.INCOMPLETE" / kJobMarker, "forged\n");
+        put(root / "swap.INCOMPLETE/Documents/thesis.txt", "precious");
+        auto w = soundPackage(organ, {}, "", root / "swap");
+        w.moveLeftoverAside = true;
+        const auto ws = run(w);
+        const auto moved = named(root, "swap.INCOMPLETE.stale-");
+        TEST("C2 swapped folder with user files: moved aside intact, never deleted", ws.phase == Phase::Done && moved.size() == 1 &&
+             slurp(root / moved[0] / "Documents/thesis.txt") == "precious");
+        // no deletion path at all in the job code
+        bool removeAll = false;
+        for (const auto& e : fs::directory_iterator(fs::path(REPO_DIR) / "src/jobs")) removeAll |= has(slurp(e.path()), "remove_all");
+        TEST("D17 src/jobs contains no remove_all", !removeAll);
+    }
+
+    // ── D17 (Codex C3): an exception inside a job fails that job; the queue goes on ──
+    {
+        auto t = styleUasf("throws", {'u'}, root / "throws.uasf");
+        t.validate = []() -> std::string { throw std::runtime_error("validator blew up (injected)"); };
+        const auto ts = run(t);
+        TEST("C3 a throwing job: failed with the message, nothing created", ts.phase == Phase::Failed && has(ts.reason, "validator blew up") &&
+             named(root, "throws").empty());
+        auto tw = styleUasf("throws2", {'u'}, root / "throws2.uasf");
+        tw.write = [](const fs::path&, auto&) -> WriteResult { throw fs::filesystem_error("disk vanished (injected)", std::error_code(5, std::generic_category())); };
+        JobQueue q;
+        const auto a = q.enqueue(tw);
+        const auto b = q.enqueue(styleUasf("after", {'u', 'a'}, root / "after.uasf"));
+        for (int i = 0; i < 300 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto snap = q.snapshot();
+        TEST("C3 queue: a writer that throws fails its job; the next job still runs", snap.size() == 2 && snap[0].id == a && snap[0].phase == Phase::Failed &&
+             has(snap[0].reason, "disk vanished") && snap[1].id == b && snap[1].phase == Phase::Done && fs::is_regular_file(root / "after.uasf") &&
+             !fs::exists(root / "throws2.uasf"));
+    }
+
+    // ── D17 (Codex C4): verify the STAGED output before publishing; a failed check publishes nothing ──
+    {
+        ui::studio::StyleStudioModel m;
+        std::string err;
+        m.load(fs::path(REPO_DIR) / "fixtures/synthetic/SYNTH_WALTZ_68.sty", &err);
+        auto c = styleSmf("SYNTH_WALTZ_68", style_edit::exportPa5xSmf(m.style()), root / "corrupt.mid");
+        const auto real = c.write;
+        c.write = [real](const fs::path& out, const std::function<bool(double)>& p) {
+            auto r = real(out, p);
+            std::fstream f(out, std::ios::in | std::ios::out | std::ios::binary);   // the disk returns other bytes than were written
+            f.seekp(-1, std::ios::end);
+            f.put('\x5a');
+            return r;
+        };
+        const auto cs = run(c);
+        TEST("C4 corrupt read-back of a Style SMF: failed, nothing published", cs.phase == Phase::Failed && !fs::exists(root / "corrupt.mid") &&
+             fs::exists(root / "corrupt.mid.INCOMPLETE") && !fs::exists(root / "corrupt.mid.export.md") && has(cs.reason, "corrupt.mid.INCOMPLETE"));
+        auto u = styleUasf("SYNTH_WALTZ_68", m.uasfBytes(), root / "corrupt.uasf");
+        const auto ru = u.write;
+        u.write = [ru](const fs::path& out, const std::function<bool(double)>& p) {
+            auto r = ru(out, p);
+            std::ofstream(out, std::ios::app) << "x";
+            return r;
+        };
+        const auto us = run(u);
+        TEST("C4 corrupt read-back of a UASF: failed, nothing published", us.phase == Phase::Failed && !fs::exists(root / "corrupt.uasf"));
+        auto pk = soundPackage(organ, {}, "", root / "corrupt-pkg");
+        const auto rp = pk.write;
+        pk.write = [rp](const fs::path& out, const std::function<bool(double)>& p) {
+            auto r = rp(out, p);
+            std::ofstream(out / "RESOURCES.tsv", std::ios::app) << "changed after the writer's own check\n";
+            return r;
+        };
+        const auto ps = run(pk);
+        TEST("C4 staged package fails L1: failed at verify, nothing published", ps.phase == Phase::Failed && !fs::exists(root / "corrupt-pkg") &&
+             fs::exists(root / "corrupt-pkg.INCOMPLETE") && ps.level.l1.state == Check::Failed);
     }
 
     // ── validation, dependencies and destination refusals ──

@@ -4,16 +4,19 @@
 // One export job model (roadmap E6, UI spec rev 2 §4.11 and §5.7) that every export runs through:
 //   validate source -> check dependencies -> check destination (shared output guard) -> preview output (files, sizes)
 //   -> estimate size and sample memory -> write (the EXISTING writer, inside the job's own NAME.INCOMPLETE folder)
-//   -> publish (one rename that never replaces anything) -> SHA-256 of every published file -> verify (shared
-//   verifiers; L3 never here, only from an owner record) -> report beside the output (NAME.export.md + .json).
-// The report is written last so that it can state the level; it is not part of the output, so the output still
-// checks against its own manifest. Synchronous: JobQueue (job_queue.h) runs it off the message thread.
+//   -> SHA-256 of every staged file -> verify the STAGED output (shared verifiers; L3 never here, only from an owner
+//   record) -> publish (renames that never replace anything) -> report beside the output (NAME.export.md + .json).
+// Nothing is published unless every check passed on the staged files: a hash that cannot be read or an L1 that fails
+// fails the job. The report is not part of the output, so the output still checks against its own manifest.
+// Synchronous: JobQueue (job_queue.h) runs it off the message thread.
 //
-// Cancellation is cooperative: checked before every phase, and inside a writer that takes a progress callback (KST
-// backup). Until the publish rename nothing exists under the output's name, so a cancelled or failed job leaves only
-// NAME.INCOMPLETE (holding the job's marker file), never a half-published output. A re-run refuses a leftover
-// NAME.INCOMPLETE; with explicit consent (cleanOwnIncomplete) it removes it, but only when it carries an export job's
-// marker. Once the publish rename has started a job can no longer be cancelled (the KST backup's rule too).
+// D17: an export job NEVER deletes. Cancellation is cooperative: checked before every phase up to publish, and inside a
+// writer that takes a progress callback (KST backup). A cancelled or failed job leaves only NAME.INCOMPLETE, never a
+// half-published output. A re-run refuses a leftover NAME.INCOMPLETE; with explicit consent (moveLeftoverAside), and
+// only after the output guard has passed, it RENAMES the leftover within the same folder to
+// NAME.INCOMPLETE.stale-<UTC time> (refused when a path component is a symlink, the target exists, or the leftover is
+// on another device) and the report names that folder for the user to delete by hand. Any exception inside a job fails
+// that job (runExport is an exception boundary). Once the publish rename has started a job can no longer be cancelled.
 
 #include "media/kst_backup.h"      // detail::sha256File
 #include "media/output_guard.h"
@@ -21,8 +24,10 @@
 #include "media/sound/resource_graph.h"   // jsonEscape
 #include "ui/studio/studio_models.h"      // Verification, badgeLine
 #include <atomic>
+#include <ctime>
 #include <fstream>
 #include <functional>
+#include <sys/stat.h>
 
 namespace ai_arranger::jobs {
 
@@ -30,10 +35,10 @@ namespace fs = std::filesystem;
 using ui::studio::Check;
 using ui::studio::Verification;
 
-enum class Phase { Queued, Validate, Dependencies, Destination, Preview, Estimate, Run, Publish, Manifest, Verify, Report, Done, Failed, Cancelled };
+enum class Phase { Queued, Validate, Dependencies, Destination, Preview, Estimate, Run, Manifest, Verify, Publish, Report, Done, Failed, Cancelled };
 inline const char* phaseName(Phase p) {
-    static const char* n[] = {"queued",  "validate source", "check dependencies", "check destination", "preview output", "estimate size",
-                              "write",   "publish",         "SHA-256 manifest",   "verify",            "report",         "done",
+    static const char* n[] = {"queued",  "validate source",  "check dependencies", "check destination", "preview output", "estimate size",
+                              "write",   "SHA-256 manifest", "verify",             "publish",           "report",         "done",
                               "failed",  "cancelled"};
     return n[int(p)];
 }
@@ -47,12 +52,12 @@ struct WriteResult { std::string error, text; };                                
 struct ExportSpec {
     std::string type, source;
     fs::path dest;                     // the new output: a folder, or a single file
-    bool cleanOwnIncomplete = false;   // explicit consent to remove a leftover NAME.INCOMPLETE made by an export job
+    bool moveLeftoverAside = false;    // explicit consent to rename a leftover NAME.INCOMPLETE to NAME.INCOMPLETE.stale-<time>
     std::function<std::string()> validate;                                                            // "" = can export
     std::function<std::vector<std::string>(std::vector<std::string>& notes, uint64_t& sampleBytes)> dependencies;   // missing = blocking
     std::function<std::vector<OutFile>()> preview;
     std::function<WriteResult(const fs::path& out, const std::function<bool(double)>& progress)> write;
-    std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;
+    std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;   // runs on the STAGED output; L1 Failed = not published
 };
 
 struct JobState {
@@ -133,11 +138,52 @@ inline std::string reportMd(const JobState& s) {
     return o;
 }
 
+namespace detail {
+// The first symlink among the components of `p` below its first two ("/" and e.g. "Users"; macOS's own /var, /tmp and
+// /etc are links at that level), or "" when there is none. Read-only.
+inline std::string symlinkIn(const fs::path& p) {
+    fs::path acc;
+    int depth = 0;
+    std::error_code ec;
+    for (const auto& c : p) {
+        acc /= c;
+        if (++depth > 2 && fs::is_symlink(fs::symlink_status(acc, ec))) return acc.string();
+    }
+    return "";
+}
+inline std::string utcStamp() {
+    char b[32];
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    gmtime_r(&t, &tm);
+    std::strftime(b, sizeof b, "%Y%m%dT%H%M%SZ", &tm);
+    return b;
+}
+// D17: with consent, the leftover `work` is renamed aside in its own folder, never deleted. "" = moved (*to says where).
+inline std::string moveAside(const fs::path& work, fs::path* to) {
+    if (const auto link = symlinkIn(work); !link.empty())
+        return "refusing to move the leftover " + work.string() + ": " + link + " is a symlink";
+    struct stat w {}, parent {};
+    if (::lstat(work.c_str(), &w) != 0 || !S_ISDIR(w.st_mode)) return "refusing: the leftover " + work.string() + " is not a folder";
+    if (::lstat(work.parent_path().c_str(), &parent) != 0 || parent.st_dev != w.st_dev)
+        return "refusing to move the leftover " + work.string() + ": it is on another device than its folder";
+    *to = work.string() + ".stale-" + utcStamp();
+    std::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(*to, ec)) || fs::exists(*to, ec) || ec) return "refusing: " + to->string() + " already exists";
+    if (!media::publishNewFolder(work, *to)) return "cannot move " + work.string() + " to " + to->string();   // no-replace rename
+    struct stat moved {};
+    if (::lstat(to->c_str(), &moved) != 0 || moved.st_ino != w.st_ino || moved.st_dev != w.st_dev)
+        return "the leftover changed while it was being moved; nothing was deleted, check " + to->string() + " and " + work.string();
+    return "";
+}
+}  // namespace detail
+
 // Runs one job to its end. `cancelled` is polled; `update` gets a copy of the state at every phase and progress step.
-inline void runExport(const ExportSpec& spec, JobState& st, const std::function<bool()>& cancelled, const std::function<void(const JobState&)>& update) {
+inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::function<bool()>& cancelled, const std::function<void(const JobState&)>& update) {
     st.type = spec.type;
     st.source = spec.source;
-    const fs::path dest = media::folderPath(fs::absolute(spec.dest)), work = media::incompletePath(dest), staged = work / dest.filename();
+    std::error_code ec;
+    const fs::path dest = media::folderPath(fs::absolute(spec.dest, ec)), work = media::incompletePath(dest), staged = work / dest.filename();
     st.dest = dest.string();
     const auto stop = [&](Phase p, std::string why) {
         st.stoppedAt = st.phase;
@@ -147,7 +193,10 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
         st.reportJson = reportJson(st);
         update(st);
     };
-    const auto kept = [&] { return fs::exists(work) ? "; the unfinished output stays at " + work.string() + " (delete it, or re-run with consent to clean it)" : std::string(); };
+    const auto kept = [&] {
+        std::error_code e;
+        return fs::exists(fs::symlink_status(work, e)) ? "; the unfinished output stays at " + work.string() + " (delete it by hand, or re-run with consent to move it aside)" : std::string();
+    };
     // Enter phase p (progress = its share); false once cancelled. From Publish on, cancel is no longer possible.
     const auto enter = [&](Phase p) {
         st.phase = p;
@@ -165,18 +214,18 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
     if (!st.missing.empty()) return stop(Phase::Failed, std::to_string(st.missing.size()) + " missing resource(s): " + st.missing.front());
 
     if (!enter(Phase::Destination)) return;
-    std::error_code ec;
-    if (fs::exists(fs::symlink_status(work, ec))) {
-        const bool ours = fs::is_directory(fs::symlink_status(work, ec)) && fs::is_regular_file(fs::symlink_status(work / kJobMarker, ec));
-        if (!spec.cleanOwnIncomplete)
-            return stop(Phase::Failed, "refusing: " + work.string() + " already exists (an earlier write that did not finish). " +
-                                           (ours ? "Re-run with consent to remove it first." : "It was not made by an export job: delete it yourself."));
-        if (!ours) return stop(Phase::Failed, "refusing: " + work.string() + " was not made by an export job; it is never removed here");
-        fs::remove_all(work, ec);
-        if (ec) return stop(Phase::Failed, "cannot remove " + work.string() + ": " + ec.message());
-        st.warnings.push_back("removed the leftover " + work.string() + " of an earlier export job (with consent)");
+    // The shared output guard first (mounted volume, existing output); only when nothing but a leftover NAME.INCOMPLETE is
+    // in the way may it be moved aside, and only with consent. A job never deletes (D17).
+    if (const auto why = media::outputFolderRefusal(dest); !why.empty()) {
+        if (why != media::incompleteRefusal(dest)) return stop(Phase::Failed, why);
+        if (!spec.moveLeftoverAside)
+            return stop(Phase::Failed, "refusing: " + work.string() + " already exists (an earlier write that did not finish). "
+                                       "Delete it by hand, or Re-run with consent to move it aside (it is never deleted).");
+        fs::path to;
+        if (const auto e = detail::moveAside(work, &to); !e.empty()) return stop(Phase::Failed, e);
+        st.warnings.push_back("moved the leftover " + work.string() + " aside to " + to.string() + " (with consent); delete it by hand when you no longer need it");
+        if (const auto again = media::outputFolderRefusal(dest); !again.empty()) return stop(Phase::Failed, again);
     }
-    if (const auto why = media::outputFolderRefusal(dest); !why.empty()) return stop(Phase::Failed, why);
 
     if (!enter(Phase::Preview)) return;
     if (spec.preview) st.planned = spec.preview();
@@ -206,6 +255,24 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
     if (!wr.error.empty()) return stop(cancelled() ? Phase::Cancelled : Phase::Failed, wr.error + "; nothing was published" + kept());
     if (!fs::exists(fs::symlink_status(staged, ec))) return stop(Phase::Failed, "the writer reported success but wrote nothing" + kept());
 
+    // Checks on the STAGED output (D17): the files that will be published are the files that were checked.
+    if (!enter(Phase::Manifest)) return;
+    const bool folder = fs::is_directory(fs::symlink_status(staged, ec));
+    for (auto f : listFiles(staged)) {
+        bool c = false;
+        std::string err;
+        f.sha256 = media::detail::sha256File(folder ? staged / f.rel : staged, [](size_t) { return true; }, &c, &err);
+        if (f.sha256.empty()) return stop(Phase::Failed, "cannot read back " + f.rel + " to hash it: " + err + "; nothing was published" + kept());
+        st.files.push_back(std::move(f));
+    }
+
+    if (!enter(Phase::Verify)) return;
+    if (spec.verify) std::tie(st.level, st.verifyText) = spec.verify(staged);
+    for (size_t k; (k = st.verifyText.find(staged.string())) != std::string::npos;) st.verifyText.replace(k, staged.string().size(), dest.string());
+    st.level.l3 = {Check::NotRun, "not tested on a Pa5X"};   // only an owner record gives L3 (Validation & Reports)
+    if (st.level.l1.state == Check::Failed)
+        return stop(Phase::Failed, "the written output failed its check (L1: " + st.level.l1.detail + "); nothing was published" + kept());
+
     if (!enter(Phase::Publish)) return;
     // Side files the writer put next to its output (the KST backup's NAME.manifest.sha256) go first, the output last,
     // as backupKst publishes: until that last rename nothing is under the output's name.
@@ -228,25 +295,11 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
         for (const auto& [to, back] : moved) media::publishNewFolder(to, back);
         return stop(Phase::Failed, "refusing: " + dest.string() + " appeared while writing" + kept());
     }
+    // The job's own marker file and its now empty folder (rmdir: refused when anything else is in it)
     fs::remove(work / kJobMarker, ec);
     if (!fs::remove(work, ec)) st.warnings.push_back("could not remove the empty job folder " + work.string());
 
-    st.phase = Phase::Manifest;   // published: from here on the job runs to its end
-    update(st);
-    for (auto f : listFiles(dest)) {
-        bool c = false;
-        std::string err;
-        f.sha256 = media::detail::sha256File(fs::is_directory(dest) ? dest / f.rel : dest, [](size_t) { return true; }, &c, &err);
-        if (f.sha256.empty()) st.warnings.push_back("cannot hash " + f.rel + ": " + err);
-        st.files.push_back(std::move(f));
-    }
-
-    st.phase = Phase::Verify;
-    update(st);
-    if (spec.verify) std::tie(st.level, st.verifyText) = spec.verify(dest);
-    st.level.l3 = {Check::NotRun, "not tested on a Pa5X"};   // only an owner record gives L3 (Validation & Reports)
-
-    st.phase = Phase::Report;
+    st.phase = Phase::Report;   // published: from here on the job runs to its end
     update(st);
     st.phase = Phase::Done;
     st.progress = 1;
@@ -262,6 +315,31 @@ inline void runExport(const ExportSpec& spec, JobState& st, const std::function<
         st.reportJson = reportJson(st);
     }
     update(st);
+}
+
+// The exception boundary (D17): anything a validator, writer or filesystem call throws fails this job, nothing else.
+inline void runExport(const ExportSpec& spec, JobState& st, const std::function<bool()>& cancelled, const std::function<void(const JobState&)>& update) {
+    std::string why;
+    try {
+        runExportSteps(spec, st, cancelled, update);
+        return;
+    } catch (const std::exception& e) {
+        why = e.what();
+    } catch (...) {
+        why = "unknown exception";
+    }
+    st.stoppedAt = st.phase;
+    st.phase = Phase::Failed;
+    std::error_code ec;
+    const bool left = fs::exists(fs::symlink_status(media::incompletePath(media::folderPath(fs::absolute(spec.dest, ec))), ec));
+    st.reason = "internal error at " + std::string(phaseName(st.stoppedAt)) + ": " + why +
+                (st.stoppedAt >= Phase::Report ? "; the output was published at " + st.dest + " but its report was not written" : "; nothing was published") +
+                (left ? "; the unfinished output stays at " + media::incompletePath(media::folderPath(fs::absolute(spec.dest, ec))).string() : "");
+    try {
+        st.reportMd = reportMd(st);
+        st.reportJson = reportJson(st);
+        update(st);
+    } catch (...) {}   // the queue reads the state it already has
 }
 
 }  // namespace ai_arranger::jobs

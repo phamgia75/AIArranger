@@ -97,7 +97,7 @@ public:
     void selectJob(uint64_t id);
     void cancelJob();                 // the selected job
     void openJobReport();             // the selected job's report, shown under the job list
-    uint64_t rerunJobCleaning();      // the selected job, failed on its own leftover NAME.INCOMPLETE: explicit consent to remove it
+    uint64_t rerunJobCleaning();      // the selected job, failed on a leftover NAME.INCOMPLETE: consent to move it aside (never deleted)
     std::vector<jobs::JobState> jobList() const { return queue_->snapshot(); }
     juce::String jobListText() const { return jobView_.getText(); }
 

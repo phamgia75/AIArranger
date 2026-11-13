@@ -1018,11 +1018,15 @@ int main() {
             st.selectJob(lf);
             TEST("jobs: a leftover from an earlier job: failed with the reason, nothing published, re-run offered",
                  job(lf).phase == P::Failed && job(lf).reason.find("Re-run with consent") != std::string::npos && !fs::exists(root / "left") &&
-                 find<juce::Button>(io, "Remove Leftover and Re-run")->isVisible() && st.jobListText().contains("FAILED at check destination"));
+                 find<juce::Button>(io, "Move Leftover Aside and Re-run")->isVisible() && st.jobListText().contains("FAILED at check destination"));
             const auto rr = st.rerunJobCleaning();
             waitIdle(30000);
-            TEST("jobs: re-run with consent removes the job's own leftover and publishes", rr > lf && job(rr).phase == P::Done &&
-                 fs::is_regular_file(root / "left/PACKAGE.sha256") && !fs::exists(root / "left.INCOMPLETE"));
+            bool stale = false;
+            for (const auto& e : fs::directory_iterator(root))
+                stale |= e.path().filename().string().rfind("left.INCOMPLETE.stale-", 0) == 0 && fs::is_regular_file(e.path() / jobs::kJobMarker);
+            TEST("jobs: re-run with consent moves the leftover aside (never deleted) and publishes", rr > lf && job(rr).phase == P::Done &&
+                 fs::is_regular_file(root / "left/PACKAGE.sha256") && !fs::exists(root / "left.INCOMPLETE") && stale &&
+                 job(rr).warnings.size() == 1 && job(rr).warnings[0].find("delete it by hand") != std::string::npos);
             TEST("jobs: nothing labelled compatible", !st.jobListText().containsIgnoreCase("compatible"));
         }
 
@@ -1096,6 +1100,14 @@ int main() {
                      fs::is_regular_file(root / "waltz-job.mid.export.md") && ju.phase == jobs::Phase::Done && fs::is_regular_file(root / "waltz-job.uasf") &&
                      ju.level.l1.state == ui::studio::Check::NotRun);
                 TEST("jobs: after the Style jobs the edits count as written", !st.styleModel().dirty());
+                st.styleValue().setText("94");
+                click(pg, "Apply");
+                const auto bad = st.exportJob(EJ::StyleUasf, juce::File((root / "waltz-job.uasf").string()));   // exists: the job fails
+                waitIdle(10000);
+                jobs::JobState jb;
+                for (const auto& j : st.jobList()) if (j.id == bad) jb = j;
+                TEST("D17 jobs: a failed Style job leaves the Style dirty (only Done marks edits written)", jb.phase == jobs::Phase::Failed &&
+                     st.styleModel().dirty());
             }
             TEST("studio: the source Style is unchanged", fs::last_write_time(sty) == styStamp);
             st.setValidationTarget(juce::File((root / "waltz.mid").string()));

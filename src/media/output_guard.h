@@ -17,6 +17,16 @@ inline std::filesystem::path folderPath(std::filesystem::path out) {
 }
 inline std::filesystem::path incompletePath(const std::filesystem::path& out) { return folderPath(out).string() + ".INCOMPLETE"; }
 
+// The last of outputFolderRefusal's checks: an unfinished earlier write NAME.INCOMPLETE exists. Separate so an export job
+// can tell "only a leftover is in the way" (it may then move it aside with consent) from every other refusal.
+inline std::string incompleteRefusal(const std::filesystem::path& out) {
+    std::error_code ec;
+    const auto inc = incompletePath(out);   // a dangling symlink there counts too
+    if (std::filesystem::is_symlink(std::filesystem::symlink_status(inc, ec)) || std::filesystem::exists(inc, ec) || ec)
+        return "refusing: " + incompletePath(out).string() + " already exists (an earlier write that did not finish; delete it when you no longer need it)";
+    return "";
+}
+
 // Why a new folder (package or backup) may not be created at `out`, or "" when it may. A mounted volume (USB stick) is
 // refused, also when reached through a symlink, because hardware-side writes are not authorized in
 // this project phase: write locally and copy the folder by hand. An existing path is never reused.
@@ -27,9 +37,7 @@ inline std::string outputFolderRefusal(const std::filesystem::path& out) {
     if (ec || real.string().rfind("/Volumes/", 0) == 0)
         return "refusing to write onto a mounted volume (" + out.string() + "): write to a local folder, then copy it to the USB stick by hand";
     if (std::filesystem::exists(out, ec) || ec) return "refusing: " + out.string() + " already exists";
-    if (std::filesystem::exists(incompletePath(out), ec) || ec)
-        return "refusing: " + incompletePath(out).string() + " already exists (an earlier write that did not finish; delete it when you no longer need it)";
-    return "";
+    return incompleteRefusal(out);
 }
 
 // A new folder is written under NAME.INCOMPLETE and published under NAME by one rename that never replaces anything,
