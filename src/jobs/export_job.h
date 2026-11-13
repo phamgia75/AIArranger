@@ -28,6 +28,7 @@
 #include <fstream>
 #include <functional>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace ai_arranger::jobs {
 
@@ -51,6 +52,7 @@ struct WriteResult { std::string error, text; };                                
 // folder or file inside the job's NAME.INCOMPLETE) with the existing writer; progress(0..1) returns false to cancel.
 struct ExportSpec {
     std::string type, source;
+    std::vector<fs::path> sources;     // every path the job reads: the output and its NAME.INCOMPLETE may not overlap any (D18)
     fs::path dest;                     // the new output: a folder, or a single file
     bool moveLeftoverAside = false;    // explicit consent to rename a leftover NAME.INCOMPLETE to NAME.INCOMPLETE.stale-<time>
     std::function<std::string()> validate;                                                            // "" = can export
@@ -160,7 +162,7 @@ inline std::string utcStamp() {
     return b;
 }
 // D17: with consent, the leftover `work` is renamed aside in its own folder, never deleted. "" = moved (*to says where).
-inline std::string moveAside(const fs::path& work, fs::path* to) {
+inline std::string moveAside(const fs::path& work, fs::path* to, const std::function<void()>& beforeRename = {}) {
     if (const auto link = symlinkIn(work); !link.empty())
         return "refusing to move the leftover " + work.string() + ": " + link + " is a symlink";
     struct stat w {}, parent {};
@@ -170,10 +172,57 @@ inline std::string moveAside(const fs::path& work, fs::path* to) {
     *to = work.string() + ".stale-" + utcStamp();
     std::error_code ec;
     if (fs::is_symlink(fs::symlink_status(*to, ec)) || fs::exists(*to, ec) || ec) return "refusing: " + to->string() + " already exists";
+    if (beforeRename) beforeRename();   // test hook: a folder swapped in after the checks
     if (!media::publishNewFolder(work, *to)) return "cannot move " + work.string() + " to " + to->string();   // no-replace rename
+    // shortcut: a parent folder swapped for a symlink, or the leftover swapped for another folder, between the checks
+    // above and this rename is not prevented (same class as D16 C1: the guard stops accidents, not a concurrent hostile
+    // local process). Mitigation (D18 C2): a moved folder that is not the inspected one is renamed back at once.
     struct stat moved {};
-    if (::lstat(to->c_str(), &moved) != 0 || moved.st_ino != w.st_ino || moved.st_dev != w.st_dev)
-        return "the leftover changed while it was being moved; nothing was deleted, check " + to->string() + " and " + work.string();
+    if (::lstat(to->c_str(), &moved) != 0 || moved.st_ino != w.st_ino || moved.st_dev != w.st_dev) {
+        const bool back = media::publishNewFolder(*to, work);
+        return "refusing: the folder at " + work.string() + " changed between the check and the move, so it was not moved aside; " +
+               (back ? "it was renamed back to " + work.string() : "it could NOT be renamed back: it is at " + to->string()) + ". Nothing was deleted.";
+    }
+    return "";
+}
+
+// True when `p` is on a case-insensitive volume (macOS default APFS/HFS+): its nearest existing folder decides.
+inline bool caseInsensitive(fs::path p) {
+#ifdef _PC_CASE_SENSITIVE
+    std::error_code ec;
+    while (!p.empty() && !fs::exists(p, ec) && p.has_parent_path() && p.parent_path() != p) p = p.parent_path();
+    return ::pathconf(p.c_str(), _PC_CASE_SENSITIVE) == 0;
+#else
+    (void)p;
+    return false;
+#endif
+}
+// True when `a` and `b` are the same path or one lies inside the other (symlinks in the existing part resolved; case
+// folded on a case-insensitive volume). A path that cannot be resolved counts as overlapping (callers refuse).
+inline bool overlaps(const fs::path& a, const fs::path& b) {
+    std::error_code ea, eb;
+    std::string x = fs::weakly_canonical(fs::absolute(a, ea), ea).string(), y = fs::weakly_canonical(fs::absolute(b, eb), eb).string();
+    if (ea || eb) return true;
+    if (caseInsensitive(a) || caseInsensitive(b))
+        for (auto* s : {&x, &y}) for (auto& c : *s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    while (x.size() > 1 && x.back() == '/') x.pop_back();
+    while (y.size() > 1 && y.back() == '/') y.pop_back();
+    const auto under = [](const std::string& in, const std::string& top) { return in.size() > top.size() && in.compare(0, top.size(), top) == 0 && in[top.size()] == '/'; };
+    return x == y || under(x, y) || under(y, x);
+}
+// "" when `work` holds this job's marker (an earlier run of the same export type to the same output), else why not.
+inline std::string notOurLeftover(const fs::path& work, const std::string& type, const fs::path& dest) {
+    std::error_code ec;
+    const auto m = work / kJobMarker;
+    if (!fs::is_regular_file(fs::symlink_status(m, ec)) || fs::file_size(m, ec) > 4096 || ec)
+        return "refusing: " + work.string() + " has no export job marker, so it may hold someone else's files; delete or rename it by hand";
+    std::ifstream f(m);
+    std::string line;
+    std::getline(f, line);
+    const std::string want = " " + type + " -> " + dest.string();
+    if (line.rfind("export job ", 0) != 0 || line.size() < want.size() || line.compare(line.size() - want.size(), want.size(), want) != 0)
+        return "refusing: the export job marker in " + work.string() + " is not for this export (" + type + " -> " + dest.string() +
+               "); delete or rename the folder by hand";
     return "";
 }
 }  // namespace detail
@@ -214,6 +263,11 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     if (!st.missing.empty()) return stop(Phase::Failed, std::to_string(st.missing.size()) + " missing resource(s): " + st.missing.front());
 
     if (!enter(Phase::Destination)) return;
+    // D18: the output and its NAME.INCOMPLETE may not be, contain or lie inside anything the job reads, before any rename
+    for (const auto& src : spec.sources)
+        if (detail::overlaps(dest, src) || detail::overlaps(work, src))
+            return stop(Phase::Failed, "refusing: the output " + dest.string() + " (work folder " + work.string() + ") overlaps the job's source " +
+                                           src.string() + "; choose a destination outside the source");
     // The shared output guard first (mounted volume, existing output); only when nothing but a leftover NAME.INCOMPLETE is
     // in the way may it be moved aside, and only with consent. A job never deletes (D17).
     if (const auto why = media::outputFolderRefusal(dest); !why.empty()) {
@@ -221,6 +275,7 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         if (!spec.moveLeftoverAside)
             return stop(Phase::Failed, "refusing: " + work.string() + " already exists (an earlier write that did not finish). "
                                        "Delete it by hand, or Re-run with consent to move it aside (it is never deleted).");
+        if (const auto e = detail::notOurLeftover(work, spec.type, dest); !e.empty()) return stop(Phase::Failed, e);
         fs::path to;
         if (const auto e = detail::moveAside(work, &to); !e.empty()) return stop(Phase::Failed, e);
         st.warnings.push_back("moved the leftover " + work.string() + " aside to " + to.string() + " (with consent); delete it by hand when you no longer need it");

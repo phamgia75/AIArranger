@@ -901,8 +901,8 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
             // The Style as it is now (the editor keeps working); once written, these bytes count as written (staged -> 0)
             const auto uasf = style_.uasfBytes();
             const auto path = style_.path();
-            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_edit::exportPa5xSmf(style_.style()), d)
-                                                 : jobs::styleUasf(path.filename().string(), uasf, d);
+            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_edit::exportPa5xSmf(style_.style()), d, path)
+                                                 : jobs::styleUasf(path.filename().string(), uasf, d, path);
             return enqueue(std::move(spec), nullptr, [this, uasf, path](const jobs::JobState& s) {
                 if (s.phase != jobs::Phase::Done || style_.path() != path) return;
                 style_.markWritten(uasf);

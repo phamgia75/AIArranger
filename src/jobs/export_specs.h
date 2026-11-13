@@ -64,6 +64,7 @@ inline ExportSpec soundPackage(std::shared_ptr<const snd::Instrument> in, fs::pa
     ExportSpec s;
     s.type = "Sound package";
     s.source = sourceDir.string();
+    if (!sourceDir.empty()) s.sources = {sourceDir};
     s.dest = std::move(dest);
     s.validate = [in] { const auto e = in ? snd::validate(*in) : std::vector<std::string>{"no Sound"}; return e.empty() ? "" : "invalid Sound: " + e.front(); };
     s.dependencies = [in](auto& notes, auto& bytes) {
@@ -132,6 +133,7 @@ inline ExportSpec labSpec(std::string type, fs::path input, fs::path dest) {
     ExportSpec s;
     s.type = std::move(type);
     s.source = input.string();
+    s.sources = {input};
     s.dest = std::move(dest);
     s.dependencies = [](auto& notes, auto&) { notes.push_back("Input WAV(s) are only read; no other resource is referenced"); return std::vector<std::string>{}; };
     s.preview = [input] {
@@ -168,10 +170,11 @@ inline ExportSpec labBatch(fs::path in, bool trim, bool normalize, fs::path dest
 }
 
 // Style as Pa5X SMF (EXPERIMENTAL): `x` is exportPa5xSmf of the Style as it was when the job was made.
-inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::path dest) {
+inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::path dest, fs::path sourceFile = {}) {
     ExportSpec s;
     s.type = "Style as Pa5X SMF (EXPERIMENTAL)";
     s.source = std::move(styleName);
+    if (!sourceFile.empty()) s.sources = {sourceFile};
     s.dest = std::move(dest);
     auto bytes = std::make_shared<const std::vector<uint8_t>>(std::move(x.bytes));
     s.validate = [ok = x.ok, e = x.error] { return ok ? "" : "export refused: " + e; };
@@ -194,10 +197,11 @@ inline ExportSpec styleSmf(std::string styleName, style_edit::SmfExport x, fs::p
 }
 
 // Style as UASF (AIArranger's own format; no Pa5X level applies).
-inline ExportSpec styleUasf(std::string styleName, std::vector<uint8_t> uasf, fs::path dest) {
+inline ExportSpec styleUasf(std::string styleName, std::vector<uint8_t> uasf, fs::path dest, fs::path sourceFile = {}) {
     ExportSpec s;
     s.type = "Style as UASF";
     s.source = std::move(styleName);
+    if (!sourceFile.empty()) s.sources = {sourceFile};
     s.dest = std::move(dest);
     auto bytes = std::make_shared<const std::vector<uint8_t>>(std::move(uasf));
     s.validate = [bytes] { return bytes->empty() ? "the Style cannot be serialized as UASF" : ""; };
@@ -220,6 +224,7 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
     ExportSpec s;
     s.type = "Verified KST backup";
     s.source = source.string();
+    s.sources = {source};
     s.dest = std::move(dest);
     // checked before the job folder is made, so nothing is ever created inside the source (backupKst refuses it too, but later)
     s.validate = [source, d = detail::absFolder(s.dest)] {

@@ -130,7 +130,7 @@ int main() {
              has(gs.reason, "guarded already exists") && slurp(root / "guarded.INCOMPLETE/user.txt") == "user data" &&
              fs::is_regular_file(root / "guarded.INCOMPLETE" / kJobMarker) && named(root, "guarded.INCOMPLETE.stale").empty());
         // a symlink in the destination's path: refused, leftover untouched
-        put(root / "realp/x.INCOMPLETE" / kJobMarker, "export job 9\n");
+        put(root / "realp/x.INCOMPLETE" / kJobMarker, "export job 9 Sound package -> " + (root / "linkp/x").string() + "\n");   // valid: the symlink refuses
         put(root / "realp/x.INCOMPLETE/user.txt", "user data");
         fs::create_directory_symlink(root / "realp", root / "linkp");
         auto l = soundPackage(organ, {}, "", root / "linkp/x");
@@ -138,15 +138,50 @@ int main() {
         const auto ls = run(l);
         TEST("C1 symlinked parent: refused, the leftover is not moved or removed", ls.phase == Phase::Failed && has(ls.reason, "symlink") &&
              slurp(root / "realp/x.INCOMPLETE/user.txt") == "user data" && named(root / "realp", "x.INCOMPLETE.stale").empty() && !fs::exists(root / "realp/x"));
-        // a folder swapped in under the leftover's name, holding user files (marker present): moved aside, never deleted
+        // D18: a folder without the job marker, or with another job's marker, is never moved (the user deletes or renames it)
         put(root / "swap.INCOMPLETE" / kJobMarker, "forged\n");
         put(root / "swap.INCOMPLETE/Documents/thesis.txt", "precious");
         auto w = soundPackage(organ, {}, "", root / "swap");
         w.moveLeftoverAside = true;
         const auto ws = run(w);
-        const auto moved = named(root, "swap.INCOMPLETE.stale-");
-        TEST("C2 swapped folder with user files: moved aside intact, never deleted", ws.phase == Phase::Done && moved.size() == 1 &&
-             slurp(root / moved[0] / "Documents/thesis.txt") == "precious");
+        TEST("D18 a leftover whose marker is not this job's: refused, untouched", ws.phase == Phase::Failed && has(ws.reason, "marker") &&
+             slurp(root / "swap.INCOMPLETE/Documents/thesis.txt") == "precious" && named(root, "swap.INCOMPLETE.stale-").empty());
+        put(root / "nomark.INCOMPLETE/Documents/thesis.txt", "precious");
+        auto nm = soundPackage(organ, {}, "", root / "nomark");
+        nm.moveLeftoverAside = true;
+        const auto nms = run(nm);
+        TEST("D18 a leftover without a job marker: refused, untouched", nms.phase == Phase::Failed && has(nms.reason, "marker") &&
+             slurp(root / "nomark.INCOMPLETE/Documents/thesis.txt") == "precious" && named(root, "nomark.INCOMPLETE.stale-").empty());
+        // D18 C1: dest.INCOMPLETE IS the job's source: a KST library named archive.INCOMPLETE, backed up to archive
+        put(root / "archive.INCOMPLETE/STYLE/BANK01.STY", std::string(100, 's'));
+        put(root / "archive.INCOMPLETE" / kJobMarker, "export job 1 Verified KST backup -> " + (root / "archive").string() + "\n");
+        auto kb = kstBackup(root / "archive.INCOMPLETE", root / "archive");
+        kb.moveLeftoverAside = true;
+        const auto kbs = run(kb);
+        TEST("D18 C1 the source is the output's NAME.INCOMPLETE: refused before any rename, the source stays", kbs.phase == Phase::Failed &&
+             has(kbs.reason, "source") && fs::is_regular_file(root / "archive.INCOMPLETE/STYLE/BANK01.STY") && named(root, "archive.INCOMPLETE.stale-").empty() &&
+             !fs::exists(root / "archive"));
+        // ... also when the names differ only by case (case-insensitive volume, the macOS default)
+        auto kc = kstBackup(root / "archive.INCOMPLETE", root / "ARCHIVE");
+        kc.moveLeftoverAside = true;
+        const auto kcs = run(kc);
+        TEST("D18 C1 the same check ignores case on a case-insensitive volume", kcs.phase == Phase::Failed && fs::exists(root / "archive.INCOMPLETE/STYLE/BANK01.STY") &&
+             named(root, "archive.INCOMPLETE.stale-").empty() && named(root, "ARCHIVE.INCOMPLETE.stale-").empty());
+        // generic for every job type: an output inside a source folder is refused
+        put(root / "srcdir/a.txt", "x");
+        auto inside = soundPackage(organ, root / "srcdir", "", root / "srcdir/pkg");
+        const auto ins = run(inside);
+        TEST("D18 every job: an output inside one of its sources is refused, nothing created there", ins.phase == Phase::Failed &&
+             ins.stoppedAt == Phase::Destination && has(ins.reason, "source") && named(root / "srcdir", "pkg").empty());
+        // D18 C2: a folder swapped in between the checks and the rename is renamed back, and the job fails
+        put(root / "race.INCOMPLETE" / kJobMarker, "m");
+        fs::path to;
+        const auto re = detail::moveAside(root / "race.INCOMPLETE", &to, [&] {
+            fs::rename(root / "race.INCOMPLETE", root / "race-original");   // the inspected folder goes away ...
+            put(root / "race.INCOMPLETE/other.txt", "another folder");      // ... and another takes its name
+        });
+        TEST("D18 C2 identity mismatch after the move: renamed back, reported", !re.empty() && has(re, "renamed back") && !fs::exists(to) &&
+             slurp(root / "race.INCOMPLETE/other.txt") == "another folder" && fs::exists(root / "race-original" / kJobMarker));
         // no deletion path at all in the job code
         bool removeAll = false;
         for (const auto& e : fs::directory_iterator(fs::path(REPO_DIR) / "src/jobs")) removeAll |= has(slurp(e.path()), "remove_all");

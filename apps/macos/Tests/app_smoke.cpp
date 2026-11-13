@@ -1012,7 +1012,7 @@ int main() {
                  st.badgeText() == l1only && !st.verification().l2.detail.empty());
 
             // Failure recovery: a leftover NAME.INCOMPLETE of an earlier job is refused; removed only with explicit consent
-            put(root / "left.INCOMPLETE" / jobs::kJobMarker, "export job 7 (crashed)\n");
+            put(root / "left.INCOMPLETE" / jobs::kJobMarker, "export job 7 Sound package -> " + (root / "left").string() + "\n");   // a crashed earlier run
             const auto lf = st.exportJob(EJ::SoundPackage, juce::File((root / "left").string()));
             waitIdle(30000);
             st.selectJob(lf);
