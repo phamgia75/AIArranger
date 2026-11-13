@@ -587,6 +587,48 @@ static void testR2() {
     TEST("r2#2: an element longer than UASF's 65535 bars refused", longEl.ok && !li.ok && li.error.find("65535") != std::string::npos);
 }
 
+static void testR3() {
+    std::printf("Codex r3: the 32-element UASF limit; KeepFirst follows MIDI bank state\n");
+    auto s = makeStyle();
+    while (s.sections.size() < 32) s.sections.push_back(s.sections[s.sections.size() % 2]);   // repeated types: valid UASF
+    StyleEditor ed(s);
+    const auto r = ed.copySection(0, uasf::SectionType::Intro1);
+    TEST("r3#1: append at 32 elements refused with the reason, nothing changed", !r.ok && r.error.find("32") != std::string::npos &&
+         ed.style().sections.size() == 32 && !ed.history().canUndo());
+    TEST("r3#1: copy over an existing element still works at the limit", ed.copySection(0, uasf::SectionType::Main2).ok);
+    // KeepFirst: CC0=1, CC0=2, CC32=3, PC=4 -> a MIDI device selects 2/3/4
+    auto file = [](std::vector<korg::Event> head) {
+        korg::Style k;
+        k.ppqn = 96;
+        k.mpqn = 500000;
+        korg::Element el;
+        el.marker = "v1cv1";
+        el.length = 384;
+        el.events = std::move(head);
+        el.events.push_back({0, 0x9B, 60, 100});
+        el.events.push_back({48, 0x8B, 60, 0});
+        k.elements.push_back(el);
+        return korg::write(k).bytes;
+    };
+    const uint8_t cc = 0xB0 | korg::kDrumCh, pc = 0xC0 | korg::kDrumCh;
+    const auto twoMsb = file({{0, cc, 0, 1}, {0, cc, 0, 2}, {0, cc, 32, 3}, {0, pc, 4, 0}});
+    TEST("r3#2: extra bank event refused by default", !importKorgSmf(twoMsb, "x").ok);
+    const auto k1 = importKorgSmf(twoMsb, "x", SoundLoss::KeepFirst);
+    TEST("r3#2: KeepFirst stores the selection active at the program change (2/3/4), loss listed", k1.ok &&
+         k1.style.korg_export.sounds.at(korg::kDrumCh) == (uasf::KorgSound{2, 3, 4}) && k1.losses.size() == 1);
+    const auto pcFirst = file({{0, pc, 4, 0}, {0, cc, 0, 1}, {0, cc, 32, 3}});
+    const auto k2 = importKorgSmf(pcFirst, "x", SoundLoss::KeepFirst);
+    TEST("r3#2: a program change before any bank select is no complete selection", k2.ok && k2.style.korg_export.sounds.empty() &&
+         k2.style.korg_export.element_sounds.empty() && k2.losses.size() == 1);
+    const auto twoPc = file({{0, cc, 0, 1}, {0, cc, 32, 3}, {0, pc, 4, 0}, {0, cc, 0, 9}, {0, pc, 7, 0}});
+    const auto k3 = importKorgSmf(twoPc, "x", SoundLoss::KeepFirst);
+    TEST("r3#2: the first complete selection is kept, the later one listed", k3.ok &&
+         k3.style.korg_export.sounds.at(korg::kDrumCh) == (uasf::KorgSound{1, 3, 4}) && k3.losses.size() == 1);
+    TEST("r3#2: an exact selection (CC32, CC0, PC) has no loss", [&] {
+        const auto e = importKorgSmf(file({{0, cc, 0, 5}, {0, cc, 32, 6}, {0, pc, 7, 0}}), "x");
+        return e.ok && e.losses.empty() && e.style.korg_export.sounds.at(korg::kDrumCh) == (uasf::KorgSound{5, 6, 7}); }());
+}
+
 static void testSectionNames() {
     std::printf("UASF 'SNAM': element names survive save -> reload\n");
     StyleEditor ed(makeStyle());
@@ -652,8 +694,9 @@ static void testKorgSmfImport() {
         TEST("r1#2: a second selection in one element is refused by default, naming the loss", !refused.ok &&
              refused.error.find("cannot be kept exactly") != std::string::npos && refused.error.find("v1cv1") != std::string::npos);
         const auto kept = importKorgSmf(korg::write(ks).bytes, "Mid", SoundLoss::KeepFirst);
-        TEST("r1#2: KeepFirst keeps the first selection and lists the loss", kept.ok && kept.losses.size() == 1 &&
-             kept.style.korg_export.element_sounds.at({uasf::SectionType::Main1, korg::kDrumCh}).pc == 40 &&
+        // PC 40 comes before any bank select (no complete selection); the first complete one is CC0 120, CC32 0, PC 16 (r3#2)
+        TEST("r1#2: KeepFirst keeps the first complete selection and lists the loss", kept.ok && kept.losses.size() == 1 &&
+             kept.style.korg_export.element_sounds.at({uasf::SectionType::Main1, korg::kDrumCh}) == (uasf::KorgSound{120, 0, 16}) &&
              std::any_of(kept.notes.begin(), kept.notes.end(), [](const std::string& n) { return n.rfind("LOSS: ", 0) == 0; }));
         korg::Style inc = x.korg;   // CC0 without CC32/PC
         auto& ev = inc.elements[2].events;
@@ -687,6 +730,7 @@ int main() {
     testKorgSmfImport();
     testSectionNames();
     testR2();
+    testR3();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

@@ -4,7 +4,6 @@
 #include "exporters/korg/genos_to_korg.h"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <iterator>
 #include <deque>
@@ -185,6 +184,18 @@ std::optional<uasf::TrackRole> trackRoleFromName(const std::string& name) {
     return std::nullopt;
 }
 
+std::string saveError(const StyleDefinition& s) {
+    if (s.sections.size() > uasf::format::kMaxSections)
+        return "cannot be kept as UASF: " + std::to_string(s.sections.size()) + " elements, UASF holds at most " +
+               std::to_string(uasf::format::kMaxSections);
+    for (size_t i = 0; i < s.sections.size(); ++i)
+        if (s.sections[i].tracks.size() > uasf::format::kMaxTracksPerSection)
+            return "cannot be kept as UASF: element " + std::to_string(i) + " has " + std::to_string(s.sections[i].tracks.size()) +
+                   " tracks, UASF holds at most " + std::to_string(uasf::format::kMaxTracksPerSection);
+    if (const auto w = uasf::UasfSerializer().serialize(s); !w.success) return "cannot be kept as UASF: " + w.error;
+    return {};
+}
+
 StyleEditor::StyleEditor(StyleDefinition style, size_t undoLimit)
     : style_(std::move(style)), history_(undoLimit) {}
 
@@ -200,6 +211,7 @@ EditResult StyleEditor::apply(const std::string& label, const Mutator& m) {
         r.error = "UASF validator: " + e.message + (e.location.empty() ? "" : " (" + e.location + ")");
         return r;
     }
+    if (auto e = saveError(next); !e.empty()) { r.error = std::move(e); return r; }   // e.g. a 33rd element
     history_.record(label, std::move(style_));
     style_ = std::move(next);
     r.ok = true;
@@ -705,17 +717,19 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
         sec.bars = bar ? static_cast<uint32_t>(el.length / bar) : 0;
         std::map<uint8_t, TrackDefinition> tracks;
         size_t chordNotes = 0, dropped = 0;
-        std::map<uint8_t, std::array<int, 3>> sel;   // first CC0, CC32, PC of this element per Korg channel (-1 = none)
-        std::map<uint8_t, size_t> later;             // further bank/program events in this element
+        // MIDI running bank state per Korg channel in this element: the sound a device selects is the CC0/CC32 value
+        // current when a Program Change arrives. The first such complete selection is the element's sound.
+        struct Bank { int msb = -1, lsb = -1; std::optional<KorgSound> got; size_t events = 0; };
+        std::map<uint8_t, Bank> bank;
         for (const auto& e : el.events) {
             const uint8_t kch = e.status & 0x0F, hi = e.status & 0xF0;
             const int g = sourceCh(kch);
             if (g < 0) { ++dropped; continue; }
             if (hi == 0xC0 || (hi == 0xB0 && (e.d1 == 0 || e.d1 == 32))) {
-                auto& a = sel.try_emplace(kch, std::array<int, 3>{-1, -1, -1}).first->second;
-                int& slot = a[hi == 0xC0 ? 2 : e.d1 == 0 ? 0 : 1];
-                if (slot < 0) slot = hi == 0xC0 ? e.d1 : e.d2;
-                else ++later[kch];
+                auto& b = bank[kch];
+                ++b.events;
+                if (hi == 0xB0) (e.d1 == 0 ? b.msb : b.lsb) = e.d2;
+                else if (!b.got && b.msb >= 0 && b.lsb >= 0) b.got = KorgSound{uint8_t(b.msb), uint8_t(b.lsb), e.d1};
                 continue;
             }
             auto [it, fresh] = tracks.try_emplace(kch);
@@ -736,14 +750,16 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
                                 " notes C-1..B-1 on chord-driven tracks (Pa5X Chord events) kept as notes; the exporter drops them");
         if (dropped) out.notes.push_back(el.marker + ": " + std::to_string(dropped) + " events outside the 8 Korg style tracks not imported");
         // Each element keeps its own bank/program (the exporter writes it at that element's start).
-        for (const auto& [kch, a] : sel) {
+        // Exact = one CC0, one CC32 and a Program Change after both; anything else is a loss.
+        for (const auto& [kch, b] : bank) {
             const std::string trk = std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": ";
-            if (a[0] < 0 || a[1] < 0 || a[2] < 0) { out.losses.push_back(trk + "incomplete bank select / program change, no sound kept"); continue; }
-            kx.element_sounds[{*type, kch}] = {uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2])};
+            if (!b.got) { out.losses.push_back(trk + "no Program Change after both CC0 and CC32 (incomplete selection), no sound kept"); continue; }
+            kx.element_sounds[{*type, kch}] = *b.got;
+            if (b.events != 3)
+                out.losses.push_back(trk + std::to_string(b.events) + " bank/program events, kept the first complete selection " +
+                                     std::to_string(b.got->msb) + "/" + std::to_string(b.got->lsb) + "/" + std::to_string(b.got->pc) +
+                                     " (bank state at its Program Change); the rest not kept");
         }
-        for (const auto& [kch, n] : later)
-            out.losses.push_back(std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": " + std::to_string(n) +
-                                 " further bank/program events at the element start not kept (first complete selection kept)");
         s.sections.push_back(std::move(sec));
     }
     if (s.sections.empty()) { out.error = "no element maps to a UASF section"; return out; }
@@ -767,9 +783,7 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
     uasf::UasfValidator v;
     for (const auto& i : v.validate(s).issues)
         if (i.severity == uasf::ValidationIssue::ERROR) { out.error = "UASF validator: " + i.message; return out; }
-    // An editable Style must be saveable: the serializer's own limits (tempo 20-400 BPM, bars and resolution <= 65535,
-    // ...) are checked here, so a Style that could never be written as UASF is refused at import, with its reason.
-    if (const auto w = uasf::UasfSerializer().serialize(s); !w.success) { out.error = "cannot be kept as UASF: " + w.error; return out; }
+    if (auto e = saveError(s); !e.empty()) { out.error = std::move(e); return out; }
     out.ok = true;
     return out;
 }

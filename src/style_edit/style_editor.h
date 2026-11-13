@@ -59,6 +59,11 @@ uint32_t gridTicks(uint32_t resolution, const std::string& grid);
 // Section length in ticks (bars x bar ticks); 0 when the meter is unset.
 uint64_t sectionLengthTicks(const uasf::SectionDefinition& s);
 
+// "" when UASF can store the Style exactly, else why not ("cannot be kept as UASF: ..."): the serializer's own refusals
+// (tempo 20-400 BPM, bars/resolution <= 65535, ...) and the counts it would silently cut (32 elements, 16 tracks).
+// Every edit, the Korg SMF import and every Studio open are held to it.
+std::string saveError(const uasf::StyleDefinition& s);
+
 // Pa Style element names ("Intro 1".."Intro 3", "Variation 1".."Variation 4", "Fill 1".."Fill 4", "Break",
 // "Ending 1".."Ending 3"); the parser also takes "Main n" and ignores case and spaces.
 const char* sectionTypeName(uasf::SectionType t) noexcept;
