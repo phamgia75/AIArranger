@@ -875,6 +875,13 @@ int main() {
                  lm.reportText().contains("only in A   PAD/USER01/Hit.PDC"));
             lm.showView(V::Duplicates);
             waitLm(5000);
+            const auto requests = lm.reportRequests();
+            lm.value().setText("unrelated", true);
+            pump(60);   // the edit is announced asynchronously and reaches refresh()
+            TEST("library manager: a value-field edit does not restart the Duplicates report (Codex re-check)",
+                 lm.reportRequests() == requests && !lm.computing());
+            lm.value().setText("", true);
+            pump(60);
             TEST("library manager: duplicates view: names flagged as name-only", lm.reportText().contains("NAME ONLY") &&
                  lm.reportText().contains("Style \"Ballad\": STYLE/USER01 STYLE/USER02"));
             lm.selectRow('A', 1);   // Ballad (rows sorted by bank: PAD/USER01 Hit, STYLE/USER01 Ballad)

@@ -65,8 +65,8 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto& mv = act(Action::Move, "Move to other side", [this] { addStep(Action::Move); });
     auto& rn = act(Action::Rename, "Rename to value", [this] { addStep(Action::Rename); });
     auto& sw = act(Action::SwapBanks, "Swap bank with value", [this] { addStep(Action::SwapBanks); });
-    auto& rm = act(Action::RemoveStep, "Remove Last Step", [this] { if (!plan_.empty()) plan_.pop_back(); showView(View::Plan); });
-    auto& cl = act(Action::ClearPlan, "Clear Plan", [this] { plan_.clear(); showView(View::Plan); });
+    auto& rm = act(Action::RemoveStep, "Remove Last Step", [this] { if (!plan_.empty()) plan_.pop_back(); ++planRev_; showView(View::Plan); });
+    auto& cl = act(Action::ClearPlan, "Clear Plan", [this] { plan_.clear(); ++planRev_; showView(View::Plan); });
     auto& ex = act(Action::Export, "Export Plan (EXPORT-ONLY)...", [this] {
         chooseFolder("Parent folder for the new plan folder (local disk)", [this](juce::File parent) {
             exportPlan(parent.getChildFile("Library Plan " + juce::Time::getCurrentTime().formatted("%Y-%m-%d %H%M%S")));
@@ -149,7 +149,8 @@ void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
             if (L->ok) {
                 p.lib = L;
                 p.selected = -1;
-                plan_.clear();   // steps name items by index into the libraries they were made for
+                plan_.clear();
+                ++planRev_;   // steps name items by index into the libraries they were made for
             }
             view_ = View::Details;
             p.header.setText(juce::String("Library ") + side + ": " + u8(L->ok ? L->name + "  ·  " + lib::formatName(L->format) + "  ·  " +
@@ -223,6 +224,7 @@ void LibraryManagerComponent::addStep(Action a) {
         default: return;
     }
     plan_.push_back(s);
+    ++planRev_;
     showView(View::Plan);
 }
 
@@ -275,7 +277,8 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
 
 // The report text of the Details, Duplicates and Plan views, from immutable snapshots: runs on a worker thread.
 static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr<const lib::Library> A, std::shared_ptr<const lib::Library> B,
-                             const std::vector<lib::Step>& plan, char active, int selected) {
+                             const std::vector<lib::Step>& plan, char active, int selected, const std::function<bool()>& stale) {
+    const std::function<bool()> going = [&] { return !stale(); };
     using View = LibraryManagerComponent::View;
     std::string t;
     const auto& act = active == 'A' ? A : B;
@@ -290,10 +293,10 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
                              : t;
         case View::Duplicates:
             for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
-                if (L) t += std::string("Library ") + side + ": " + lib::duplicatesView(*L, lib::duplicates(*L)) + "\n";
+                if (L) t += std::string("Library ") + side + ": " + lib::duplicatesView(*L, lib::duplicates(*L, going)) + "\n";
             return t;
         case View::Plan:
-            return A && B ? lib::planReport(*A, *B, plan, lib::evaluate(*A, *B, plan)) : "A plan needs a library open on both sides.";
+            return A && B ? lib::planReport(*A, *B, plan, lib::evaluate(*A, *B, plan, going)) : "A plan needs a library open on both sides.";
         case View::Compare: break;
     }
     return t;
@@ -303,19 +306,35 @@ void LibraryManagerComponent::refresh(bool report) {
     for (auto& [a, b] : actions_) setUnavailable(*b, unavailable(a));
     setUnavailable(*openA_, jobs_ > 0 ? "Needs: the running job to finish" : "");
     setUnavailable(*openB_, jobs_ > 0 ? "Needs: the running job to finish" : "");
-    const auto gen = ++reportGen_;   // supersedes any report still being computed: only the newest one is shown
-    if (jobs_ > 0 || !report || view_ == View::Compare) return;   // a job (or Compare) writes the report when it lands
-    // duplicates() and evaluate() can be slow on a large library: never on the message thread
-    ++computing_;
+    if (jobs_ > 0 || !report || view_ == View::Compare) {   // a job (or Compare) writes the report when it lands
+        ++reportGen_;               // drop any report still in flight
+        deliveredGen_ = reportGen_;
+        shownKey_.clear();          // the text no longer shows a view report: the next one is recomputed
+        return;
+    }
+    // Only what the visible view depends on: a value-field edit does not restart Duplicates, a selection not Plan.
+    const auto* sel = pane(active_).item();
+    const auto ptr = [](const auto& p) { return std::to_string(reinterpret_cast<uintptr_t>(p.get())); };
+    std::string key = std::to_string(int(view_)) + "|" + ptr(a_.lib) + "|" + ptr(b_.lib);
+    if (view_ == View::Details) key += std::string("|") + active_ + "|" + std::to_string(sel ? pane(active_).selected : -1);
+    if (view_ == View::Plan) key += "|" + std::to_string(planRev_);
+    if (key == shownKey_) return;
+    shownKey_ = key;
+    // duplicates() and evaluate() can be slow on a large library: one background worker, latest request wins, a superseded
+    // request stops inside their loops (library/latest_worker.h)
+    const auto gen = ++reportGen_;
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, gen, v = view_, A = a_.lib, B = b_.lib, plan = plan_, side = active_, sel = pane(active_).selected] {
-        auto text = std::make_shared<std::string>(reportFor(v, A, B, plan, side, sel));
+    const bool queued = reports_.submit([this, alive, gen, v = view_, A = a_.lib, B = b_.lib, plan = plan_, side = active_,
+                                         selIdx = sel ? pane(active_).selected : -1](const std::function<bool()>& stale) {
+        auto text = std::make_shared<std::string>(reportFor(v, A, B, plan, side, selIdx, stale));
+        if (stale()) return;   // superseded: its (possibly partial) text is never shown
         juce::MessageManager::callAsync([this, alive, gen, text] {
-            if (alive.expired()) return;
-            --computing_;
-            if (gen == reportGen_) report_.setText(u8(*text), false);
+            if (alive.expired() || gen != reportGen_) return;
+            deliveredGen_ = gen;
+            report_.setText(u8(*text), false);
         });
-    }).detach();
+    });
+    if (!queued) { deliveredGen_ = gen; report_.setText(u8(reports_.error()), false); }
 }
 
 }  // namespace ai_arranger::app

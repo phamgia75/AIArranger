@@ -8,6 +8,7 @@
 // exporting run on worker threads; nothing here touches MIDI or audio.
 
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "library/latest_worker.h"
 #include "library/library_plan.h"
 
 namespace ai_arranger::app {
@@ -24,7 +25,8 @@ public:
     // What the buttons do; also driven by the UI smoke test.
     void openLibrary(char side, const juce::File& dir);   // asynchronous, read-only; busy() until it lands
     bool busy() const { return jobs_ > 0; }
-    bool computing() const { return computing_ > 0; }      // a view report is being computed off the message thread
+    uint64_t reportRequests() const { return reportGen_; }   // report requests so far (each recompute or drop counts one)
+    bool computing() const { return deliveredGen_ != reportGen_; }   // the visible view's report is still being computed off the message thread
     void selectRow(char side, int row);                    // a row of that pane's (filtered) list
     void showView(View v);                                 // Compare is asynchronous
     void addStep(Action a);                                // Copy, Move, Rename or SwapBanks from the current selection
@@ -76,10 +78,12 @@ private:
     juce::TextEditor search_, value_, report_;
     juce::Label hint_;
     int jobs_ = 0;   // message thread only
-    int computing_ = 0;          // view reports in flight (message thread only)
-    uint64_t reportGen_ = 0;     // the newest report request; older results are dropped
+    uint64_t reportGen_ = 0, deliveredGen_ = 0;   // newest report request / the one shown; older results are dropped (message thread)
+    uint64_t planRev_ = 0;       // bumped on every plan edit: the Plan view's input
+    std::string shownKey_;       // inputs of the report on screen; the same inputs are not recomputed
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+    library::LatestWorker reports_;   // last member: destroyed first, so its job is cancelled and joined before anything else goes
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LibraryManagerComponent)
 };

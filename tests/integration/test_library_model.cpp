@@ -3,7 +3,12 @@
 // data. The optional owner check runs only when AIARR_LIBRARY_OWNER_SET names a local COPY of an owner SET folder,
 // and only reads it.
 
+#include "library/latest_worker.h"
 #include "library/library_plan.h"
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
 #include "../support/panative_fixture.h"
 #include <cstdio>
 #include <cstdlib>
@@ -239,6 +244,66 @@ int main() {
         TEST("C1: too many bytes refused before hashing", load(ka, {}, {1000, 16, 5000}).error.find("more than 5000 bytes") != std::string::npos);
         TEST("C1: within the limits the same library loads", load(ka, {}, {1000, 16, 1u << 20}).items.size() == A.items.size());
         TEST("C1: compare uses the same bounds", compare(load(root / "Deep.KST", {}, {1000, 64, 1u << 20}), A).error.find("deeper than") != std::string::npos);
+    }
+
+    // ── Codex re-check: view reports run on ONE worker, latest request wins, stale work stops early ──
+    {
+        std::atomic<int> running{0}, maxRunning{0}, finished{0};
+        std::atomic<bool> go{false}, firstSawStale{false};
+        std::mutex m;
+        std::vector<int> started;
+        {
+            LatestWorker w;
+            auto job = [&](int i) {
+                return [&, i](const std::function<bool()>& stale) {
+                    { std::lock_guard<std::mutex> l(m); started.push_back(i); }
+                    const int r = ++running;
+                    for (int k = maxRunning; r > k && !maxRunning.compare_exchange_weak(k, r);) {}
+                    if (i == 0) {   // the first job is running while the other 49 arrive
+                        while (!go) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        for (int k = 0; k < 10000 && !stale(); ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        firstSawStale = stale();
+                    }
+                    --running;
+                    ++finished;
+                };
+            };
+            w.submit(job(0));
+            // job 0 must be running before the rest are queued, so it is the one that gets superseded
+            for (int k = 0; k < 2000; ++k) { { std::lock_guard<std::mutex> l(m); if (!started.empty()) break; } std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+            for (int i = 1; i < 50; ++i) w.submit(job(i));
+            go = true;
+            for (int k = 0; k < 5000 && finished < 2; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::lock_guard<std::mutex> l(m);
+        TEST("worker: 50 rapid requests run one at a time", maxRunning == 1);
+        TEST("worker: only the running one and the latest pending one ever run (latest wins)", started == (std::vector<int>{0, 49}));
+        TEST("worker: the superseded running job is told it is stale and stops early", firstSawStale);
+
+        // destruction while a job is computing: the job is cancelled and joined before the destructor returns
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        std::atomic<bool> inJob{false};
+        const auto t0 = std::chrono::steady_clock::now();
+        {
+            LatestWorker w;
+            w.submit([done, &inJob](const std::function<bool()>& stale) {
+                inJob = true;
+                while (!stale()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                *done = true;
+            });
+            for (int k = 0; k < 2000 && !inJob; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        TEST("worker: destroying it while computing cancels and joins the job", inJob && *done &&
+             std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+
+        // duplicates() and evaluate() stop inside their loops when cancelled
+        int calls = 0;
+        const auto stop = [&] { ++calls; return false; };
+        TEST("duplicates() stops early when cancelled", duplicates(SA, stop).names.empty() && calls >= 1 && !duplicates(SA).names.empty());
+        std::vector<Step> many(500, Step{Op::Copy, 'A', rockIdx(SA), "STYLE/USER01", -1, ""});
+        calls = 0;
+        const auto partial = evaluate(SA, SB, many, [&] { return ++calls < 3; });
+        TEST("evaluate() stops early when cancelled", partial.steps.size() == 2 && evaluate(SA, SB, many).steps.size() == 500);
     }
 
     // strictness: missing folder, links not followed

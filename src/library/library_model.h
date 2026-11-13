@@ -200,15 +200,21 @@ struct Duplicates {
     std::vector<std::vector<size_t>> names;        // items of one type with the same name in two or more banks (name only)
 };
 
-inline Duplicates duplicates(const Library& L) {
+// `keepGoing` (optional) is checked inside the loops; when it returns false the result is partial and must be dropped.
+inline Duplicates duplicates(const Library& L, const std::function<bool()>& keepGoing = {}) {
     Duplicates d;
+    size_t n = 0;
+    const auto going = [&] { return !keepGoing || (n++ & 1023) != 0 || keepGoing(); };   // checked on the first and every 1024th
     std::map<std::string, std::vector<std::string>> bySha;
-    for (const auto& [rel, f] : L.files) bySha[f.sha256].push_back(rel);
+    for (const auto& [rel, f] : L.files) { if (!going()) return d; bySha[f.sha256].push_back(rel); }
     for (auto& [h, g] : bySha) if (g.size() > 1) d.files.push_back(g);
     std::map<std::pair<std::string, std::string>, std::vector<size_t>> byName;
-    for (size_t i = 0; i < L.items.size(); ++i)
-        if (const auto n = trimmed(L.items[i].name); !n.empty()) byName[{L.items[i].type, n}].push_back(i);
+    for (size_t i = 0; i < L.items.size(); ++i) {
+        if (!going()) return d;
+        if (const auto name = trimmed(L.items[i].name); !name.empty()) byName[{L.items[i].type, name}].push_back(i);
+    }
     for (auto& [k, g] : byName) {
+        if (!going()) return d;
         std::set<std::string> banks;
         for (size_t i : g) banks.insert(L.items[i].bank);
         if (banks.size() > 1) d.names.push_back(g);

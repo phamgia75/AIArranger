@@ -75,10 +75,12 @@ inline std::string badName(const std::string& n) {
 
 // Applies the steps in order to simulated copies of A and B and records, per step, what blocks it (conflicts) and
 // what to look at (warnings: dependencies, duplicates). Read-only: the libraries themselves are never touched.
-inline Evaluation evaluate(const Library& A, const Library& B, const std::vector<Step>& plan) {
+// `keepGoing` (optional) is checked before each step; when it returns false the evaluation stops (partial: drop it).
+inline Evaluation evaluate(const Library& A, const Library& B, const std::vector<Step>& plan, const std::function<bool()>& keepGoing = {}) {
     Evaluation ev;
     detail::Sim sa = detail::simOf(A), sb = detail::simOf(B);
     for (const auto& st : plan) {
+        if (keepGoing && !keepGoing()) return ev;
         StepCheck c;
         const Library& L = st.side == 'A' ? A : B;
         detail::Sim& S = st.side == 'A' ? sa : sb;
