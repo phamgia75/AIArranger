@@ -776,7 +776,7 @@ int main() {
 
         // Library Workspace: the existing pages are segments of the shared Sounds & Resources view
         TEST("studio: Library segments wrap Resource Graph, KST Library, Memory Check",
-             st.segmentNames(D::Library).joinIntoString("|") == "Sources|Resource Graph|KST Library|Memory Check");
+             st.segmentNames(D::Library).joinIntoString("|") == "Sources|Resource Graph|KST Library|Memory Check|Library Manager");
         st.showDomain(D::Library, 2);
         TEST("studio: KST Library segment shows the existing tab", st.resources().isVisible() && st.resources().tabs().getCurrentTabIndex() == 1);
         st.showDomain(D::SampleLab, 1);
@@ -840,6 +840,80 @@ int main() {
                  st.libraryText().contains("Files: 2") && st.libraryText().contains("INVALID Pa-native container") &&
                  st.libraryText().contains("no Pa-native wrapper"));
             TEST("studio: the SET source is unchanged", fs::last_write_time(root / "Pa700copy/SOUND/USERDK01.PCG") == setStamp);
+        }
+        {   // E7 Library Manager: two read-only libraries, search, compare, duplicates, an EXPORT-ONLY plan
+            using A = app::LibraryManagerComponent::Action;
+            using V = app::LibraryManagerComponent::View;
+            auto& lm = st.manager();
+            auto waitLm = [&](int ms) { for (int i = 0; i < ms / 20 && (lm.busy() || lm.computing()); ++i) pump(20); };
+            st.showDomain(D::Library, 4);
+            TEST("library manager: a Library segment, shown", st.currentPage() == &lm && lm.isVisible());
+            TEST("library manager: Compare and Copy say what they need", lm.unavailable(A::Compare) == "Needs: a library open on both sides" &&
+                 lm.unavailable(A::Copy) == "Needs: an item selected in a list" && lm.unavailable(A::Export).startsWith("Needs: a plan step"));
+            TEST("library manager: unavailable actions show their reason inline", reasonsShown());
+            put(root / "Other.KST/STYLE/USER01/Ballad.STG", "s");       // same bytes as Mine.KST's
+            put(root / "Other.KST/STYLE/USER02/Ballad.STG", "other");   // same name, other bank
+            put(root / "Other.KST/PAD/USER09/Kick.PDC", "k");
+            lm.openLibrary('A', juce::File((root / "Mine.KST").string()));
+            TEST("library manager: a library is read off the message thread", lm.busy());
+            waitLm(5000);
+            lm.openLibrary('B', juce::File((root / "Other.KST").string()));
+            waitLm(5000);
+            TEST("library manager: both headers read-only with format and item count", lm.headerText('A').contains("Pa5X KST") &&
+                 lm.headerText('A').contains("2 items") && lm.headerText('B').contains("3 items") && lm.headerText('B').contains("Read-only source"));
+            TEST("library manager: details show sizes, sample disk size (not RAM) and banks", lm.reportText().contains("not keyboard sample RAM") &&
+                 lm.reportText().contains("STYLE/USER02  Style"));
+            lm.search().setText("ball", true);
+            pump(60);   // TextEditor announces a change asynchronously
+            TEST("library manager: the search box filters both panes", lm.paneText('A') == "Style        STYLE/USER01  Ballad" &&
+                 lm.paneText('B').contains("STYLE/USER02  Ballad") && !lm.paneText('B').contains("Kick"));
+            lm.search().setText("", true);
+            pump(60);
+            lm.showView(V::Compare);
+            waitLm(5000);
+            TEST("library manager: compare view (file level)", lm.reportText().contains("same 1, different 0, only in A 1, only in B 2") &&
+                 lm.reportText().contains("only in A   PAD/USER01/Hit.PDC"));
+            lm.showView(V::Duplicates);
+            waitLm(5000);
+            const auto requests = lm.reportRequests();
+            lm.value().setText("unrelated", true);
+            pump(60);   // the edit is announced asynchronously and reaches refresh()
+            TEST("library manager: a value-field edit does not restart the Duplicates report (Codex re-check)",
+                 lm.reportRequests() == requests && !lm.computing());
+            lm.value().setText("", true);
+            pump(60);
+            TEST("library manager: duplicates view: names flagged as name-only", lm.reportText().contains("NAME ONLY") &&
+                 lm.reportText().contains("Style \"Ballad\": STYLE/USER01 STYLE/USER02"));
+            lm.selectRow('A', 1);   // Ballad (rows sorted by bank: PAD/USER01 Hit, STYLE/USER01 Ballad)
+            waitLm(5000);
+            TEST("library manager: selecting an item shows its details and evidenced dependencies only", lm.reportText().contains("Library A: Ballad") &&
+                 lm.reportText().contains("UNKNOWN") && lm.unavailable(A::Copy).isEmpty());
+            TEST("library manager: Rename needs a name and says so", lm.unavailable(A::Rename) == "Needs: the new name in the value field");
+            lm.addStep(A::Copy);
+            TEST("library manager: the plan is evaluated off the message thread (Codex C5)", lm.computing() && !lm.reportText().contains("1. copy"));
+            waitLm(5000);
+            TEST("library manager: Copy is staged in the plan view, nothing written", lm.plan().size() == 1 && lm.reportText().contains("READY TO EXPORT") &&
+                 lm.reportText().contains("same bytes: nothing to do") && lm.reportText().contains("EXPORT-ONLY"));
+            lm.selectRow('A', 0);   // Hit.PDC into B's selected bank: none selected there, so the same bank id
+            lm.value().setText("STYLE/USER01", true);
+            lm.addStep(A::SwapBanks);
+            waitLm(5000);
+            TEST("library manager: a conflicting step is shown as a conflict", lm.plan().size() == 2 && lm.reportText().contains("CONFLICT") &&
+                 lm.reportText().contains("BLOCKED"));
+            lm.exportPlan(juce::File("/Volumes/AIA-NO-SUCH-STICK/plan"));
+            waitLm(5000);
+            TEST("library manager: export onto a mounted volume refused", lm.reportText().contains("Plan NOT written") && lm.reportText().contains("mounted volume"));
+            lm.exportPlan(juce::File((root / "My Plan").string()));
+            TEST("library manager: export runs off the message thread", lm.busy());
+            waitLm(5000);
+            TEST("library manager: plan folder written at L1 only, EXPORT-ONLY", fs::is_regular_file(root / "My Plan/plan.json") &&
+                 fs::is_regular_file(root / "My Plan/PACKAGE.sha256") && lm.reportText().contains(juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3")) &&
+                 lm.reportText().contains("EXPORT-ONLY"));
+            lm.exportPlan(juce::File((root / "My Plan").string()));
+            waitLm(5000);
+            TEST("library manager: an existing plan folder is never overwritten", lm.reportText().contains("already exists"));
+            TEST("library manager: the libraries are unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
+            TEST("library manager: reasons still inline with libraries open", reasonsShown());
         }
         {
             media::sound::Sample sm;

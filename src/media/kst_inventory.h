@@ -96,13 +96,24 @@ struct Listing {
     bool pcm = false;                     // a directory named PCM exists (manual p.736: the KST holds User Samples)
 };
 
-// Full recursive listing. Returns false (with error) on any permission, iteration or metadata error, or when
-// `keepGoing` (checked per entry, optional) returns false.
-inline bool listFiles(const std::filesystem::path& root, Listing& out, std::string& error, const std::function<bool()>& keepGoing = {}) {
+// Bounds on a listing, checked during enumeration (a hostile folder cannot exhaust memory or run forever). The defaults
+// sit far above any keyboard backup (a Pa5X KST is TYPE/BANK/file, a few thousand files) so normal results never change.
+struct ListLimits {
+    size_t entries = 1000000;              // files + folders + skipped entries
+    int depth = 64;                        // path components below the root
+    uintmax_t bytes = UINTMAX_MAX;         // sum of regular-file sizes
+};
+
+// Full recursive listing. Returns false (with error) on any permission, iteration or metadata error, when
+// `keepGoing` (checked per entry, optional) returns false, or when a limit is passed (the listing stops there).
+inline bool listFiles(const std::filesystem::path& root, Listing& out, std::string& error, const std::function<bool()>& keepGoing = {},
+                      const ListLimits& limits = {}) {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (!fs::is_directory(fs::symlink_status(root, ec))) { error = "not a directory (symlinks are not followed): " + root.string(); return false; }
     fs::recursive_directory_iterator it(root, ec), end;   // no skip_permission_denied: an unreadable folder is an error
+    size_t entries = 0;
+    uintmax_t bytes = 0;
     for (;;) {
         if (ec) { error = "cannot read " + root.string() + ": " + ec.message(); return false; }
         if (it == end) break;
@@ -110,6 +121,8 @@ inline bool listFiles(const std::filesystem::path& root, Listing& out, std::stri
         const auto st = it->symlink_status(ec);
         if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
         const std::string rel = it->path().lexically_relative(root).generic_string();
+        if (++entries > limits.entries) { error = "refusing: more than " + std::to_string(limits.entries) + " entries in " + root.string(); return false; }
+        if (it.depth() + 1 > limits.depth) { error = "refusing: " + rel + " is nested deeper than " + std::to_string(limits.depth) + " folders"; return false; }
         if (fs::is_directory(st)) {
             std::string n = it->path().filename().string();
             std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::toupper(c); });
@@ -118,6 +131,8 @@ inline bool listFiles(const std::filesystem::path& root, Listing& out, std::stri
         } else if (fs::is_regular_file(st)) {
             const uintmax_t size = it->file_size(ec);
             if (ec) { error = "cannot stat " + it->path().string() + ": " + ec.message(); return false; }
+            if (size > limits.bytes - bytes) { error = "refusing: more than " + std::to_string(limits.bytes) + " bytes of files in " + root.string(); return false; }
+            bytes += size;
             out.files[rel] = {it->path(), size};
         } else {
             out.skipped.push_back(rel);   // symlink or special file; recursive_directory_iterator does not follow symlinks by default

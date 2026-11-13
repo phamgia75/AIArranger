@@ -302,14 +302,15 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     validationPage_.addAndMakeVisible(jobsLog_);
     jobsLog_.setText("Jobs (this session)\n", false);
 
-    segments_[D::Library] = {{"Sources", -1, &sourcesPage_}, {"Resource Graph", 0}, {"KST Library", 1}, {"Memory Check", 2}};
+    segments_[D::Library] = {{"Sources", -1, &sourcesPage_}, {"Resource Graph", 0}, {"KST Library", 1}, {"Memory Check", 2}, {"Library Manager", -1, &manager_}};
     segments_[D::ImportExport] = {{"Routes", -1, &ioPage_}};
     segments_[D::SampleLab] = {{"Convert Sound", 3}, {"Sample Plugin", 4}, {"Quality Report", -1, &qualityPage_},
                                {"KMP / KSF Writer", -1, &kmpPage_}, {"Tools", -1, &labPage_}};
     segments_[D::StyleStudio] = {{"Style Editor", -1, &stylePage_}};
     segments_[D::Validation] = {{"Checks", -1, &validationPage_}};
     for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
-                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
+                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
+                    (juce::Component*)&manager_})
         addChildComponent(p);
     for (auto& [d, segs] : segments_)
         for (size_t i = 0; i < segs.size(); ++i) {
@@ -403,7 +404,8 @@ void StudioComponent::showDomain(Domain d, int segment) {
 
     const auto& seg = segs[size_t(segment)];
     for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
-                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
+                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
+                    (juce::Component*)&manager_})
         p->setVisible(p == seg.page);
     res_.setVisible(seg.resTab >= 0);
     if (seg.resTab >= 0) {
@@ -922,7 +924,8 @@ void StudioComponent::resized() {
     }
     r.removeFromTop(10);
     for (auto* p : {(juce::Component*)&res_, (juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
-                    (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_})
+                    (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
+                    (juce::Component*)&manager_})
         p->setBounds(r);
 }
 
