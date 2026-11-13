@@ -1049,6 +1049,37 @@ int main() {
             st.openStyle(juce::File((root / "invalid.uasf").string()));
             TEST("C3 studio: invalid Style not editable, validator named, the open Style unchanged",
                  st.styleStatus().startsWith("Not editable") && st.styleStatus().contains("UASF validator") && fs::equivalent(st.styleModel().path(), root / "kept.uasf"));
+
+            // App quit (Cmd-Q / menu Quit / main window close): clean quits at once; unwritten edits ask first, Cancel aborts
+            int quits = 0;
+            auto quitFn = [&quits] { ++quits; };
+            TEST("quit: no unwritten edits -> quits at once, no prompt", !st.styleModel().dirty() && st.requestQuit(quitFn) && quits == 1 &&
+                 !st.unsavedPromptShown());
+            st.styleOp().setSelectedId(6);   // Tempo
+            st.styleValue().setText("96");
+            click(pg, "Apply");
+            st.showDomain(D::Validation);
+            TEST("quit: unwritten edits -> deferred, the Style page asks", !st.requestQuit(quitFn) && quits == 1 && st.unsavedPromptShown() &&
+                 st.domain() == D::StyleStudio && find<juce::Button>(pg, "Discard Edits and Quit") &&
+                 find<juce::Button>(pg, "Discard Edits and Quit")->isVisible() && st.styleStatus().contains("Quit AI Arranger"));
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Cancel);
+            TEST("quit: Cancel aborts the quit; edits and undo stay", quits == 1 && !st.unsavedPromptShown() && st.styleModel().dirty() &&
+                 st.styleModel().style().tempo_bpm == 96 && st.styleModel().undoLabel() == "Tempo");
+            st.requestQuit(quitFn);
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "quit-save.uasf").string()));
+            TEST("quit: Save writes the edits, then quits", quits == 2 && fs::is_regular_file(root / "quit-save.uasf") && !st.styleModel().dirty());
+            st.styleValue().setText("95");
+            click(pg, "Apply");
+            st.requestQuit(quitFn);
+            TEST("quit: still deferred before a choice", quits == 2);
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
+            TEST("quit: Discard quits", quits == 3 && !st.unsavedPromptShown());
+            {
+                app::LiveHostComponent h;
+                int hq = 0;
+                h.confirmQuit([&hq] { ++hq; });
+                TEST("quit: the live host quits at once when no Studio window is open", hq == 1);
+            }
         }
 
         // Validation & Reports: badges from the shared verifiers; L3 only from a matching owner record

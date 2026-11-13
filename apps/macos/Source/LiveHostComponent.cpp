@@ -290,4 +290,13 @@ void LiveHostComponent::resized() {
     statusLabel_.setBounds(bottom);
 }
 
+void LiveHostComponent::confirmQuit(std::function<void()> quit) {
+    auto* studio = studioWindow_ ? dynamic_cast<StudioComponent*>(studioWindow_->getContentComponent()) : nullptr;
+    if (!studio) { quit(); return; }
+    if (!studio->requestQuit(std::move(quit))) {   // deferred: show where the choice is
+        studioWindow_->setVisible(true);
+        studioWindow_->toFront(true);
+    }
+}
+
 } // namespace ai_arranger::app

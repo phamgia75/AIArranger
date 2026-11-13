@@ -70,7 +70,10 @@ public:
     // (then open), Discard (then open) or Cancel (the open Style stays as it is, undo included).
     enum class UnsavedChoice { Save, Discard, Cancel };
     void resolveUnsavedStyle(UnsavedChoice c, const juce::File& saveAs = {});
-    bool unsavedPromptShown() const { return pendingStyle_ != juce::File(); }
+    bool unsavedPromptShown() const { return pendingStyle_ != juce::File() || pendingQuit_ != nullptr; }
+    // The app's quit request: with unwritten Style edits it shows the same choice on the Style page and returns false
+    // (quit runs later, after Save or Discard; Cancel aborts it). Clean: quit runs now and it returns true.
+    bool requestQuit(std::function<void()> quit);
     bool styleUndo();
     bool styleRedo();
     void importSmfTrack(const juce::File& mid);
@@ -166,6 +169,8 @@ private:
     ui::studio::StyleStudioModel style_;
     std::string sff1Report_;
     juce::File pendingStyle_;   // asked to open while the open Style has unwritten edits
+    std::function<void()> pendingQuit_;   // the app asked to quit while the open Style has unwritten edits
+    void askUnsaved(const juce::String& what, const juce::String& then);
     juce::TextButton *pendSave_ = nullptr, *pendDiscard_ = nullptr, *pendCancel_ = nullptr;
     juce::ComboBox styleElem_, styleTrack_, styleOp_;
     juce::TextEditor styleValue_;

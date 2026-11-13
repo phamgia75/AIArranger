@@ -22,6 +22,9 @@ public:
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    // The app's quit path: runs `quit` now, or later when the AI Music Studio first asks about unwritten Style edits
+    // (Save / Discard run it, Cancel aborts the quit).
+    void confirmQuit(std::function<void()> quit);
 
 private:
     void timerCallback() override;     // message thread: poll snapshot -> labels

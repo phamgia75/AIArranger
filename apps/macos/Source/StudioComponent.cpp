@@ -466,29 +466,48 @@ void StudioComponent::openSource(const juce::File& dir) {
 
 void StudioComponent::openStyle(const juce::File& sty) {
     if (style_.dirty()) {   // never drop unwritten edits silently: ask on the page
+        pendingQuit_ = nullptr;
         pendingStyle_ = sty;
-        styleStatus_.setText("The open Style has edits not written yet. Open " + sty.getFileName() + " anyway? Save them, discard them, or cancel.",
-                             juce::dontSendNotification);
-        for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(true);
+        askUnsaved("Open " + sty.getFileName(), "Open");
         return;
     }
     loadStyle(sty, false);
 }
 
+bool StudioComponent::requestQuit(std::function<void()> quit) {
+    if (!style_.dirty()) { quit(); return true; }
+    pendingStyle_ = juce::File();
+    pendingQuit_ = std::move(quit);
+    showDomain(Domain::StyleStudio);
+    askUnsaved("Quit AI Arranger", "Quit");
+    return false;
+}
+
+void StudioComponent::askUnsaved(const juce::String& what, const juce::String& then) {
+    styleStatus_.setText("The open Style has edits not written yet. " + what + " anyway? Save them, discard them, or cancel.", juce::dontSendNotification);
+    pendSave_->setButtonText("Save UASF, then " + then + "...");
+    pendDiscard_->setButtonText("Discard Edits and " + then);
+    for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(true);
+}
+
 void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& saveAs) {
     const auto next = pendingStyle_;
-    if (next == juce::File()) return;
+    auto quit = pendingQuit_;
+    if (next == juce::File() && !quit) return;
     if (c == UnsavedChoice::Save) {
         saveStyleUasf(saveAs);
         if (style_.dirty()) return;   // not written (the status says why): keep asking, nothing is lost
     }
     pendingStyle_ = juce::File();
+    pendingQuit_ = nullptr;
     for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(false);
     if (c == UnsavedChoice::Cancel) {
-        styleStatus_.setText("Cancelled: " + juce::String(style_.path().filename().string()) + " stays open with its edits.", juce::dontSendNotification);
+        styleStatus_.setText((quit ? "Quit cancelled: " : "Cancelled: ") + juce::String(style_.path().filename().string()) +
+                                 " stays open with its edits.", juce::dontSendNotification);
         refreshStyle();
         return;
     }
+    if (quit) { quit(); return; }   // Saved or discarded: the app may quit now
     loadStyle(next, c == UnsavedChoice::Discard);
 }
 

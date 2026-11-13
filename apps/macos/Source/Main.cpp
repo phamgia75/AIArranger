@@ -17,7 +17,14 @@ public:
         mainWindow_ = std::make_unique<MainWindow>("AI Arranger");
     }
     void shutdown() override { mainWindow_ = nullptr; }
-    void systemRequestedQuit() override { quit(); }
+    // Cmd-Q, the app menu Quit and the main window's close button all land here: the live host asks the Studio first
+    // when a Style has unwritten edits (Cancel keeps the app running).
+    void systemRequestedQuit() override {
+        if (auto* host = mainWindow_ ? dynamic_cast<LiveHostComponent*>(mainWindow_->getContentComponent()) : nullptr)
+            host->confirmQuit([] { juce::JUCEApplicationBase::quit(); });
+        else
+            quit();
+    }
 
 private:
     class MainWindow : public juce::DocumentWindow {
