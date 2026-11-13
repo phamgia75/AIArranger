@@ -189,6 +189,11 @@ public:
         return "";
     }
 
+    // For an export job (jobs/export_specs.h): the UASF bytes of the Style now, and, once the job has written them,
+    // marking them as written (dirty() stays true when the Style was edited after the job was made).
+    std::vector<uint8_t> uasfBytes() const { return bytes(); }
+    void markWritten(std::vector<uint8_t> uasf) { saved_ = std::move(uasf); }
+
     // L1 of a Pa5X Style SMF file: it parses as "Style SMF separated by markers" and the Korg validate() finds nothing.
     // There is no L2 (no second reader), and L3 needs an owner hardware test.
     static Verification checkStyleSmf(const std::filesystem::path& mid) {

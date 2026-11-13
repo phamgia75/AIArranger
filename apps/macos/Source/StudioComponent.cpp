@@ -1,6 +1,7 @@
 #include "StudioComponent.h"
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_report.h"
+#include "jobs/export_specs.h"
 #include "media/sf2_check.h"
 #include <thread>
 
@@ -120,6 +121,31 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         setUnavailable(b, why);
         return {{&b, 260}, {&reasonFor(b), 0}};
     };
+    // An export route with its job button: the label beside it says where the export comes from, or why it cannot run now.
+    auto exportRow = [this](const juce::String& text, D d, int seg, ExportJob j, const juce::String& job, const juce::String& where,
+                            std::optional<ExportJob> j2 = {}, const juce::String& job2 = {}) -> std::vector<std::pair<juce::Component*, int>> {
+        auto& b = button(text, [this, d, seg] { showDomain(d, seg); });
+        auto jobButton = [this](ExportJob k, const juce::String& t, const juce::String& w) -> juce::TextButton& {
+            auto& jb = button(t, [this, k] {
+                auto pick = [this, k](juce::File f) { exportJob(k, f); };
+                if (k == ExportJob::StyleSmf) chooseSave("New Pa5X Style SMF file (never overwrites)", "*.mid", [pick](juce::File f) { pick(f.withFileExtension("mid")); });
+                else if (k == ExportJob::StyleUasf) chooseSave("New UASF file (never overwrites)", "*.uasf", [pick](juce::File f) { pick(f.withFileExtension("uasf")); });
+                else chooseFolder("Parent folder for the new output (local disk)", [this, k, pick](juce::File parent) {
+                    const auto in = res_.converter().model().snapshot();
+                    pick(k == ExportJob::KstBackup && source_ ? ResourcesComponent::backupFolderFor(juce::File(source_->path), parent)
+                                                              : parent.getChildFile(juce::File::createLegalFileName(
+                                                                    juce::String(in ? in->name : "Sound") + (k == ExportJob::KmpFolder ? " KMP" : ""))));
+                });
+            });
+            exportButtons_[k] = {&jb, w};
+            return jb;
+        };
+        auto& jb = jobButton(j, job, where);
+        std::vector<std::pair<juce::Component*, int>> row{{&b, 260}, {&jb, 120}};
+        if (j2) row.push_back({&jobButton(*j2, job2, where), 120});
+        row.push_back({&reasonFor(jb), 0});
+        return row;
+    };
     ioPage_.rows = {
         {{&label("IMPORT  (sources are only read)", kAccent), 0}},
         route("Keyboard backup (KST) folder", "Library Workspace > Sources: recognise it and show its library", D::Library, 0),
@@ -129,19 +155,41 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         route("Yamaha style (.sty)", "Style Studio: report and EXPERIMENTAL editing (the source file is never changed)", D::StyleStudio, 0),
         route("Pa-family SET folder", "Library Workspace > Sources: recognise it, then Inspect Pa-native (read-only, EXPERIMENTAL)", D::Library, 0),
         {{&label("EXPORT  (always a NEW local folder)", kAccent), 0}},
-        route("Sound package (SF2, TXPROG, WAV)", "Sample Lab > Convert Sound: Generate Package...", D::SampleLab, 0),
-        route("Verified KST backup", "Library Workspace > KST Library: Backup KST... (byte copy + SHA-256 manifest)", D::Library, 2),
+        exportRow("Sound package (SF2, TXPROG, WAV)", D::SampleLab, 0, ExportJob::SoundPackage, "Package job...",
+                  "The Sound previewed in Sample Lab > Convert Sound (also: Generate Package... there)"),
+        exportRow("Verified KST backup", D::Library, 2, ExportJob::KstBackup, "Backup job...",
+                  "The KST opened in Library Workspace > Sources: byte copy + SHA-256 manifest (also: Backup KST... in KST Library)"),
         route("Check a USB copy (read-only)", "Validation & Reports: Verify Package against its manifest", D::Validation, 0),
         off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet."),
-        route("KMP / KSF folder (EXPERIMENTAL)", "Sample Lab > KMP / KSF Writer: the previewed Sound as .KMP + .KSF, verification level L1 only",
-              D::SampleLab, 3),
-        route("Style as Pa5X SMF (EXPERIMENTAL)", "Style Studio: Export Pa5X SMF... (L1 = our Korg Style validator; Pa5X import not tested)",
-              D::StyleStudio, 0),
+        exportRow("KMP / KSF folder (EXPERIMENTAL)", D::SampleLab, 3, ExportJob::KmpFolder, "KMP job...",
+                  "The previewed Sound as .KMP + .KSF (Sample Lab > KMP / KSF Writer), verification level L1 only"),
+        exportRow("Style as Pa5X SMF (EXPERIMENTAL)", D::StyleStudio, 0, ExportJob::StyleSmf, "SMF job...",
+                  "The Style open in Style Studio (L1 = our Korg Style validator; Pa5X import not tested). UASF: our own format",
+                  ExportJob::StyleUasf, "UASF job..."),
         {{(staged_ = &label("STAGED CHANGES: 0", kPending)), 0}},
         {{&label("WRITE RULES: every write goes to NAME.INCOMPLETE and is published by one rename only after its checks pass; "
                  "a cancelled or failed write leaves only NAME.INCOMPLETE.", kText2), 0}},
         {{&label("Mounted volumes (USB sticks) are refused: write locally, copy by hand in Finder, then Check a USB copy.", kText2), 0}},
     };
+    // ── the job list: queued, running (progress), done, failed with the reason, cancelled; Cancel and Open Report ──
+    styleText(jobView_);
+    jobView_.setText("No export jobs yet.", false);
+    jobPick_.setTitle("Export job");
+    jobPick_.onChange = [this] { refreshJobs(); };
+    cancelJobBtn_ = &button("Cancel Job", [this] { cancelJob(); });
+    reportBtn_ = &button("Open Report", [this] { openJobReport(); });
+    rerunBtn_ = &button("Remove Leftover and Re-run", [this] { rerunJobCleaning(); });
+    ioPage_.rows.push_back({{&label("JOBS  (run one at a time in the order added; this window never waits for them)", kAccent), 0}});
+    ioPage_.rows.push_back({{&jobPick_, 300}, {cancelJobBtn_, 100}, {reportBtn_, 110}, {rerunBtn_, 200}});
+    ioPage_.fill = &jobView_;
+    ioPage_.addAndMakeVisible(jobView_);
+    queue_ = std::make_unique<jobs::JobQueue>([this, alive = std::weak_ptr<bool>(alive_), posted = jobsPosted_] {
+        if (posted->exchange(true)) return;   // one refresh in flight is enough: it reads the latest state
+        juce::MessageManager::callAsync([this, alive, posted] {
+            posted->store(false);
+            if (!alive.expired()) refreshJobs();
+        });
+    });
     for (auto& row : ioPage_.rows) for (auto& [c, w] : row) ioPage_.addAndMakeVisible(c);
 
     // ── Sample Lab › Quality Report (the Convert Sound recipe with its measured QUALITY section) ──
@@ -717,7 +765,7 @@ juce::String StudioComponent::kmpUnavailable() {
 void StudioComponent::writeKmp(const juce::File& dest) {
     if (kmpUnavailable().isNotEmpty()) return;
     const auto in = res_.converter().model().snapshot();   // immutable; shared with the worker without copying audio
-    runOutputJob("KMP/KSF folder (EXPERIMENTAL)", kmpReport_, [in, d = dest.getFullPathName().toStdString()] { return st::writeKmpFolder(*in, d); });
+    enqueue(jobs::kmpFolder(in, dest.getFullPathName().toStdString()), &kmpReport_);
 }
 
 // ── Sample Lab › Tools (E4) ──
@@ -740,20 +788,16 @@ void StudioComponent::runLabTool(LabTool t, const juce::File& dest) {
     const auto n = [](juce::TextEditor& e) { return e.getText().getDoubleValue(); };
     switch (t) {
         case LabTool::Analyze: runOutputJob("Sample Lab analyze", labReport_, [in] { return st::labAnalyze(in); }); break;
-        case LabTool::Slice:
-            runOutputJob("Sample Lab Time Slice", labReport_, [in, out, bars = n(labBars_), beats = n(labBeats_)] { return st::labSlice(in, bars, beats, out); });
-            break;
+        case LabTool::Slice: enqueue(jobs::labSlice(in, n(labBars_), n(labBeats_), out), &labReport_); break;
         case LabTool::Loop:
-            runOutputJob("Sample Lab loop", labReport_, [in, out, a = uint32_t(n(labStart_)), b = uint32_t(n(labEnd_)), sn = uint32_t(n(labSnap_)),
-                                                         x = uint32_t(n(labXfade_))] { return st::labLoop(in, a, b, sn, x, out); });
+            enqueue(jobs::labLoop(in, uint32_t(n(labStart_)), uint32_t(n(labEnd_)), uint32_t(n(labSnap_)), uint32_t(n(labXfade_)), out), &labReport_);
             break;
-        case LabTool::BatchPreview:
-        case LabTool::Batch:
-            runOutputJob(t == LabTool::Batch ? "Sample Lab batch" : "Sample Lab batch preview", labReport_,
-                         [in, out = t == LabTool::Batch ? out : std::string(), tr = labTrim_.getToggleState(), no = labNorm_.getToggleState()] {
-                             return st::labBatch(in, tr, no, out);
-                         });
+        case LabTool::BatchPreview:   // read-only: nothing is written, so no export job
+            runOutputJob("Sample Lab batch preview", labReport_, [in, tr = labTrim_.getToggleState(), no = labNorm_.getToggleState()] {
+                return st::labBatch(in, tr, no, {});
+            });
             break;
+        case LabTool::Batch: enqueue(jobs::labBatch(in, labTrim_.getToggleState(), labNorm_.getToggleState(), out), &labReport_); break;
     }
 }
 
@@ -826,6 +870,134 @@ void StudioComponent::saveStyleUasf(const juce::File& f) {
     refreshStyle();
 }
 
+// ── Export jobs (E6): one serial queue; each finished job lands on the page that started it and becomes the
+// verification target at the level its verifier gave (L3 never: only an owner record, Validation & Reports) ──
+juce::String StudioComponent::exportUnavailable(ExportJob j) {
+    using K = st::SourceProbe::Kind;
+    switch (j) {
+        case ExportJob::SoundPackage:
+        case ExportJob::KmpFolder:
+            if (res_.converter().busy()) return "Needs: the Convert Sound work to finish";
+            return res_.converter().model().built() ? "" : "Needs: a previewed Sound (Sample Lab > Convert Sound: choose a folder, Preview)";
+        case ExportJob::KstBackup:
+            return source_ && (source_->kind == K::Pa5xUserData || source_->kind == K::KstBackupCopy) ? ""
+                                                                                                     : "Needs: a Pa5X KST folder opened in Library Workspace > Sources";
+        case ExportJob::StyleSmf:
+        case ExportJob::StyleUasf: return style_.loaded() ? "" : "Needs: a Style opened for editing in Style Studio";
+    }
+    return "";
+}
+
+uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
+    if (exportUnavailable(j).isNotEmpty()) return 0;
+    const std::string d = dest.getFullPathName().toStdString();
+    auto& cv = res_.converter();
+    switch (j) {
+        case ExportJob::SoundPackage: return enqueue(jobs::soundPackage(cv.model().snapshot(), cv.model().folder(), cv.ksfNotes(), d), nullptr);
+        case ExportJob::KmpFolder: return enqueue(jobs::kmpFolder(cv.model().snapshot(), d), &kmpReport_);
+        case ExportJob::KstBackup: return enqueue(jobs::kstBackup(source_->path, d), nullptr);
+        case ExportJob::StyleSmf:
+        case ExportJob::StyleUasf: {
+            // The Style as it is now (the editor keeps working); once written, these bytes count as written (staged -> 0)
+            const auto uasf = style_.uasfBytes();
+            const auto path = style_.path();
+            auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_edit::exportPa5xSmf(style_.style()), d)
+                                                 : jobs::styleUasf(path.filename().string(), uasf, d);
+            return enqueue(std::move(spec), nullptr, [this, uasf, path](const jobs::JobState& s) {
+                if (s.phase != jobs::Phase::Done || style_.path() != path) return;
+                style_.markWritten(uasf);
+                refreshStyle();
+            });
+        }
+    }
+    return 0;
+}
+
+uint64_t StudioComponent::enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done) {
+    const juce::String type(spec.type);
+    JobHome home{spec, out, domain_, std::move(done)};
+    const auto id = queue_->enqueue(std::move(spec));
+    jobHomes_[id] = std::move(home);
+    if (out) out->setText(type + ": queued as export job #" + juce::String(id) + " (Import / Export Center lists every job)...", false);
+    addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + type + "  queued as job #" + juce::String(id));
+    jobPick_.addItem("#" + juce::String(id), int(id));
+    jobPick_.setSelectedId(int(id), juce::dontSendNotification);
+    refreshJobs();
+    return id;
+}
+
+void StudioComponent::refreshJobs() {
+    using P = jobs::Phase;
+    const auto all = queue_->snapshot();
+    const auto badge = [](const jobs::JobState& j) { return juce::String::fromUTF8(st::badgeLine(j.level).c_str()); };
+    const auto state = [&](const jobs::JobState& j) -> juce::String {
+        switch (j.phase) {
+            case P::Queued: return "queued";
+            case P::Done: return "done  " + badge(j);
+            case P::Failed: return "FAILED at " + juce::String(jobs::phaseName(j.stoppedAt)) + ": " + juce::String(j.reason);
+            case P::Cancelled: return "cancelled: " + juce::String(j.reason);
+            default: return "running " + juce::String(int(j.progress * 100)) + "%  (" + jobs::phaseName(j.phase) + ")";
+        }
+    };
+    // Land each finished job once: its page shows the result, a checked output becomes the verification target.
+    for (const auto& j : all) {
+        auto h = jobHomes_.find(j.id);
+        if (!jobs::finished(j.phase) || h == jobHomes_.end() || h->second.landed) continue;
+        h->second.landed = true;
+        const bool ok = j.phase == P::Done;
+        juce::String warn;
+        for (const auto& w : j.warnings) warn << "\nWarning: " << juce::String::fromUTF8(w.c_str());
+        if (h->second.out)
+            h->second.out->setText(ok ? "Job #" + juce::String(j.id) + " done. Written: " + juce::String(j.dest) + "\n" + juce::String::fromUTF8(j.verifyText.c_str()) +
+                                            "\n" + badge(j) + "\nReport: " + juce::String(j.reportPath) + warn + "\n\n" + juce::String::fromUTF8(j.writerText.c_str())
+                                      : juce::String::fromUTF8(j.reason.c_str()) + "\n(job #" + juce::String(j.id) + " " + jobs::phaseName(j.phase) + " at " +
+                                            jobs::phaseName(j.stoppedAt) + ")",
+                                   false);
+        if (ok && j.level.l1.state != st::Check::NotRun) {
+            validationTarget_ = juce::File(juce::String::fromUTF8(j.dest.c_str()));
+            verification_ = j.level;
+            verificationIsPackage_ = std::filesystem::is_regular_file(std::filesystem::path(j.dest) / media::sound::pkgio::FileSet::kPackageManifest);
+            verificationDomain_ = h->second.from;
+        }
+        addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + juce::String(j.type) + "  " +
+               (ok ? "done  " + badge(j) + "  " + juce::String(j.dest) : state(j)));
+        if (h->second.done) h->second.done(j);
+    }
+    const int picked = jobPick_.getSelectedId();
+    jobPick_.clear(juce::dontSendNotification);
+    juce::String t;
+    const jobs::JobState* sel = nullptr;
+    for (auto it = all.rbegin(); it != all.rend(); ++it) {   // newest first
+        jobPick_.addItem("#" + juce::String(it->id) + "  " + juce::String(it->type) + "  " + jobs::phaseName(it->phase), int(it->id));
+        t << "#" << int(it->id) << "  " << juce::String(it->type) << "  " << state(*it) << "\n     -> " << juce::String(it->dest)
+          << (it->reportPath.empty() ? juce::String() : "\n     report: " + juce::String(it->reportPath)) << "\n";
+        if (int(it->id) == picked) sel = &*it;
+    }
+    jobPick_.setSelectedId(picked, juce::dontSendNotification);
+    if (all.empty()) t = "No export jobs yet. Each export button queues a job; it runs here while you keep working.";
+    for (const auto& j : all)
+        if (j.id == reportJob_) t << "\n──── REPORT, job #" << int(j.id) << "  (" << juce::String(j.reportPath.empty() ? "in memory only: nothing was published" : j.reportPath)
+                                 << ") ────\n" << juce::String::fromUTF8(j.reportMd.c_str());
+    jobView_.setText(t, false);
+    // Actions show only when they apply to the chosen job (no disabled button without a reason).
+    cancelJobBtn_->setVisible(sel && !jobs::finished(sel->phase));
+    reportBtn_->setVisible(sel && jobs::finished(sel->phase) && !sel->reportMd.empty());
+    rerunBtn_->setVisible(sel && sel->phase == P::Failed && sel->reason.find("Re-run with consent") != std::string::npos);
+    refreshInspector();
+}
+
+void StudioComponent::selectJob(uint64_t id) { jobPick_.setSelectedId(int(id), juce::dontSendNotification); refreshJobs(); }
+void StudioComponent::cancelJob() { if (jobPick_.getSelectedId() > 0) queue_->cancel(uint64_t(jobPick_.getSelectedId())); }
+void StudioComponent::openJobReport() { reportJob_ = uint64_t(std::max(0, jobPick_.getSelectedId())); refreshJobs(); }
+
+uint64_t StudioComponent::rerunJobCleaning() {
+    const auto h = jobHomes_.find(uint64_t(std::max(0, jobPick_.getSelectedId())));
+    if (h == jobHomes_.end() || !rerunBtn_->isVisible()) return 0;
+    auto spec = h->second.spec;
+    spec.cleanOwnIncomplete = true;   // the user's explicit consent, for this one job
+    return enqueue(std::move(spec), h->second.out, h->second.done);
+}
+
 void StudioComponent::addJob(const juce::String& line) {
     jobsLog_.moveCaretToEnd();
     jobsLog_.insertTextAtCaret(line + "\n");
@@ -848,6 +1020,10 @@ void StudioComponent::refreshAvailability() {
     setUnavailable(*exportSmfBtn_, noStyle);
     setUnavailable(*saveUasfBtn_, noStyle);
     for (auto& [v, b] : validatorButtons_) setUnavailable(*b, validatorUnavailable(v));
+    for (auto& [j, b] : exportButtons_) {
+        setUnavailable(*b.first, exportUnavailable(j));
+        if (b.first->isEnabled()) reasonFor(*b.first).setText(b.second, juce::dontSendNotification);   // available: where it comes from
+    }
     setUnavailable(*l3Btn_, jobs_ > 0 ? "Needs: the running job to finish"
                             : !verificationIsPackage_ || verification_.l1.state != st::Check::Passed
                                 ? "Needs: Verify Package with L1 passed on this target first" : "");

@@ -953,6 +953,78 @@ int main() {
         st.showDomain(D::ImportExport);
         TEST("studio: staged change set and write rules stated", find<juce::Label>(st.page(D::ImportExport), "STAGED CHANGES: 0") != nullptr &&
              find<juce::Label>(st.page(D::ImportExport), "WRITE RULES: every write goes to NAME.INCOMPLETE") != nullptr);
+        {   // E6: every export runs as a queued job (Import / Export Center job list); the page buttons enqueue jobs too
+            using EJ = app::StudioComponent::ExportJob;
+            using P = jobs::Phase;
+            auto& io = st.page(D::ImportExport);
+            auto job = [&](uint64_t id) { for (const auto& j : st.jobList()) if (j.id == id) return j; return jobs::JobState{}; };
+            const auto all = st.jobList();
+            TEST("jobs: the KMP writer and the Sample Lab writes ran as export jobs", std::any_of(all.begin(), all.end(), [](const jobs::JobState& j) {
+                     return j.type == "KMP/KSF folder (EXPERIMENTAL)" && j.phase == P::Done; }) &&
+                 std::any_of(all.begin(), all.end(), [](const jobs::JobState& j) { return j.type == "Sample Lab batch" && j.phase == P::Done; }) &&
+                 std::any_of(all.begin(), all.end(), [](const jobs::JobState& j) {
+                     return j.type == "Sample Lab batch" && j.phase == P::Failed && j.stoppedAt == P::Validate && j.reason.rfind("Batch refused", 0) == 0; }));
+            auto* pkgJob = find<juce::Button>(io, "Package job...");
+            auto* smfJob = find<juce::Button>(io, "SMF job...");
+            TEST("jobs: export routes carry job buttons; unavailable ones say why", pkgJob && pkgJob->isEnabled() && smfJob && !smfJob->isEnabled() &&
+                 smfJob->getTooltip().startsWith("Needs: a Style") && find<juce::Label>(io, "Needs: a Style opened for editing") != nullptr);
+            const auto pkgDest = root / "pkg-job";
+            const auto id = st.exportJob(EJ::SoundPackage, juce::File(pkgDest.string()));
+            TEST("jobs: a Sound package job is queued and runs off the message thread", id > 0 && st.busy());
+            waitIdle(30000);
+            const auto pj = job(id);
+            TEST("jobs: the package job is done: published, report beside, L1 + L2, never L3", pj.phase == P::Done &&
+                 fs::is_regular_file(pkgDest / "PACKAGE.sha256") && fs::is_regular_file(root / "pkg-job.export.md") &&
+                 fs::is_regular_file(root / "pkg-job.export.json") && !fs::exists(root / "pkg-job.INCOMPLETE") &&
+                 pj.level.l1.state == ui::studio::Check::Passed && pj.level.l2.state == ui::studio::Check::Passed && pj.level.l3.state == ui::studio::Check::NotRun);
+            TEST("jobs: the job list shows the job, its level and its report path", st.jobListText().contains("#" + juce::String(int(id)) + "  Sound package  done") &&
+                 st.jobListText().contains("pkg-job.export.md") && st.jobsText().contains("Sound package  done"));
+            st.selectJob(id);
+            TEST("jobs: Open Report is offered for a finished job", find<juce::Button>(io, "Open Report") && find<juce::Button>(io, "Open Report")->isVisible() &&
+                 !find<juce::Button>(io, "Cancel Job")->isVisible());
+            st.openJobReport();
+            TEST("jobs: Open Report shows the report under the list", st.jobListText().contains("REPORT, job #" + juce::String(int(id))) &&
+                 st.jobListText().contains("# Export report: Sound package") && st.jobListText().contains("PACKAGE.sha256"));
+
+            // A Pa5X KST source: the backup job; a queued job cancelled before it starts writes nothing. The first job copies
+            // and hashes 256 MB, so the second is still queued while this (message-thread) code runs.
+            put(root / "Big.KST/STYLE/USER01/Big.STG", "s");
+            put(root / "Big.KST/PCM/big.PCM", std::string(256u << 20, 'p'));
+            st.openSource(juce::File((root / "Big.KST").string()));
+            waitIdle(5000);
+            const auto slow = st.exportJob(EJ::KstBackup, juce::File((root / "big-backup").string()));
+            const auto queued = st.exportJob(EJ::KstBackup, juce::File((root / "kst-cancelled").string()));
+            st.selectJob(queued);
+            TEST("jobs: a queued job offers Cancel", job(queued).phase == P::Queued && find<juce::Button>(io, "Cancel Job")->isVisible());
+            st.cancelJob();
+            waitIdle(30000);
+            TEST("jobs: cancelled while queued: cancelled, nothing written; the job before it finished", job(queued).phase == P::Cancelled &&
+                 !fs::exists(root / "kst-cancelled") && !fs::exists(root / "kst-cancelled.INCOMPLETE") && job(slow).phase == P::Done &&
+                 st.jobListText().contains("cancelled"));
+            fs::remove_all(root / "Big.KST");
+            fs::remove_all(root / "big-backup");
+            st.openSource(juce::File((root / "Mine.KST").string()));
+            waitIdle(5000);
+            const auto bk = st.exportJob(EJ::KstBackup, juce::File((root / "kst-job").string()));
+            waitIdle(30000);
+            TEST("jobs: KST backup job: folder + manifest published, L1 from the manifest, no L2", job(bk).phase == P::Done &&
+                 fs::is_regular_file(root / "kst-job/STYLE/USER01/Ballad.STG") && fs::is_regular_file(root / "kst-job.manifest.sha256") &&
+                 st.badgeText() == l1only && !st.verification().l2.detail.empty());
+
+            // Failure recovery: a leftover NAME.INCOMPLETE of an earlier job is refused; removed only with explicit consent
+            put(root / "left.INCOMPLETE" / jobs::kJobMarker, "export job 7 (crashed)\n");
+            const auto lf = st.exportJob(EJ::SoundPackage, juce::File((root / "left").string()));
+            waitIdle(30000);
+            st.selectJob(lf);
+            TEST("jobs: a leftover from an earlier job: failed with the reason, nothing published, re-run offered",
+                 job(lf).phase == P::Failed && job(lf).reason.find("Re-run with consent") != std::string::npos && !fs::exists(root / "left") &&
+                 find<juce::Button>(io, "Remove Leftover and Re-run")->isVisible() && st.jobListText().contains("FAILED at check destination"));
+            const auto rr = st.rerunJobCleaning();
+            waitIdle(30000);
+            TEST("jobs: re-run with consent removes the job's own leftover and publishes", rr > lf && job(rr).phase == P::Done &&
+                 fs::is_regular_file(root / "left/PACKAGE.sha256") && !fs::exists(root / "left.INCOMPLETE"));
+            TEST("jobs: nothing labelled compatible", !st.jobListText().containsIgnoreCase("compatible"));
+        }
 
         // Style Studio: read-only report of an own synthetic style
         st.showDomain(D::StyleStudio);
@@ -1008,6 +1080,23 @@ int main() {
                  find<juce::Button>(pg, "Undo Import SMF track") != nullptr);
             st.saveStyleUasf(juce::File((root / "waltz.uasf").string()));
             TEST("studio: Save UASF writes a new file", fs::is_regular_file(root / "waltz.uasf"));
+            {   // E6: Style exports as jobs from the Import / Export Center; once written the edits count as written
+                using EJ = app::StudioComponent::ExportJob;
+                st.styleOp().setSelectedId(6);   // Tempo
+                st.styleValue().setText("93");
+                click(pg, "Apply");
+                const bool dirtyBefore = st.styleModel().dirty();
+                const auto smf = st.exportJob(EJ::StyleSmf, juce::File((root / "waltz-job.mid").string()));
+                const auto ua = st.exportJob(EJ::StyleUasf, juce::File((root / "waltz-job.uasf").string()));
+                waitIdle(10000);
+                jobs::JobState js, ju;
+                for (const auto& j : st.jobList()) { if (j.id == smf) js = j; if (j.id == ua) ju = j; }
+                TEST("jobs: Style SMF job: a new file at L1 with its report; UASF job: written, no Pa5X level", dirtyBefore &&
+                     js.phase == jobs::Phase::Done && js.level.l1.state == ui::studio::Check::Passed && fs::is_regular_file(root / "waltz-job.mid") &&
+                     fs::is_regular_file(root / "waltz-job.mid.export.md") && ju.phase == jobs::Phase::Done && fs::is_regular_file(root / "waltz-job.uasf") &&
+                     ju.level.l1.state == ui::studio::Check::NotRun);
+                TEST("jobs: after the Style jobs the edits count as written", !st.styleModel().dirty());
+            }
             TEST("studio: the source Style is unchanged", fs::last_write_time(sty) == styStamp);
             st.setValidationTarget(juce::File((root / "waltz.mid").string()));
             st.runValidator(app::StudioComponent::Validator::StyleSmf);
