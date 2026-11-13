@@ -46,6 +46,7 @@ public:
     juce::TextEditor& memoryAfter() { return memAfter_; }
     juce::TabbedComponent& tabs() { return tabs_; }
     SoundConversionComponent& converter() { return convert_; }
+    const SoundConversionComponent& converter() const { return convert_; }
     PluginSamplerComponent& sampler() { return sampler_; }
 
 private:

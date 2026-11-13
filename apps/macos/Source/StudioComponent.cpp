@@ -79,6 +79,7 @@ void StudioComponent::setUnavailable(juce::Button& b, const juce::String& reason
 void StudioComponent::FlowPage::resized() {
     auto r = getLocalBounds();
     for (const auto& row : rows) {
+        if (!row.empty() && !row.front().first->isVisible() && std::count(collapse.begin(), collapse.end(), row.front().first)) continue;
         auto line = r.removeFromTop(28);
         for (const auto& [c, w] : row) {
             c->setBounds(w > 0 ? line.removeFromLeft(w) : line);
@@ -197,7 +198,9 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         });
     });
     for (auto& row : ioPage_.rows) for (auto& [c, w] : row) ioPage_.addAndMakeVisible(c);
-    for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
+    for (juce::Component* b : {(juce::Component*)workStatus_, (juce::Component*)waitQuitBtn_, (juce::Component*)cancelQuitBtn_, (juce::Component*)keepWorkingBtn_})
+        b->setVisible(false);
+    ioPage_.collapse = {workStatus_, waitQuitBtn_};   // the quit prompt's rows take no space while it is hidden
     manager_.enqueueJob = [this](jobs::ExportSpec spec, std::function<void(const jobs::JobState&)> done) { return enqueue(std::move(spec), nullptr, std::move(done)); };
 
     // ── Sample Lab › Quality Report (the Convert Sound recipe with its measured QUALITY section) ──
@@ -535,18 +538,28 @@ void StudioComponent::openStyle(const juce::File& sty) {
 bool StudioComponent::requestQuit(std::function<void()> quit) {
     if (pendingWorkQuit_) { pendingWorkQuit_ = std::move(quit); return false; }   // already asking (or waiting)
     if (!busy()) return quitIfStyleWritten(std::move(quit));
+    askRunningWork(std::move(quit));
+    return false;
+}
+
+// The work guard's prompt (Import / Export page): Wait, then Quit / Cancel Jobs and Quit / Keep Working.
+void StudioComponent::askRunningWork(std::function<void()> quit) {
     int n = 0;
     for (const auto& j : queue_->snapshot()) n += !jobs::finished(j.phase);
     juce::StringArray what;
     if (n) what.add(juce::String(n) + " export job(s) running or queued");
     if (manager_.busy() || manager_.computing()) what.add("a Library Manager scan, report or plan");
+    if (res_.backingUp()) what.add("a KST backup or backup check");
+    if (res_.loading()) what.add("a package or evidence load");
+    if (res_.converter().busy()) what.add("Convert Sound work");
     if (jobs_ > 0 || what.isEmpty()) what.add("a read or check in progress");
     pendingWorkQuit_ = std::move(quit);
     showDomain(Domain::ImportExport);
     workStatus_->setText("Still running: " + what.joinIntoString(", ") + ". Quit AI Arranger anyway? Wait for it, cancel the jobs, or keep working.",
                          juce::dontSendNotification);
-    for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(true);
-    return false;
+    for (juce::Component* b : {(juce::Component*)workStatus_, (juce::Component*)waitQuitBtn_, (juce::Component*)cancelQuitBtn_, (juce::Component*)keepWorkingBtn_})
+        b->setVisible(true);
+    ioPage_.resized();
 }
 
 void StudioComponent::resolveRunningWork(WorkChoice c) {
@@ -554,20 +567,24 @@ void StudioComponent::resolveRunningWork(WorkChoice c) {
     if (c == WorkChoice::KeepWorking) {
         pendingWorkQuit_ = nullptr;
         quitWhenIdle_ = false;
+        styleResolved_ = false;   // a later quit asks about unwritten Style edits again
         for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
         workStatus_->setText("Quit cancelled: the work keeps running.", juce::dontSendNotification);
+        ioPage_.resized();
         return;
     }
     if (c == WorkChoice::CancelJobsAndQuit) {
         const auto all = queue_->snapshot();   // newest first: a queued job is cancelled before the running one can end and free the worker
         for (auto j = all.rbegin(); j != all.rend(); ++j) if (!jobs::finished(j->phase)) queue_->cancel(j->id);
         manager_.stopWork();
+        res_.cancelBackup();   // a KST backup or backup check stops; a cancelled backup is never published
         workStatus_->setText("Cancelling: a cancelled job stops at its next check and leaves only NAME.INCOMPLETE (never deleted); nothing is "
                              "published half-way. The app quits once everything has stopped.", juce::dontSendNotification);
     } else {
         workStatus_->setText("Waiting for the running work to finish; the app quits then.", juce::dontSendNotification);
     }
     waitQuitBtn_->setVisible(false);
+    ioPage_.resized();
     const bool polling = quitWhenIdle_;
     quitWhenIdle_ = true;
     if (!polling) quitWhenIdle();
@@ -582,8 +599,11 @@ void StudioComponent::quitWhenIdle() {
     auto quit = std::move(pendingWorkQuit_);
     pendingWorkQuit_ = nullptr;
     quitWhenIdle_ = false;
-    for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
+    for (juce::Component* b : {(juce::Component*)workStatus_, (juce::Component*)waitQuitBtn_, (juce::Component*)cancelQuitBtn_, (juce::Component*)keepWorkingBtn_})
+        b->setVisible(false);
     workStatus_->setText("", juce::dontSendNotification);
+    ioPage_.resized();
+    if (std::exchange(styleResolved_, false)) { quit(); return; }   // Saved or discarded on the Style page already: not asked again
     quitIfStyleWritten(std::move(quit));
 }
 
@@ -620,7 +640,13 @@ void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& sav
         refreshStyle();
         return;
     }
-    if (quit) { quit(); return; }   // Saved or discarded: the app may quit now
+    if (quit) {   // Saved or discarded: quit, but only through the work guard (an export may have started meanwhile)
+        if (!busy()) { quit(); return; }
+        styleResolved_ = true;
+        if (pendingWorkQuit_) pendingWorkQuit_ = std::move(quit);
+        else askRunningWork(std::move(quit));
+        return;
+    }
     loadStyle(next, c == UnsavedChoice::Discard);
 }
 

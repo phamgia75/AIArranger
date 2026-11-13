@@ -1238,6 +1238,18 @@ int main() {
             TEST("C3 studio: invalid Style not editable, validator named, the open Style unchanged",
                  st.styleStatus().startsWith("Not editable") && st.styleStatus().contains("UASF validator") && fs::equivalent(st.styleModel().path(), root / "kept.uasf"));
 
+            // a job that runs until it is cancelled (its writer polls the job's cancel check)
+            auto slowJob = [](fs::path dest) {
+                jobs::ExportSpec slow;
+                slow.type = "test: runs until cancelled";
+                slow.dest = std::move(dest);
+                slow.write = [](const fs::path& out, const std::function<bool(double)>& progress) {
+                    fs::create_directories(out);
+                    while (progress(0.5)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    return jobs::WriteResult{"stopped: cancelled", ""};
+                };
+                return slow;
+            };
             {   // Quit while work runs (export jobs, Library Manager scans/reports): Wait / Cancel Jobs and Quit / Keep Working
                 using W = app::StudioComponent::WorkChoice;
                 using EJ = app::StudioComponent::ExportJob;
@@ -1263,16 +1275,8 @@ int main() {
                 waitIdle(5000);
                 pump(300);
                 TEST("quit: Wait quits once the work has finished", wq == 1 && !st.workPromptShown() && st.manager().headerText('A').contains("2 items"));
-                // a job that runs until it is cancelled (its writer polls the job's cancel check), and a job queued behind it
-                jobs::ExportSpec slow;
-                slow.type = "test: runs until cancelled";
-                slow.dest = root / "quit-slow";
-                slow.write = [](const fs::path& out, const std::function<bool(double)>& progress) {
-                    fs::create_directories(out);
-                    while (progress(0.5)) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    return jobs::WriteResult{"stopped: cancelled", ""};
-                };
-                const auto j1 = st.manager().enqueueJob(slow, {});
+                // a job that runs until it is cancelled, and a job queued behind it
+                const auto j1 = st.manager().enqueueJob(slowJob(root / "quit-slow"), {});
                 const auto j2 = st.exportJob(EJ::SoundPackage, juce::File((root / "quit-pkg2").string()));
                 pump(100);
                 TEST("quit: export jobs running or queued -> deferred", j1 > 0 && j2 > 0 && job(j1).phase == jobs::Phase::Run &&
@@ -1286,6 +1290,18 @@ int main() {
                 TEST("quit: a cancelled job leaves only NAME.INCOMPLETE, nothing published (D17)", !fs::exists(root / "quit-slow") &&
                      fs::is_directory(root / "quit-slow.INCOMPLETE") && !fs::exists(root / "quit-pkg2") && !fs::exists(root / "quit-pkg2.INCOMPLETE"));
                 TEST("quit: idle -> quits at once, no work prompt", !st.busy() && st.requestQuit(wfn) && wq == 3 && !st.workPromptShown());
+                const int listTop = st.jobListTop();   // the job list starts right under the job picker while the prompt is hidden
+                // Codex P1-a: a KST backup (Sounds & Resources, its own thread) counts as running work
+                st.resources().startBackup(juce::File((root / "Mine.KST").string()), juce::File((root / "quit-backup").string()));
+                TEST("quit: a KST backup running counts as busy and defers the quit (Codex P1-a)", st.busy() && !st.requestQuit(wfn) && wq == 3 &&
+                     st.workPromptShown() && find<juce::Label>(io, "Still running:") && find<juce::Label>(io, "Still running:")->getText().contains("KST backup"));
+                TEST("quit: the prompt's two rows take space only while it shows", st.jobListTop() == listTop + 2 * (28 + 6));
+                st.resolveRunningWork(W::Wait);
+                TEST("quit: Wait does not quit while the backup runs", wq == 3);
+                waitIdle(10000);
+                pump(300);
+                TEST("quit: Wait lets the backup finish and publish, then quits", wq == 4 && !st.resources().backingUp() && fs::is_directory(root / "quit-backup"));
+                TEST("quit: the hidden prompt takes no rows again", st.jobListTop() == listTop);
                 st.setValidationTarget(juce::File());   // the quit jobs' output is not a target the Validation checks below expect
             }
 
@@ -1313,6 +1329,33 @@ int main() {
             TEST("quit: still deferred before a choice", quits == 2);
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
             TEST("quit: Discard quits", quits == 3 && !st.unsavedPromptShown());
+            {   // Codex P1-b: an export starts while the Style prompt shows; Save or Discard then goes through the work guard
+                using W = app::StudioComponent::WorkChoice;
+                st.requestQuit(quitFn);   // the Style is still unwritten (Discard above quit without reloading it)
+                const auto s1 = st.manager().enqueueJob(slowJob(root / "quit-slow2"), {});
+                pump(100);
+                st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
+                TEST("quit: Discard while an export runs does not quit mid-job; the work prompt asks (Codex P1-b)", s1 > 0 && quits == 3 &&
+                     st.workPromptShown() && !st.unsavedPromptShown() && st.domain() == D::ImportExport);
+                st.resolveRunningWork(W::CancelJobsAndQuit);
+                waitIdle(10000);
+                pump(300);
+                TEST("quit: after Discard, Cancel Jobs and Quit quits without asking about the Style again", quits == 4 && !st.unsavedPromptShown() &&
+                     !st.workPromptShown() && !fs::exists(root / "quit-slow2"));
+                st.requestQuit(quitFn);
+                const auto s2 = st.manager().enqueueJob(slowJob(root / "quit-slow3"), {});
+                pump(100);
+                st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "quit-save2.uasf").string()));
+                TEST("quit: Save while an export runs writes the Style, then the work prompt asks", quits == 4 &&
+                     fs::is_regular_file(root / "quit-save2.uasf") && !st.styleModel().dirty() && st.workPromptShown() && !st.unsavedPromptShown());
+                st.resolveRunningWork(W::KeepWorking);
+                st.selectJob(s2);
+                st.cancelJob();
+                waitIdle(10000);
+                pump(100);
+                TEST("quit: Keep Working aborts; nothing running and the Style written -> the next quit is immediate", quits == 4 && !st.busy() &&
+                     st.requestQuit(quitFn) && quits == 5);
+            }
             {
                 app::LiveHostComponent h;
                 int hq = 0;

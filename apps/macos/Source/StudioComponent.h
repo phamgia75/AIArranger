@@ -46,9 +46,10 @@ public:
     void runValidator(Validator v);               // asynchronous; busy() until it lands
     void attachL3Record(const juce::File& record);
     juce::String validatorUnavailable(Validator v) const;   // "" when it can run now
-    bool busy() const {   // a finished export job counts until it has landed on its page (message thread); also the Library Manager
+    bool busy() const {   // a finished export job counts until it has landed on its page (message thread); also the Library Manager and
+                          // the Sounds & Resources work (KST backup or backup check, package/evidence loads, Convert Sound)
         return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; }) ||
-               manager_.busy() || manager_.computing();
+               manager_.busy() || manager_.computing() || res_.backingUp() || res_.loading() || res_.converter().busy();
     }
 
     // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.
@@ -108,6 +109,7 @@ public:
     uint64_t rerunJobCleaning();      // the selected job, failed on a leftover NAME.INCOMPLETE: consent to move it aside (never deleted)
     std::vector<jobs::JobState> jobList() const { return queue_->snapshot(); }
     juce::String jobListText() const { return jobView_.getText(); }
+    int jobListTop() const { return jobView_.getY(); }
 
     ResourcesComponent& resources() { return res_; }
     LibraryManagerComponent& manager() { return manager_; }   // Library Workspace > Library Manager (E7)
@@ -128,6 +130,7 @@ private:
     struct FlowPage : juce::Component {
         std::vector<std::vector<std::pair<juce::Component*, int>>> rows;
         juce::Component* fill = nullptr;
+        std::vector<juce::Component*> collapse;   // rows led by one of these take no space while it is hidden
         void resized() override;
     };
 
@@ -199,6 +202,8 @@ private:
     bool quitWhenIdle_ = false;               // Wait or Cancel Jobs and Quit chosen: polled until busy() is false
     juce::Label* workStatus_ = nullptr;
     juce::TextButton *waitQuitBtn_ = nullptr, *cancelQuitBtn_ = nullptr, *keepWorkingBtn_ = nullptr;
+    bool styleResolved_ = false;              // Save or Discard was chosen for this quit: the Style is not asked about again
+    void askRunningWork(std::function<void()> quit);
     bool quitIfStyleWritten(std::function<void()> quit);   // the unwritten-Style check (b80f49a)
     void quitWhenIdle();
     std::function<void()> pendingQuit_;   // the app asked to quit while the open Style has unwritten edits

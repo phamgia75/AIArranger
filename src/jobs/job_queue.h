@@ -5,6 +5,7 @@
 // message thread never waits for a write. Never the audio or MIDI thread. `changed` is called from the worker after
 // every state change (the app posts it to the message thread). Destroying the queue cancels every job and returns at
 // once: the worker stops at the job's next cancel check and exits; it never touches the queue's owner afterwards.
+// An idle worker (no job running, e.g. after the app's quit waited for every job) is joined; a busy one is detached.
 
 #include "jobs/export_job.h"
 #include <condition_variable>
@@ -19,14 +20,20 @@ class JobQueue {
 public:
     explicit JobQueue(std::function<void()> changed = {}) : s_(std::make_shared<Shared>()) {
         s_->changed = std::move(changed);
-        std::thread([s = s_] { work(s); }).detach();
+        thread_ = std::thread([s = s_] { work(s); });
     }
     ~JobQueue() {
-        std::lock_guard<std::mutex> l(s_->m);
-        s_->changed = nullptr;
-        s_->stop = true;
-        for (auto& j : s_->jobs) j.cancel = true;
-        s_->cv.notify_all();
+        bool running;
+        {
+            std::lock_guard<std::mutex> l(s_->m);
+            s_->changed = nullptr;
+            s_->stop = true;
+            for (auto& j : s_->jobs) j.cancel = true;
+            running = s_->running;
+            s_->cv.notify_all();
+        }
+        if (running) thread_.detach();   // never wait for a writer: it stops at its next cancel check (holds only Shared)
+        else thread_.join();             // idle: it sees `stop` at once and exits
     }
     JobQueue(const JobQueue&) = delete;
     JobQueue& operator=(const JobQueue&) = delete;
@@ -79,10 +86,11 @@ private:
         std::condition_variable cv;
         std::deque<Job> jobs;   // never erased: the job list shows them all; deque keeps references stable
         uint64_t next = 0;
-        bool stop = false;
+        bool stop = false, running = false;   // running: the worker is inside a job
         std::function<void()> changed;
     };
     std::shared_ptr<Shared> s_;
+    std::thread thread_;
 
     static void notify(const std::shared_ptr<Shared>& s) {
         std::function<void()> f;
@@ -104,12 +112,15 @@ private:
                 if (s->stop) return;
                 spec = j->spec;
                 st = j->state;
+                s->running = true;
             }
             runExport(*spec, st, [&] { std::lock_guard<std::mutex> l(s->m); return j->cancel; },
                       [&](const JobState& now) {
                           { std::lock_guard<std::mutex> l(s->m); j->state = now; }
                           notify(s);
                       });
+            std::lock_guard<std::mutex> l(s->m);
+            s->running = false;
         }
     }
 };
