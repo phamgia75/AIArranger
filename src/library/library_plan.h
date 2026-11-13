@@ -53,6 +53,16 @@ inline Sim simOf(const Library& L) {
     return s;
 }
 inline std::string fileName(const std::string& rel) { return fs::path(rel).filename().string(); }
+// Names, banks and files are compared ignoring case, as media::planMerge does: how the keyboard treats case is UNKNOWN.
+inline bool same(const std::string& a, const std::string& b) { return lower(a) == lower(b); }
+// `file` moved from bank `from` to bank `to` (KST "TYPE/BANK/x.STG", SET "TYPE/BANK.STY"); unchanged if not in `from`.
+inline bool rebank(std::string& file, const std::string& from, const std::string& to) {
+    if (file.size() < from.size() || !same(file.substr(0, from.size()), from)) return false;
+    const std::string rest = file.substr(from.size());
+    if (!rest.empty() && rest[0] != '/' && rest[0] != '.') return false;   // "USER01" is not a prefix of "USER010"
+    file = to + rest;
+    return true;
+}
 inline std::string slotText(int s) { return s >= 0 ? " slot " + std::to_string(s + 1) : ""; }
 
 // Names are written by the keyboard's own UI: printable ASCII, no path separator. Limits beyond that are UNKNOWN.
@@ -79,12 +89,16 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
         if (st.op == Op::BankSwap) {
             c.summary = std::string("bank-swap in ") + st.side + ": " + st.bank + " <-> " + st.text;
             std::string tx, ty;
-            for (const auto& it : S.items) if (!it.gone) { if (it.bank == st.bank) tx = it.type; if (it.bank == st.text) ty = it.type; }
-            if (st.bank == st.text) conflict("both banks are the same bank");
+            for (const auto& it : S.items) if (!it.gone) { if (detail::same(it.bank, st.bank)) tx = it.type; if (detail::same(it.bank, st.text)) ty = it.type; }
+            if (detail::same(st.bank, st.text)) conflict("both banks are the same bank");
+            else if (st.bank == "(root)" || st.text == "(root)") conflict("files at the library root are not a bank");
             else if (tx.empty() && ty.empty()) conflict("neither bank holds an item in " + std::string(1, st.side));
             else if (!tx.empty() && !ty.empty() && tx != ty) conflict("the banks hold different types (" + tx + ", " + ty + ")");
             else {
-                for (auto& it : S.items) if (!it.gone) { if (it.bank == st.bank) it.bank = st.text; else if (it.bank == st.text) it.bank = st.bank; }
+                for (auto& it : S.items) {   // gone items too: their paths must not shadow the swapped ones
+                    if (detail::same(it.bank, st.bank)) { it.bank = st.text; detail::rebank(it.file, st.bank, st.text); }
+                    else if (detail::same(it.bank, st.text)) { it.bank = st.bank; detail::rebank(it.file, st.text, st.bank); }
+                }
                 warn("what refers to these banks by bank and slot (SongBook entries, Keyboard Sets, Style settings) is not decoded: "
                      "those references may point elsewhere after the swap (UNKNOWN)");
             }
@@ -97,12 +111,12 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             if (const auto why = detail::badName(st.text); !why.empty()) conflict(why);
             else {
                 for (const auto& o : S.items)
-                    if (&o != &it && !o.gone && o.bank == it.bank && o.name == trimmed(st.text)) warn("the name is already used in " + it.bank + detail::slotText(o.slot));
+                    if (&o != &it && !o.gone && detail::same(o.bank, it.bank) && detail::same(o.name, trimmed(st.text))) warn("the name is already used in " + it.bank + detail::slotText(o.slot));
                 if (S.format == Format::PaSet && st.text.size() > 18)
                     warn("longer than 18 characters: the 24-byte Pa-native directory holds 18 (observed); this file's limit is UNKNOWN");
                 if (S.format != Format::PaSet) {   // a KST/folder item is a file: the rename renames it
                     const std::string to = (fs::path(it.file).parent_path() / (trimmed(st.text) + fs::path(it.file).extension().string())).generic_string();
-                    for (const auto& o : S.items) if (&o != &it && !o.gone && o.file == to) conflict("the file " + to + " already exists in " + std::string(1, st.side));
+                    for (const auto& o : S.items) if (&o != &it && !o.gone && detail::same(o.file, to)) conflict("the file " + to + " already exists in " + std::string(1, st.side));
                     if (c.conflicts.empty()) it.file = to;
                 }
                 if (c.conflicts.empty()) it.name = trimmed(st.text);
@@ -114,7 +128,8 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             if (S.format != D.format) conflict(std::string("formats differ (") + formatName(S.format) + " -> " + formatName(D.format) + "): converting is not available");
             std::string btype;
             std::set<int> used;
-            for (const auto& o : D.items) if (!o.gone && o.bank == bank) { btype = btype.empty() || btype == o.type ? o.type : "mixed"; used.insert(o.slot); }
+            bool unknownOccupancy = false;   // an undecoded SET bank file: which slots are taken is UNKNOWN
+            for (const auto& o : D.items) if (!o.gone && detail::same(o.bank, bank)) { unknownOccupancy |= o.slot < 0; btype = btype.empty() || btype == o.type ? o.type : "mixed"; used.insert(o.slot); }
             if (!btype.empty() && btype != src.type) conflict("bank " + bank + " in " + other + " holds " + btype + ", not " + src.type);
             int slot = -1;
             bool already = false;   // the same bytes are already at the target path: nothing to add
@@ -122,11 +137,13 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             if (D.format == Format::PaSet && S.format == Format::PaSet) {
                 const int cap = bankCapacity(D.format, src.type);
                 slot = st.slot;
-                if (slot < 0) { slot = 0; while (used.count(slot)) ++slot; }
-                if (cap && st.slot >= cap) conflict("slot " + std::to_string(st.slot + 1) + " is past the " + std::to_string(cap) + " slots of a bank file (MAN4 p.975)");
+                if (slot < 0 && !unknownOccupancy) { slot = 0; while (used.count(slot)) ++slot; }
+                if (unknownOccupancy)
+                    conflict("occupancy of " + std::string(1, other) + ":" + bank + " is UNKNOWN (its file was not read as a Pa-native container): no slot can be chosen");
+                else if (cap && st.slot >= cap) conflict("slot " + std::to_string(st.slot + 1) + " is past the " + std::to_string(cap) + " slots of a bank file (MAN4 p.975)");
                 else if (cap && slot >= cap) conflict("bank " + bank + " is full (" + std::to_string(cap) + " per bank file, MAN4 p.975)");
                 else if (used.count(slot)) {
-                    for (const auto& o : D.items) if (!o.gone && o.bank == bank && o.slot == slot)
+                    for (const auto& o : D.items) if (!o.gone && detail::same(o.bank, bank) && o.slot == slot)
                         conflict("slot " + std::to_string(slot + 1) + " of " + bank + " is taken by \"" + o.name + "\": the copy would replace it");
                 }
                 c.summary += detail::slotText(slot);
@@ -135,15 +152,15 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
             } else if (D.format == S.format) {
                 file = (bank == "(root)" ? "" : bank + "/") + detail::fileName(src.file);
                 for (const auto& o : D.items) {
-                    if (o.gone || o.file != file) continue;
+                    if (o.gone || !detail::same(o.file, file)) continue;
                     if (o.sha == src.sha) { already = true; warn(std::string(1, other) + " already has " + file + " with the same bytes: nothing to do"); }
                     else conflict(std::string(1, other) + " already has " + file + " with other bytes: the copy would replace it");
                 }
             }
             for (const auto& o : D.items)
-                if (!o.gone && o.bank == bank && o.name == src.name && o.file != file) warn("the name \"" + src.name + "\" is already used in " + bank + detail::slotText(o.slot));
+                if (!o.gone && detail::same(o.bank, bank) && detail::same(o.name, src.name) && !detail::same(o.file, file)) warn("the name \"" + src.name + "\" is already used in " + bank + detail::slotText(o.slot));
             if (D.format == Format::Pa5xKst || D.format == Format::Unknown)
-                for (const auto& o : D.items) if (!o.gone && !o.sha.empty() && o.sha == src.sha && o.file != file) { warn("duplicate: same bytes as " + std::string(1, other) + ":" + o.file); break; }
+                for (const auto& o : D.items) if (!o.gone && !o.sha.empty() && o.sha == src.sha && !detail::same(o.file, file)) { warn("duplicate: same bytes as " + std::string(1, other) + ":" + o.file); break; }
             for (const auto& d : itemDependencies(L, L.items[st.item])) warn("dependency " + d.status + ": " + d.to + " (" + d.reason + ")");
             if (src.type == "Sample" || src.type == "Multisample")
                 warn("loading a whole KST that holds a PCM folder deletes all User Samples in memory (Pa5X manual p.736): load single Sounds");

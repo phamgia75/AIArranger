@@ -267,41 +267,55 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
         juce::MessageManager::callAsync([this, alive, text] {
             if (alive.expired()) return;
             --jobs_;
-            refresh();
+            refresh(false);   // keep the export result: no view report replaces it
             report_.setText(u8(*text), false);
         });
     }).detach();
 }
 
-void LibraryManagerComponent::refresh() {
+// The report text of the Details, Duplicates and Plan views, from immutable snapshots: runs on a worker thread.
+static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr<const lib::Library> A, std::shared_ptr<const lib::Library> B,
+                             const std::vector<lib::Step>& plan, char active, int selected) {
+    using View = LibraryManagerComponent::View;
+    std::string t;
+    const auto& act = active == 'A' ? A : B;
+    switch (view) {
+        case View::Details:
+            if (act && selected >= 0) return std::string("Library ") + active + ": " + lib::itemDetails(*act, act->items[size_t(selected)]);
+            for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
+                if (L) t += std::string("Library ") + side + ": " + lib::summary(*L) + "Dependencies (only where evidenced):\n" + lib::dependencyView(L->deps) +
+                            lib::bankView(*L) + "\n";
+            return t.empty() ? "No library open. Open Library A... and Open Library B... read a Pa5X KST folder or a Pa-family SET folder each. "
+                               "Nothing in them is changed."
+                             : t;
+        case View::Duplicates:
+            for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
+                if (L) t += std::string("Library ") + side + ": " + lib::duplicatesView(*L, lib::duplicates(*L)) + "\n";
+            return t;
+        case View::Plan:
+            return A && B ? lib::planReport(*A, *B, plan, lib::evaluate(*A, *B, plan)) : "A plan needs a library open on both sides.";
+        case View::Compare: break;
+    }
+    return t;
+}
+
+void LibraryManagerComponent::refresh(bool report) {
     for (auto& [a, b] : actions_) setUnavailable(*b, unavailable(a));
     setUnavailable(*openA_, jobs_ > 0 ? "Needs: the running job to finish" : "");
     setUnavailable(*openB_, jobs_ > 0 ? "Needs: the running job to finish" : "");
-    if (jobs_ > 0) return;   // the job writes the report when it lands
-    std::string t;
-    switch (view_) {
-        case View::Details:
-            if (const auto* it = pane(active_).item()) t = std::string("Library ") + active_ + ": " + lib::itemDetails(*pane(active_).lib, *it);
-            else
-                for (const auto* p : {&a_, &b_}) {
-                    if (!p->lib) continue;
-                    t += std::string("Library ") + p->side + ": " + lib::summary(*p->lib) + "Dependencies (only where evidenced):\n" +
-                         lib::dependencyView(p->lib->deps) + lib::bankView(*p->lib) + "\n";
-                }
-            if (t.empty()) t = "No library open. Open Library A... and Open Library B... read a Pa5X KST folder or a Pa-family SET folder each. "
-                               "Nothing in them is changed.";
-            break;
-        case View::Compare: return;   // written by the compare job
-        case View::Duplicates:
-            for (const auto* p : {&a_, &b_}) if (p->lib) t += std::string("Library ") + p->side + ": " + lib::duplicatesView(*p->lib, lib::duplicates(*p->lib)) + "\n";
-            break;
-        case View::Plan: {
-            if (!a_.lib || !b_.lib) { t = "A plan needs a library open on both sides."; break; }
-            t = lib::planReport(*a_.lib, *b_.lib, plan_, lib::evaluate(*a_.lib, *b_.lib, plan_));
-            break;
-        }
-    }
-    report_.setText(u8(t), false);
+    const auto gen = ++reportGen_;   // supersedes any report still being computed: only the newest one is shown
+    if (jobs_ > 0 || !report || view_ == View::Compare) return;   // a job (or Compare) writes the report when it lands
+    // duplicates() and evaluate() can be slow on a large library: never on the message thread
+    ++computing_;
+    std::weak_ptr<bool> alive = alive_;
+    std::thread([this, alive, gen, v = view_, A = a_.lib, B = b_.lib, plan = plan_, side = active_, sel = pane(active_).selected] {
+        auto text = std::make_shared<std::string>(reportFor(v, A, B, plan, side, sel));
+        juce::MessageManager::callAsync([this, alive, gen, text] {
+            if (alive.expired()) return;
+            --computing_;
+            if (gen == reportGen_) report_.setText(u8(*text), false);
+        });
+    }).detach();
 }
 
 }  // namespace ai_arranger::app

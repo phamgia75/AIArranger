@@ -24,6 +24,7 @@ public:
     // What the buttons do; also driven by the UI smoke test.
     void openLibrary(char side, const juce::File& dir);   // asynchronous, read-only; busy() until it lands
     bool busy() const { return jobs_ > 0; }
+    bool computing() const { return computing_ > 0; }      // a view report is being computed off the message thread
     void selectRow(char side, int row);                    // a row of that pane's (filtered) list
     void showView(View v);                                 // Compare is asynchronous
     void addStep(Action a);                                // Copy, Move, Rename or SwapBanks from the current selection
@@ -55,7 +56,7 @@ private:
 
     juce::TextButton& button(const juce::String& text, std::function<void()> onClick);
     void setUnavailable(juce::Button& b, const juce::String& reason);
-    void refresh();
+    void refresh(bool report = true);   // action states now; the view report on a worker thread (newest wins)
     void refilter();
     void chooseFolder(const juce::String& title, std::function<void(juce::File)> then);
     Pane& pane(char side) { return side == 'A' ? a_ : b_; }
@@ -75,6 +76,8 @@ private:
     juce::TextEditor search_, value_, report_;
     juce::Label hint_;
     int jobs_ = 0;   // message thread only
+    int computing_ = 0;          // view reports in flight (message thread only)
+    uint64_t reportGen_ = 0;     // the newest report request; older results are dropped
     std::shared_ptr<juce::FileChooser> chooser_;
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 

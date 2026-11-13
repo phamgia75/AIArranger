@@ -111,14 +111,20 @@ inline std::vector<Dependency> itemDependencies(const Library& L, const Item& it
     return d;
 }
 
+// Bounds for one library, checked while the folder is listed (before anything is hashed or parsed), so a hostile or
+// mistaken folder is refused instead of exhausting memory or hashing forever. A Pa5X KST is TYPE/BANK/file and holds at
+// most 4 GB (8 GB compressed) of samples (MAN pp.1174, 1176); these leave wide room for that.
+inline constexpr media::detail::ListLimits kLibraryLimits{200000, 16, uintmax_t(64) << 30};   // entries, depth, 64 GiB
+
 // Reads a library folder. Strict like media::scan: any listing or read error fails it (ok = false) instead of showing
-// a partial library as complete. `keepGoing` (optional) is checked per file and per hashed block.
-inline Library load(const fs::path& root, const std::function<bool()>& keepGoing = {}) {
+// a partial library as complete. `keepGoing` (optional) is checked per file and per hashed block. Hashing reads at most
+// limits.bytes (the listing already refused anything larger).
+inline Library load(const fs::path& root, const std::function<bool()>& keepGoing = {}, const media::detail::ListLimits& limits = kLibraryLimits) {
     Library L;
     L.root = root.string();
     L.name = media::folderPath(root).filename().string();
     media::detail::Listing ls;
-    if (!media::detail::listFiles(root, ls, L.error, keepGoing)) return L;
+    if (!media::detail::listFiles(root, ls, L.error, keepGoing, limits)) return L;
     L.layout = media::detail::detectLayout(root, ls);
     L.format = L.layout == media::kLayoutKst ? Format::Pa5xKst : media::isSetLayout(L.layout) ? Format::PaSet : Format::Unknown;
     L.skipped = ls.skipped;
@@ -221,7 +227,7 @@ struct Comparison {
 
 inline Comparison compare(const Library& A, const Library& B) {
     Comparison c;
-    const auto d = media::diff(A.root, B.root);
+    const auto d = media::diff(A.root, B.root, kLibraryLimits);   // the same bounds as load()
     if (!d.ok) { c.error = d.error; return c; }
     c.onlyA = d.removed; c.onlyB = d.added; c.different = d.changed; c.moved = d.moved; c.skipped = d.skipped;
     const std::set<std::string> changed(d.changed.begin(), d.changed.end());

@@ -33,6 +33,7 @@ static size_t find(const Library& L, const std::string& name, const std::string&
     for (size_t i = 0; i < L.items.size(); ++i) if (trimmed(L.items[i].name) == name && (bank.empty() || L.items[i].bank == bank)) return i;
     return size_t(-1);
 }
+static size_t rockIdx(const Library& L) { return find(L, "Synth Rock"); }
 static std::map<std::string, std::pair<fs::file_time_type, std::string>> stamp(const Library& L) {
     std::map<std::string, std::pair<fs::file_time_type, std::string>> m;
     for (const auto& [rel, f] : L.files) m[rel] = {fs::last_write_time(fs::path(L.root) / rel), f.sha256};
@@ -202,6 +203,40 @@ int main() {
         TEST("export inside a library is refused", exportPlan(SA, SB, plan, sb / "plan").find("inside library") != std::string::npos && !fs::exists(sb / "plan"));
         TEST("export onto a mounted volume is refused", exportPlan(SA, SB, plan, "/Volumes/AIA-NO-SUCH-STICK/plan").find("mounted volume") != std::string::npos);
         TEST("both libraries are unchanged (mtime and SHA-256)", stamp(load(sa)) == before && stamp(load(sb)) == beforeB);
+    }
+
+    // ── Codex review E7 (C1-C4): each check failed before its fix ──
+    {
+        // C2: a bank swap moves the simulated file paths too, so a later copy into the swapped bank sees the file
+        const auto c2 = evaluate(A, B, {{Op::BankSwap, 'B', 0, "STYLE/USER01", -1, "STYLE/USER05"},
+                                        {Op::Copy, 'A', find(A, "Swing"), "STYLE/USER05", -1, ""}});
+        TEST("C2: after a bank swap, a copy onto the swapped file is still an overwrite conflict", anyHas(c2.steps[1].conflicts, "STYLE/USER05/Swing.STG already has") ||
+             anyHas(c2.steps[1].conflicts, "already has STYLE/USER05/Swing.STG"));
+        // C3: an undecoded SET bank (one file-level item, slot unknown) has UNKNOWN occupancy: no slot is chosen
+        const fs::path sc = root / "SetC";
+        put(sc / "GLOBAL/LIMITER.AUD", "x");
+        put(sc / "STYLE/USER07.STY", std::string("\x01\x00\x01\x14\x00\x00", 6));   // invalid container
+        const auto SC = load(sc);
+        const auto c3 = evaluate(SA, SC, {{Op::Copy, 'A', rockIdx(SA), "STYLE/USER07", -1, ""}});
+        TEST("C3: copy into an undecoded SET bank is blocked: occupancy UNKNOWN", SC.ok && anyHas(c3.steps[0].conflicts, "occupancy") && c3.blocked());
+        // C4: names and files collide ignoring case (as media::planMerge does; keyboard case handling UNKNOWN)
+        const auto c4 = evaluate(A, B, {{Op::Rename, 'A', find(A, "Swing"), "", -1, "BALLAD"},
+                                        {Op::Copy, 'A', find(A, "Hit"), "pad/user01", -1, ""}});
+        TEST("C4: rename onto a file that differs only in case is a conflict", anyHas(c4.steps[0].conflicts, "already exists"));
+        TEST("C4: copy onto a path that differs only in case is noticed", !c4.steps[1].warnings.empty() &&
+             anyHas(c4.steps[1].warnings, "same bytes: nothing to do"));
+        const auto c4b = evaluate(SA, SB, {{Op::Rename, 'B', find(SB, "B Waltz"), "", -1, "b tango"}});
+        TEST("C4: a SET name that differs only in case is flagged", anyHas(c4b.steps[0].warnings, "already used"));
+        // C1: enumeration is bounded (depth here; file count and bytes below)
+        fs::path deep = root / "Deep.KST";
+        for (int i = 0; i < 40; ++i) deep /= "d";
+        put(deep / "x.STG", "s");
+        const auto D = load(root / "Deep.KST");
+        TEST("C1: a folder nested deeper than the limit is refused during enumeration", !D.ok && D.error.find("deeper than") != std::string::npos);
+        TEST("C1: too many entries refused", load(ka, {}, {5, 16, 1u << 20}).error.find("more than 5 entries") != std::string::npos);
+        TEST("C1: too many bytes refused before hashing", load(ka, {}, {1000, 16, 5000}).error.find("more than 5000 bytes") != std::string::npos);
+        TEST("C1: within the limits the same library loads", load(ka, {}, {1000, 16, 1u << 20}).items.size() == A.items.size());
+        TEST("C1: compare uses the same bounds", compare(load(root / "Deep.KST", {}, {1000, 64, 1u << 20}), A).error.find("deeper than") != std::string::npos);
     }
 
     // strictness: missing folder, links not followed

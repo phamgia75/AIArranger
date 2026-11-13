@@ -68,10 +68,10 @@ struct KstDiff {
     bool same() const { return ok && added.empty() && removed.empty() && changed.empty() && moved.empty() && skipped.empty(); }
 };
 
-inline KstDiff diff(const std::filesystem::path& a, const std::filesystem::path& b) {
+inline KstDiff diff(const std::filesystem::path& a, const std::filesystem::path& b, const detail::ListLimits& limits = {}) {
     KstDiff d;
     detail::Listing A, B;
-    if (!detail::listFiles(a, A, d.error) || !detail::listFiles(b, B, d.error)) return d;
+    if (!detail::listFiles(a, A, d.error, {}, limits) || !detail::listFiles(b, B, d.error, {}, limits)) return d;
     for (const auto& s : A.skipped) d.skipped.push_back("A: " + s);
     for (const auto& s : B.skipped) d.skipped.push_back("B: " + s);
     std::map<std::string, detail::Entry> onlyB;

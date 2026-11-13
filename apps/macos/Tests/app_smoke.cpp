@@ -845,7 +845,7 @@ int main() {
             using A = app::LibraryManagerComponent::Action;
             using V = app::LibraryManagerComponent::View;
             auto& lm = st.manager();
-            auto waitLm = [&](int ms) { for (int i = 0; i < ms / 20 && lm.busy(); ++i) pump(20); };
+            auto waitLm = [&](int ms) { for (int i = 0; i < ms / 20 && (lm.busy() || lm.computing()); ++i) pump(20); };
             st.showDomain(D::Library, 4);
             TEST("library manager: a Library segment, shown", st.currentPage() == &lm && lm.isVisible());
             TEST("library manager: Compare and Copy say what they need", lm.unavailable(A::Compare) == "Needs: a library open on both sides" &&
@@ -874,18 +874,23 @@ int main() {
             TEST("library manager: compare view (file level)", lm.reportText().contains("same 1, different 0, only in A 1, only in B 2") &&
                  lm.reportText().contains("only in A   PAD/USER01/Hit.PDC"));
             lm.showView(V::Duplicates);
+            waitLm(5000);
             TEST("library manager: duplicates view: names flagged as name-only", lm.reportText().contains("NAME ONLY") &&
                  lm.reportText().contains("Style \"Ballad\": STYLE/USER01 STYLE/USER02"));
             lm.selectRow('A', 1);   // Ballad (rows sorted by bank: PAD/USER01 Hit, STYLE/USER01 Ballad)
+            waitLm(5000);
             TEST("library manager: selecting an item shows its details and evidenced dependencies only", lm.reportText().contains("Library A: Ballad") &&
                  lm.reportText().contains("UNKNOWN") && lm.unavailable(A::Copy).isEmpty());
             TEST("library manager: Rename needs a name and says so", lm.unavailable(A::Rename) == "Needs: the new name in the value field");
             lm.addStep(A::Copy);
+            TEST("library manager: the plan is evaluated off the message thread (Codex C5)", lm.computing() && !lm.reportText().contains("1. copy"));
+            waitLm(5000);
             TEST("library manager: Copy is staged in the plan view, nothing written", lm.plan().size() == 1 && lm.reportText().contains("READY TO EXPORT") &&
                  lm.reportText().contains("same bytes: nothing to do") && lm.reportText().contains("EXPORT-ONLY"));
             lm.selectRow('A', 0);   // Hit.PDC into B's selected bank: none selected there, so the same bank id
             lm.value().setText("STYLE/USER01", true);
             lm.addStep(A::SwapBanks);
+            waitLm(5000);
             TEST("library manager: a conflicting step is shown as a conflict", lm.plan().size() == 2 && lm.reportText().contains("CONFLICT") &&
                  lm.reportText().contains("BLOCKED"));
             lm.exportPlan(juce::File("/Volumes/AIA-NO-SUCH-STICK/plan"));
