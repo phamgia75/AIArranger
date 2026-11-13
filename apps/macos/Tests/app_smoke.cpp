@@ -10,6 +10,7 @@
 #include "../Source/StudioComponent.h"
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/serializer.h"
+#include "jobs/export_specs.h"
 #include "media/kst_diff.h"
 #include "media/sound/additive_source.h"
 #include "media/sound/drum_source.h"
@@ -85,7 +86,8 @@ int main() {
     std::setvbuf(stdout, nullptr, _IOLBF, 0);   // under ctest stdout is a pipe: a killed run (timeout) still shows its last check
     setenv("AIARR_MIDI_HW_TX", "0", 1);
     const auto stateDir = std::filesystem::temp_directory_path() / ("aia-smoke-state-" + std::to_string(::getpid()));
-    setenv("AIARR_STATE_DIR", stateDir.c_str(), 1);   // the studio's last-output record: never the user's own
+    setenv("AIARR_STATE_DIR", stateDir.c_str(), 1);   // the output record: never the user's own
+    ai_arranger::jobs::setOutputRecord(ai_arranger::app::appOutputRecordFile());   // as Main.cpp does at launch
     juce::ScopedJuceInitialiser_GUI gui;
     std::printf("Test: macOS app UI smoke (LiveHostComponent)\n");
 
@@ -1424,7 +1426,10 @@ int main() {
                      job(j1).phase == jobs::Phase::Cancelled && job(j2).phase == jobs::Phase::Cancelled);
                 {   // leftover banner: read-only listing of the last output folder, on launch and on page open; nothing deleted
                     app::StudioComponent again([] {});
+                    const bool idleAtOnce = !again.busy() && !again.manager().computing();   // before any pump: as the app's quit sees it
                     pump(50);
+                    TEST("quit guard: a new Studio with nothing started is idle at once (no Library Manager report counted, #43 gate D note 1)",
+                         idleAtOnce);
                     TEST("leftovers: on launch a banner lists NAME.INCOMPLETE in the last output folder", again.leftoverText().contains("quit-slow.INCOMPLETE") &&
                          again.leftoverText().contains(juce::String(root.string())) && again.leftoverText().contains("Nothing is deleted"));
                     fs::create_directories(root / "old.INCOMPLETE.stale-20260101T000000Z");
@@ -1432,6 +1437,21 @@ int main() {
                     TEST("leftovers: opening a page lists a moved-aside .stale- folder too", again.leftoverText().contains("old.INCOMPLETE.stale-20260101T000000Z"));
                     TEST("leftovers: the listing changes nothing", fs::is_directory(root / "quit-slow.INCOMPLETE") &&
                          fs::is_directory(root / "old.INCOMPLETE.stale-20260101T000000Z"));
+                    {   // #43 gate D note 2: a job running in this process is being written, not left over
+                        const auto rs = st.manager().enqueueJob(slowJob(root / "run-slow"), {});
+                        for (int i = 0; i < 250 && !fs::exists(root / "run-slow.INCOMPLETE"); ++i) pump(20);
+                        again.showDomain(D::ImportExport);
+                        TEST("leftovers: a running job's own NAME.INCOMPLETE is not listed; the others still are (#43 gate D note 2)",
+                             fs::is_directory(root / "run-slow.INCOMPLETE") && !again.leftoverText().contains("run-slow.INCOMPLETE") &&
+                             again.leftoverText().contains("quit-slow.INCOMPLETE"));
+                        st.selectJob(rs);
+                        st.cancelJob();
+                        waitIdle(5000);
+                        pump(100);
+                        again.showDomain(D::Validation);
+                        TEST("leftovers: once that job is cancelled its NAME.INCOMPLETE is listed", again.leftoverText().contains("run-slow.INCOMPLETE"));
+                        fs::remove_all(root / "run-slow.INCOMPLETE");   // the test's own cleanup (the app never deletes)
+                    }
                     const auto rec = stateDir / "last-output-folder.txt";
                     const auto keep = juce::File(rec.string()).loadFileAsString();
                     fs::create_directories(root / "clean-out");
@@ -1570,6 +1590,8 @@ int main() {
                 TEST("quit: a backup in the standalone Sounds & Resources window defers the app quit; the Studio asks", rw->busy() && hq == 0 && hs &&
                      hs->workPromptShown() && find<juce::Label>(hs->page(D::ImportExport), "Still running:") &&
                      find<juce::Label>(hs->page(D::ImportExport), "Still running:")->getText().contains("Sounds & Resources"));
+                TEST("quit: the first prompt of a Studio made by the quit lists only real work, no Library Manager (#43 gate D note 1)",
+                     hs && !find<juce::Label>(hs->page(D::ImportExport), "Still running:")->getText().contains("Library Manager"));
                 hs->resolveRunningWork(W::Wait);
                 for (int i = 0; i < 500 && hq == 0; ++i) pump(20);
                 TEST("quit: Wait lets that backup finish and publish, then quits", hq == 1 && !rw->busy() && fs::is_directory(root / "host-backup"));
@@ -1623,6 +1645,27 @@ int main() {
                 }
                 pump(300);
                 TEST("quit: that quit ran exactly once", hq == 2);
+                {   // #43 gate D e: a backup in the Sounds & Resources window (its own JobRunner), cancelled: the next launch's banner lists
+                    // it, and a later Studio job elsewhere hides neither it nor the Studio's own leftovers
+                    const auto b6 = root / "res-out" / "host-backup6";
+                    rw->startBackup(juce::File((root / "bigkst2").string()), juce::File(b6.string()));
+                    for (int i = 0; i < 500 && !fs::exists(b6.string() + ".INCOMPLETE"); ++i) pump(10);
+                    {
+                        app::StudioComponent s([] {});
+                        TEST("leftovers: the running Sounds & Resources backup's own NAME.INCOMPLETE is not listed (#43 gate D note 2)",
+                             rw->busy() && fs::is_directory(b6.string() + ".INCOMPLETE") && !s.leftoverText().contains("host-backup6.INCOMPLETE"));
+                    }
+                    rw->cancelJobs();
+                    for (int i = 0; i < 500 && rw->busy(); ++i) pump(20);
+                    hs->manager().enqueueJob(jobs::styleUasf("later", {'u'}, root / "later-out" / "later.uasf"), {});
+                    for (int i = 0; i < 500 && !fs::exists(root / "later-out" / "later.uasf"); ++i) pump(20);
+                    app::StudioComponent s([] {});   // as on the next launch
+                    TEST("leftovers: a cancelled Sounds & Resources window backup is listed on the next launch, after a later Studio job "
+                         "elsewhere; the Studio's own leftovers too (#43 gate D e)",
+                         fs::is_directory(b6.string() + ".INCOMPLETE") && !fs::exists(b6) && fs::is_regular_file(root / "later-out" / "later.uasf") &&
+                         s.leftoverText().contains("host-backup6.INCOMPLETE") && s.leftoverText().contains(juce::String((root / "res-out").string())) &&
+                         s.leftoverText().contains("quit-slow.INCOMPLETE"));
+                }
                 rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup4").string()));
                 h.confirmQuit([&hq] { ++hq; });
                 hs->resolveRunningWork(W::Wait);

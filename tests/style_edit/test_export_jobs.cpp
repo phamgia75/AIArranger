@@ -407,6 +407,59 @@ int main() {
         TEST("leftovers: a missing folder lists nothing", leftovers(root / "no-such").empty());
     }
 
+    // ── the output record and the banner listing (#43 gate D e and note 2): every queue records, running work excluded ──
+    {
+        const auto rec = root / "state" / "last-output-folder.txt";
+        setOutputRecord(rec);
+        {
+            JobQueue studio, window;   // two windows' own queues
+            studio.enqueue(styleUasf("s", {'u'}, root / "rec-a" / "s.uasf"));
+            window.enqueue(styleUasf("w", {'u'}, root / "rec-b" / "w.uasf"));
+            studio.enqueue(styleUasf("s2", {'u'}, root / "rec-a" / "s2.uasf"));
+            for (int i = 0; i < 500 && !(studio.idle() && window.idle()); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST("record: every queue records its output folder, most recent first, no duplicates",
+             (recordedFolders() == std::vector<std::string>{(root / "rec-a").string(), (root / "rec-b").string()}));
+        for (int i = 0; i < 12; ++i) recordOutputFolder((root / ("many" + std::to_string(i))).string());
+        const auto many = recordedFolders();
+        TEST("record: bounded to kRecordedFolders, newest kept first", many.size() == kRecordedFolders && many.front() == (root / "many11").string() &&
+             many.back() == (root / "many4").string());
+
+        fs::create_directories(root / "rec-a" / "old-a.INCOMPLETE");
+        fs::create_directories(root / "rec-b" / "old-b.INCOMPLETE");
+        recordOutputFolder((root / "rec-b").string());
+        recordOutputFolder((root / "rec-a").string());
+        auto report = leftoverReport();
+        TEST("banner: every recorded folder with leftovers, most recent first; a later folder hides no earlier one",
+             report.size() == 2 && report[0].first == (root / "rec-a").string() && report[0].second == std::vector<std::string>{"old-a.INCOMPLETE"} &&
+             report[1].first == (root / "rec-b").string() && report[1].second == std::vector<std::string>{"old-b.INCOMPLETE"});
+
+        std::atomic<bool> release{false};
+        auto blocked = styleUasf("busy", {'u'}, root / "rec-a" / "busy.uasf");
+        blocked.write = [&release](const fs::path& out, const std::function<bool(double)>&) {
+            fs::create_directories(out.parent_path());
+            while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return WriteResult{"stopped", ""};
+        };
+        {
+            JobQueue q;
+            q.enqueue(blocked);
+            for (int i = 0; i < 500 && !fs::exists(root / "rec-a" / "busy.uasf.INCOMPLETE"); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            report = leftoverReport();
+            TEST("banner: a job running in this process is not a leftover (its own NAME.INCOMPLETE is left out)",
+                 fs::is_directory(root / "rec-a" / "busy.uasf.INCOMPLETE") && !report.empty() &&
+                 report[0].second == std::vector<std::string>{"old-a.INCOMPLETE"});
+            release = true;
+            for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        report = leftoverReport();
+        TEST("banner: once that job has failed, its NAME.INCOMPLETE is listed; nothing was deleted",
+             !report.empty() && report[0].second == (std::vector<std::string>{"busy.uasf.INCOMPLETE", "old-a.INCOMPLETE"}));
+        setOutputRecord({});
+        recordOutputFolder((root / "ignored").string());
+        TEST("record: no record file set (the default) records nothing", recordedFolders().empty());
+    }
+
     // ── Library Manager plan (E7) as a job: D18 covers both libraries, EXPORT-ONLY, L1 only ──
     {
         put(root / "LibA.KST/STYLE/USER01/Ballad.STG", "s");

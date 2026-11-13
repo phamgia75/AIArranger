@@ -167,7 +167,7 @@ private:
     juce::TextButton* liveBtn_ = nullptr;
     std::map<Domain, std::vector<juce::TextButton*>> segmentButtons_;
     juce::Label title_, experimental_;
-    juce::Label leftovers_;   // non-blocking banner: unfinished writes (NAME.INCOMPLETE, .stale-*) in the last output folder
+    juce::Label leftovers_;   // non-blocking banner: unfinished writes (NAME.INCOMPLETE, .stale-*) in the recorded output folders (jobs::leftoverReport)
     void checkLeftovers();    // read-only listing; on launch and whenever a page opens
     juce::TextEditor inspector_;
 

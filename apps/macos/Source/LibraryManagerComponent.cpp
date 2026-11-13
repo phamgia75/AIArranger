@@ -332,6 +332,11 @@ void LibraryManagerComponent::refresh(bool report) {
     if (view_ == View::Plan) key += "|" + std::to_string(planRev_);
     if (key == shownKey_) return;
     shownKey_ = key;
+    if (!a_.lib && !b_.lib) {   // no library open: a fixed text, no worker (else computing() reads as running work, e.g. at quit)
+        deliveredGen_ = ++reportGen_;
+        report_.setText(u8(reportFor(view_, nullptr, nullptr, plan_, active_, -1, [] { return false; })), false);
+        return;
+    }
     // duplicates() and evaluate() can be slow on a large library: one background worker, latest request wins, a superseded
     // request stops inside their loops (library/latest_worker.h)
     const auto gen = ++reportGen_;

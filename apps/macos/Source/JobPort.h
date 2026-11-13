@@ -12,6 +12,13 @@
 
 namespace ai_arranger::app {
 
+// The app's output record (jobs::setOutputRecord): AIARR_STATE_DIR (tests) or the user's application data folder.
+inline std::filesystem::path appOutputRecordFile() {
+    const auto dir = juce::SystemStats::getEnvironmentVariable("AIARR_STATE_DIR", {});
+    return (dir.isNotEmpty() ? juce::File(dir) : juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("AIArranger"))
+        .getChildFile("last-output-folder.txt").getFullPathName().toStdString();
+}
+
 struct JobPort {
     // `done` runs once on the message thread when the job has finished (done, failed or cancelled).
     std::function<uint64_t(jobs::ExportSpec, std::function<void(const jobs::JobState&)> done)> enqueue;

@@ -7,20 +7,65 @@
 // once: the worker stops at the job's next cancel check and exits; it never touches the queue's owner afterwards.
 // An idle worker (no job running, e.g. after the app's quit waited for every job) is joined; a busy one is detached.
 // workers() counts the worker threads still alive in this process (a direct check of that join in the tests).
+// Every enqueue records its output folder in the one output record (setOutputRecord, set once by the app), so the
+// leftover banner (leftoverReport) finds an unfinished write whichever window's queue made it.
 
 #include "jobs/export_job.h"
+#include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 
 namespace ai_arranger::jobs {
+
+// The output record: a text file, one output folder per line, most recent first, no duplicates, at most kRecordedFolders.
+// Process-wide; empty (the default, e.g. in tests) records nothing.
+inline constexpr size_t kRecordedFolders = 8;
+namespace detail {
+struct OutputRecord { std::mutex m; fs::path file; };
+inline OutputRecord& outputRecord() { static OutputRecord r; return r; }
+}  // namespace detail
+inline void setOutputRecord(const fs::path& file) {
+    std::lock_guard<std::mutex> l(detail::outputRecord().m);
+    detail::outputRecord().file = file;
+}
+inline std::vector<std::string> recordedFolders() {
+    std::lock_guard<std::mutex> l(detail::outputRecord().m);
+    std::vector<std::string> r;
+    std::ifstream f(detail::outputRecord().file);
+    for (std::string line; std::getline(f, line);) {
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+        if (!line.empty() && std::find(r.begin(), r.end(), line) == r.end()) r.push_back(line);
+    }
+    return r;
+}
+inline void recordOutputFolder(const std::string& folder) {
+    auto list = recordedFolders();
+    std::lock_guard<std::mutex> l(detail::outputRecord().m);
+    const auto file = detail::outputRecord().file;
+    if (file.empty() || (!list.empty() && list.front() == folder)) return;
+    list.erase(std::remove(list.begin(), list.end(), folder), list.end());
+    list.insert(list.begin(), folder);
+    if (list.size() > kRecordedFolders) list.resize(kRecordedFolders);
+    std::error_code ec;
+    fs::create_directories(file.parent_path(), ec);
+    std::ofstream o(file, std::ios::trunc);
+    for (const auto& d : list) o << d << "\n";
+}
 
 class JobQueue {
 public:
     explicit JobQueue(std::function<void()> changed = {}) : s_(std::make_shared<Shared>()) {
         s_->changed = std::move(changed);
+        {
+            std::lock_guard<std::mutex> l(registry().m);
+            registry().queues.push_back(s_);
+        }
         ++workers();
         thread_ = std::thread([s = s_] {
             struct Exit { ~Exit() { --workers(); } } exit;
@@ -44,6 +89,11 @@ public:
     JobQueue& operator=(const JobQueue&) = delete;
 
     uint64_t enqueue(ExportSpec spec) {
+        {
+            std::error_code ec;
+            const auto parent = media::folderPath(fs::absolute(spec.dest, ec)).parent_path();
+            if (!ec) recordOutputFolder(parent.string());
+        }
         uint64_t id;
         {
             std::lock_guard<std::mutex> l(s_->m);
@@ -79,6 +129,24 @@ public:
         return r;
     }
     static std::atomic<int>& workers() { static std::atomic<int> n{0}; return n; }
+    // The NAME.INCOMPLETE work folders of every unfinished job of every queue in this process (a detached worker's too):
+    // these are being written now, not left over.
+    static std::set<std::string> unfinishedWork() {
+        std::set<std::string> r;
+        std::lock_guard<std::mutex> l(registry().m);
+        auto& qs = registry().queues;
+        qs.erase(std::remove_if(qs.begin(), qs.end(), [](const auto& w) { return w.expired(); }), qs.end());
+        for (const auto& w : qs)
+            if (const auto s = w.lock()) {
+                std::lock_guard<std::mutex> sl(s->m);
+                for (const auto& j : s->jobs)
+                    if (!finished(j.state.phase)) {
+                        std::error_code ec;
+                        r.insert(media::incompletePath(media::folderPath(fs::absolute(j.spec->dest, ec))).string());
+                    }
+            }
+        return r;
+    }
     bool idle() const {
         std::lock_guard<std::mutex> l(s_->m);
         for (const auto& j : s_->jobs) if (!finished(j.state.phase)) return false;
@@ -97,6 +165,8 @@ private:
     };
     std::shared_ptr<Shared> s_;
     std::thread thread_;
+    struct Registry { std::mutex m; std::vector<std::weak_ptr<Shared>> queues; };
+    static Registry& registry() { static Registry r; return r; }
 
     static void notify(const std::shared_ptr<Shared>& s) {
         std::function<void()> f;
@@ -130,6 +200,20 @@ private:
         }
     }
 };
+
+// The leftover banner's listing: each recorded output folder (most recent first) with its unfinished writes, minus the
+// work folders of jobs still running in this process. Read-only; folders without leftovers are left out.
+inline std::vector<std::pair<std::string, std::vector<std::string>>> leftoverReport() {
+    std::vector<std::pair<std::string, std::vector<std::string>>> r;
+    const auto running = JobQueue::unfinishedWork();
+    for (const auto& dir : recordedFolders()) {
+        auto names = leftovers(dir);
+        names.erase(std::remove_if(names.begin(), names.end(), [&](const std::string& n) { return running.count((fs::path(dir) / n).string()) > 0; }),
+                    names.end());
+        if (!names.empty()) r.emplace_back(dir, std::move(names));
+    }
+    return r;
+}
 
 }  // namespace ai_arranger::jobs
 

@@ -1014,24 +1014,18 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
     return 0;
 }
 
-// Where the last export went is kept across launches (a one-line file), so the leftover banner can look there.
-static juce::File lastOutputRecord() {
-    const auto dir = juce::SystemStats::getEnvironmentVariable("AIARR_STATE_DIR", {});
-    return (dir.isNotEmpty() ? juce::File(dir) : juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("AIArranger"))
-        .getChildFile("last-output-folder.txt");
-}
-
-// shortcut: lists one folder on the message thread (fast on a local disk); move it to a worker if the last output folder
-// can be a slow network volume.
+// shortcut: lists the recorded output folders (at most jobs::kRecordedFolders) on the message thread (fast on a local
+// disk); move it to a worker if an output folder can be a slow network volume.
 void StudioComponent::checkLeftovers() {
-    const auto rec = lastOutputRecord();
-    const auto folder = rec.existsAsFile() ? rec.loadFileAsString().trim() : juce::String();
-    const auto names = folder.isEmpty() ? std::vector<std::string>{} : jobs::leftovers(folder.toStdString());
-    juce::StringArray shown;
-    for (size_t i = 0; i < names.size() && i < 4; ++i) shown.add(juce::String::fromUTF8(names[i].c_str()));
-    if (names.size() > 4) shown.add("and " + juce::String(int(names.size() - 4)) + " more");
-    const bool show = !names.empty();
-    leftovers_.setText(show ? "Unfinished writes in " + folder + ": " + shown.joinIntoString(", ") +
+    juce::StringArray parts;
+    for (const auto& [dir, names] : jobs::leftoverReport()) {
+        juce::StringArray shown;
+        for (size_t i = 0; i < names.size() && i < 4; ++i) shown.add(juce::String::fromUTF8(names[i].c_str()));
+        if (names.size() > 4) shown.add("and " + juce::String(int(names.size() - 4)) + " more");
+        parts.add("in " + juce::String::fromUTF8(dir.c_str()) + ": " + shown.joinIntoString(", "));
+    }
+    const bool show = !parts.isEmpty();
+    leftovers_.setText(show ? "Unfinished writes " + parts.joinIntoString("; ") +
                                   ". Nothing is deleted by the app: check them, then move them aside or delete them in Finder."
                             : juce::String(),
                        juce::dontSendNotification);
@@ -1041,13 +1035,6 @@ void StudioComponent::checkLeftovers() {
 
 uint64_t StudioComponent::enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done) {
     const juce::String type(spec.type);
-    {
-        std::error_code ec;
-        const juce::String parent(media::folderPath(std::filesystem::absolute(spec.dest, ec)).parent_path().string());
-        const auto rec = lastOutputRecord();
-        if (!ec && (!rec.existsAsFile() || rec.loadFileAsString().trim() != parent) && rec.getParentDirectory().createDirectory())
-            rec.replaceWithText(parent);
-    }
     JobHome home{spec, out, domain_, std::move(done)};
     const auto id = queue_->enqueue(std::move(spec));
     jobHomes_[id] = std::move(home);

@@ -3,6 +3,7 @@
 // Gate 14 MainComponent remains in the tree for reference but is no longer the
 // window content.
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "JobPort.h"
 #include "LiveHostComponent.h"
 
 namespace ai_arranger::app {
@@ -14,6 +15,7 @@ public:
     bool moreThanOneInstanceAllowed() override { return false; }
 
     void initialise(const juce::String&) override {
+        jobs::setOutputRecord(appOutputRecordFile());   // every job queue records where it writes, for the leftover banner
         mainWindow_ = std::make_unique<MainWindow>("AI Arranger");
     }
     void shutdown() override { mainWindow_ = nullptr; }
