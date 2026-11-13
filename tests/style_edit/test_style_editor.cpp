@@ -546,6 +546,47 @@ static void testSoundsAndRoute() {
         return std::search(plain.begin(), plain.end(), std::begin("KEXP"), std::begin("KEXP") + 4) == plain.end(); }());
 }
 
+static void testR2() {
+    std::printf("Codex r2: copy keeps a renamed target's name; Korg import refuses what UASF cannot save\n");
+    uasf::UasfSerializer ser;
+    uasf::UasfDeserializer de;
+    {
+        StyleEditor ed(makeStyle());
+        ed.renameSection(1, "My Var 2");
+        TEST("r2#1: copy over a renamed element keeps its name", ed.copySection(0, uasf::SectionType::Main2).ok && ed.style().sections[1].name == "My Var 2");
+        const auto back = de.deserialize(ser.serialize(ed.style()).data);
+        TEST("r2#1: ... through Save UASF + reload", back.success && back.style.sections[1].name == "My Var 2");
+        StyleEditor e2(makeStyle());
+        e2.renameSection(0, "Src A");
+        e2.copySection(0, uasf::SectionType::Main2);
+        const auto b2 = de.deserialize(ser.serialize(e2.style()).data);
+        TEST("r2#1: unrenamed target stays unstored (importer name, as before)", b2.success && b2.style.sections[1].name == "Section 1" &&
+             !e2.style().sections[1].keep_name);
+    }
+    auto korgStyle = [](uint32_t mpqn, uint32_t bars) {
+        korg::Style k;
+        k.ppqn = 96;
+        k.mpqn = mpqn;
+        korg::Element el;
+        el.marker = "v1cv1";
+        el.length = bars * 384;
+        el.events = {{0, 0x9B, 60, 100}, {48, 0x8B, 60, 0}};
+        k.elements.push_back(el);
+        return korg::write(k);
+    };
+    const auto ok = korgStyle(500000, 2);
+    TEST("r2#2: a 120 BPM file imports", ok.ok && importKorgSmf(ok.bytes, "ok").ok);
+    for (uint32_t mpqn : {120000u, 4000000u}) {   // 500 BPM, 15 BPM
+        const auto w = korgStyle(mpqn, 2);
+        const auto in = importKorgSmf(w.bytes, "t");
+        TEST((std::string("r2#2: tempo outside 20-400 BPM refused with the reason, mpqn ") + std::to_string(mpqn)).c_str(),
+             w.ok && !in.ok && in.error.find("BPM") != std::string::npos && in.error.find("20-400") != std::string::npos);
+    }
+    const auto longEl = korgStyle(500000, 70000);
+    const auto li = importKorgSmf(longEl.bytes, "long");
+    TEST("r2#2: an element longer than UASF's 65535 bars refused", longEl.ok && !li.ok && li.error.find("65535") != std::string::npos);
+}
+
 static void testSectionNames() {
     std::printf("UASF 'SNAM': element names survive save -> reload\n");
     StyleEditor ed(makeStyle());
@@ -645,6 +686,7 @@ int main() {
     testSoundsAndRoute();
     testKorgSmfImport();
     testSectionNames();
+    testR2();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

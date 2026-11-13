@@ -1,5 +1,6 @@
 #include "style_edit/style_editor.h"
 
+#include "engine/uasf/serializer.h"
 #include "exporters/korg/genos_to_korg.h"
 
 #include <algorithm>
@@ -419,6 +420,7 @@ EditResult StyleEditor::copySection(size_t from, uasf::SectionType to) {
         auto it = std::find_if(s.sections.begin(), s.sections.end(), [&](const auto& x) { return x.type == to; });
         if (it != s.sections.end()) {
             copy.name = it->name;
+            copy.keep_name = it->keep_name;   // the target's name and whether it is stored stay together
             *it = std::move(copy);
         } else {
             copy.name = sectionTypeName(to);
@@ -765,6 +767,9 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
     uasf::UasfValidator v;
     for (const auto& i : v.validate(s).issues)
         if (i.severity == uasf::ValidationIssue::ERROR) { out.error = "UASF validator: " + i.message; return out; }
+    // An editable Style must be saveable: the serializer's own limits (tempo 20-400 BPM, bars and resolution <= 65535,
+    // ...) are checked here, so a Style that could never be written as UASF is refused at import, with its reason.
+    if (const auto w = uasf::UasfSerializer().serialize(s); !w.success) { out.error = "cannot be kept as UASF: " + w.error; return out; }
     out.ok = true;
     return out;
 }
