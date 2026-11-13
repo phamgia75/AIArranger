@@ -9,6 +9,7 @@
 
 #include "jobs/export_job.h"
 #include "library/library_apply.h"
+#include "media/samplelab/drum_builder.h"
 #include "media/sound/package_graph.h"
 #include "ui/sound/sound_conversion_model.h"
 #include "ui/studio/studio_tools.h"
@@ -58,6 +59,45 @@ inline bool isFile(const fs::path& p) { std::error_code ec; return fs::is_regula
 inline bool isDir(const fs::path& p) { std::error_code ec; return fs::is_directory(p, ec); }
 inline fs::path absFolder(const fs::path& p) { std::error_code ec; return media::folderPath(fs::absolute(p, ec)); }
 inline WriteResult labResult(const st::JobResult& r) { return r.level ? WriteResult{"", writerReport(r.text)} : WriteResult{r.text, ""}; }
+
+using Conversion = std::vector<std::pair<std::string, std::string>>;
+// What a Sound output carries (P1 conversion report). kmp: the KMP/KSF writer, which drops zone levels.
+inline Conversion soundConversion(const snd::Instrument& in, const fs::path& source, bool kmp) {
+    size_t zones = 0, looped = 0, levels = 0;
+    for (const auto& L : in.layers) for (const auto& z : L.zones) { ++zones; levels += z.levelCentibels != 0; }
+    for (const auto& x : in.samples) looped += x.looped;
+    Conversion c = {{"EXACT", "16-bit audio of " + std::to_string(in.samples.size()) + " sample(s) as decoded, sample rates, mono/stereo"},
+                    kmp ? std::pair<std::string, std::string>{"EXACT", std::to_string(zones) + " key zone(s): key ranges, roots and tune as mapped"}
+                        : std::pair<std::string, std::string>{"EXACT", std::to_string(in.layers.size()) + " velocity layer(s), " + std::to_string(zones) +
+                                                                           " key zone(s): ranges, roots and tune as mapped"},
+                    {"EXACT", std::to_string(looped) + " loop(s) at the frames shown in the preview (forward)"}};
+    if (snd::isKsfFolder(source)) c.push_back({"MEASURED", "root pitch of each KSF sample (no KMP): see the writer report"});
+    c.push_back({"MEASURED", "level per velocity layer (first 200 ms RMS, Sound Recipe)"});
+    c.push_back({"ESTIMATED", "Pa5X sample memory (software estimate)"});
+    if (kmp)   // a KMP holds key zones only; the velocity split is a Program/Sound setting
+        c.push_back({"MISSING", std::to_string(in.layers.size()) + " velocity layer(s) and their velocity ranges: not in a KMP (set in the Program/Sound)"});
+    if (kmp && levels) c.push_back({"MISSING", std::to_string(levels) + " zone level offset(s): not carried in a KMP (written 0)"});
+    c.push_back({"MISSING", "envelopes, filters, LFOs, effects: not carried by the import (set by hand on the Pa5X; Sound Recipe in REPORT.txt)"});
+    return c;
+}
+// converted: some WAV was dithered or resampled (drumKitFromFolder notes), so the audio is not the source bit for bit.
+inline Conversion drumConversion(const snd::DrumKit& kit, const std::vector<std::string>& lost, bool converted) {
+    size_t keys = 0, chokes = 0;
+    for (const auto& I : kit.instruments) { keys += I.keys.size(); chokes += I.choke != 0; }
+    Conversion c = {converted ? std::pair<std::string, std::string>{"MEASURED", "16-bit audio of " + std::to_string(kit.samples.size()) +
+                                                                                    " sample(s), one-shot; converted files dithered/resampled (listed in the notes), not bit-exact"}
+                              : std::pair<std::string, std::string>{"EXACT", "16-bit audio of " + std::to_string(kit.samples.size()) + " sample(s), one-shot, as read"}};
+    if (lost.empty()) {   // TXPERF: every Drum Kit setting of the map is written
+        c.push_back({"EXACT", std::to_string(keys) + " key(s), " + std::to_string(kit.instruments.size()) + " group(s), " + std::to_string(chokes) +
+                                  " with an exclusive group; level and pan as mapped"});
+        c.push_back({"EXACT", "group names, exclusive groups, pan and drum families (TXPERF matrices)"});
+    } else {              // KMP: only the keys and samples; what was dropped is listed MISSING below
+        c.push_back({"EXACT", std::to_string(keys) + " key(s), one zone per key, root = key"});
+    }
+    for (const auto& l : lost) c.push_back({"MISSING", l});
+    c.push_back({"MISSING", "Drum Kit filter/envelope/effects edits: set by hand on the Pa5X"});
+    return c;
+}
 }  // namespace detail
 
 // Sound package (SF2 + TXPROG + WAV), the Convert Sound Generate step.
@@ -84,11 +124,13 @@ inline ExportSpec soundPackage(std::shared_ptr<const snd::Instrument> in, fs::pa
         return rep.empty() ? WriteResult{"Sound package NOT written: " + err, ""} : WriteResult{"", rep};
     };
     s.verify = detail::outputLevel;
+    s.conversion = [in, sourceDir] { return detail::soundConversion(*in, sourceDir, false); };
     return s;
 }
 
 // Drum Kit package (TX Drum Kit + samples).
 inline ExportSpec drumKit(std::shared_ptr<const snd::DrumKit> kit, std::string notes, fs::path dest) {
+    const bool conv = notes.find("Converted to 16-bit") != std::string::npos;   // drumKitFromFolder's notes
     ExportSpec s;
     s.type = "Drum Kit package";
     s.source = kit ? kit->name : "";
@@ -109,6 +151,60 @@ inline ExportSpec drumKit(std::shared_ptr<const snd::DrumKit> kit, std::string n
         return rep.empty() ? WriteResult{"Drum Kit package NOT written: " + err, ""} : WriteResult{"", rep};
     };
     s.verify = detail::outputLevel;
+    s.conversion = [kit, conv] { return detail::drumConversion(*kit, {}, conv); };
+    return s;
+}
+
+// Drum Kit as a KMP/KSF folder (EXPERIMENTAL, L1): one zone per key (samplelab::drumKitAsInstrument).
+inline ExportSpec drumKitKmp(std::shared_ptr<const snd::DrumKit> kit, std::string notes, fs::path dest) {
+    const bool conv = notes.find("Converted to 16-bit") != std::string::npos;   // drumKitFromFolder's notes
+    auto s = drumKit(kit, {}, std::move(dest));
+    s.type = "Drum Kit as KMP/KSF folder (EXPERIMENTAL)";
+    auto in = std::make_shared<snd::Instrument>();
+    auto lost = std::make_shared<std::vector<std::string>>();
+    const std::string why = kit ? media::samplelab::drumKitAsInstrument(*kit, in.get(), lost.get()) : "no Drum Kit";
+    s.validate = [kit, why] {
+        if (!kit) return std::string("no Drum Kit");
+        const auto e = snd::validate(*kit);
+        return !e.empty() ? "invalid Drum Kit: " + e.front() : why.empty() ? std::string() : "Drum Kit cannot be a KMP: " + why;
+    };
+    s.preview = [in] {
+        return std::vector<OutFile>{{std::to_string(in->samples.size()) + " .KSF samples", snd::sampleBytes(*in) + 64 * in->samples.size(), "", false},
+                                    {".KMP multisample (one zone per key), REPORT.txt, PACKAGE.sha256", 65536, "", false}};
+    };
+    s.write = [in, lost, notes = std::move(notes)](const fs::path& out, auto&) {
+        std::string err, n = notes + "Drum Kit as one multisample, one zone per key. Not in a KMP:\n";
+        for (const auto& l : *lost) n += "  " + l + "\n";
+        const auto rep = snd::writeKorgFolder(*in, out, n, &err);
+        return rep.empty() ? WriteResult{"KMP/KSF folder NOT written: " + err, ""} : WriteResult{"", rep};
+    };
+    s.conversion = [kit, lost, conv] { return detail::drumConversion(*kit, *lost, conv); };
+    return s;
+}
+
+// Drum Kit from a WAV folder and its drum map (samplelab/drum_builder.h), as a TXPERF package or (kmp) a KMP/KSF folder.
+// The WAVs are read inside the job (its validate phase, a worker thread), never on the caller's thread; then every
+// phase is the drumKit / drumKitKmp spec's own. The folder is a source (D18).
+inline ExportSpec drumKitFromFolder(fs::path dir, std::string name, std::string map, bool kmp, fs::path dest) {
+    ExportSpec s;
+    s.type = kmp ? "Drum Kit as KMP/KSF folder (EXPERIMENTAL)" : "Drum Kit package";
+    s.source = dir.string();
+    s.sources = {dir};
+    s.dest = dest;
+    auto in = std::make_shared<ExportSpec>();
+    s.validate = [=] {
+        auto kit = std::make_shared<snd::DrumKit>();
+        std::string notes;
+        if (const auto e = media::samplelab::buildDrumKit(dir, name, map, kit.get(), &notes); !e.empty()) return "Drum Kit refused: " + e;
+        notes = "Source: WAV folder " + dir.string() + " and its drum map\n" + (notes.empty() ? "" : "Converted to 16-bit / Pa5X rate:\n" + notes);
+        *in = kmp ? drumKitKmp(kit, notes, dest) : drumKit(kit, notes, dest);
+        return in->validate();
+    };
+    s.dependencies = [in](auto& n, auto& b) { return in->dependencies(n, b); };
+    s.preview = [in] { return in->preview(); };
+    s.write = [in](const fs::path& out, const auto& p) { return in->write(out, p); };
+    s.verify = [in](const fs::path& out) { return in->verify(out); };
+    s.conversion = [in] { return in->conversion(); };
     return s;
 }
 
@@ -126,6 +222,7 @@ inline ExportSpec kmpFolder(std::shared_ptr<const snd::Instrument> in, fs::path 
         const auto rep = snd::writeKorgFolder(*in, out, snd::formatRecipe(snd::recipeFromSamples(*in)), &err);
         return rep.empty() ? WriteResult{"KMP/KSF folder NOT written: " + err, ""} : WriteResult{"", rep};
     };
+    s.conversion = [in] { return detail::soundConversion(*in, {}, true); };
     return s;
 }
 
@@ -155,9 +252,13 @@ inline ExportSpec labLoop(fs::path wav, uint32_t start, uint32_t end, uint32_t s
     auto s = labSpec("Sample Lab loop", wav, std::move(dest));
     s.validate = [wav] { return detail::isFile(wav) ? "" : "Loop refused: " + wav.string() + " is not a file"; };
     s.write = [=](const fs::path& out, auto&) { return detail::labResult(st::labLoop(wav, start, end, snap, xfade, out)); };
+    s.conversion = [] {
+        return detail::Conversion{{"EXACT", "16-bit audio, rate and root of the input; the loop at the frames in the writer report (after snap)"},
+                                  {"MISSING", "nothing else: one WAV with its smpl loop"}};
+    };
     return s;
 }
-inline ExportSpec labBatch(fs::path in, bool trim, bool normalize, fs::path dest) {
+inline ExportSpec labBatch(fs::path in, bool trim, bool normalize, fs::path dest, bool convert = false) {
     auto s = labSpec("Sample Lab batch", in, dest);
     // checked before the job folder is made, so nothing is ever created inside the input folder
     s.validate = [in, d = detail::absFolder(dest)] {
@@ -166,7 +267,17 @@ inline ExportSpec labBatch(fs::path in, bool trim, bool normalize, fs::path dest
             return std::string("Batch refused: refusing: the output folder may not be inside the input folder, or contain it");
         return std::string();
     };
-    s.write = [=](const fs::path& out, auto&) { return detail::labResult(st::labBatch(in, trim, normalize, out)); };
+    s.write = [=](const fs::path& out, auto&) { return detail::labResult(st::labBatch(in, trim, normalize, out, convert)); };
+    s.conversion = [=] {
+        detail::Conversion c;
+        if (!trim && !normalize && !convert) c.push_back({"EXACT", "16-bit audio, rate, root and loop of every file written, unchanged"});
+        if (trim || normalize) c.push_back({"MEASURED", "levels before/after, trim points and gain per file (writer report)"});
+        if (convert) c.push_back({"MEASURED", "format before/after per file: 24/32-bit and float requantised to 16-bit (TPDF dither), rates outside 11025-48000 Hz "
+                                              "resampled (windowed sinc), loop points scaled and rounded"});
+        c.push_back({"ESTIMATED", "root key from pitch where a file has no smpl chunk and no Pa5X-style name"});
+        c.push_back({"MISSING", "files not read (listed in the writer report)"});
+        return c;
+    };
     return s;
 }
 

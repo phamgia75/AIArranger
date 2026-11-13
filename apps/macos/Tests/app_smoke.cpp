@@ -36,6 +36,7 @@ static int failures = 0, passes = 0;
     else { std::printf("  PASS: %s\n", name); ++passes; } } while (0)
 
 static void pump(int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); }
+static std::string slurp(const std::filesystem::path& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
 
 // Per-phase timing (instrumentation only, no check): wall vs process CPU (all threads; children separately) and the
 // 1-minute load average. CPU tracking wall under load = slow; wall growing with flat CPU = blocked or starved.
@@ -497,6 +498,21 @@ int main() {
             }
             TEST("generate refuses an existing folder", [&] { cv.generate(juce::File(root.string() + "/out/Big Sine"));
                  for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
+            {   // P1: one editable zone map for every source; edits apply at the next Preview
+                TEST("Convert Sound: Preview proposes the zone map", cv.zoneMapField().getText().contains("layer 0 63 Soft") &&
+                     cv.zoneMapField().getText().contains("layer 64 127 Hard") && cv.zoneMapField().getText().contains("zone "));
+                const auto z = cv.zoneMapField().getText().replace("layer 0 63 Soft", "layer 0 79 Soft").replace("layer 64 127 Hard", "layer 80 127 Hard");
+                cv.zoneMapField().setText(z);
+                pump(50);
+                TEST("Convert Sound: editing the zone map invalidates the preview", !cv.model().built());
+                cv.buildPreview();
+                for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
+                TEST("Convert Sound: Preview applies the edited zone map (velocity split moved), the text is kept",
+                     cv.model().built() && cv.previewText().contains("Layer 'Soft'  velocity 0-79") && cv.zoneMapField().getText() == z);
+                cv.splitsField().setText("70");
+                pump(50);
+                TEST("Convert Sound: changing the splits clears the zone map (proposed again at Preview)", cv.zoneMapField().isEmpty());
+            }
         }
 
         phase("resources: sample plugin");
@@ -1151,6 +1167,8 @@ int main() {
             waitIdle(10000);
             TEST("studio: Analyze previews levels, onsets, normalize and trim; writes nothing", st.labText().contains("Onsets (4)") &&
                  st.labText().contains("Normalize preview") && st.labText().contains("Trim preview") && !fs::exists(root / "labin/Loop slices"));
+            TEST("studio: Analyze draws the waveform (read on a worker, no playback)", st.labWave().data() && st.labWave().data()->frames == lp.frames() &&
+                 st.labWave().data()->all.size() == 600 && !st.labWave().data()->looped);
             st.runLabTool(T::Slice, juce::File((root / "Loop slices").string()));
             waitIdle(10000);
             TEST("studio: Time Slice writes a new folder at L1", fs::is_regular_file(root / "Loop slices/SLICES.tsv") && st.badgeText() == l1only &&
@@ -1172,6 +1190,30 @@ int main() {
             st.runLabTool(T::Batch, juce::File((root / "labin/out").string()));
             waitIdle(10000);
             TEST("studio: Batch into its own input refused", st.labText().startsWith("Batch refused"));
+            // P1: rate/bit-depth conversion and the Drum Kit builder
+            st.labConvert().setToggleState(true, juce::dontSendNotification);
+            st.runLabTool(T::BatchPreview);
+            waitIdle(10000);
+            TEST("studio: Batch Preview with Convert shows the before/after format", st.labText().contains("format: 44100 Hz 16-bit 1 ch"));
+            st.labConvert().setToggleState(false, juce::dontSendNotification);
+            st.labDrumMap().setText({});
+            pump(50);
+            TEST("studio: Drum Kit needs a drum map and says so", st.labUnavailable(T::DrumKitTx).startsWith("Needs: a drum map"));
+            st.runLabTool(T::DrumMap);
+            waitIdle(10000);
+            TEST("studio: Propose Drum Map lists one key per WAV", st.labDrumMap().getText().contains("C2 Copy.wav group=Copy") &&
+                 st.labDrumMap().getText().contains("C#2 Loop.wav group=Loop"));
+            st.labDrumMap().setText("C2 Copy.wav group=Kick level=-3\nD2 Loop.wav group=Snare pan=20 family=S\n");
+            pump(50);
+            st.runLabTool(T::DrumKitTx, juce::File((root / "labin kit").string()));
+            waitIdle(20000);
+            TEST("studio: Drum Kit (TXPERF) job: new package, conversion report beside it", fs::is_regular_file(root / "labin kit/PACKAGE.sha256") &&
+                 st.badgeText() == juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x86\xE2\x97\x86 L2  \xE2\x97\x87 L3") &&
+                 slurp(root / "labin kit.export.md").find("structurally valid, not verified on a Pa5X") != std::string::npos);
+            st.runLabTool(T::DrumKitKmp, juce::File((root / "labin kit KMP").string()));
+            waitIdle(20000);
+            TEST("studio: Drum Kit (KMP/KSF) job: L1 only, pan listed MISSING", fs::is_regular_file(root / "labin kit KMP/PACKAGE.sha256") &&
+                 st.badgeText() == l1only && slurp(root / "labin kit KMP.export.md").find("**MISSING** pan (1 key(s) panned)") != std::string::npos);
         }
         std::string err;
         media::sound::writePackage(media::sound::buildDemoOrgan(), root / "organ", "", &err);

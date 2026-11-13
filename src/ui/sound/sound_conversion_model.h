@@ -8,6 +8,7 @@
 // steps and words the results. It reads the source folder and writes one new local folder; it never
 // writes to an instrument or sends MIDI.
 
+#include "media/samplelab/zone_map.h"
 #include "media/sound/korg_kmp_source.h"
 #include "media/sound/ksf_folder_source.h"
 #include "media/sound/package_writer.h"
@@ -147,8 +148,21 @@ public:
     const std::filesystem::path& folder() const { return dir_; }
     // KSF-only folder: `mapping` is the mapping text; when it is empty it is proposed here and returned in it. `notes`
     // receives the REPORT source section measured on the decoded audio; pass it to generate().
+    // zoneMap (P1, any source): empty = receives the proposed zone map of the decoded Sound; otherwise the decoded Sound
+    // is re-mapped by it (samplelab/zone_map.h) and *zoneNotes receives its loop operations.
     static bool decode(const std::filesystem::path& dir, const std::string& name, const std::string& orderCsv, const std::string& splitsCsv,
-                       snd::Instrument& out, std::string* err, std::string* mapping = nullptr, std::string* notes = nullptr) {
+                       snd::Instrument& out, std::string* err, std::string* mapping = nullptr, std::string* notes = nullptr,
+                       std::string* zoneMap = nullptr, std::string* zoneNotes = nullptr) {
+        if (!decodeSource(dir, name, orderCsv, splitsCsv, out, err, mapping, notes)) return false;
+        if (!zoneMap) return true;
+        if (zoneMap->find_first_not_of(" \t\r\n") == std::string::npos) { *zoneMap = media::samplelab::formatZoneMap(out); return true; }
+        snd::Instrument mapped;
+        if (const auto e = media::samplelab::applyZoneMap(out, *zoneMap, &mapped, zoneNotes); !e.empty()) return fail(err, e);
+        out = std::move(mapped);
+        return true;
+    }
+    static bool decodeSource(const std::filesystem::path& dir, const std::string& name, const std::string& orderCsv, const std::string& splitsCsv,
+                             snd::Instrument& out, std::string* err, std::string* mapping, std::string* notes) {
         if (snd::isKsfFolder(dir)) {
             if (!mapping) return fail(err, "a KSF folder needs a key mapping");
             const auto layer = csv(orderCsv);

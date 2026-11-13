@@ -67,6 +67,8 @@ struct ExportSpec {
     std::function<WriteResult(int outFd, const fs::path& out, const std::function<bool(double)>& progress)> writeAt;
     std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;   // runs on the STAGED output; L1 Failed = not published
     std::function<std::string(const fs::path& out)> beforePublish;   // right before the publishing renames: "" = publish, else why not
+    // P1 conversion report: what the output carries and how sure it is: {"EXACT"|"MEASURED"|"ESTIMATED"|"MISSING", what}
+    std::function<std::vector<std::pair<std::string, std::string>>()> conversion;
 };
 
 struct JobState {
@@ -76,6 +78,7 @@ struct JobState {
     double progress = 0;
     std::string reason, writerText, verifyText;
     std::vector<std::string> missing, notes, warnings;
+    std::vector<std::pair<std::string, std::string>> conversion;   // ExportSpec::conversion
     std::vector<OutFile> planned, files;
     uint64_t plannedBytes = 0, sampleBytes = 0;
     Verification level;
@@ -120,6 +123,9 @@ inline std::vector<std::string> leftovers(const fs::path& dir) {
     return r;
 }
 
+inline constexpr const char* kConversionStatus = "structurally valid, not verified on a Pa5X";
+inline const char* conversionStatus(Phase p) { return p == Phase::Done ? kConversionStatus : "not published"; }
+
 // Machine report (aiarranger-export-report/1) and its human-readable twin.
 inline std::string reportJson(const JobState& s) {
     auto q = [](const std::string& v) { return "\"" + media::graph::jsonEscape(v) + "\""; };
@@ -136,7 +142,14 @@ inline std::string reportJson(const JobState& s) {
                     ",\n  \"reason\": " + q(s.reason) + ",\n  \"writer\": " + q(s.writerText) + ",\n  \"verifyText\": " + q(s.verifyText) + ",\n  \"missing\": " + list(s.missing) + ",\n  \"notes\": " + list(s.notes) +
                     ",\n  \"warnings\": " + list(s.warnings) + ",\n  \"plannedBytes\": " + std::to_string(s.plannedBytes) +
                     ",\n  \"sampleBytes\": " + std::to_string(s.sampleBytes) + ",\n  \"verification\": {\"L1\": " + lvl(s.level.l1) +
-                    ", \"L2\": " + lvl(s.level.l2) + ", \"L3\": " + lvl(s.level.l3) + "},\n  \"files\": [";
+                    ", \"L2\": " + lvl(s.level.l2) + ", \"L3\": " + lvl(s.level.l3) + "},\n";
+    if (!s.conversion.empty()) {
+        o += "  \"status\": " + q(conversionStatus(s.phase)) + ",\n  \"conversion\": [";
+        for (size_t i = 0; i < s.conversion.size(); ++i)
+            o += std::string(i ? "," : "") + "\n    {\"class\": " + q(s.conversion[i].first) + ", \"item\": " + q(s.conversion[i].second) + "}";
+        o += "\n  ],\n";
+    }
+    o += "  \"files\": [";
     for (size_t i = 0; i < s.files.size(); ++i)
         o += std::string(i ? "," : "") + "\n    {\"path\": " + q(s.files[i].rel) + ", \"bytes\": " + std::to_string(s.files[i].bytes) +
              ", \"sha256\": " + q(s.files[i].sha256) + "}";
@@ -156,6 +169,11 @@ inline std::string reportMd(const JobState& s) {
     section("Missing resources", s.missing);
     section("Warnings", s.warnings);
     section("Notes", s.notes);
+    if (!s.conversion.empty()) {
+        o += std::string("\n## Conversion (EXACT / MEASURED / ESTIMATED / MISSING)\n\nStatus: ") + conversionStatus(s.phase) + ".\n\n";
+        for (const char* c : {"EXACT", "MEASURED", "ESTIMATED", "MISSING"})
+            for (const auto& [k, v] : s.conversion) if (k == c) o += "- **" + k + "** " + v + "\n";
+    }
     if (!s.writerText.empty()) o += "\n## Writer report\n\n```\n" + s.writerText + (s.writerText.back() == '\n' ? "" : "\n") + "```\n";
     if (!s.verifyText.empty()) o += "\n## Verification\n\n" + s.verifyText + "\n";
     o += "\n## Files (SHA-256, sha256sum format)\n\n```\n";
@@ -281,6 +299,7 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
     if (!enter(Phase::Validate)) return;
     if (const auto e = spec.validate ? spec.validate() : ""; !e.empty()) return stop(Phase::Failed, e);
+    if (spec.conversion) st.conversion = spec.conversion();
 
     if (!enter(Phase::Dependencies)) return;
     if (spec.dependencies) st.missing = spec.dependencies(st.notes, st.sampleBytes);

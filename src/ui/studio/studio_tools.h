@@ -77,6 +77,11 @@ inline JobResult labAnalyze(const fs::path& wav) {
     std::snprintf(b, sizeof b, "%zu frames, %u Hz, %u ch, peak %.2f dBFS, RMS %.2f dBFS\n", s.frames(), s.rate, unsigned(s.channels), l.peakDb, l.rmsDb);
     std::string o = "Sample Lab: analyze (read-only preview; nothing is written)\n" + wav.string() + "\n" + b;
     o += s.looped ? "Loop: " + std::to_string(s.loopStart) + "-" + std::to_string(s.loopEnd) + "\n" : std::string("Loop: none\n");
+    if (const auto seam = lab::loopSeam(s); seam.has) {   // audition-free: the step at the seam beside the wave's own step
+        std::snprintf(b, sizeof b, "Loop seam: jump %.0f vs the wave's own step %.0f (sample units)%s\n", seam.jump, seam.slope,
+                      seam.jump > 2 * seam.slope + 1 ? ": may click; try snap and/or a crossfade" : ": smooth");
+        o += b;
+    }
     const auto on = lab::detectOnsets(s);
     o += "Onsets (" + std::to_string(on.size()) + "):";
     for (size_t i = 0; i < on.size() && i < 64; ++i) o += " " + std::to_string(on[i]) + " (" + ms(s, on[i]) + ")";
@@ -132,12 +137,13 @@ inline JobResult labLoop(const fs::path& wav, uint32_t start, uint32_t end, uint
     return {"Written: " + media::folderPath(dest).string() + "\n" + v.text + "\n\n" + rep, v.level, media::folderPath(dest).string()};
 }
 
-// Batch over every .wav of a folder (optional trim and peak normalize) with the duplicates report. An empty dest is a
+// Batch over every .wav of a folder (optional trim, peak normalize, 16-bit/rate conversion) with the duplicates report. An empty dest is a
 // preview: the same table, nothing written.
-inline JobResult labBatch(const fs::path& in, bool trim, bool normalize, const fs::path& dest) {
+inline JobResult labBatch(const fs::path& in, bool trim, bool normalize, const fs::path& dest, bool convert = false) {
     lab::BatchOptions o;
     o.trim = trim;
     o.normalize = normalize;
+    o.convert = convert;   // P1: any PCM depth/rate into the Pa5X limits, with the before/after format per file
     const auto r = lab::runBatch(in, dest, o);
     if (!r.error.empty()) return {"Batch refused: " + r.error, std::nullopt, {}};
     if (dest.empty()) return {"Batch preview (nothing written)\n\n" + r.report, std::nullopt, {}};

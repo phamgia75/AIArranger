@@ -14,6 +14,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "LibraryManagerComponent.h"
 #include "ResourcesComponent.h"
+#include "WaveView.h"
 #include "jobs/job_queue.h"
 #include "ui/studio/studio_models.h"
 #include "ui/studio/studio_tools.h"
@@ -57,7 +58,9 @@ public:
     juce::String paNativeUnavailable() const;
     void writeKmp(const juce::File& dest);        // Sample Lab > KMP / KSF Writer: the previewed Sound (EXPERIMENTAL, L1)
     juce::String kmpUnavailable();
-    enum class LabTool { Analyze, Slice, Loop, BatchPreview, Batch };
+    // P1: DrumMap proposes a drum map for the WAV folder (read on a worker); DrumKitTx / DrumKitKmp build the kit inside an
+    // export job from the folder and the edited map. Analyze also draws the waveform and loop seam (no playback).
+    enum class LabTool { Analyze, Slice, Loop, BatchPreview, Batch, DrumMap, DrumKitTx, DrumKitKmp };
     void setLabInput(const juce::File& wavOrFolder);
     void runLabTool(LabTool t, const juce::File& dest = {});
     juce::String labUnavailable(LabTool t) const;
@@ -66,6 +69,9 @@ public:
     juce::TextEditor& labEnd() { return labEnd_; }
     juce::ToggleButton& labTrim() { return labTrim_; }
     juce::ToggleButton& labNormalize() { return labNorm_; }
+    juce::ToggleButton& labConvert() { return labConvert_; }
+    juce::TextEditor& labDrumMap() { return labDrumMap_; }
+    const WaveView& labWave() const { return labWave_; }
     // Style Studio editing (E3): element/track browser, ops, undo/redo, SMF import/export
     juce::ComboBox& styleElement() { return styleElem_; }
     juce::ComboBox& styleTrack() { return styleTrack_; }
@@ -137,6 +143,7 @@ private:
         std::vector<std::vector<std::pair<juce::Component*, int>>> rows;
         juce::Component* fill = nullptr;
         std::vector<juce::Component*> collapse;   // rows led by one of these take no space while it is hidden
+        std::map<juce::Component*, int> heights;   // rows led by one of these are this tall (else 28)
         void resized() override;
     };
 
@@ -193,7 +200,9 @@ private:
     juce::TextButton* kmpBtn_ = nullptr;
     std::map<LabTool, juce::TextButton*> labButtons_;
     juce::TextEditor labBars_, labBeats_, labStart_, labEnd_, labSnap_, labXfade_;
-    juce::ToggleButton labTrim_{"Trim -60 dBFS"}, labNorm_{"Normalize peak -1 dBFS"};
+    juce::ToggleButton labTrim_{"Trim -60 dBFS"}, labNorm_{"Normalize peak -1 dBFS"}, labConvert_{"Convert to 16-bit, 11.025-48 kHz"};
+    juce::TextEditor labDrumMap_;
+    WaveView labWave_;
     juce::Label labInput_;
     juce::File labIn_;
     // Sample Lab › Quality Report

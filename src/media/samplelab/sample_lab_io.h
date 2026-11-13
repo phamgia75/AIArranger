@@ -13,6 +13,7 @@
 // (AIARR_MIDI_HW_TX). Design note in the E4 report; the offline counterpart is sound/rendered_source.h.
 
 #include "media/kst_backup.h"
+#include "media/samplelab/optimize.h"
 #include "media/samplelab/sample_lab.h"
 #include "media/sound/ksf_folder_source.h"   // yinHz (pitch)
 #include "media/sound/package_writer.h"      // pkgio::FileSet, outputFolderRefusal, publishNewFolder
@@ -223,6 +224,7 @@ struct BatchOptions {
     NormMode mode = NormMode::Peak;
     double targetDb = -1, headroomDb = 1;
     double nearThreshold = 0.98;   // findDuplicates
+    bool convert = false;          // optimize.h: any PCM/float WAV to 16-bit, the rate into 11 025-48 000 Hz (pa5xRate)
 };
 
 // Batch limits, checked up front from the folder listing (file sizes only, nothing read): a batch reads, processes and
@@ -241,6 +243,7 @@ struct BatchItem {
     int root = 60;
     std::string rootFrom;      // "smpl", "file name", "pitch", "default"
     std::vector<std::string> limits;   // Pa5X sample limits the result breaks (sound::validateSample)
+    WavFormat in, out;                 // file format before and after (convert)
 };
 
 struct BatchResult { std::string error; std::vector<BatchItem> items; std::vector<DuplicatePair> duplicates; std::string report; };
@@ -300,7 +303,13 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
         else {
             std::ifstream f(p, std::ios::binary);
             const std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            it.error = sound::readWav(b, &s, &noSmpl);
+            if (o.convert) {
+                it.error = readWavAny(b, &s, &it.in, &noSmpl);
+                if (it.error.empty()) it.error = resample(s, pa5xRate(s.rate));
+            } else {
+                it.error = sound::readWav(b, &s, &noSmpl);
+                it.in = {s.rate, 16, false, s.channels, s.frames()};
+            }
             // Format limits before any analysis: the rate sets the cost of the pitch search.
             if (it.error.empty() && (s.rate < 11025 || s.rate > 48000)) it.error = "sample rate " + std::to_string(s.rate) + " Hz outside 11025-48000 Hz";
             else if (it.error.empty() && (s.frames() == 0 || s.frames() > 1048576)) it.error = "no audio, or longer than 1 048 576 frames";
@@ -322,6 +331,7 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
             if (o.trim) it.trim = trimSilence(s, o.trimDb, o.fadeIn, o.fadeOut);
             if (o.normalize) it.gain = normalize(s, o.mode, o.targetDb, o.headroomDb);
             it.after = measureLevel(s);
+            it.out = {s.rate, 16, false, s.channels, s.frames()};
             s.name = it.file.substr(0, 20);   // validateSample needs a name; the file keeps its own
             for (char& c : s.name) if (c < 0x20 || c > 0x7E) c = '_';
             sound::validateSample(s, 0, it.limits);
@@ -341,6 +351,8 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
 
     char line[768];
     std::string rep = "AIArranger Sample Lab: batch (SOFTWARE evidence only)\n\nSource: " + in.string() + "\n";
+    if (o.convert) rep += "Convert: to 16-bit (TPDF dither from 24/32-bit and float, 8-bit shifted exactly), rate into 11025-48000 Hz "
+                          "(windowed sinc; loop points scaled and rounded)\n";
     std::snprintf(line, sizeof line, "Trim: %s  Normalize: %s\n\n", o.trim ? ("below " + std::to_string(int(o.trimDb)) + " dBFS").c_str() : "off",
                   !o.normalize ? "off" : (std::string(o.mode == NormMode::Peak ? "peak" : "RMS") + " to " + std::to_string(o.targetDb).substr(0, 5) +
                                           " dBFS, headroom " + std::to_string(o.headroomDb).substr(0, 4) + " dB").c_str());
@@ -353,6 +365,7 @@ inline BatchResult runBatch(const fs::path& in, const fs::path& out, const Batch
                       it.after.peakDb, it.after.rmsDb, it.gain.gainDb, it.gain.limited ? "L" : " ", it.trim.cutStart, it.trim.cutEnd, it.pitchHz,
                       it.root, it.rootFrom.c_str(), it.file.c_str());
         rep += line;
+        if (o.convert) rep += "      format: " + formatLine(it.in) + " -> " + formatLine(it.out) + "\n";
         for (const auto& l : it.limits) rep += "      Pa5X limit: " + l + "\n";
         ++written;
     }

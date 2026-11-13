@@ -74,6 +74,7 @@ public:
     juce::TextEditor& orderField() { return order_; }
     juce::TextEditor& splitsField() { return splits_; }
     juce::TextEditor& mappingField() { return mapping_; }   // KSF-only folders: proposed key map, editable
+    juce::TextEditor& zoneMapField() { return zoneMap_; }   // P1, every source: zone map + loops (samplelab/zone_map.h), editable
     juce::String previewText() const { return preview_.getText(); }
     juce::String recipeText() const { return recipe_.getText(); }
     juce::String recipeShownText() const { return recipe_.shownText(); }
@@ -84,7 +85,7 @@ private:
     std::function<void(const juce::File&)> openInResources_;
     juce::TextButton folderBtn_{"Choose Folder..."}, previewBtn_{"Preview"}, generateBtn_{"Generate Package..."};
     juce::Label folder_, nameLbl_{{}, "Sound name"}, orderLbl_{{}, "Layers, softest first"}, splitsLbl_{{}, "Velocity splits"}, status_, pluginNote_;
-    juce::TextEditor name_, order_, splits_, mapping_;
+    juce::TextEditor name_, order_, splits_, mapping_, zoneMap_;
     TextView preview_, recipe_;
     KeyMapView map_;
     std::shared_ptr<juce::FileChooser> chooser_;
@@ -95,7 +96,7 @@ private:
     PendingJobs genJobs_;
     jobs::JobState lastJob_;
     void showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err, const std::string& mapping,
-                     const std::string& ksfNotes);
+                     const std::string& ksfNotes, const std::string& zoneMap);
 
     JobRunner ownJobs_;   // destroyed first: its jobs are cancelled (never published half-way), its done callbacks dropped
     JobPort port_ = ownJobs_.port();
