@@ -130,10 +130,10 @@ int main() {
         TEST("P1: role is one undo step", f.apply(Op::TrackRole, 0, last, "melody").empty() && f.undoLabel() == "Track role" &&
              f.style().sections[0].tracks[last].role == uasf::TrackRole::Melody);
         TEST("P1: bad part refused", has(f.apply(Op::TrackPart, 0, last, "acc9"), "part must be"));
-        TEST("P1: part acc5", f.apply(Op::TrackPart, 0, last, "ACC5").empty() && f.exportOptions().route.at(ch) == 15 && has(f.browser(), "-> Pa5X Acc5"));
+        TEST("P1: part acc5", f.apply(Op::TrackPart, 0, last, "ACC5").empty() && f.style().korg_export.route.at(ch) == 15 && has(f.browser(), "-> Pa5X Acc5"));
         TEST("P1: bad sound refused", !f.apply(Op::TrackSound, 0, last, "200 0 0").empty() && !f.apply(Op::TrackSound, 0, last, "1 2").empty() &&
-             f.exportOptions().sounds.empty());
-        TEST("P1: sound set", f.apply(Op::TrackSound, 0, last, "121 1 34").empty() && f.exportOptions().sounds.at(15).pc == 34 &&
+             f.style().korg_export.sounds.empty());
+        TEST("P1: sound set", f.apply(Op::TrackSound, 0, last, "121 1 34").empty() && f.style().korg_export.sounds.at(15).pc == 34 &&
              has(f.browser(), "Acc5 sound 121/1/34"));
         const auto x = f.smfExport();
         TEST("P1: export carries the sound", x.ok && std::any_of(x.korg.elements[0].events.begin(), x.korg.elements[0].events.end(),
@@ -143,14 +143,68 @@ int main() {
         TEST("P1: part none = not exported", f.apply(Op::TrackPart, 0, last, "none").empty() && has(f.browser(), "none (not exported)") &&
              has(f.apply(Op::TrackSound, 0, last, "1 2 3"), "not exported"));
         TEST("P1: part back + sound unresolved", f.apply(Op::TrackPart, 0, last, "acc5").empty() &&
-             f.apply(Op::TrackSound, 0, last, "unresolved").empty() && f.exportOptions().sounds.empty());
+             f.apply(Op::TrackSound, 0, last, "unresolved").empty() && f.style().korg_export.sounds.empty());
         f.apply(Op::TrackSound, 0, last, "121 1 34");
+        // Codex r1 #1 / owner gate 1: part/sound are Style edits (UASF 'KEXP'): dirty, undo/redo, Save UASF + reload keep them
+        {
+            StyleStudioModel g;
+            g.load(fs::path(REPO_DIR) / "fixtures/synthetic/SYNTH_FULL_SFF2.sty", &why);
+            TEST("r1#1: a sound change alone is an unwritten edit", g.apply(Op::TrackSound, 0, 0, "1 2 3").empty() && g.dirty() &&
+                 g.undoLabel() == "Pa5X sound");
+            TEST("r1#1: undo / redo of the sound", g.undo() && !g.dirty() && g.redo() && g.dirty());
+            TEST("r1#1: opening another Style is refused", !g.load(root / "edited.uasf", &why) && has(why, "not written"));
+            TEST("r1#1: a part change is an undo step", g.apply(Op::TrackPart, 0, 0, "acc4").empty() && g.undoLabel() == "Pa5X part");
+            TEST("r1#1: element sound needs a track, then is an undo step", !g.apply(Op::ElementSound, 2, {}, "4 5 6").empty() &&
+                 g.apply(Op::ElementSound, 2, 0, "4 5 6").empty() && g.undoLabel() == "Pa5X element sound" &&
+                 has(g.browser(), "sound 4/5/6 (this element)"));
+            TEST("rename is an unwritten edit", g.apply(Op::ElementRename, 1, {}, "Renamed").empty() && g.dirty());
+            TEST("r1#1: Save UASF writes them (nothing unwritten after)", g.saveUasf(root / "r1.uasf").empty() && !g.dirty());
+            StyleStudioModel back2;
+            TEST("r1#1: reload keeps part, sound and element sound", back2.load(root / "r1.uasf", &why) &&
+                 back2.style().korg_export.route == g.style().korg_export.route && back2.style().korg_export.sounds == g.style().korg_export.sounds &&
+                 back2.style().korg_export.element_sounds == g.style().korg_export.element_sounds &&
+                 back2.style().sections[1].name == "Renamed" && !back2.dirty());
+            TEST("r1#1: the reloaded Style exports the same SMF", back2.smfExport().bytes == g.smfExport().bytes);
+            Verification l;
+            TEST("r1#1: export after reload", back2.exportSmf(root / "r1.mid", &l).empty() && l.l1.state == Check::Passed);
+            StyleStudioModel back3;
+            TEST("r1#1: reopening the SMF restores the sounds, element sound included", back3.load(root / "r1.mid", &why) &&
+                 back3.smfExport().bytes == back2.smfExport().bytes);
+        }
+        // Owner gate 5/6: create a new Intro, Variation, Fill and Ending, edit each, save, reload, export
+        {
+            StyleStudioModel w;
+            w.load(sty, &why);   // SYNTH_WALTZ_68: Main A/B, Fill AA/BB, Intro A, Ending A
+            const char* kinds[] = {"Intro 2", "Variation 3", "Fill 3", "Ending 2"};
+            const uasf::SectionType types[] = {uasf::SectionType::Intro2, uasf::SectionType::Main3, uasf::SectionType::Fill3, uasf::SectionType::Ending2};
+            bool all = true;
+            for (int i = 0; i < 4; ++i) {
+                const size_t n = w.style().sections.size();
+                const bool made = w.apply(Op::ElementCopy, 0, {}, kinds[i]).empty() && w.style().sections.size() == n + 1 &&
+                                  w.style().sections[n].type == types[i] && w.style().sections[n].name == kinds[i];
+                const bool edited = w.apply(Op::Transpose, n, {}, "1").empty() && w.apply(Op::ElementLength, n, {}, "6").empty() &&
+                                    w.apply(Op::ElementRename, n, {}, std::string("New ") + kinds[i]).empty() &&
+                                    w.apply(Op::ElementSound, n, 0, std::to_string(10 + i) + " 0 " + std::to_string(i)).empty() &&
+                                    w.style().sections[n].bars == 6;
+                TEST((std::string("gate5: new ") + kinds[i] + " created, selected by index and edited").c_str(), made && edited);
+                all = all && made && edited;
+            }
+            TEST("gate6: save after the new elements", all && w.saveUasf(root / "gate.uasf").empty() && !w.dirty());
+            StyleStudioModel r;
+            TEST("gate6: reload has the 4 new elements with their names, lengths and sounds", r.load(root / "gate.uasf", &why) &&
+                 r.style().sections.size() == 10 && r.style().sections[9].name == "New Ending 2" && r.style().sections[6].bars == 6 &&
+                 r.style().korg_export.element_sounds.size() == 4);
+            const auto x = r.smfExport();
+            auto marker = [&](const char* m) { return std::any_of(x.korg.elements.begin(), x.korg.elements.end(), [&](const auto& e) { return e.marker == m; }); };
+            TEST("gate6: export has i2cv1, v3cv1, f3cv1, e2cv1 and each element's sound", x.ok && marker("i2cv1") && marker("v3cv1") && marker("f3cv1") &&
+                 marker("e2cv1") && has(x.report, "e2cv1 ") && has(x.report, "MSB 13 LSB 0 PC 3"));
+        }
         Verification lvl;
         TEST("P1: Korg SMF written", f.exportSmf(root / "conv.mid", &lvl).empty() && lvl.l1.state == Check::Passed);
 
         StyleStudioModel k;
         TEST("P1: our Korg Style SMF reopens for editing", k.load(root / "conv.mid", &why) && has(k.browser(), "Korg Style SMF") &&
-             k.exportOptions().sounds.at(15).msb == 121);
+             k.style().korg_export.sounds.at(15).msb == 121);
         TEST("P1: re-export of the reopened SMF is byte-identical", k.smfExport().bytes == f.smfExport().bytes);
         std::ofstream(root / "plain.mid", std::ios::binary) << std::string("MThd\0\0\0\6\0\0\0\1\0\x60MTrk\0\0\0\4\0\xFF\x2F\0", 26);
         TEST("P1: a plain SMF without markers is refused", !k.load(root / "plain.mid", &why, true) && has(why, "Korg"));

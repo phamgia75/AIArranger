@@ -1413,6 +1413,61 @@ int main() {
                      st.styleModel().loaded() && st.styleText().contains("Korg Style SMF") && !st.styleText().contains("Parse: SUCCESS"));
                 st.openStyle(juce::File(sty.string()));
             }
+            {   // Owner gate #53 (4-6): new Intro, Variation, Fill and Ending from the page, each selected and edited; save, reload, export
+                const int base = int(st.styleModel().style().sections.size());   // SYNTH_WALTZ_68: 6 elements
+                const char* kinds[] = {"Intro 2", "Variation 3", "Fill 3", "Ending 2"};
+                for (int i = 0; i < 4; ++i) {
+                    st.styleElement().setSelectedId(2, juce::sendNotificationSync);
+                    st.styleOp().setSelectedId(8);   // Element: copy to
+                    st.styleValue().setText(kinds[i]);
+                    click(pg, "Apply");
+                    const int id = base + i + 2;   // the new element's choice
+                    const bool listed = st.styleElement().indexOfItemId(id) >= 0 && st.styleElement().getItemText(st.styleElement().indexOfItemId(id)).contains(kinds[i]);
+                    st.styleElement().setSelectedId(id, juce::sendNotificationSync);
+                    st.styleOp().setSelectedId(11);   // Element: length
+                    st.styleValue().setText("6");
+                    click(pg, "Apply");
+                    const bool lengthened = st.styleStatus().startsWith("Done: Element: length") && st.styleModel().style().sections[size_t(base + i)].bars == 6;
+                    st.styleTrack().setSelectedId(2, juce::sendNotificationSync);   // [0]
+                    st.styleOp().setSelectedId(15);   // Element: Pa5X sound
+                    st.styleValue().setText(juce::String(20 + i) + " 0 " + juce::String(i));
+                    click(pg, "Apply");
+                    TEST((juce::String("gate #53 studio: new ") + kinds[i] + " listed, selectable and editable (length, element sound)").toRawUTF8(),
+                         listed && lengthened && st.styleStatus().startsWith("Done: Element: Pa5X sound") && st.styleElement().getSelectedId() == id);
+                }
+                TEST("gate #53 studio: Pa5X sound edits are unwritten edits with undo", st.styleModel().dirty() &&
+                     find<juce::Button>(pg, "Undo Pa5X element sound") != nullptr);
+                st.styleUndo();
+                TEST("gate #53 studio: undo keeps a valid selection", st.styleElement().getSelectedId() == base + 5 && st.styleRedo());
+                st.saveStyleUasf(juce::File((root / "gate53.uasf").string()));
+                TEST("gate #53 studio: Save UASF writes every edit", fs::is_regular_file(root / "gate53.uasf") && !st.styleModel().dirty());
+                st.openStyle(juce::File((root / "gate53.uasf").string()));
+                TEST("gate #53 studio: reload lists the 4 new elements with their sounds", st.styleStatus().startsWith("Opened for editing") &&
+                     st.styleElement().getNumItems() == base + 5 && st.styleElement().getItemText(base + 4).contains("Ending 2") &&
+                     st.styleModel().style().korg_export.element_sounds.size() == 4 && st.styleText().contains("sound 23/0/3 (this element)"));
+                using EJ = app::StudioComponent::ExportJob;
+                const auto gid = st.exportJob(EJ::StyleSmf, juce::File((root / "gate53.mid").string()));
+                waitIdle(10000);
+                jobs::JobState gj;
+                for (const auto& j : st.jobList()) if (j.id == gid) gj = j;
+                TEST("gate #53 studio: export job after reload carries each element's sound", gj.phase == jobs::Phase::Done &&
+                     gj.writerText.find("Element-specific Pa5X sounds") != std::string::npos && gj.writerText.find("e2cv1 ") != std::string::npos);
+                // Gate 3: a Korg SMF whose bank/program cannot be kept exactly needs the explicit choice
+                std::ifstream gin(root / "gate53.mid", std::ios::binary);
+                auto k = exporters::korg::parse({std::istreambuf_iterator<char>(gin), std::istreambuf_iterator<char>()}).style;
+                k.elements[0].events.insert(k.elements[0].events.begin(), {0, uint8_t(0xB0 | exporters::korg::kAcc1Ch), 0, 5});   // CC0 alone
+                const auto w = exporters::korg::write(k);
+                std::ofstream(root / "lossy.mid", std::ios::binary).write(reinterpret_cast<const char*>(w.bytes.data()), std::streamsize(w.bytes.size()));
+                st.openStyle(juce::File((root / "lossy.mid").string()));
+                TEST("gate #53 studio: lossy Korg SMF refused by default, naming the loss", w.ok && st.styleStatus().startsWith("Not editable") &&
+                     st.styleStatus().contains("cannot be kept exactly") && fs::equivalent(st.styleModel().path(), root / "gate53.uasf"));
+                st.styleKeepFirstSound().setToggleState(true, juce::dontSendNotification);
+                st.openStyle(juce::File((root / "lossy.mid").string()));
+                TEST("gate #53 studio: with keep-first chosen it opens and lists the loss", st.styleStatus().startsWith("Opened for editing") &&
+                     st.styleText().contains("LOSS: "));
+                st.styleKeepFirstSound().setToggleState(false, juce::dontSendNotification);
+                st.openStyle(juce::File(sty.string()));
+            }
             TEST("studio: the source Style is unchanged", fs::last_write_time(sty) == styStamp);
             st.setValidationTarget(juce::File((root / "waltz.mid").string()));
             st.runValidator(app::StudioComponent::Validator::StyleSmf);

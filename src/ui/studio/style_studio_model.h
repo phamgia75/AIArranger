@@ -28,14 +28,15 @@ class StyleStudioModel {
 public:
     // The ops the Style Studio offers, in menu order, with what their value field holds.
     // Element ops act on the chosen element; Track ops on the chosen track's channel, style-wide (a Pa track). Part and
-    // Sound are Pa5X export settings (the CASM route and the user's bank/program), not UASF edits: no undo, not in UASF.
+    // Sound are the Pa5X export settings (CASM route, user bank/program) kept in the Style (UASF 'KEXP'): undo, save,
+    // unwritten-edit prompt as any edit. Element sound sets the chosen track's sound in the chosen element only.
     enum class Op { Quantize, Transpose, VelocitySet, VelocityOffset, VelocityScale, Tempo, Meter,
-                    ElementCopy, ElementClear, ElementRename, ElementLength, TrackRole, TrackPart, TrackSound };
-    static constexpr int kOps = 14;
+                    ElementCopy, ElementClear, ElementRename, ElementLength, TrackRole, TrackPart, TrackSound, ElementSound };
+    static constexpr int kOps = 15;
     static const char* opName(Op o) {
         static const char* n[] = {"Quantize", "Transpose", "Velocity: set", "Velocity: offset", "Velocity: scale %", "Tempo", "Meter",
                                   "Element: copy to", "Element: clear", "Element: rename", "Element: length", "Track: role",
-                                  "Track: Pa5X part", "Track: Pa5X sound"};
+                                  "Track: Pa5X part", "Track: Pa5X sound", "Element: Pa5X sound"};
         return n[int(o)];
     }
     static const char* opHint(Op o) {
@@ -43,17 +44,20 @@ public:
                                   "percent, e.g. 90", "BPM 20-400 (whole style)", "num/den, e.g. 6/8 (element only)",
                                   "Intro 1-3, Variation 1-4, Fill 1-4, Break, Ending 1-3", "(no value)", "new name", "bars 1-256",
                                   "drum, percussion, bass, chord, pad, phrase1, phrase2, melody, accompaniment",
-                                  "bass, drum, perc, acc1-acc5 or none", "MSB LSB PC (your Pa5X values) or unresolved"};
+                                  "bass, drum, perc, acc1-acc5 or none", "MSB LSB PC (your Pa5X values) or unresolved",
+                                  "MSB LSB PC for this element only, or unresolved"};
         return h[int(o)];
     }
 
     // Refused while the open Style has edits not written yet, unless `discard` (the user chose Discard): opening another
     // Style must never silently drop them. An invalid Style (UASF validator ERROR) never becomes an editable model.
-    bool load(const std::filesystem::path& path, std::string* error, bool discard = false) {
+    // `policy`: for a Korg Style SMF whose bank/program cannot be kept exactly, Refuse (default) or KeepFirst (the user's
+    // explicit choice; every loss is listed in the browser and the conversion report).
+    bool load(const std::filesystem::path& path, std::string* error, bool discard = false,
+              style_edit::SoundLoss policy = style_edit::SoundLoss::Refuse) {
         if (dirty() && !discard)
             return fail(error, "the open Style has edits not written yet: Save UASF... or Export Pa5X SMF..., or Discard them first");
         uasf::StyleDefinition s;
-        exporters::korg::MapOptions opts;
         std::vector<std::string> notes;
         std::string ext = path.extension().string();
         for (auto& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -62,12 +66,11 @@ public:
             if (!std::filesystem::is_regular_file(path, ec) || std::filesystem::file_size(path, ec) > (8u << 20))
                 return fail(error, path.string() + ": not a regular file of at most 8 MiB");
             std::ifstream f(path, std::ios::binary);
-            auto in = style_edit::importKorgSmf({std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()}, path.stem().string());
+            auto in = style_edit::importKorgSmf({std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()}, path.stem().string(), policy);
             if (!in.ok) return fail(error, path.string() + ": " + in.error);
             s = std::move(in.style);
-            opts.sounds = std::move(in.sounds);
             notes = std::move(in.notes);
-            notes.insert(notes.begin(), "Source: Korg Style SMF separated by markers; bank/program per track taken as the Pa5X sounds");
+            notes.insert(notes.begin(), "Source: Korg Style SMF separated by markers; each element's bank/program kept as its Pa5X sounds");
         } else if (ext == ".uasf") {
             uasf::UasfDeserializer d;
             auto r = d.deserializeFromFile(path.string());
@@ -81,7 +84,7 @@ public:
             auto mapped = m.map(parsed);
             if (!mapped.success) return fail(error, path.string() + ": " + mapped.error);
             s = std::move(mapped.style);
-            opts.route = exporters::korg::routeFromCasm(parsed);
+            s.korg_export.route = exporters::korg::routeFromCasm(parsed);
             std::string fmt = "unknown SFF version (no SFF1/SFF2 marker)";
             for (const auto& mk : parsed.markers)
                 if (mk.name == "SFF1" || mk.name == "SFF2") fmt = mk.name;
@@ -97,7 +100,6 @@ public:
             if (i.severity == uasf::ValidationIssue::ERROR)
                 return fail(error, path.string() + ": refused by the UASF validator: " + i.message + (i.location.empty() ? "" : " (" + i.location + ")"));
         ed_ = std::make_unique<style_edit::StyleEditor>(std::move(s));
-        opts_ = std::move(opts);
         notes_ = std::move(notes);
         path_ = path;
         saved_ = bytes();
@@ -131,7 +133,7 @@ public:
                 size_t notes = 0;
                 for (const auto& e : tr.events) notes += e.type == uasf::MidiEventType::NoteOn && e.data2 > 0;
                 o += "    [" + std::to_string(t) + "] ch " + std::to_string(int(tr.midi_channel) + 1) + (tr.is_drum ? " drum" : "") + "  '" + tr.name +
-                     "'  " + std::to_string(notes) + " notes  " + style_edit::trackRoleName(tr.role) + " -> Pa5X " + partOf(tr.midi_channel) + "\n";
+                     "'  " + std::to_string(notes) + " notes  " + style_edit::trackRoleName(tr.role) + " -> Pa5X " + partOf(tr.midi_channel, sec.type) + "\n";
             }
         }
         return o;
@@ -190,7 +192,7 @@ public:
                 }
                 break;
             }
-            case Op::TrackRole: case Op::TrackPart: case Op::TrackSound: {
+            case Op::TrackRole: case Op::TrackPart: case Op::TrackSound: case Op::ElementSound: {
                 if (!section || !track || *track >= style().sections[*section].tracks.size()) return "choose an element and a track";
                 const uint8_t ch = style().sections[*section].tracks[*track].midi_channel;
                 if (op == Op::TrackRole) {
@@ -205,7 +207,7 @@ public:
                     for (auto& c : v) c = char(std::tolower(static_cast<unsigned char>(c)));
                     for (uint8_t g = 0; g < 16; ++g) {   // the source channel the exporter maps onto that Pa5X track
                         const uint8_t kch = k::korgChannelFor(g);
-                        if (v == "none" ? kch == 0xFF : kch != 0xFF && v == k::soundMapKey(kch)) { opts_.route[ch] = g; return ""; }
+                        if (v == "none" ? kch == 0xFF : kch != 0xFF && v == k::soundMapKey(kch)) return done(ed_->setPart(ch, g));
                     }
                     return std::string("part must be one of: ") + opHint(Op::TrackPart);
                 }
@@ -214,9 +216,10 @@ public:
                 std::istringstream line(std::string(k::soundMapKey(kch)) + " " + value);
                 const auto m = k::parseSoundMap(line, "sound");
                 if (!m.ok) return "sound: " + m.error.substr(m.error.find(": ") + 2) + " (MSB LSB PC 0-127, or unresolved)";
-                if (m.sounds.count(kch)) opts_.sounds[kch] = m.sounds.at(kch);
-                else opts_.sounds.erase(kch);
-                return "";
+                std::optional<uasf::KorgSound> snd;
+                if (m.sounds.count(kch)) snd = uasf::KorgSound{m.sounds.at(kch).msb, m.sounds.at(kch).lsb, m.sounds.at(kch).pc};
+                r = ed_->setSound(kch, snd, op == Op::ElementSound ? std::optional<uasf::SectionType>(style().sections[*section].type) : std::nullopt);
+                break;
             }
         }
         return done(r);
@@ -270,14 +273,13 @@ public:
     // The Pa5X Style SMF of the Style now, with the CASM route and the user's sounds, and its conversion report (what
     // mapped, what was dropped, what does not carry over). Built on the message thread; the job only writes the bytes.
     style_edit::SmfExport smfExport() const {
-        auto x = style_edit::exportPa5xSmf(style(), 0, opts_);
+        auto x = style_edit::exportPa5xSmf(style());
         std::string head = "Conversion: " + path_.filename().string() + " -> Korg Pa5X Style SMF separated by markers\n"
                            "Status: structurally valid (our reader + Korg Style SMF validator), not verified on a Pa5X\n";
         for (const auto& n : notes_) head += n + "\n";
         x.report = head + "\n" + x.report;
         return x;
     }
-    const exporters::korg::MapOptions& exportOptions() const { return opts_; }
 
     // For an export job (jobs/export_specs.h): the UASF bytes of the Style now, and, once the job has written them,
     // marking them as written (dirty() stays true when the Style was edited after the job was made).
@@ -316,19 +318,23 @@ private:
     }
 
     uint8_t korgCh(uint8_t ch) const {
-        const auto r = opts_.route.find(ch);
-        return exporters::korg::korgChannelFor(r == opts_.route.end() ? ch : r->second);
+        const auto& route = style().korg_export.route;
+        const auto r = route.find(ch);
+        return exporters::korg::korgChannelFor(r == route.end() ? ch : r->second);
     }
-    std::string partOf(uint8_t ch) const {
+    std::string partOf(uint8_t ch, uasf::SectionType element) const {
         const uint8_t kch = korgCh(ch);
         if (kch == 0xFF) return "none (not exported)";
-        const auto s = opts_.sounds.find(kch);
-        return std::string(exporters::korg::korgTrackName(kch)) + (s == opts_.sounds.end() ? " sound unresolved" :
-               " sound " + std::to_string(s->second.msb) + "/" + std::to_string(s->second.lsb) + "/" + std::to_string(s->second.pc));
+        const auto& k = style().korg_export;
+        auto txt = [](const uasf::KorgSound& x) { return std::to_string(x.msb) + "/" + std::to_string(x.lsb) + "/" + std::to_string(x.pc); };
+        const auto e = k.element_sounds.find({element, kch});
+        const auto s = k.sounds.find(kch);
+        return std::string(exporters::korg::korgTrackName(kch)) +
+               (e != k.element_sounds.end() ? " sound " + txt(e->second) + " (this element)"
+                : s != k.sounds.end()        ? " sound " + txt(s->second) : std::string(" sound unresolved"));
     }
 
     std::unique_ptr<style_edit::StyleEditor> ed_;
-    exporters::korg::MapOptions opts_;   // CASM route + user Pa5X sounds for the Style SMF export
     std::vector<std::string> notes_;     // source format and what the conversion cannot carry
     std::filesystem::path path_;
     std::vector<uint8_t> saved_;   // UASF bytes of the Style as opened or last written

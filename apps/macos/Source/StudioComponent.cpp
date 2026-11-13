@@ -321,6 +321,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     pendDiscard_ = &button("Discard Edits and Open", [this] { resolveUnsavedStyle(UnsavedChoice::Discard); });
     pendCancel_ = &button("Cancel", [this] { resolveUnsavedStyle(UnsavedChoice::Cancel); });
     stylePage_.rows = {{{&openSty, 150}, {liveFromStyle_, 160}, {&label("Load the Style there with Load Style... to audition it.", kText2), 0}},
+                       {{&styleKeepFirst_, 0}},
                        {{&label("Element", kText2), 60}, {&styleElem_, 220}, {&label("Track", kText2), 44}, {&styleTrack_, 220}},
                        {{&styleOp_, 170}, {&styleValue_, 170}, {applyBtn_, 80}, {&reasonFor(*applyBtn_), 0}},
                        {{&styleStatus_, 0}},
@@ -687,7 +688,8 @@ void StudioComponent::loadStyle(const juce::File& sty, bool discard) {
                  "\n\n" + importers::sff1::Sff1ReportGenerator::generateReport(r);
     }
     std::string err;
-    const bool ok = style_.load(sty.getFullPathName().toStdString(), &err, discard);
+    const bool ok = style_.load(sty.getFullPathName().toStdString(), &err, discard,
+                                styleKeepFirst_.getToggleState() ? style_edit::SoundLoss::KeepFirst : style_edit::SoundLoss::Refuse);
     styleStatus_.setText(ok ? "Opened for editing: " + sty.getFileName() : "Not editable: " + juce::String(err), juce::dontSendNotification);
     if (!ok) {   // the read-only report may still be shown, but only when no other Style is open for editing
         if (!style_.loaded()) sff1Report_ = report;
