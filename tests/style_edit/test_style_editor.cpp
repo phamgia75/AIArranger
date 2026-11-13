@@ -532,6 +532,25 @@ static void testKorgSmfImport() {
     const auto cv = importKorgSmf(korg::write(kd.style()).bytes, "CV");
     TEST("cv2 listed in notes, not imported", cv.ok && cv.style.sections.size() == 4 &&
          std::any_of(cv.notes.begin(), cv.notes.end(), [](const std::string& n) { return n.find("v1cv2 not imported") != std::string::npos; }));
+    // Codex r1 #2: different bank/program per element is reported, never silently replaced by the first
+    {
+        korg::Style ks = x.korg;
+        auto setPc = [&](korg::Element& el, uint8_t pc) {
+            for (auto& e : el.events) if (e.status == (0xC0 | korg::kDrumCh)) e.d1 = pc;
+        };
+        setPc(ks.elements[1], 25);
+        const auto diff = importKorgSmf(korg::write(ks).bytes, "Diff");
+        TEST("r1#2: conflicting element sound reported", diff.ok && diff.sounds.at(korg::kDrumCh).pc == 16 &&
+             std::any_of(diff.notes.begin(), diff.notes.end(), [](const std::string& n) {
+                 return n.find("v2cv1") != std::string::npos && n.find("120/0/25") != std::string::npos && n.find("120/0/16") != std::string::npos; }));
+        TEST("r1#2: same sound in every element: no note", std::none_of(in.notes.begin(), in.notes.end(), [](const std::string& n) {
+                 return n.find("differs") != std::string::npos; }));
+        // Korg validate() allows bank/program only at tick 0 (a mid-element change is refused); a second one there:
+        ks.elements[0].events.insert(ks.elements[0].events.begin(), {0, static_cast<uint8_t>(0xC0 | korg::kDrumCh), 40, 0});
+        const auto mid = importKorgSmf(korg::write(ks).bytes, "Mid");
+        TEST("r1#2: a later bank/program change inside an element is reported", mid.ok &&
+             std::any_of(mid.notes.begin(), mid.notes.end(), [](const std::string& n) { return n.find("later bank/program") != std::string::npos; }));
+    }
     TEST("plain garbage refused", !importKorgSmf({'M', 'T', 'h', 'd'}, "x").ok);
     TEST("plain SMF without markers refused", !importKorgSmf(smf1(), "x").ok);
 }

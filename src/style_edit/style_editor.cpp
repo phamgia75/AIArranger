@@ -3,6 +3,7 @@
 #include "exporters/korg/genos_to_korg.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <iterator>
 #include <deque>
@@ -644,7 +645,8 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
             if (k::korgChannelFor(static_cast<uint8_t>(g)) == kch) return g;
         return -1;
     };
-    std::map<uint8_t, uint8_t> sel[3];   // first CC0, CC32, PC value per Korg channel
+    std::map<uint8_t, std::string> origin;   // Korg channel -> element its sound was taken from
+    auto ref = [](const k::SoundRef& r) { return std::to_string(r.msb) + "/" + std::to_string(r.lsb) + "/" + std::to_string(r.pc); };
     for (const auto& el : ks.elements) {
         std::optional<uasf::SectionType> type;
         for (int i = 0; i <= static_cast<int>(uasf::SectionType::Break); ++i)
@@ -664,12 +666,17 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
         sec.bars = bar ? static_cast<uint32_t>(el.length / bar) : 0;
         std::map<uint8_t, TrackDefinition> tracks;
         size_t chordNotes = 0, dropped = 0;
+        std::map<uint8_t, std::array<int, 3>> sel;   // first CC0, CC32, PC of this element per Korg channel (-1 = none)
+        std::map<uint8_t, size_t> later;             // further bank/program events in this element
         for (const auto& e : el.events) {
             const uint8_t kch = e.status & 0x0F, hi = e.status & 0xF0;
             const int g = sourceCh(kch);
             if (g < 0) { ++dropped; continue; }
             if (hi == 0xC0 || (hi == 0xB0 && (e.d1 == 0 || e.d1 == 32))) {
-                sel[hi == 0xC0 ? 2 : e.d1 == 0 ? 0 : 1].try_emplace(kch, hi == 0xC0 ? e.d1 : e.d2);
+                auto& a = sel.try_emplace(kch, std::array<int, 3>{-1, -1, -1}).first->second;
+                int& slot = a[hi == 0xC0 ? 2 : e.d1 == 0 ? 0 : 1];
+                if (slot < 0) slot = hi == 0xC0 ? e.d1 : e.d2;
+                else ++later[kch];
                 continue;
             }
             auto [it, fresh] = tracks.try_emplace(kch);
@@ -689,13 +696,21 @@ KorgSmfImport importKorgSmf(const std::vector<uint8_t>& bytes, const std::string
             out.notes.push_back(el.marker + ": " + std::to_string(chordNotes) +
                                 " notes C-1..B-1 on chord-driven tracks (Pa5X Chord events) kept as notes; the exporter drops them");
         if (dropped) out.notes.push_back(el.marker + ": " + std::to_string(dropped) + " events outside the 8 Korg style tracks not imported");
+        // One sound per Korg track (the exporter writes it in every element): anything else is reported, never silent.
+        for (const auto& [kch, a] : sel) {
+            const std::string trk = std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": ";
+            if (a[0] < 0 || a[1] < 0 || a[2] < 0) { out.notes.push_back(trk + "incomplete bank select / program change, no sound taken"); continue; }
+            const k::SoundRef r{uint8_t(a[0]), uint8_t(a[1]), uint8_t(a[2])};
+            if (auto it = out.sounds.find(kch); it == out.sounds.end()) { out.sounds[kch] = r; origin[kch] = el.marker; }
+            else if (ref(it->second) != ref(r))
+                out.notes.push_back(trk + "selects " + ref(r) + ", differs from " + ref(it->second) + " (from " + origin[kch] +
+                                    "); the export writes " + ref(it->second) + " in every element");
+        }
+        for (const auto& [kch, n] : later)
+            out.notes.push_back(std::string("Korg ") + k::korgTrackName(kch) + ", " + el.marker + ": " + std::to_string(n) +
+                                " later bank/program events inside the element not kept (one sound per track)");
         s.sections.push_back(std::move(sec));
     }
-    for (const auto& [kch, msb] : sel[0])
-        if (sel[1].count(kch) && sel[2].count(kch)) out.sounds[kch] = {msb, sel[1][kch], sel[2][kch]};
-        else out.notes.push_back(std::string("Korg ") + k::korgTrackName(kch) + ": incomplete bank select / program change, no sound taken");
-    for (const auto& [kch, pc] : sel[2])
-        if (!sel[0].count(kch)) out.notes.push_back(std::string("Korg ") + k::korgTrackName(kch) + ": program change without bank select, no sound taken");
     if (s.sections.empty()) { out.error = "no element maps to a UASF section"; return out; }
     uasf::UasfValidator v;
     for (const auto& i : v.validate(s).issues)
