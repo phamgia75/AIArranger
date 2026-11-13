@@ -24,6 +24,9 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
+#include <sys/resource.h>
+#include <chrono>
+#include <ctime>
 
 static int failures = 0, passes = 0;
 #define TEST(name, expr) do { \
@@ -31,6 +34,28 @@ static int failures = 0, passes = 0;
     else { std::printf("  PASS: %s\n", name); ++passes; } } while (0)
 
 static void pump(int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); }
+
+// Per-phase timing (instrumentation only, no check): wall vs process CPU (all threads; children separately) and the
+// 1-minute load average. CPU tracking wall under load = slow; wall growing with flat CPU = blocked or starved.
+// "phase-start" lines carry the epoch second so a harness can sample a stalled phase.
+static void phase(const char* next) {
+    static std::string name;
+    static double wall0 = 0, cpu0 = 0, child0 = 0;
+    const auto secs = [](const timeval& t) { return double(t.tv_sec) + double(t.tv_usec) / 1e6; };
+    rusage self{}, kids{};
+    getrusage(RUSAGE_SELF, &self);
+    getrusage(RUSAGE_CHILDREN, &kids);
+    const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double cpu = secs(self.ru_utime) + secs(self.ru_stime), child = secs(kids.ru_utime) + secs(kids.ru_stime);
+    double load[1] = {0};
+    getloadavg(load, 1);
+    if (!name.empty())
+        std::printf("  phase-end: %-38s wall %7.2fs  cpu %7.2fs  cpu/wall %4.2f  child-cpu %6.2fs  load1 %5.1f\n", name.c_str(), wall - wall0,
+                    cpu - cpu0, (cpu - cpu0) / std::max(wall - wall0, 1e-3), child - child0, load[0]);
+    name = next ? next : "";
+    wall0 = wall, cpu0 = cpu, child0 = child;
+    if (next) std::printf("  phase-start: %s at %lld\n", next, (long long)std::time(nullptr));
+}
 
 template <typename T>
 static T* find(juce::Component& root, const juce::String& textPrefix) {
@@ -57,12 +82,14 @@ static juce::String section(juce::Component& root) {
 }
 
 int main() {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);   // under ctest stdout is a pipe: a killed run (timeout) still shows its last check
     setenv("AIARR_MIDI_HW_TX", "0", 1);
     const auto stateDir = std::filesystem::temp_directory_path() / ("aia-smoke-state-" + std::to_string(::getpid()));
     setenv("AIARR_STATE_DIR", stateDir.c_str(), 1);   // the studio's last-output record: never the user's own
     juce::ScopedJuceInitialiser_GUI gui;
     std::printf("Test: macOS app UI smoke (LiveHostComponent)\n");
 
+    phase("live host");
     {
         auto host = std::make_unique<ai_arranger::app::LiveHostComponent>();
         pump(200);
@@ -119,6 +146,7 @@ int main() {
     TEST("5 create/start/destroy cycles", cycles);
 
     // ── Resources window (read-only): what a musician reaches from "Resources..." ──
+    phase("resources: open + KST");
     {
         namespace fs = std::filesystem;
         using namespace ai_arranger;
@@ -192,6 +220,7 @@ int main() {
         for (int i = 0; i < 50 && rc.kstText().startsWith("Working"); ++i) pump(50);
         TEST("KST inventory runs in the background and says semantic merge is unavailable",
              rc.kstText().contains("UNAVAILABLE") && rc.kstText().contains("STY"));
+        phase("resources: backup KST");
         {   // Backup KST: verified copy into a new folder; refusals, cancel and window close leave nothing presented as a backup
             const fs::path kst = root / "kst", bdir = root / "kst-backups";
             fs::create_directories(bdir);
@@ -278,6 +307,7 @@ int main() {
         TEST("Memory Check: compares with the open packages (47 samples)", rc.memoryText().contains("predicted +47  MATCH") &&
              rc.memoryText().contains("does not validate"));
 
+        phase("resources: convert sound");
         // ── Convert Sound: WAV folder -> preview -> package -> opens in Resource Graph; UI stays responsive ──
         {
             // Message-loop watchdog: the longest gap between 20 ms timer ticks while work runs.
@@ -466,6 +496,7 @@ int main() {
                  for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
         }
 
+        phase("resources: sample plugin");
         // ── Sample Plugin: AU/VST -> offline render in a separate process -> preview -> package ──
         {
             auto& ps = rc.sampler();
@@ -626,6 +657,7 @@ int main() {
                 TEST("cancel after the tool exited sends no signal", done && !p.running() && !p.cancel());
             }
 
+            phase("resources: sample plugin real render");
             // Real offline render with an instrument that ships with macOS (Apple DLSMusicDevice).
             const auto real = app::PluginSamplerComponent::locateSampler();
             if (const char* req = std::getenv("AIARR_REQUIRE_REAL_PLUGIN"); req && *req == '1') {   // CI: the exact build-tree tool, not a search
@@ -797,6 +829,7 @@ int main() {
     }
 
     // ── AI Music Studio window (E2): sidebar | content | inspector over the same tools; nothing written to a source ──
+    phase("studio: setup + library workspace");
     {
         namespace fs = std::filesystem;
         using namespace ai_arranger;
@@ -918,6 +951,7 @@ int main() {
                  st.libraryText().contains("no Pa-native wrapper"));
             TEST("studio: the SET source is unchanged", fs::last_write_time(root / "Pa700copy/SOUND/USERDK01.PCG") == setStamp);
         }
+        phase("studio: library manager");
         {   // E7 Library Manager: two read-only libraries, search, compare, duplicates, an EXPORT-ONLY plan
             using A = app::LibraryManagerComponent::Action;
             using V = app::LibraryManagerComponent::View;
@@ -1014,6 +1048,7 @@ int main() {
             TEST("library manager: the libraries are unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
             TEST("library manager: reasons still inline with libraries open", reasonsShown());
         }
+        phase("studio: sample lab");
         {
             media::sound::Sample sm;
             sm.root = 60; sm.rate = 44100; sm.channels = 1;
@@ -1105,6 +1140,7 @@ int main() {
         TEST("studio: a package source also opens in Resource Graph", st.resources().model().packages().size() == 1 &&
              st.libraryText().contains("AIArranger Sound / Drum Kit package"));
 
+        phase("studio: import/export jobs");
         // Import / Export Center: routes into the existing flows; unbuilt exports say why
         st.showDomain(D::ImportExport);
         click(st.page(D::ImportExport), "AU / VST3 instrument");
@@ -1204,6 +1240,7 @@ int main() {
             TEST("jobs: nothing labelled compatible", !st.jobListText().containsIgnoreCase("compatible"));
         }
 
+        phase("studio: style studio");
         // Style Studio: read-only report of an own synthetic style
         st.showDomain(D::StyleStudio);
         st.openStyle(juce::File(AIARR_REPO_TOOLS_DIR "/../fixtures/synthetic/SYNTH_WALTZ_68.sty"));
@@ -1347,6 +1384,7 @@ int main() {
                 };
                 return slow;
             };
+            phase("studio: quit while work runs");
             {   // Quit while work runs (export jobs, Library Manager scans/reports): Wait / Cancel Jobs and Quit / Keep Working
                 using W = app::StudioComponent::WorkChoice;
                 using EJ = app::StudioComponent::ExportJob;
@@ -1430,6 +1468,7 @@ int main() {
                 st.setValidationTarget(juce::File());   // the quit jobs' output is not a target the Validation checks below expect
             }
 
+            phase("studio: app quit");
             // App quit (Cmd-Q / menu Quit / main window close): clean quits at once; unwritten edits ask first, Cancel aborts
             int quits = 0;
             auto quitFn = [&quits] { ++quits; };
@@ -1487,6 +1526,7 @@ int main() {
                 h.confirmQuit([&hq] { ++hq; });
                 TEST("quit: the live host quits at once when no Studio window is open", hq == 1);
             }
+            phase("studio: standalone window quit");
             {   // the standalone Sounds & Resources window's work goes through the same quit prompt (not cancelled silently)
                 using W = app::StudioComponent::WorkChoice;
                 // Owner gate A/B: the sources' SHA-256 manifest before and after each choice, and the output folder's listing
@@ -1595,6 +1635,7 @@ int main() {
                      fs::is_directory(root / "host-backup4") && !fs::exists(root / "host-backup4.INCOMPLETE") && manifest(root / "bigkst2") == bigBefore);
                 fs::remove_all(root / "bigkst2");
             }
+            phase("studio: r5 scans");
             {   // Codex r5 P2: a KST Inventory / Compare Folders scan counts as the window's work (standalone and in the Studio)
                 using W = app::StudioComponent::WorkChoice;
                 using KA = ui::ResourceBrowserModel::KstAction;
@@ -1623,6 +1664,7 @@ int main() {
             }
         }
 
+        phase("studio: validation");
         // Validation & Reports: badges from the shared verifiers; L3 only from a matching owner record
         st.showDomain(D::Validation);
         TEST("studio: no target -> checks unavailable with a reason", st.validatorUnavailable(app::StudioComponent::Validator::VerifyPackage).startsWith("Needs:"));
@@ -1714,6 +1756,7 @@ int main() {
         fs::remove_all(root);
     }
 
+    phase(nullptr);
     std::filesystem::remove_all(stateDir);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

@@ -55,7 +55,9 @@ target_link_libraries(aiarranger-app-smoke PRIVATE
 add_test(NAME test_app_smoke COMMAND aiarranger-app-smoke)
 # One ENVIRONMENT list: a second set_tests_properties(ENVIRONMENT ...) would replace the first.
 set_tests_properties(test_app_smoke PROPERTIES
-    ENVIRONMENT "AIARR_MIDI_HW_TX=0;AIARR_PLUGIN_SAMPLER=$<TARGET_FILE:aiarranger-plugin-sampler>" RUN_SERIAL TRUE)
+    ENVIRONMENT "AIARR_MIDI_HW_TX=0;AIARR_PLUGIN_SAMPLER=$<TARGET_FILE:aiarranger-plugin-sampler>" RUN_SERIAL TRUE
+    # ~250 s idle, ~290 s beside a ctest -j8 load: a --timeout 300 on the command line killed passing runs (log row 159)
+    TIMEOUT 600)
 
 # ── Sound conversion S7: offline AU/VST3 instrument sampler (no audio device, no MIDI port) ──
 juce_add_console_app(aiarranger-plugin-sampler PRODUCT_NAME "aiarranger-plugin-sampler")
