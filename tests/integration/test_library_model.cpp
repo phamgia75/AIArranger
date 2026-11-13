@@ -218,6 +218,8 @@ int main() {
         put(sc / "STYLE/USER07.STY", std::string("\x01\x00\x01\x14\x00\x00", 6));   // invalid container
         const auto SC = load(sc);
         const auto c3 = evaluate(SA, SC, {{Op::Copy, 'A', rockIdx(SA), "STYLE/USER07", -1, ""}});
+        TEST("C3 (OCR): an undecoded SET bank file is not one item: copying it into a slot is blocked",
+             anyHas(evaluate(SC, SB, {{Op::Copy, 'A', find(SC, "USER07"), "STYLE/USER01", -1, ""}}).steps[0].conflicts, "not a single item"));
         TEST("C3: copy into an undecoded SET bank is blocked: occupancy UNKNOWN", SC.ok && anyHas(c3.steps[0].conflicts, "occupancy") && c3.blocked());
         // C4: names and files collide ignoring case (as media::planMerge does; keyboard case handling UNKNOWN)
         const auto c4 = evaluate(A, B, {{Op::Rename, 'A', find(A, "Swing"), "", -1, "BALLAD"},

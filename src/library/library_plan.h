@@ -138,6 +138,7 @@ inline Evaluation evaluate(const Library& A, const Library& B, const std::vector
                 const int cap = bankCapacity(D.format, src.type);
                 slot = st.slot;
                 if (slot < 0 && !unknownOccupancy) { slot = 0; while (used.count(slot)) ++slot; }
+                if (src.slot < 0) conflict("the source is a whole SET bank file that was not read as a Pa-native container, not a single item");
                 if (unknownOccupancy)
                     conflict("occupancy of " + std::string(1, other) + ":" + bank + " is UNKNOWN (its file was not read as a Pa-native container): no slot can be chosen");
                 else if (cap && st.slot >= cap) conflict("slot " + std::to_string(st.slot + 1) + " is past the " + std::to_string(cap) + " slots of a bank file (MAN4 p.975)");
