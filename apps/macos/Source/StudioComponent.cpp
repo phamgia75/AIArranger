@@ -461,7 +461,7 @@ void StudioComponent::runJob(const juce::String& name, std::function<std::pair<j
             --jobs_;
             if (target == validationTarget_ && result->second) {
                 verification_ = *result->second;
-                verificationIsPackage_ = name == "Verify Package";
+                verificationIsPackage_ = name == "Verify Package" || name == "L3 record";
             }
             addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  done" +
                    (result->second ? "  " + juce::String::fromUTF8(st::badgeLine(*result->second).c_str()) : juce::String()) + "\n" +
@@ -472,12 +472,17 @@ void StudioComponent::runJob(const juce::String& name, std::function<std::pair<j
     }).detach();
 }
 
+// The record is applied against a FRESH L1/L2 check: files changed since the last Verify Package never get L3.
 void StudioComponent::attachL3Record(const juce::File& record) {
-    if (!verificationIsPackage_) return;
-    verification_.l3 = st::checkL3Record(record.getFullPathName().toStdString(), validationTarget_.getFullPathName().toStdString(), verification_.l1);
-    addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  L3 record " + record.getFullPathName() + "  " +
-           juce::String::fromUTF8(st::badgeLine(verification_).c_str()) + "  " + juce::String(verification_.l3.detail) + "\n");
-    refreshInspector();
+    if (!verificationIsPackage_ || jobs_ > 0) return;
+    const auto out = validationTarget_.getFullPathName().toStdString(), rec = record.getFullPathName().toStdString();
+    std::weak_ptr<bool> alive = alive_;
+    runJob("L3 record", [out, rec, alive]() -> std::pair<juce::String, std::optional<st::Verification>> {
+        const auto c = media::sound::verifyPackage(out, [alive] { return !alive.expired(); });
+        auto v = st::fromPackageCheck(c);
+        v.l3 = st::checkL3Record(rec, out, v.l1);
+        return {"L3 record " + juce::String(rec) + ": " + juce::String(v.l3.detail) + "\nL1/L2 re-checked first: " + juce::String(c.text), v};
+    });
 }
 
 void StudioComponent::addJob(const juce::String& line) {

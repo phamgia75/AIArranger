@@ -875,11 +875,24 @@ int main() {
         auto record = [&](const std::string& hash) {
             put(root / "L3.txt", "aiarranger-l3-record 1\nmanifest-sha256 " + hash + "\ndevice Pa5X\ndate 2026-11-20\ntester owner\nresult pass\n");
             st.attachL3Record(juce::File((root / "L3.txt").string()));
+            TEST("studio: an L3 record is applied in a background job", st.busy());
+            waitIdle(20000);
             return st.verification().l3.state;
         };
         TEST("studio: an L3 record for another output gives no L3", record(std::string(64, '0')) == ui::studio::Check::NotRun && st.badgeText() == filled);
         TEST("studio: the owner's record for this output gives L3", record(manHash) == ui::studio::Check::Passed &&
              st.badgeText().endsWith(juce::String::fromUTF8("\xE2\x97\x86\xE2\x97\x86\xE2\x97\x86 L3")));
+        {   // review finding: L1 from an earlier Verify Package must not carry L3 onto files changed since
+            const auto keep = fs::path(pkg / "RESOURCES.tsv");
+            std::ifstream in(keep, std::ios::binary);
+            const std::string orig((std::istreambuf_iterator<char>(in)), {});
+            st.runValidator(app::StudioComponent::Validator::VerifyPackage);
+            waitIdle(20000);
+            put(keep, "changed after Verify Package\n");
+            TEST("studio: a record attached after the files changed gives no L3 (L1 re-checked)",
+                 record(manHash) == ui::studio::Check::NotRun && st.verification().l1.state == ui::studio::Check::Failed);
+            put(keep, orig);
+        }
         put(pkg / "RESOURCES.tsv", "changed after the test\n");
         st.setValidationTarget(juce::File(pkg.string()));
         st.runValidator(app::StudioComponent::Validator::VerifyPackage);
