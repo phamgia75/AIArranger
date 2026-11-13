@@ -41,11 +41,12 @@ private:
                      introBtn_{"Intro"}, varA_{"A"}, varB_{"B"}, varC_{"C"},
                      varD_{"D"}, fillBtn_{"Fill"}, breakBtn_{"Break"},
                      endingBtn_{"Ending"}, panicBtn_{"PANIC"},
-                     resourcesBtn_{"Sound Tools..."};   // Sounds & Resources window (reads; writes only new package folders)
+                     resourcesBtn_{"Sound Tools..."},   // Sounds & Resources window (reads; writes only new package folders)
+                     studioBtn_{"Studio..."};           // AI Music Studio window (the same tools in one sidebar layout)
     juce::ToggleButton autoFillBtn_{"Auto Fill"};   // spec §5.3
 
     std::unique_ptr<juce::FileChooser> chooser_;
-    std::unique_ptr<juce::DocumentWindow> resourcesWindow_;
+    std::unique_ptr<juce::DocumentWindow> resourcesWindow_, studioWindow_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LiveHostComponent)
 };

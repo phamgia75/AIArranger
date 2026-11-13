@@ -25,7 +25,8 @@ target_compile_definitions(aiarranger-macos PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_APPLICATION_NAME_STRING="AI Arranger"
-    JUCE_APPLICATION_VERSION_STRING="0.14.0")
+    JUCE_APPLICATION_VERSION_STRING="0.14.0"
+    AIARR_REPO_TOOLS_DIR="${CMAKE_SOURCE_DIR}/tools")   # Studio > Validation finds the Python validators (AIARR_TOOLS_DIR overrides)
 
 # The shell consumes the engine + the headless app-shell modules (session/
 # control/ui/midi) that live in arranger-engine.
@@ -46,7 +47,7 @@ set(MACOS_APP_LIB_SRC ${MACOS_APP_SRC})
 list(FILTER MACOS_APP_LIB_SRC EXCLUDE REGEX "Main\\.cpp$")
 target_sources(aiarranger-app-smoke PRIVATE Tests/app_smoke.cpp ${MACOS_APP_LIB_SRC})
 target_compile_definitions(aiarranger-app-smoke PRIVATE
-    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1 AIARR_REPO_TOOLS_DIR="${CMAKE_SOURCE_DIR}/tools")
 target_link_libraries(aiarranger-app-smoke PRIVATE
     platform-apple importer-sff1
     juce::juce_gui_extra juce::juce_audio_basics juce::juce_audio_devices)
