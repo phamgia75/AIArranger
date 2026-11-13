@@ -39,6 +39,7 @@ public:
                     return std::nullopt;
                 }};
     }
+    void cancelAll() { for (const auto& j : queue_.snapshot()) if (!jobs::finished(j.phase)) queue_.cancel(j.id); }
     // Blocks until no job is queued or running (no message loop needed): a window that must not close mid-copy.
     void waitIdle() const { while (!queue_.idle()) std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
 

@@ -357,6 +357,7 @@ void PluginSamplerComponent::generate(const juce::File& outDir) {
     port_.enqueue(jobs::stagedPackage(from, out), [this, alive, gen, token = genJobs_.start()](const jobs::JobState& j) {
             if (alive.expired()) return;
             if (genJobs_.land(token)) --jobs_;
+            lastJob_ = j;
             settingsChanged();
             if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }
             if (gen != generation_) return;

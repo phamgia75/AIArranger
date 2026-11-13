@@ -15,6 +15,9 @@
 
 namespace ai_arranger::app {
 
+class StudioComponent;
+class ResourcesComponent;
+
 class LiveHostComponent : public juce::Component, private juce::Timer {
 public:
     LiveHostComponent();
@@ -24,7 +27,12 @@ public:
     void paint(juce::Graphics& g) override;
     // The app's quit path: runs `quit` now, or later when the AI Music Studio first asks about unwritten Style edits
     // (Save / Discard run it, Cancel aborts the quit).
+    // Running work (export jobs, and Generate / Backup KST in the standalone Sounds & Resources window) is asked about
+    // first, in the Studio's Wait / Cancel Jobs and Quit / Keep Working prompt (the Studio window opens for it).
     void confirmQuit(std::function<void()> quit);
+    StudioComponent* showStudio();             // opens (creating once) the AI Music Studio window
+    ResourcesComponent* resources() const;     // the standalone Sounds & Resources window's page, if it was opened
+    StudioComponent* studio() const;
 
 private:
     void timerCallback() override;     // message thread: poll snapshot -> labels

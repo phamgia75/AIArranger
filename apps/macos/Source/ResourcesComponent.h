@@ -33,6 +33,10 @@ public:
     void startBackup(const juce::File& source, const juce::File& newFolder);   // asynchronous; backingUp() until done
     void cancelBackup();   // the backup job, or a Verify Backup
     void setJobPort(JobPort p);   // the studio's queue for Backup KST, Convert Sound and Sample Plugin; else their own
+    // Work the app's quit must ask about (standalone window): a backup or check, a load, Convert Sound, Sample Plugin.
+    bool busy() const { return backingUp_ || loads_ > 0 || convert_.busy() || sampler_.busy(); }
+    void cancelJobs() { cancelBackup(); ownJobs_.cancelAll(); convert_.cancelJobs(); sampler_.cancelJobs(); }
+    const jobs::JobState& lastBackupJob() const { return lastBackup_; }   // the last Backup KST job that landed (tests)
     void startVerify(const juce::File& backupFolder);   // asynchronous, read-only; backingUp() until done
     bool backingUp() const { return backingUp_; }
     double backupProgress() const { return backupProgress_; }
@@ -95,6 +99,7 @@ private:
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     void pollBackup();      // the progress bar follows the backup job's state
     PendingJobs backupJobs_;   // at most one (startBackup refuses while backingUp_), counted the same way as Generate
+    jobs::JobState lastBackup_;
     uint64_t backupId_ = 0;    // the running backup job, for Cancel Backup and the progress bar; 0 once it has landed
     JobRunner ownJobs_;     // destroyed first: closing the window cancels a backup (only NAME.INCOMPLETE stays, D17)
     JobPort port_ = ownJobs_.port();

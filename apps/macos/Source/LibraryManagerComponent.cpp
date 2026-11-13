@@ -260,7 +260,7 @@ void LibraryManagerComponent::exportPlan(const juce::File& dest) {
     const juce::String d = dest.getFullPathName();
     std::weak_ptr<bool> alive = alive_;
     // E6 job: D18 refuses an output in or around either library, staged + verified before one publish, report beside it
-    const auto token = planJobs_.start();   // `done` may already run inside enqueueJob when the job finishes at once
+    const auto token = planJobs_.start();   // (defensive: a port could land `done` inside enqueueJob)
     const auto id = enqueueJob(jobs::libraryPlan(a_.lib, b_.lib, plan_, d.toStdString()), [this, alive, token](const jobs::JobState& j) {
         if (alive.expired()) return;
         planJobs_.land(token);   // a re-run from the job list (same token) is only shown

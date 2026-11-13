@@ -99,24 +99,7 @@ LiveHostComponent::LiveHostComponent() {
         resourcesWindow_->toFront(true);
     };
 
-    studioBtn_.onClick = [this] {
-        if (!studioWindow_) {
-            struct Window : juce::DocumentWindow {
-                explicit Window(std::function<void()> showHost)
-                    : DocumentWindow("AI Music Studio", juce::Colours::black, DocumentWindow::allButtons) {
-                    setUsingNativeTitleBar(true);
-                    setContentOwned(new StudioComponent(std::move(showHost)), true);
-                    setResizable(true, true);
-                    setResizeLimits(1100, 700, 4096, 4096);
-                    centreWithSize(getWidth(), getHeight());
-                }
-                void closeButtonPressed() override { setVisible(false); }
-            };
-            studioWindow_ = std::make_unique<Window>([this] { if (auto* w = getTopLevelComponent()) w->toFront(true); });
-        }
-        studioWindow_->setVisible(true);
-        studioWindow_->toFront(true);
-    };
+    studioBtn_.onClick = [this] { showStudio(); };
 
     panicBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
 
@@ -290,9 +273,40 @@ void LiveHostComponent::resized() {
     statusLabel_.setBounds(bottom);
 }
 
+StudioComponent* LiveHostComponent::showStudio() {
+    if (!studioWindow_) {
+        struct Window : juce::DocumentWindow {
+            explicit Window(std::function<void()> showHost)
+                : DocumentWindow("AI Music Studio", juce::Colours::black, DocumentWindow::allButtons) {
+                setUsingNativeTitleBar(true);
+                setContentOwned(new StudioComponent(std::move(showHost)), true);
+                setResizable(true, true);
+                setResizeLimits(1100, 700, 4096, 4096);
+                centreWithSize(getWidth(), getHeight());
+            }
+            void closeButtonPressed() override { setVisible(false); }
+        };
+        studioWindow_ = std::make_unique<Window>([this] { if (auto* w = getTopLevelComponent()) w->toFront(true); });
+    }
+    studioWindow_->setVisible(true);
+    studioWindow_->toFront(true);
+    return studio();
+}
+
+ResourcesComponent* LiveHostComponent::resources() const {
+    return resourcesWindow_ ? dynamic_cast<ResourcesComponent*>(resourcesWindow_->getContentComponent()) : nullptr;
+}
+StudioComponent* LiveHostComponent::studio() const {
+    return studioWindow_ ? dynamic_cast<StudioComponent*>(studioWindow_->getContentComponent()) : nullptr;
+}
+
 void LiveHostComponent::confirmQuit(std::function<void()> quit) {
-    auto* studio = studioWindow_ ? dynamic_cast<StudioComponent*>(studioWindow_->getContentComponent()) : nullptr;
+    auto* res = resources();
+    auto* studio = this->studio();
+    if (!studio && res && res->busy()) studio = showStudio();   // the quit guard's Wait / Cancel / Keep Working prompt lives there
     if (!studio) { quit(); return; }
+    if (res) studio->setOtherWork("work in the Sounds & Resources window (Generate, Backup KST or a render)", [res] { return res->busy(); },
+                                  [res] { res->cancelJobs(); });
     if (!studio->requestQuit(std::move(quit))) {   // deferred: show where the choice is
         studioWindow_->setVisible(true);
         studioWindow_->toFront(true);

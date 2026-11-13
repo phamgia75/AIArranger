@@ -49,7 +49,8 @@ public:
     bool busy() const {   // a finished export job counts until it has landed on its page (message thread); also the Library Manager and
                           // the Sounds & Resources work (KST backup or backup check, package/evidence loads, Convert Sound)
         return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; }) ||
-               manager_.busy() || manager_.computing() || res_.backingUp() || res_.loading() || res_.converter().busy();
+               manager_.busy() || manager_.computing() || res_.backingUp() || res_.loading() || res_.converter().busy() ||
+               (otherBusy_ && otherBusy_());
     }
 
     // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.
@@ -86,6 +87,10 @@ public:
     enum class WorkChoice { Wait, CancelJobsAndQuit, KeepWorking };
     void resolveRunningWork(WorkChoice c);
     bool workPromptShown() const { return pendingWorkQuit_ != nullptr; }
+    // Work outside this window that the quit guard also waits for or cancels (the standalone Sounds & Resources window).
+    void setOtherWork(juce::String what, std::function<bool()> busy, std::function<void()> cancel) {
+        otherWhat_ = std::move(what); otherBusy_ = std::move(busy); otherCancel_ = std::move(cancel);
+    }
     bool styleUndo();
     bool styleRedo();
     void importSmfTrack(const juce::File& mid);
@@ -201,6 +206,9 @@ private:
     ui::studio::StyleStudioModel style_;
     std::string sff1Report_;
     juce::File pendingStyle_;   // asked to open while the open Style has unwritten edits
+    juce::String otherWhat_;
+    std::function<bool()> otherBusy_;
+    std::function<void()> otherCancel_;
     std::function<void()> pendingWorkQuit_;   // the app asked to quit while work runs (workPromptShown)
     bool quitWhenIdle_ = false;               // Wait or Cancel Jobs and Quit chosen: polled until busy() is false
     juce::Label* workStatus_ = nullptr;
@@ -230,7 +238,7 @@ private:
 
     // Export jobs (E6)
     uint64_t enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done = {});
-    void refreshJobs();   // message thread: job list, finished jobs land on their page and in the verification target
+    void refreshJobs(bool land = true);   // message thread: job list; finished jobs land on their page and in the verification target
     juce::String exportReason(ExportJob j, juce::String where);
     struct JobHome { jobs::ExportSpec spec; juce::TextEditor* out = nullptr; Domain from; std::function<void(const jobs::JobState&)> done; bool landed = false; };
     std::map<uint64_t, JobHome> jobHomes_;

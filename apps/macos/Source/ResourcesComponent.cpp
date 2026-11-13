@@ -299,6 +299,7 @@ void ResourcesComponent::startBackup(const juce::File& source, const juce::File&
     const auto id = port_.enqueue(std::move(spec), [this, alive, text, token](const jobs::JobState& j) {
             if (alive.expired()) return;
             if (!backupJobs_.land(token)) { kstOut_.setText(text(j), false); return; }   // a re-run from the studio's job list
+            lastBackup_ = j;
             backupId_ = 0;
             backingUp_ = false;
             backupProgress_ = j.phase == jobs::Phase::Done ? 1.0 : 0.0;

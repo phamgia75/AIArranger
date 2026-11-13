@@ -564,6 +564,7 @@ void StudioComponent::askRunningWork(std::function<void()> quit) {
     if (res_.backingUp()) what.add("a KST backup or backup check");
     if (res_.loading()) what.add("a package or evidence load");
     if (res_.converter().busy()) what.add("Convert Sound work");
+    if (otherBusy_ && otherBusy_()) what.add(otherWhat_);
     if (jobs_ > 0 || what.isEmpty()) what.add("a read or check in progress");
     pendingWorkQuit_ = std::move(quit);
     showDomain(Domain::ImportExport);
@@ -590,6 +591,7 @@ void StudioComponent::resolveRunningWork(WorkChoice c) {
         for (auto j = all.rbegin(); j != all.rend(); ++j) if (!jobs::finished(j->phase)) queue_->cancel(j->id);
         manager_.stopWork();
         res_.cancelBackup();   // a KST backup or backup check stops; a cancelled backup is never published
+        if (otherCancel_) otherCancel_();
         workStatus_->setText("Cancelling: a cancelled job stops at its next check and leaves only NAME.INCOMPLETE (never deleted); nothing is "
                              "published half-way. The app quits once everything has stopped.", juce::dontSendNotification);
     } else {
@@ -953,7 +955,7 @@ void StudioComponent::importSmfTrack(const juce::File& mid) {
 void StudioComponent::exportStyleSmf(const juce::File& mid) {
     // An export job like the Import / Export Center's (staged, read back, L1 check, then published); lands in styleStatus_
     styleStatus_.setText("Exporting " + mid.getFullPathName() + " (export job; Import / Export Center lists every job)...", juce::dontSendNotification);
-    if (exportJob(ExportJob::StyleSmf, mid) == 0)   // (a quick job may already have landed and set the status)
+    if (exportJob(ExportJob::StyleSmf, mid) == 0)
         styleStatus_.setText("Not written: " + exportUnavailable(ExportJob::StyleSmf), juce::dontSendNotification);
 }
 
@@ -1051,11 +1053,11 @@ uint64_t StudioComponent::enqueue(jobs::ExportSpec spec, juce::TextEditor* out, 
     addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + type + "  queued as job #" + juce::String(id));
     jobPick_.addItem("#" + juce::String(id), int(id));
     jobPick_.setSelectedId(int(id), juce::dontSendNotification);
-    refreshJobs();
+    refreshJobs(false);   // never lands here: a job's `done` always runs later, never inside the caller's enqueue
     return id;
 }
 
-void StudioComponent::refreshJobs() {
+void StudioComponent::refreshJobs(bool land) {
     using P = jobs::Phase;
     const auto all = queue_->snapshot();
     const auto badge = [](const jobs::JobState& j) { return juce::String::fromUTF8(st::badgeLine(j.level).c_str()); };
@@ -1071,7 +1073,7 @@ void StudioComponent::refreshJobs() {
     // Land each finished job once: its page shows the result, a checked output becomes the verification target.
     for (const auto& j : all) {
         auto h = jobHomes_.find(j.id);
-        if (!jobs::finished(j.phase) || h == jobHomes_.end() || h->second.landed) continue;
+        if (!land || !jobs::finished(j.phase) || h == jobHomes_.end() || h->second.landed) continue;
         h->second.landed = true;
         const bool ok = j.phase == P::Done;
         juce::String warn;

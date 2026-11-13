@@ -28,6 +28,7 @@
 #include <fstream>
 #include <functional>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 namespace ai_arranger::jobs {
@@ -73,7 +74,9 @@ struct JobState {
     uint64_t plannedBytes = 0, sampleBytes = 0;
     Verification level;
     std::string reportMd, reportJson, reportPath;
+    size_t writerThread = 0;   // hash of the thread that ran the writer: evidence that a UI's write never runs on its message thread
 };
+inline size_t thisThread() { return std::hash<std::thread::id>{}(std::this_thread::get_id()); }
 
 inline constexpr const char* kJobMarker = "AIARRANGER-EXPORT-JOB";   // inside NAME.INCOMPLETE: made by an export job
 // Above this the Sound can never fit, even compressed (MAN p.1181 "up to a half"; resource_graph.h budget).
@@ -315,6 +318,7 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     if (!(std::ofstream(work / kJobMarker) << "export job " << st.id << " " << st.type << " -> " << st.dest << "\n"))
         return stop(Phase::Failed, "cannot write in " + work.string() + kept());
     const double base = st.progress, share = 1.0 / double(int(Phase::Done) - 1);
+    st.writerThread = thisThread();
     const auto wr = spec.write(staged, [&](double f) {
         const double now = base + share * std::clamp(f, 0.0, 1.0);
         if (now - st.progress >= 0.005) { st.progress = now; update(st); }   // throttled: a writer may call this per chunk

@@ -206,6 +206,8 @@ int main() {
             TEST("Backup KST: complete and verified, manifest beside it, progress full",
                  rc.kstText().startsWith("Backup complete and verified") && media::diff(kst, b1p).same() && media::verifyBackup(b1p).empty() &&
                  rc.backupProgress() == 1.0);
+            TEST("Backup KST: the copy ran on a worker thread, not the message thread", rc.lastBackupJob().writerThread != 0 &&
+                 rc.lastBackupJob().writerThread != jobs::thisThread());
             TEST("Backup KST runs as an export job: its report sits beside the backup", fs::is_regular_file(b1p.string() + ".export.md") &&
                  rc.kstText().contains("Export job #"));
             rc.startBackup(juce::File(kst.string()), juce::File((kst / "STYLE/inside").string()));
@@ -214,6 +216,7 @@ int main() {
                  (rc.kstText().contains("overlaps") || rc.kstText().contains("inside the source")) && !fs::exists(kst / "STYLE/inside") &&
                  !fs::exists(kst / "STYLE/inside.INCOMPLETE"));
             rc.startVerify(b1);
+            TEST("Verify Backup (the check) runs off the message thread", rc.backingUp());
             waitBackup(rc);
             TEST("Verify Backup: a good backup verifies", rc.kstText().startsWith("Backup verified: all 1 files"));
             std::ofstream(b1p / "STYLE/BANK01.STY") << "tampered";
@@ -259,6 +262,13 @@ int main() {
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 std::printf("  info: closing during a backup took %.0f ms\n", ms);
                 TEST("closing the window during a backup stops it promptly; nothing published, any partial copy marked INCOMPLETE", ms < 1000 && notPublished(b3));
+            }
+            {   // closing the window during Verify Backup: the check stops, its result is dropped, nothing is changed
+                auto c = std::make_unique<app::ResourcesComponent>();
+                c->startVerify(b1);
+                c.reset();
+                pump(100);
+                TEST("closing the window during Verify Backup is safe; the backup is unchanged", media::verifyBackup(b1p).empty());
             }
             fs::remove_all(root / "bigkst");
         }
@@ -381,6 +391,8 @@ int main() {
             const double generateGap = watch.worstMs;
             TEST("generate: package written, summary with budget", cv.statusText().startsWith("Package written") && cv.previewText().contains("verdict: fits") &&
                  fs::exists(root / "out/Big Sine/RESOURCES.tsv"));
+            TEST("Generate: the package was written on a worker thread, not the message thread", cv.lastJob().writerThread != 0 &&
+                 cv.lastJob().writerThread != jobs::thisThread());
             TEST("Generate runs as an export job: report beside the package, no work folder left", fs::is_regular_file(root / "out/Big Sine.export.md") &&
                  !fs::exists(root / "out/Big Sine.INCOMPLETE") && !cv.previewText().contains(".INCOMPLETE"));
             watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
@@ -437,6 +449,18 @@ int main() {
                 for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
                 TEST("two overlapping Generates both land and leave the page idle (busy() false)", !cv.busy() &&
                      fs::exists(root / "out/Twice A/RESOURCES.tsv") && fs::exists(root / "out/Twice B/RESOURCES.tsv"));
+            }
+            {   // closing Convert Sound while Generate writes: its job is cancelled, its result dropped, nothing published
+                const int workers = jobs::JobQueue::workers();
+                auto c = std::make_unique<app::SoundConversionComponent>();
+                c->inspectFolder(juce::File(root.string() + "/big"));
+                c->buildPreview();
+                for (int i = 0; i < 1500 && c->busy(); ++i) pump(20);
+                c->generate(juce::File(root.string() + "/out/Closed"));
+                c.reset();
+                for (int i = 0; i < 500 && jobs::JobQueue::workers() > workers; ++i) pump(20);
+                TEST("closing Convert Sound during Generate: no crash, nothing published, its worker exits", !fs::exists(root / "out/Closed") &&
+                     jobs::JobQueue::workers() == workers);
             }
             TEST("generate refuses an existing folder", [&] { cv.generate(juce::File(root.string() + "/out/Big Sine"));
                  for (int i = 0; i < 500 && cv.busy(); ++i) pump(20); return cv.statusText().contains("already exists"); }());
@@ -678,6 +702,8 @@ int main() {
                 TEST("generate copies the package and opens it in Resource Graph",
                      fs::exists(root / "plug-out/DLS Piano/RESOURCES.tsv") && fs::exists(root / "plug-out/DLS Piano/REPORT.txt") &&
                      rc.tabs().getCurrentTabIndex() == 0 && ps.statusText().startsWith("Package written"));
+                TEST("Sample Plugin Generate: the copy ran on a worker thread, not the message thread", ps.lastJob().writerThread != 0 &&
+                     ps.lastJob().writerThread != jobs::thisThread());
                 TEST("Sample Plugin Generate runs as an export job: report beside the package", fs::is_regular_file(root / "plug-out/DLS Piano.export.md"));
                 ps.generate(ps.stagingFolder().getChildFile("pkg/copy"));
                 waitIdle(10000);
@@ -941,8 +967,17 @@ int main() {
             waitLm(5000);
             TEST("library manager: export onto a mounted volume refused", lm.reportText().contains("Plan NOT written") && lm.reportText().contains("mounted volume"));
             lm.exportPlan(juce::File((root / "My Plan").string()));
-            TEST("library manager: export runs off the message thread", lm.busy());
+            const bool busyAfterExport = lm.busy();   // read before the message loop runs again
+            TEST("library manager: export runs off the message thread", busyAfterExport);
             waitLm(5000);
+            {
+                const auto all = st.jobList();
+                const auto pj = all.empty() ? jobs::JobState{} : all.back();
+                std::printf("  info: plan export job #%llu: writer thread %zx, message thread %zx, busy right after exportPlan %d, landed after the loop ran\n",
+                            (unsigned long long)pj.id, pj.writerThread, jobs::thisThread(), int(busyAfterExport));
+                TEST("library manager: the plan was written on a worker thread (thread id), never the message thread",
+                     pj.type == "Library plan (EXPORT-ONLY)" && pj.writerThread != 0 && pj.writerThread != jobs::thisThread());
+            }
             TEST("library manager: plan folder written at L1 only, EXPORT-ONLY", fs::is_regular_file(root / "My Plan/plan.json") &&
                  fs::is_regular_file(root / "My Plan/PACKAGE.sha256") && lm.reportText().contains(juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3")) &&
                  lm.reportText().contains("EXPORT-ONLY"));
@@ -1091,6 +1126,7 @@ int main() {
             TEST("jobs: a Sound package job is queued and runs off the message thread", id > 0 && st.busy());
             waitIdle(30000);
             const auto pj = job(id);
+            TEST("jobs: the studio's package job was written on a worker thread", pj.writerThread != 0 && pj.writerThread != jobs::thisThread());
             TEST("jobs: the package job is done: published, report beside, L1 + L2, never L3", pj.phase == P::Done &&
                  fs::is_regular_file(pkgDest / "PACKAGE.sha256") && fs::is_regular_file(root / "pkg-job.export.md") &&
                  fs::is_regular_file(root / "pkg-job.export.json") && !fs::exists(root / "pkg-job.INCOMPLETE") &&
@@ -1195,6 +1231,8 @@ int main() {
                 const auto all = st.jobList();
                 TEST("studio: the Style page's SMF export ran as an export job", !all.empty() && all.back().type == "Style as Pa5X SMF (EXPERIMENTAL)" &&
                      all.back().dest == (root / "waltz.mid").string());
+                TEST("studio: the SMF was written on a worker thread, not the message thread", !all.empty() && all.back().writerThread != 0 &&
+                     all.back().writerThread != jobs::thisThread());
             }
             TEST("studio: Pa5X SMF export writes a new file at L1 (validator), EXPERIMENTAL", fs::is_regular_file(root / "waltz.mid") &&
                  st.badgeText() == l1only && st.styleStatus().contains("EXPERIMENTAL") && st.inspectorText().contains("STAGED CHANGES\n0.") &&
@@ -1345,6 +1383,15 @@ int main() {
                     juce::File(rec.string()).replaceWithText(keep);
                     fs::remove_all(root / "old.INCOMPLETE.stale-20260101T000000Z");
                 }
+                {   // a studio closed while a job runs: the job is cancelled, its `done` is never called, nothing published
+                    bool landed = false;
+                    auto tmp = std::make_unique<app::StudioComponent>([] {});
+                    tmp->manager().enqueueJob(slowJob(root / "destroyed-slow"), [&landed](const jobs::JobState&) { landed = true; });
+                    pump(50);
+                    tmp.reset();
+                    pump(300);
+                    TEST("closing the studio during a job: no crash, its done not called, nothing published", !landed && !fs::exists(root / "destroyed-slow"));
+                }
                 TEST("quit: a cancelled job leaves only NAME.INCOMPLETE, nothing published (D17)", !fs::exists(root / "quit-slow") &&
                      fs::is_directory(root / "quit-slow.INCOMPLETE") && !fs::exists(root / "quit-pkg2") && !fs::exists(root / "quit-pkg2.INCOMPLETE"));
                 TEST("quit: idle -> quits at once, no work prompt", !st.busy() && st.requestQuit(wfn) && wq == 3 && !st.workPromptShown());
@@ -1419,6 +1466,61 @@ int main() {
                 int hq = 0;
                 h.confirmQuit([&hq] { ++hq; });
                 TEST("quit: the live host quits at once when no Studio window is open", hq == 1);
+            }
+            {   // the standalone Sounds & Resources window's work goes through the same quit prompt (not cancelled silently)
+                using W = app::StudioComponent::WorkChoice;
+                app::LiveHostComponent h;
+                find<juce::Button>(h, "Sound Tools...")->onClick();
+                auto* rw = h.resources();
+                int hq = 0;
+                rw->startBackup(juce::File((root / "Mine.KST").string()), juce::File((root / "host-backup").string()));
+                h.confirmQuit([&hq] { ++hq; });
+                auto* hs = h.studio();
+                TEST("quit: a backup in the standalone Sounds & Resources window defers the app quit; the Studio asks", rw->busy() && hq == 0 && hs &&
+                     hs->workPromptShown() && find<juce::Label>(hs->page(D::ImportExport), "Still running:") &&
+                     find<juce::Label>(hs->page(D::ImportExport), "Still running:")->getText().contains("Sounds & Resources"));
+                hs->resolveRunningWork(W::Wait);
+                for (int i = 0; i < 500 && hq == 0; ++i) pump(20);
+                TEST("quit: Wait lets that backup finish and publish, then quits", hq == 1 && !rw->busy() && fs::is_directory(root / "host-backup"));
+                fs::create_directories(root / "bigkst2/PCM");
+                { std::ofstream big(root / "bigkst2/PCM/RAM01.PCM", std::ios::binary); std::string mb(1 << 20, 'p'); for (int i = 0; i < 128; ++i) big << mb; }
+                {   // closing (hiding) the Sounds & Resources window does not cancel its backup
+                    auto* win = dynamic_cast<juce::DocumentWindow*>(rw->getTopLevelComponent());
+                    rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup3").string()));
+                    if (win) win->closeButtonPressed();
+                    TEST("closing the Sounds & Resources window hides it; its backup keeps running", win && !win->isVisible() && rw->busy());
+                    for (int i = 0; i < 1500 && rw->busy(); ++i) pump(20);
+                    TEST("the hidden window's backup finishes and publishes (not cancelled)", !rw->busy() && fs::is_directory(root / "host-backup3") &&
+                         rw->lastBackupJob().phase == jobs::Phase::Done && hq == 1);
+                    fs::remove_all(root / "host-backup3");
+                }
+                rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup2").string()));
+                h.confirmQuit([&hq] { ++hq; });
+                TEST("quit: again deferred while the standalone window backs up", hq == 1 && hs->workPromptShown());
+                // the checks below run without pumping the message loop, so the backup cannot land between them
+                h.confirmQuit([&hq] { ++hq; });
+                TEST("quit: a second quit while the prompt shows changes nothing (one prompt, no quit)", hq == 1 && hs->workPromptShown() && rw->busy());
+                hs->resolveRunningWork(W::KeepWorking);
+                TEST("quit: Keep Working closes the prompt; the standalone backup keeps running", hq == 1 && !hs->workPromptShown() && rw->busy());
+                h.confirmQuit([&hq] { ++hq; });
+                TEST("quit: quitting again after Keep Working asks again", hq == 1 && hs->workPromptShown());
+                hs->resolveRunningWork(W::CancelJobsAndQuit);
+                for (int i = 0; i < 500 && hq == 1; ++i) pump(20);
+                TEST("quit: Cancel Jobs and Quit cancels that backup, then quits; nothing published", hq == 2 && !rw->busy() &&
+                     rw->kstText().contains("cancelled") && !fs::exists(root / "host-backup2"));
+                pump(300);
+                TEST("quit: that quit ran exactly once", hq == 2);
+                rw->startBackup(juce::File((root / "bigkst2").string()), juce::File((root / "host-backup4").string()));
+                h.confirmQuit([&hq] { ++hq; });
+                hs->resolveRunningWork(W::Wait);
+                h.confirmQuit([&hq] { ++hq; });
+                TEST("quit: quitting again during Wait keeps waiting (no second prompt, no early quit)", hq == 2 && rw->busy() &&
+                     hs->workPromptShown());
+                for (int i = 0; i < 1500 && hq == 2; ++i) pump(20);
+                pump(300);
+                TEST("quit: the Wait finishes the backup, publishes it and quits exactly once", hq == 3 && !rw->busy() &&
+                     fs::is_directory(root / "host-backup4"));
+                fs::remove_all(root / "bigkst2");
             }
         }
 

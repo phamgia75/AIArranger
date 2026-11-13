@@ -193,6 +193,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     port_.enqueue(std::move(spec), [this, alive, gen, token = genJobs_.start()](const jobs::JobState& j) {
             if (alive.expired()) return;
             if (genJobs_.land(token)) --jobs_;
+            lastJob_ = j;
             if (gen != generation_) return;   // the user moved on (new folder, settings or preview): keep their state
             generateBtn_.setEnabled(true);
             if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }

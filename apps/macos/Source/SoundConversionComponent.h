@@ -64,6 +64,8 @@ public:
     void buildPreview();                      // asynchronous (reads every WAV)
     void generate(const juce::File& outDir);   // an export job; busy() until it lands
     void setJobPort(JobPort p) { port_ = std::move(p); }   // the studio's queue; else this tab's own
+    void cancelJobs() { ownJobs_.cancelAll(); }            // app quit: this tab's own jobs (a cancelled job publishes nothing)
+    const jobs::JobState& lastJob() const { return lastJob_; }   // the last Generate job that landed (tests: thread, result)
 
     bool busy() const { return jobs_ > 0; }
     ui::SoundConversionModel& model() { return model_; }
@@ -91,6 +93,7 @@ private:
     int jobs_ = 0;
     uint64_t generation_ = 0;
     PendingJobs genJobs_;
+    jobs::JobState lastJob_;
     void showPreview(media::sound::Instrument* in, const std::array<std::string, 2>& texts, const std::string& err, const std::string& mapping,
                      const std::string& ksfNotes);
 

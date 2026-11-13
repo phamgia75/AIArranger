@@ -58,6 +58,8 @@ public:
     void cancelRender();
     void generate(const juce::File& outDir);    // an export job copying the staged package
     void setJobPort(JobPort p) { port_ = std::move(p); }   // the studio's queue; else this tab's own
+    void cancelJobs() { cancelRender(); ownJobs_.cancelAll(); }   // app quit: the render and this tab's own jobs
+    const jobs::JobState& lastJob() const { return lastJob_; }   // the last Generate job that landed (tests: thread, result)
 
     bool busy() const { return jobs_ > 0; }
     bool rendered() const { return in_ != nullptr; }
@@ -108,6 +110,7 @@ private:
     int jobs_ = 0;
     uint64_t generation_ = 0;
     PendingJobs genJobs_;
+    jobs::JobState lastJob_;
     JobRunner ownJobs_;   // the destructor waits for its Generate copy before staging is deleted (a package is never half-copied)
     JobPort port_ = ownJobs_.port();
 
