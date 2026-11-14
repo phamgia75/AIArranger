@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <thread>
 #include <fstream>
+#include <sys/resource.h>
 #include <unistd.h>
 
 using namespace ai_arranger;
@@ -51,6 +52,29 @@ int main() {
     const fs::path root = fs::temp_directory_path() / ("aia-report-export-" + std::to_string(::getpid()));
     fs::remove_all(root);
     fs::create_directories(root);
+    bool hung = false;
+
+    // ── Codex r2 #1 (first, so the memory high-water mark is this test's): a 4 MB plan of 1,999,997 scalar steps (exactly
+    // 2,000,000 JSON values, inside both parser caps) is refused in bounded time and memory, never expanded into rows ──
+    {
+        std::string j = "{\"format\":\"aiarranger-library-plan\",\"steps\":[0";
+        for (int i = 1; i < 1999997; ++i) j += ",0";
+        j += "]}";
+        struct rusage ru {};
+        getrusage(RUSAGE_SELF, &ru);
+        const long before = ru.ru_maxrss;   // bytes on macOS
+        const auto done = std::make_shared<std::atomic<int>>(0);   // 0 running, 1 accepted, 2 refused
+        const auto t0 = std::chrono::steady_clock::now();
+        std::thread([j, done] { rp::Report r; *done = rp::fromJsonText(j, "x", &r).empty() ? 1 : 2; }).detach();
+        while (!*done && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        getrusage(RUSAGE_SELF, &ru);
+        const long grew = (ru.ru_maxrss - before) >> 20;
+        std::printf("  info: r2#1 scalar-steps plan: %s after %lld ms, peak memory +%ld MiB\n", *done == 2 ? "refused" : *done == 1 ? "accepted" : "still running",
+                    (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(), grew);
+        TEST("r2#1: a 4 MB plan of 1,999,997 scalar steps is refused within 10 s", *done == 2);
+        TEST("r2#1: ... using less than 400 MiB more memory (the parse itself; no rows built)", *done != 0 && grew < 400);
+        hung = !*done;
+    }
 
     // ── CSV cells: RFC 4180 quoting and the formula-injection guard ──
     TEST("csv: plain cell unchanged", rp::csvCell("Ballad 1") == "Ballad 1");
@@ -204,7 +228,6 @@ int main() {
     }
 
     // ── Codex r1 #1: a hostile many-keys JSON under the 10 MiB cap is parsed in bounded time ──
-    bool hung = false;
     {
         std::string j = "{";
         for (int i = 0; i < 500000; ++i) j += (i ? ",\"" : "\"") + std::to_string(i) + "\":0";
@@ -215,7 +238,7 @@ int main() {
         std::thread([j, done] { rp::Report r; rp::fromJsonText(j, "x", &r); *done = true; }).detach();
         while (!*done && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         TEST("r1#1: 500,000 distinct keys are parsed within 10 s", *done);
-        hung = !*done;
+        hung |= !*done;
     }
 
     // ── Codex r1 #1: the parser's value cap, and a superseded read stops early ──
@@ -232,6 +255,30 @@ int main() {
         const auto e = rp::loadJsonReport(root / "many.export.json", &r, [&] { return ++checks < 3; });
         TEST("r1#1: a read whose keepGoing turns false says cancelled, after a few checks", e == "cancelled" && checks >= 3 && checks <= 4);
         TEST("r1#1: duplicate keys still refused", has(kit::parseJson("{\"a\": 1, \"b\": 2, \"a\": 3}", &j), "duplicate key a"));
+    }
+
+    // ── Codex r2 #1: report rows are bounded and typed before they are built; conversion honours keepGoing ──
+    {
+        rp::Report r;
+        std::string objs = "{\"format\":\"aiarranger-library-plan\",\"steps\":[{}";
+        for (int i = 1; i < 1000000; ++i) objs += ",{}";
+        TEST("r2#1: 1,000,000 object steps (17,000,000 cells) are refused before any row is built",
+             has(rp::fromJsonText(objs + "]}", "p", &r), "more than 4000000 report cells"));
+        TEST("r2#1: steps that are not a list are refused", has(rp::fromJsonText("{\"format\":\"aiarranger-library-plan\",\"steps\":7}", "p", &r), "not a list"));
+        const std::string ex = "{\"schema\":\"aiarranger-export-report/1\",";
+        TEST("r2#1: an export file entry that is not an object is refused", has(rp::fromJsonText(ex + "\"files\":[1]}", "e", &r), "not an object"));
+        TEST("r2#1: a note that is not a string is refused", has(rp::fromJsonText(ex + "\"notes\":[{}]}", "e", &r), "not a string"));
+        TEST("r2#1: an empty export report still reads", rp::fromJsonText(ex + "\"files\":[]}", "e", &r).empty() && r.tables.size() == 3);
+        std::string steps = "{\"format\":\"aiarranger-library-plan\",\"steps\":[{}";
+        for (int i = 1; i < 100000; ++i) steps += ",{}";
+        steps += "]}";
+        int parseChecks = 0, allChecks = 0;
+        kit::Json j;
+        kit::parseJson(steps, &j, [&] { ++parseChecks; return true; });
+        TEST("r2#1: 100,000 steps read", rp::fromJsonText(steps, "p", &r, [&] { ++allChecks; return true; }).empty() && r.tables[0].rows.size() == 100000);
+        TEST("r2#1: the conversion checks keepGoing too (every 4096 rows)", allChecks - parseChecks >= 20);
+        int n = 0;
+        TEST("r2#1: a read cancelled during the conversion says cancelled", rp::fromJsonText(steps, "p", &r, [&] { return ++n < allChecks - 5; }) == "cancelled");
     }
 
     // ── Codex r1 #3: slot integers outside the valid range are refused before any conversion ──
