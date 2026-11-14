@@ -465,6 +465,40 @@ int main() {
         TEST("record: no record file set (the default) records nothing", recordedFolders().empty());
     }
 
+    // ── Codex r1 #2 (report export): enqueue does no file I/O on the caller (message) thread; the worker records the
+    // output folder before the job runs, in enqueue order ──
+    {
+        const auto rec = root / "state-io" / "record.txt";
+        setOutputRecord(rec);
+        std::atomic<bool> release{false}, started{false};
+        auto first = styleUasf("first", {'u'}, root / "io-a" / "first.uasf");
+        first.write = [&](const fs::path&, const std::function<bool(double)>&) {
+            started = true;
+            while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return WriteResult{"stopped", ""};
+        };
+        {
+            JobQueue q;
+            q.enqueue(first);
+            for (int i = 0; i < 500 && !started; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto before = slurp(rec);
+            TEST("r1#2: the running job's folder was recorded before it wrote", started && has(before, (root / "io-a").string().c_str()));
+            q.enqueue(styleUasf("second", {'u'}, root / "io-b" / "second.uasf"));
+            TEST("r1#2: enqueue does not touch the output record on the caller thread", slurp(rec) == before);
+            release = true;
+            for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST("r1#2: the worker recorded the second folder, most recent first",
+             (recordedFolders() == std::vector<std::string>{(root / "io-b").string(), (root / "io-a").string()}));
+        setOutputRecord({});
+    }
+    {   // Codex r1 #2: whether the output is a package is found by the job's worker, so the studio needs no file check
+        const auto pkg = run(soundPackage(organ, root / "src", "", root / "pm-organ"));
+        const auto one = run(styleUasf("pm", {'u'}, root / "pm.uasf"));
+        TEST("r1#2: a published package is flagged by the job (PACKAGE.sha256)", pkg.phase == Phase::Done && pkg.packageManifest);
+        TEST("r1#2: a single-file output is not", one.phase == Phase::Done && !one.packageManifest);
+    }
+
     // ── Library Manager plan (E7) as a job: D18 covers both libraries, EXPORT-ONLY, L1 only ──
     {
         put(root / "LibA.KST/STYLE/USER01/Ballad.STG", "s");

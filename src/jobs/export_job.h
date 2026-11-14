@@ -83,6 +83,7 @@ struct JobState {
     uint64_t plannedBytes = 0, sampleBytes = 0;
     Verification level;
     std::string reportMd, reportJson, reportPath;
+    bool packageManifest = false;   // Done: the output holds PACKAGE.sha256 (checked by the worker, not the message thread)
     size_t writerThread = 0;   // hash of the thread that ran the writer: evidence that a UI's write never runs on its message thread
 };
 inline size_t thisThread() { return std::hash<std::thread::id>{}(std::this_thread::get_id()); }
@@ -459,6 +460,10 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     if (::unlinkat(parentFd.v, workName.c_str(), AT_REMOVEDIR) != 0) st.warnings.push_back("could not remove the empty job folder " + work.string());
 
     st.phase = Phase::Report;   // published: from here on the job runs to its end
+    {
+        std::error_code ec;
+        st.packageManifest = fs::is_regular_file(dest / media::sound::pkgio::FileSet::kPackageManifest, ec);   // as the studio checked it before
+    }
     update(st);
     st.phase = Phase::Done;
     st.progress = 1;
