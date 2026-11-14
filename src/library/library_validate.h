@@ -18,6 +18,8 @@
 #define AI_ARRANGER_LIBRARY_LIBRARY_VALIDATE_H
 
 #include "library/library_model.h"
+#include <cerrno>
+#include <cstring>
 
 namespace ai_arranger::library {
 
@@ -162,15 +164,17 @@ inline bool fatBad(const std::string& n) {
 inline bool macMeta(const std::string& n) {
     return n.rfind("._", 0) == 0 || n == ".DS_Store" || n == ".Spotlight-V100" || n == ".fseventsd" || n == ".Trashes";
 }
-// 1 = starts with the placeholder marker, 0 = does not, -1 = cannot be read (the validation is then incomplete).
-inline int placeholder(const fs::path& p) {
+// 1 = starts with the placeholder marker, 0 = does not, -1 = cannot be read (the validation is then incomplete; *why says
+// what failed).
+inline int placeholder(const fs::path& p, std::string* why = nullptr) {
+    errno = 0;
     std::FILE* f = media::detail::openRegular(AT_FDCWD, p.c_str());   // no symlink followed; bounded read
-    if (!f) return -1;
+    if (!f) { if (why) *why = errno ? std::strerror(errno) : "not a regular file"; return -1; }
     char b[64] = {};
     const size_t n = std::fread(b, 1, std::strlen(kPlaceholder), f);
     const bool err = std::ferror(f) != 0;
     std::fclose(f);
-    if (err) return -1;
+    if (err) { if (why) *why = "read error"; return -1; }
     return n == std::strlen(kPlaceholder) && std::memcmp(b, kPlaceholder, n) == 0;
 }
 // Relative paths that equal an earlier one once letter case is folded over the WHOLE path (so a file below two folders
@@ -191,14 +195,16 @@ inline bool bankFileName(const std::string& stem, const std::vector<std::string>
 }
 }  // namespace detail
 
-// Validates the folder `root` against the rule table of its detected layout. Read-only.
-inline Validation validate(const fs::path& root, const std::function<bool()>& keepGoing = {}, const media::detail::ListLimits& limits = kLibraryLimits) {
+// Validates the folder `root` against the rule table of its detected layout, or against `table` when given (the
+// Keyboard Compatibility card evaluates every target keyboard against its own table). Read-only.
+inline Validation validate(const fs::path& root, const std::function<bool()>& keepGoing = {}, const media::detail::ListLimits& limits = kLibraryLimits,
+                           const RuleTable* table = nullptr) {
     Validation v;
     v.root = root.string();
     media::detail::Listing ls;
     if (!media::detail::listFiles(root, ls, v.error, keepGoing, limits)) return v;
     v.layout = media::detail::detectLayout(root, ls);
-    const RuleTable* t = tableFor(v.layout);
+    const RuleTable* t = table ? table : tableFor(v.layout);
     if (!t) {
         v.table = "none";
         v.findings.push_back({Severity::Error, "R-01", ".", "no rule table: the folder has no KST or SET markers (" + v.layout + ")",
@@ -248,8 +254,9 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
         for (const auto& c : p) parts.push_back(media::detail::upper(c.string()));
         const std::string ext = media::detail::upper(p.extension().string());
         if (e.size == 0) add("R-07", rel, "empty file");
-        const int ph = detail::placeholder(e.abs);
-        if (ph < 0) { v.error = "cannot read " + rel + ": validation incomplete"; return v; }   // ok stays false: never a pass
+        std::string why;
+        const int ph = detail::placeholder(e.abs, &why);
+        if (ph < 0) { v.error = "cannot read " + rel + " (" + why + "): validation incomplete"; return v; }   // ok stays false: never a pass
         if (ph) add("R-10", rel, "AIArranger synthetic placeholder bytes: never load this on a keyboard");
         if (parts.size() == 1) {
             if (!t->topFiles.count(parts[0])) add("R-06", rel, "loose file at the top level");
