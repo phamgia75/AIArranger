@@ -21,6 +21,16 @@ static int failures = 0, passes = 0;
 
 static bool has(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
 static std::string slurp(const fs::path& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
+// A real UASF for jobs that must publish: a UASF job's verify parses and validates what it wrote (D33 P2).
+static std::vector<uint8_t> realUasf() {
+    static const auto b = [] {
+        ui::studio::StyleStudioModel m;
+        std::string e;
+        m.load(fs::path(REPO_DIR) / "fixtures/synthetic/SYNTH_WALTZ_68.sty", &e);
+        return m.uasfBytes();
+    }();
+    return b;
+}
 static void put(const fs::path& p, const std::string& s) { fs::create_directories(p.parent_path()); std::ofstream(p, std::ios::binary) << s; }
 
 // Runs a spec synchronously; `cancelAt` cancels when the job enters that phase. Records every phase seen.
@@ -199,7 +209,7 @@ int main() {
         tw.write = [](const fs::path&, auto&) -> WriteResult { throw fs::filesystem_error("disk vanished (injected)", std::error_code(5, std::generic_category())); };
         JobQueue q;
         const auto a = q.enqueue(tw);
-        const auto b = q.enqueue(styleUasf("after", {'u', 'a'}, root / "after.uasf"));
+        const auto b = q.enqueue(styleUasf("after", realUasf(), root / "after.uasf"));
         for (int i = 0; i < 300 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         const auto snap = q.snapshot();
         TEST("C3 queue: a writer that throws fails its job; the next job still runs", snap.size() == 2 && snap[0].id == a && snap[0].phase == Phase::Failed &&
@@ -233,6 +243,17 @@ int main() {
         };
         const auto us = run(u);
         TEST("C4 corrupt read-back of a UASF: failed, nothing published", us.phase == Phase::Failed && !fs::exists(root / "corrupt.uasf"));
+        // D33 P2: a UASF job checks the staged file independently: it must parse as UASF and pass the UASF validator
+        const auto junk = run(styleUasf("junk", {'n', 'o', 't', ' ', 'u', 'a', 's', 'f'}, root / "junk.uasf"));
+        TEST("D33 P2 a UASF job whose bytes do not parse as UASF: failed at verify, nothing published", junk.phase == Phase::Failed &&
+             junk.level.l1.state == Check::Failed && has(junk.reason, "UASF reader") && !fs::exists(root / "junk.uasf") &&
+             fs::exists(root / "junk.uasf.INCOMPLETE"));
+        auto inv = m.style();
+        inv.sections[0].beats_per_bar = 0;
+        const auto invBytes = uasf::UasfSerializer().serialize(inv);
+        const auto iv = run(styleUasf("invalid", invBytes.data, root / "invalid.uasf"));
+        TEST("D33 P2 a UASF job whose Style fails the UASF validator: failed at verify, nothing published", invBytes.success &&
+             iv.phase == Phase::Failed && iv.level.l1.state == Check::Failed && has(iv.reason, "UASF validator") && !fs::exists(root / "invalid.uasf"));
         auto pk = soundPackage(organ, {}, "", root / "corrupt-pkg");
         const auto rp = pk.write;
         pk.write = [rp](const fs::path& out, const std::function<bool(double)>& p) {
@@ -305,6 +326,7 @@ int main() {
         const auto u = run(styleUasf("SYNTH_WALTZ_68", m.uasfBytes(), root / "waltz.uasf"));
         TEST("Style UASF job: written, no Pa5X level claimed", u.phase == Phase::Done && slurp(root / "waltz.uasf").size() == m.uasfBytes().size() &&
              u.level.l1.state == Check::NotRun);
+        TEST("D33 P2 Style UASF job: the published file was read back, parsed and validated", has(u.verifyText, "parsed by the UASF reader"));
         const auto again = run(styleSmf("SYNTH_WALTZ_68", style_edit::exportPa5xSmf(m.style()), root / "waltz.mid"));
         TEST("an existing Style SMF is never overwritten", again.phase == Phase::Failed && has(again.reason, "already exists"));
         const auto conv = run(styleSmf("SYNTH_WALTZ_68", m.smfExport(), root / "conv.mid"));
@@ -338,7 +360,7 @@ int main() {
         std::mutex m;
         std::vector<int> order;
         auto spec = [&](int n, int ms) {
-            auto s = styleUasf("q" + std::to_string(n), {'u', 'a', 's', 'f'}, root / ("q" + std::to_string(n) + ".uasf"));
+            auto s = styleUasf("q" + std::to_string(n), realUasf(), root / ("q" + std::to_string(n) + ".uasf"));
             const auto w = s.write;
             s.write = [&, n, ms, w](const fs::path& out, const std::function<bool(double)>& p) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(ms));
@@ -376,13 +398,13 @@ int main() {
         {
             JobQueue q;
             TEST("shutdown: a queue starts one worker", JobQueue::workers() == before + 1);
-            q.enqueue(styleUasf("j1", {'u'}, root / "j1.uasf"));
+            q.enqueue(styleUasf("j1", realUasf(), root / "j1.uasf"));
             for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         TEST("shutdown: destroying an idle queue joins its worker (gone when the destructor returns)", JobQueue::workers() == before &&
              fs::is_regular_file(root / "j1.uasf"));
         std::atomic<bool> release{false};
-        auto blocked = styleUasf("j2", {'u'}, root / "j2.uasf");
+        auto blocked = styleUasf("j2", realUasf(), root / "j2.uasf");
         blocked.write = [&release](const fs::path&, const std::function<bool(double)>&) {   // ignores cancel until released
             while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
             return WriteResult{"stopped", ""};
@@ -418,9 +440,9 @@ int main() {
         setOutputRecord(rec);
         {
             JobQueue studio, window;   // two windows' own queues
-            studio.enqueue(styleUasf("s", {'u'}, root / "rec-a" / "s.uasf"));
-            window.enqueue(styleUasf("w", {'u'}, root / "rec-b" / "w.uasf"));
-            studio.enqueue(styleUasf("s2", {'u'}, root / "rec-a" / "s2.uasf"));
+            studio.enqueue(styleUasf("s", realUasf(), root / "rec-a" / "s.uasf"));
+            window.enqueue(styleUasf("w", realUasf(), root / "rec-b" / "w.uasf"));
+            studio.enqueue(styleUasf("s2", realUasf(), root / "rec-a" / "s2.uasf"));
             for (int i = 0; i < 500 && !(studio.idle() && window.idle()); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         TEST("record: every queue records its output folder, most recent first, no duplicates",
@@ -440,7 +462,7 @@ int main() {
              report[1].first == (root / "rec-b").string() && report[1].second == std::vector<std::string>{"old-b.INCOMPLETE"});
 
         std::atomic<bool> release{false};
-        auto blocked = styleUasf("busy", {'u'}, root / "rec-a" / "busy.uasf");
+        auto blocked = styleUasf("busy", realUasf(), root / "rec-a" / "busy.uasf");
         blocked.write = [&release](const fs::path& out, const std::function<bool(double)>&) {
             fs::create_directories(out.parent_path());
             while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));

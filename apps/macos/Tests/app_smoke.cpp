@@ -1403,7 +1403,32 @@ int main() {
             TEST("studio: Import SMF Track replaces the chosen track (undoable)", st.styleStatus().startsWith("Imported") &&
                  find<juce::Button>(pg, "Undo Import SMF track") != nullptr);
             st.saveStyleUasf(juce::File((root / "waltz.uasf").string()));
+            const bool dirtyWhileSaving = st.styleModel().dirty();   // D33 P2: only the job's result (message thread) clears it
+            waitIdle(10000);
+            pump(100);
             TEST("studio: Save UASF writes a new file", fs::is_regular_file(root / "waltz.uasf"));
+            {
+                const auto all = st.jobList();
+                TEST("D33 P2 studio: Save UASF runs as an export job on a worker thread; dirty until the job is Done", dirtyWhileSaving &&
+                     !st.styleModel().dirty() && !all.empty() && all.back().type == "Style as UASF" && all.back().phase == jobs::Phase::Done &&
+                     all.back().dest == (root / "waltz.uasf").string() && all.back().writerThread != 0 && all.back().writerThread != jobs::thisThread());
+                TEST("D33 P2 studio: the published UASF was read back, parsed and validated before it counted as saved", !all.empty() &&
+                     all.back().verifyText.find("parsed by the UASF reader") != std::string::npos && !fs::exists(root / "waltz.uasf.INCOMPLETE"));
+                st.styleOp().setSelectedId(6);   // Tempo
+                st.styleValue().setText("101");
+                click(pg, "Apply");
+                st.saveStyleUasf(juce::File((root / "waltz-101.uasf").string()));
+                st.styleValue().setText("102");
+                click(pg, "Apply");   // an edit while the save job is pending
+                waitIdle(10000);
+                pump(100);
+                uasf::UasfDeserializer des;
+                const auto back = des.deserializeFromFile((root / "waltz-101.uasf").string());
+                TEST("D33 P2 studio: an edit made during the save job keeps the Style dirty; the file holds the saved snapshot", back.success &&
+                     back.style.tempo_bpm == 101 && st.styleModel().style().tempo_bpm == 102 && st.styleModel().dirty());
+                st.styleUndo();
+                TEST("D33 P2 studio: undo back to the saved snapshot: nothing unwritten", !st.styleModel().dirty());
+            }
             {   // E6: Style exports as jobs from the Import / Export Center; once written the edits count as written
                 using EJ = app::StudioComponent::ExportJob;
                 st.styleOp().setSelectedId(6);   // Tempo
@@ -1489,6 +1514,8 @@ int main() {
                 st.styleUndo();
                 TEST("gate #53 studio: undo keeps a valid selection", st.styleElement().getSelectedId() == base + 5 && st.styleRedo());
                 st.saveStyleUasf(juce::File((root / "gate53.uasf").string()));
+                waitIdle(10000);
+                pump(100);
                 TEST("gate #53 studio: Save UASF writes every edit", fs::is_regular_file(root / "gate53.uasf") && !st.styleModel().dirty());
                 st.openStyle(juce::File((root / "gate53.uasf").string()));
                 TEST("gate #53 studio: reload lists the 4 new elements with their sounds", st.styleStatus().startsWith("Opened for editing") &&
@@ -1538,6 +1565,11 @@ int main() {
                  st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() && !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
             st.openStyle(juce::File(sty.string()));
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "kept.uasf").string()));
+            const bool openWaits = st.styleModel().dirty() && !fs::equivalent(st.styleModel().path(), sty) && !st.jobList().empty() &&
+                                   st.jobList().back().type == "Style as UASF" && !jobs::finished(st.jobList().back().phase);
+            waitIdle(10000);
+            pump(100);
+            TEST("D33 P2 studio: Save-before-open runs as an export job; the other Style opens only after it is Done", openWaits);
             TEST("C2 studio: Save writes the edits first, then opens the other Style", fs::is_regular_file(root / "kept.uasf") &&
                  !st.unsavedPromptShown() && fs::equivalent(st.styleModel().path(), sty) && !st.styleModel().dirty());
             st.styleValue().setText("98");
@@ -1545,6 +1577,17 @@ int main() {
             st.openStyle(juce::File((root / "kept.uasf").string()));
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Discard);
             TEST("C2 studio: Discard opens the other Style", fs::equivalent(st.styleModel().path(), root / "kept.uasf") && st.styleModel().style().tempo_bpm == 99);
+            st.styleValue().setText("97");
+            click(pg, "Apply");
+            st.openStyle(juce::File(sty.string()));
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "kept.uasf").string()));   // exists: refused
+            waitIdle(10000);
+            pump(100);
+            TEST("D33 P2 studio: a failed Save-before-open opens nothing; the edits stay and the page asks again", st.unsavedPromptShown() &&
+                 fs::equivalent(st.styleModel().path(), root / "kept.uasf") && st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 97 &&
+                 st.styleStatus().contains("not written yet"));
+            st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Cancel);
+            st.styleUndo();   // back to kept.uasf as opened
 
             // Codex C3: an invalid Style is refused for editing with the validator message; the open one stays
             {
@@ -1691,6 +1734,10 @@ int main() {
                  st.styleModel().style().tempo_bpm == 96 && st.styleModel().undoLabel() == "Tempo");
             st.requestQuit(quitFn);
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "quit-save.uasf").string()));
+            const bool quitWaits = quits == 1 && st.styleModel().dirty() && st.busy();
+            waitIdle(10000);
+            pump(300);
+            TEST("D33 P2 quit: Save-before-quit runs as an export job; the quit waits for it", quitWaits);
             TEST("quit: Save writes the edits, then quits", quits == 2 && fs::is_regular_file(root / "quit-save.uasf") && !st.styleModel().dirty());
             st.styleValue().setText("95");
             click(pg, "Apply");
@@ -1715,15 +1762,74 @@ int main() {
                 const auto s2 = st.manager().enqueueJob(slowJob(root / "quit-slow3"), {});
                 pump(100);
                 st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "quit-save2.uasf").string()));
-                TEST("quit: Save while an export runs writes the Style, then the work prompt asks", quits == 4 &&
-                     fs::is_regular_file(root / "quit-save2.uasf") && !st.styleModel().dirty() && st.workPromptShown() && !st.unsavedPromptShown());
+                TEST("quit: Save while an export runs: the work prompt asks (the save job queues behind it)", quits == 4 &&
+                     st.workPromptShown() && !st.unsavedPromptShown());
                 st.resolveRunningWork(W::KeepWorking);
                 st.selectJob(s2);
                 st.cancelJob();
                 waitIdle(10000);
                 pump(100);
+                TEST("quit: Save while an export runs writes the Style once the queue reaches it", quits == 4 &&
+                     fs::is_regular_file(root / "quit-save2.uasf") && !st.styleModel().dirty() && !st.unsavedPromptShown());
                 TEST("quit: Keep Working aborts; nothing running and the Style written -> the next quit is immediate", quits == 4 && !st.busy() &&
                      st.requestQuit(quitFn) && quits == 5);
+            }
+            {   // D33 P1: a Save or Discard chosen for a quit holds for the Style as it was then; an edit after it asks again
+                using W = app::StudioComponent::WorkChoice;
+                using U = app::StudioComponent::UnsavedChoice;
+                auto edit = [&](const char* bpm) {
+                    st.showDomain(D::StyleStudio);
+                    st.styleOp().setSelectedId(6);   // Tempo
+                    st.styleValue().setText(bpm);
+                    click(pg, "Apply");
+                };
+                edit("94");
+                st.requestQuit(quitFn);
+                const auto d1 = st.manager().enqueueJob(slowJob(root / "d33-slow1"), {});
+                pump(100);
+                st.resolveUnsavedStyle(U::Discard);
+                st.resolveRunningWork(W::Wait);
+                edit("93");                 // after the Discard, while the quit waits for the job
+                st.requestQuit(quitFn);     // a repeated Quit while waiting stays one pending quit
+                st.selectJob(d1);
+                st.cancelJob();
+                waitIdle(10000);
+                pump(300);
+                TEST("D33 P1 quit: Discard, Wait, then an edit: no quit, the Style page asks again", quits == 5 && st.unsavedPromptShown() &&
+                     st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 93);
+                st.resolveUnsavedStyle(U::Discard);
+                TEST("D33 P1 quit: Discard of the Style as shown then quits once", quits == 6 && !st.unsavedPromptShown() && !st.workPromptShown());
+                st.requestQuit(quitFn);   // still unwritten (tempo 93)
+                const auto d2 = st.manager().enqueueJob(slowJob(root / "d33-slow2"), {});
+                pump(100);
+                st.resolveUnsavedStyle(U::Save, juce::File((root / "d33-save.uasf").string()));
+                st.resolveRunningWork(W::Wait);
+                edit("92");                 // after the Save was chosen, while waiting
+                st.selectJob(d2);
+                st.cancelJob();
+                waitIdle(10000);
+                pump(300);
+                uasf::UasfDeserializer des;
+                const auto saved = des.deserializeFromFile((root / "d33-save.uasf").string());
+                TEST("D33 P1 quit: Save, Wait, then an edit: the file holds the Style as saved, no quit, the page asks again", quits == 6 &&
+                     saved.success && saved.style.tempo_bpm == 93 && st.unsavedPromptShown() && st.styleModel().dirty() &&
+                     st.styleModel().style().tempo_bpm == 92);
+                st.resolveUnsavedStyle(U::Cancel);
+                st.styleUndo();   // back to tempo 93, the state written
+                TEST("D33 P1 quit: undo back to the saved state: nothing unwritten, the quit is immediate", !st.styleModel().dirty() &&
+                     st.requestQuit(quitFn) && quits == 7);
+                edit("91");
+                st.requestQuit(quitFn);
+                st.resolveUnsavedStyle(U::Save, juce::File((root / "d33-save.uasf").string()));   // exists: the save job fails
+                waitIdle(10000);
+                pump(300);
+                TEST("D33 P1 quit: a failed Save never quits; the Style stays unwritten and the page asks again", quits == 7 &&
+                     st.unsavedPromptShown() && st.styleModel().dirty() && !st.jobList().empty() &&
+                     st.jobList().back().reason.find("already exists") != std::string::npos);
+                st.resolveUnsavedStyle(U::Cancel);
+                st.styleUndo();
+                TEST("D33 P1 quit: Cancel then undo: clean again", !st.styleModel().dirty() && quits == 7);
+                for (const char* n : {"d33-slow1.INCOMPLETE", "d33-slow2.INCOMPLETE"}) fs::remove_all(root / n);   // the test's own cleanup (the app never deletes)
             }
             {
                 app::LiveHostComponent h;
@@ -1842,7 +1948,8 @@ int main() {
                     }
                     rw->cancelJobs();
                     for (int i = 0; i < 500 && rw->busy(); ++i) pump(20);
-                    hs->manager().enqueueJob(jobs::styleUasf("later", {'u'}, root / "later-out" / "later.uasf"), {});
+                    std::ifstream kept(root / "kept.uasf", std::ios::binary);   // a real UASF: the job parses what it publishes (D33 P2)
+                    hs->manager().enqueueJob(jobs::styleUasf("later", {std::istreambuf_iterator<char>(kept), {}}, root / "later-out" / "later.uasf"), {});
                     for (int i = 0; i < 500 && !fs::exists(root / "later-out" / "later.uasf"); ++i) pump(20);
                     app::StudioComponent s([] {});   // as on the next launch
                     TEST("leftovers: a cancelled Sounds & Resources window backup is listed on the next launch, after a later Studio job "
