@@ -36,6 +36,8 @@ static int failures = 0, passes = 0;
     else { std::printf("  PASS: %s\n", name); ++passes; } } while (0)
 
 static void pump(int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil(ms); }
+// The leftover banner is listed on a worker thread (Codex r2 #2): wait until the newest listing has landed.
+static void settleLeftovers(ai_arranger::app::StudioComponent& s) { for (int i = 0; i < 500 && s.leftoversChecking(); ++i) pump(10); }
 static std::string slurp(const std::filesystem::path& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
 
 // Per-phase timing (instrumentation only, no check): wall vs process CPU (all threads; children separately) and the
@@ -1104,6 +1106,76 @@ int main() {
                  bytesOf(root / "Other.KST") == otherBefore);
             lm.clearPlan();
         }
+        phase("studio: reports viewer");
+        {   // Validation & Reports > Reports (P1, C17/C18): read-only viewer, reads off the message thread, HTML + CSV as an export job
+            namespace rp = jobs::report;
+            st.showDomain(D::Validation, 1);
+            TEST("reports: Validation & Reports has a Reports segment", st.segmentNames(D::Validation).joinIntoString("|") == "Checks|Reports" && st.segment() == 1);
+            TEST("reports: export needs an open report and says so", st.reportUnavailable().startsWith("Needs: a report open") && reasonsShown());
+            st.openReport(app::StudioComponent::ReportSource::Inventory, juce::File((root / "Mine.KST").string()));
+            TEST("reports: the inventory is read off the message thread (busy, not shown yet)", st.busy() && !st.reportViewText().contains("Library inventory"));
+            waitIdle(5000);
+            TEST("reports: inventory shown from the Library struct", st.reportViewText().contains("Library inventory: Mine.KST") &&
+                 st.reportViewText().contains("Ballad") && st.reportViewText().contains("Not verified on a Pa5X") && st.reportStatus().startsWith("Showing (read-only)"));
+            const auto out = root / "Inventory Report";
+            const auto id = st.exportReport(juce::File(out.string()));
+            const bool busyAfter = st.busy();
+            waitIdle(10000);
+            const auto all = st.jobList();
+            const auto job = std::find_if(all.begin(), all.end(), [&](const jobs::JobState& j) { return j.id == id; });
+            TEST("reports: export runs as an export job on a worker thread", id != 0 && busyAfter && job != all.end() && job->type == "Report (HTML + CSV)" &&
+                 job->phase == jobs::Phase::Done && job->writerThread != 0 && job->writerThread != jobs::thisThread());
+            std::vector<std::vector<std::string>> rows;
+            TEST("reports: report.html + CSVs published with PACKAGE.sha256 and the job report, nothing staged left",
+                 fs::is_regular_file(out / "report.html") && fs::is_regular_file(out / "banks.csv") && fs::is_regular_file(out / "PACKAGE.sha256") &&
+                 fs::is_regular_file(root / "Inventory Report.export.json") && !fs::exists(root / "Inventory Report.INCOMPLETE"));
+            TEST("reports: the written HTML is self-contained and items.csv parses", rp::htmlRefusal(slurp(out / "report.html")).empty() &&
+                 rp::parseCsv(slurp(out / "items.csv"), &rows).empty() && rows.size() == 3 && rows[0][3] == "name");
+            TEST("reports: status shows the published folder at L1 only", st.reportStatus().startsWith("Exported: ") &&
+                 st.reportStatus().contains(juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3")));
+            st.exportReport(juce::File((root / "Mine.KST/reports").string()));
+            waitIdle(5000);
+            TEST("reports: an export inside the library it reports on is refused (D18)", st.reportStatus().startsWith("Report NOT written") &&
+                 st.reportStatus().contains("overlaps") && !fs::exists(root / "Mine.KST/reports") && !fs::exists(root / "Mine.KST/reports.INCOMPLETE"));
+            st.openReport(app::StudioComponent::ReportSource::Validation, juce::File((root / "Mine.KST").string()));
+            waitIdle(5000);
+            TEST("reports: validation findings shown with their sources", st.reportViewText().contains("Structural validation: Mine.KST") &&
+                 st.reportViewText().contains("== Findings ("));
+            st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "My Plan/plan.json").string()));
+            waitIdle(5000);
+            TEST("reports: plan.json shown as the plan's steps", st.reportViewText().contains("Library Manager plan (EXPORT-ONLY)") &&
+                 st.reportViewText().contains("== Steps (2) ==") && st.reportViewText().contains("1 | copy | A |") &&
+                 st.reportViewText().contains("2 | bank-swap |"));
+            st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "Inventory Report.export.json").string()));
+            waitIdle(5000);
+            TEST("reports: NAME.export.json shown as an export report", st.reportViewText().contains("Export report: Report (HTML + CSV)") &&
+                 st.reportViewText().contains("Verification L1: passed"));
+            {   // Codex r1 #1: a hostile many-keys report, superseded at once by a plan: the plan is shown, nothing stays busy
+                std::string many = "{";
+                for (int i = 0; i < 500000; ++i) many += (i ? ",\"" : "\"") + std::to_string(i) + "\":0";
+                put(root / "many.export.json", many + "}");
+                st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "many.export.json").string()));
+                st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "My Plan/plan.json").string()));
+                waitIdle(10000);
+                TEST("reports r1#1: a superseded hostile read does not hold the viewer; the newest report is shown", !st.busy() &&
+                     st.reportViewText().contains("Library Manager plan (EXPORT-ONLY)") && st.reportUnavailable().isEmpty());
+            }
+            {   // Codex r2 #1: 4 MB of scalar plan steps is refused with the reason, nothing built, the viewer free again
+                std::string j = "{\"format\":\"aiarranger-library-plan\",\"steps\":[0";
+                for (int i = 1; i < 1999997; ++i) j += ",0";
+                put(root / "scalar.plan.json", j + "]}");
+                st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "scalar.plan.json").string()));
+                waitIdle(10000);
+                TEST("reports r2#1: a plan of scalar steps is refused with the reason", !st.busy() &&
+                     st.reportStatus().startsWith("Not shown: plan refused") && st.reportStatus().contains("not an object"));
+            }
+            put(root / "other.json", "{\"a\": 1}");
+            st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "other.json").string()));
+            waitIdle(5000);
+            TEST("reports: another JSON is refused with the reason; export unavailable again", st.reportStatus().startsWith("Not shown: not an AIArranger") &&
+                 st.reportUnavailable().startsWith("Needs: a report open"));
+            TEST("reports: the library is unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
+        }
         phase("studio: sample lab");
         {
             media::sound::Sample sm;
@@ -1655,13 +1727,15 @@ int main() {
                 {   // leftover banner: read-only listing of the last output folder, on launch and on page open; nothing deleted
                     app::StudioComponent again([] {});
                     const bool idleAtOnce = !again.busy() && !again.manager().computing();   // before any pump: as the app's quit sees it
-                    pump(50);
+                    settleLeftovers(again);
                     TEST("quit guard: a new Studio with nothing started is idle at once (no Library Manager report counted, #43 gate D note 1)",
                          idleAtOnce);
                     TEST("leftovers: on launch a banner lists NAME.INCOMPLETE in the last output folder", again.leftoverText().contains("quit-slow.INCOMPLETE") &&
                          again.leftoverText().contains(juce::String(root.string())) && again.leftoverText().contains("Nothing is deleted"));
                     fs::create_directories(root / "old.INCOMPLETE.stale-20260101T000000Z");
                     again.showDomain(D::Validation);
+                    TEST("leftovers r2#2: opening a page lists leftovers on a worker, not inside showDomain", again.leftoversChecking());
+                    settleLeftovers(again);
                     TEST("leftovers: opening a page lists a moved-aside .stale- folder too", again.leftoverText().contains("old.INCOMPLETE.stale-20260101T000000Z"));
                     TEST("leftovers: the listing changes nothing", fs::is_directory(root / "quit-slow.INCOMPLETE") &&
                          fs::is_directory(root / "old.INCOMPLETE.stale-20260101T000000Z"));
@@ -1669,6 +1743,7 @@ int main() {
                         const auto rs = st.manager().enqueueJob(slowJob(root / "run-slow"), {});
                         for (int i = 0; i < 250 && !fs::exists(root / "run-slow.INCOMPLETE"); ++i) pump(20);
                         again.showDomain(D::ImportExport);
+                        settleLeftovers(again);
                         TEST("leftovers: a running job's own NAME.INCOMPLETE is not listed; the others still are (#43 gate D note 2)",
                              fs::is_directory(root / "run-slow.INCOMPLETE") && !again.leftoverText().contains("run-slow.INCOMPLETE") &&
                              again.leftoverText().contains("quit-slow.INCOMPLETE"));
@@ -1677,6 +1752,7 @@ int main() {
                         waitIdle(5000);
                         pump(100);
                         again.showDomain(D::Validation);
+                        settleLeftovers(again);
                         TEST("leftovers: once that job is cancelled its NAME.INCOMPLETE is listed", again.leftoverText().contains("run-slow.INCOMPLETE"));
                         fs::remove_all(root / "run-slow.INCOMPLETE");   // the test's own cleanup (the app never deletes)
                     }
@@ -1685,6 +1761,7 @@ int main() {
                     fs::create_directories(root / "clean-out");
                     juce::File(rec.string()).replaceWithText(juce::String((root / "clean-out").string()));
                     again.showDomain(D::ImportExport);
+                    settleLeftovers(again);
                     TEST("leftovers: no banner when the last output folder has none", again.leftoverText().isEmpty());
                     juce::File(rec.string()).replaceWithText(keep);
                     fs::remove_all(root / "old.INCOMPLETE.stale-20260101T000000Z");
@@ -1961,6 +2038,7 @@ int main() {
                     for (int i = 0; i < 500 && !fs::exists(b6.string() + ".INCOMPLETE"); ++i) pump(10);
                     {
                         app::StudioComponent s([] {});
+                        settleLeftovers(s);
                         TEST("leftovers: the running Sounds & Resources backup's own NAME.INCOMPLETE is not listed (#43 gate D note 2)",
                              rw->busy() && fs::is_directory(b6.string() + ".INCOMPLETE") && !s.leftoverText().contains("host-backup6.INCOMPLETE"));
                     }
@@ -1970,6 +2048,7 @@ int main() {
                     hs->manager().enqueueJob(jobs::styleUasf("later", {std::istreambuf_iterator<char>(kept), {}}, root / "later-out" / "later.uasf"), {});
                     for (int i = 0; i < 500 && !fs::exists(root / "later-out" / "later.uasf"); ++i) pump(20);
                     app::StudioComponent s([] {});   // as on the next launch
+                    settleLeftovers(s);
                     TEST("leftovers: a cancelled Sounds & Resources window backup is listed on the next launch, after a later Studio job "
                          "elsewhere; the Studio's own leftovers too (#43 gate D e)",
                          fs::is_directory(b6.string() + ".INCOMPLETE") && !fs::exists(b6) && fs::is_regular_file(root / "later-out" / "later.uasf") &&

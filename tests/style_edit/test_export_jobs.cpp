@@ -9,6 +9,8 @@
 #include "media/sound/drum_source.h"
 #include <chrono>
 #include <cstdio>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace ai_arranger;
@@ -485,6 +487,85 @@ int main() {
         setOutputRecord({});
         recordOutputFolder((root / "ignored").string());
         TEST("record: no record file set (the default) records nothing", recordedFolders().empty());
+    }
+
+    // ── Codex r1 #2 (report export): enqueue does no file I/O on the caller (message) thread; the worker records the
+    // output folder before the job runs, in enqueue order ──
+    {
+        const auto rec = root / "state-io" / "record.txt";
+        setOutputRecord(rec);
+        std::atomic<bool> release{false}, started{false};
+        auto first = styleUasf("first", {'u'}, root / "io-a" / "first.uasf");
+        first.write = [&](const fs::path&, const std::function<bool(double)>&) {
+            started = true;
+            while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return WriteResult{"stopped", ""};
+        };
+        {
+            JobQueue q;
+            q.enqueue(first);
+            for (int i = 0; i < 500 && !started; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto before = slurp(rec);
+            TEST("r1#2: the running job's folder was recorded before it wrote", started && has(before, (root / "io-a").string().c_str()));
+            q.enqueue(styleUasf("second", {'u'}, root / "io-b" / "second.uasf"));
+            TEST("r1#2: enqueue does not touch the output record on the caller thread", slurp(rec) == before);
+            fs::create_directories(root / "io-b" / "old-b.INCOMPLETE");
+            const auto report = leftoverReport();   // what a page opening runs, while io-b is only a note
+            TEST("r2#2: leftover detection with a note pending writes nothing (the record file is unchanged)", slurp(rec) == before);
+            TEST("r2#2: ... and still sees the noted folder's leftovers", !report.empty() && report[0].first == (root / "io-b").string() &&
+                 report[0].second == std::vector<std::string>{"old-b.INCOMPLETE"});
+            release = true;
+            for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        TEST("r1#2: the worker recorded the second folder, most recent first",
+             (recordedFolders() == std::vector<std::string>{(root / "io-b").string(), (root / "io-a").string()}));
+        setOutputRecord({});
+    }
+    {   // Codex r3 #1: enqueue (message thread) never waits for another thread's record I/O. The record is a FIFO, so a
+        // reader blocks inside the open until the test opens the writing end: real slow I/O, no hook.
+        const auto rec = root / "state-fifo" / "record.txt";
+        fs::create_directories(rec.parent_path());
+        setOutputRecord(root / "state-fifo" / "plain.txt");
+        std::atomic<bool> release{false}, started{false};
+        auto first = styleUasf("first", {'u'}, root / "fifo-a" / "first.uasf");
+        first.write = [&](const fs::path&, const std::function<bool(double)>&) {
+            started = true;
+            while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return WriteResult{"stopped", ""};
+        };
+        JobQueue q;
+        q.enqueue(first);   // the worker flushes into plain.txt, then blocks in this writer
+        for (int i = 0; i < 500 && !started; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        TEST("r3#1: a FIFO record file made", ::mkfifo(rec.c_str(), 0600) == 0);
+        setOutputRecord(rec);   // nothing pending: no I/O
+        std::atomic<bool> reading{false};
+        std::thread reader([&] { reading = true; (void)recordedFolders(); });   // blocks opening the FIFO
+        while (!reading) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the reader is inside the open now
+        std::thread opener([&] {   // ends the slow I/O after 1.5 s whatever happens
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            const int fd = ::open(rec.c_str(), O_WRONLY);
+            if (fd >= 0) ::close(fd);
+        });
+        const auto t0 = std::chrono::steady_clock::now();
+        q.enqueue(styleUasf("second", {'u'}, root / "fifo-b" / "second.uasf"));
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("  info: r3#1 enqueue took %lld ms while another thread read the record\n", (long long)ms);
+        TEST("r3#1: enqueue returns within 200 ms while another thread holds the record in slow I/O", ms < 200);
+        opener.join();
+        reader.join();
+        fs::remove(rec);   // a plain file again, so the worker's flush of fifo-b completes
+        std::ofstream(rec) << "";
+        release = true;
+        for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        TEST("r3#1: the second folder is still recorded by the worker", recordedFolders() == std::vector<std::string>{(root / "fifo-b").string()});
+        setOutputRecord({});
+    }
+    {   // Codex r1 #2: whether the output is a package is found by the job's worker, so the studio needs no file check
+        const auto pkg = run(soundPackage(organ, root / "src", "", root / "pm-organ"));
+        const auto one = run(styleUasf("pm", {'u'}, root / "pm.uasf"));
+        TEST("r1#2: a published package is flagged by the job (PACKAGE.sha256)", pkg.phase == Phase::Done && pkg.packageManifest);
+        TEST("r1#2: a single-file output is not", one.phase == Phase::Done && !one.packageManifest);
     }
 
     // ── Library Manager plan (E7) as a job: D18 covers both libraries, EXPORT-ONLY, L1 only ──

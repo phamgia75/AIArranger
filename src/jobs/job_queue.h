@@ -8,7 +8,11 @@
 // An idle worker (no job running, e.g. after the app's quit waited for every job) is joined; a busy one is detached.
 // workers() counts the worker threads still alive in this process (a direct check of that join in the tests).
 // Every enqueue records its output folder in the one output record (setOutputRecord, set once by the app), so the
-// leftover banner (leftoverReport) finds an unfinished write whichever window's queue made it.
+// leftover banner (leftoverReport) finds an unfinished write whichever window's queue made it. enqueue only notes the
+// folder in memory (it runs on the message thread: no file I/O there, report export Codex r1 #2); a queue's worker
+// writes every noted folder, in enqueue order, before it starts a job, so the record names a folder before its job can
+// leave anything there. recordedFolders() applies pending notes in memory (never writes: a page opening runs it), so a
+// reader never misses one.
 
 #include "jobs/export_job.h"
 #include <algorithm>
@@ -27,35 +31,77 @@ namespace ai_arranger::jobs {
 // Process-wide; empty (the default, e.g. in tests) records nothing.
 inline constexpr size_t kRecordedFolders = 8;
 namespace detail {
-struct OutputRecord { std::mutex m; fs::path file; };
+// Two locks (Codex r3 #1): `m` guards memory only (file, pending) and is all enqueue (the message thread) takes; `io`
+// serializes record file I/O, taken by the worker-side flush and by readers, always before `m`, never inside it.
+struct OutputRecord { std::mutex m, io; fs::path file; std::vector<std::string> pending; };   // pending: noted, not yet written
 inline OutputRecord& outputRecord() { static OutputRecord r; return r; }
-}  // namespace detail
-inline void setOutputRecord(const fs::path& file) {
-    std::lock_guard<std::mutex> l(detail::outputRecord().m);
-    detail::outputRecord().file = file;
-}
-inline std::vector<std::string> recordedFolders() {
-    std::lock_guard<std::mutex> l(detail::outputRecord().m);
+inline std::vector<std::string> readRecord(const fs::path& file) {
     std::vector<std::string> r;
-    std::ifstream f(detail::outputRecord().file);
+    std::ifstream f(file);
     for (std::string line; std::getline(f, line);) {
         while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
         if (!line.empty() && std::find(r.begin(), r.end(), line) == r.end()) r.push_back(line);
     }
     return r;
 }
-inline void recordOutputFolder(const std::string& folder) {
-    auto list = recordedFolders();
-    std::lock_guard<std::mutex> l(detail::outputRecord().m);
-    const auto file = detail::outputRecord().file;
-    if (file.empty() || (!list.empty() && list.front() == folder)) return;
-    list.erase(std::remove(list.begin(), list.end(), folder), list.end());
-    list.insert(list.begin(), folder);
+inline std::vector<std::string> withPending(std::vector<std::string> list, const std::vector<std::string>& pending) {
+    for (const auto& folder : pending) {
+        list.erase(std::remove(list.begin(), list.end(), folder), list.end());
+        list.insert(list.begin(), folder);
+    }
     if (list.size() > kRecordedFolders) list.resize(kRecordedFolders);
+    return list;
+}
+inline void flushRecord(OutputRecord& r) {   // r.io held, r.m not
+    fs::path file;
+    std::vector<std::string> pending;
+    {
+        std::lock_guard<std::mutex> l(r.m);
+        file = r.file;
+        pending.swap(r.pending);
+    }
+    if (pending.empty() || file.empty()) return;
+    const auto before = readRecord(file);
+    const auto list = withPending(before, pending);
+    if (list == before) return;
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     std::ofstream o(file, std::ios::trunc);
     for (const auto& d : list) o << d << "\n";
+}
+}  // namespace detail
+inline void setOutputRecord(const fs::path& file) {
+    auto& r = detail::outputRecord();
+    std::lock_guard<std::mutex> io(r.io);
+    detail::flushRecord(r);   // notes made for the previous file go there
+    std::lock_guard<std::mutex> l(r.m);
+    r.file = file;
+}
+// Memory only, no file I/O and never waits for it: the folder is written by the next flushOutputRecord (a queue worker).
+inline void noteOutputFolder(const std::string& folder) {
+    std::lock_guard<std::mutex> l(detail::outputRecord().m);
+    if (!detail::outputRecord().file.empty()) detail::outputRecord().pending.push_back(folder);
+}
+inline void flushOutputRecord() {
+    std::lock_guard<std::mutex> io(detail::outputRecord().io);
+    detail::flushRecord(detail::outputRecord());
+}
+inline std::vector<std::string> recordedFolders() {   // read-only: pending notes applied in memory
+    auto& r = detail::outputRecord();
+    std::lock_guard<std::mutex> io(r.io);
+    fs::path file;
+    std::vector<std::string> pending;
+    {
+        std::lock_guard<std::mutex> l(r.m);
+        file = r.file;
+        pending = r.pending;
+    }
+    if (file.empty()) return {};
+    return detail::withPending(detail::readRecord(file), pending);
+}
+inline void recordOutputFolder(const std::string& folder) {
+    noteOutputFolder(folder);
+    flushOutputRecord();
 }
 
 class JobQueue {
@@ -92,7 +138,7 @@ public:
         {
             std::error_code ec;
             const auto parent = media::folderPath(fs::absolute(spec.dest, ec)).parent_path();
-            if (!ec) recordOutputFolder(parent.string());
+            if (!ec) noteOutputFolder(parent.string());   // written by the worker (flushOutputRecord), never here
         }
         uint64_t id;
         {
@@ -190,6 +236,7 @@ private:
                 st = j->state;
                 s->running = true;
             }
+            flushOutputRecord();   // this job's folder (and every earlier note) is in the record before the job writes
             runExport(*spec, st, [&] { std::lock_guard<std::mutex> l(s->m); return j->cancel; },
                       [&](const JobState& now) {
                           { std::lock_guard<std::mutex> l(s->m); j->state = now; }

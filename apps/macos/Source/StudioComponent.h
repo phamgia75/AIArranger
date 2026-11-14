@@ -16,6 +16,7 @@
 #include "ResourcesComponent.h"
 #include "WaveView.h"
 #include "jobs/job_queue.h"
+#include "jobs/report_export.h"
 #include "ui/studio/studio_models.h"
 #include "ui/studio/studio_tools.h"
 #include "ui/studio/style_studio_model.h"
@@ -105,6 +106,7 @@ public:
     void importSmfTrack(const juce::File& mid);
     void exportStyleSmf(const juce::File& mid);   // an export job (EXPERIMENTAL, L1); the status says when it lands
     juce::String leftoverText() const { return leftovers_.isVisible() ? leftovers_.getText() : juce::String(); }
+    bool leftoversChecking() const { return leftoverShown_ != leftoverGen_; }   // the banner's listing is still running
     // An E6 export job (staged, read back, parsed and validated, then published); the edits count as written only for the
     // Style as it was when the job was made. `landed` runs on the message thread once the job has finished (any outcome).
     // false: not started (the status says why).
@@ -129,6 +131,16 @@ public:
     std::vector<jobs::JobState> jobList() const { return queue_->snapshot(); }
     juce::String jobListText() const { return jobView_.getText(); }
     int jobListTop() const { return jobView_.getY(); }
+
+    // Validation & Reports > Reports (P1, parity C17/C18): a READ-ONLY viewer of the existing reports (plan.json,
+    // NAME.export.json, a library's inventory or structural validation), each read on a worker thread (newest wins), and
+    // Export HTML + CSV as an export job (E6: a NEW folder, staged, checked, published; the report's source only read).
+    enum class ReportSource { JsonFile, Inventory, Validation };
+    void openReport(ReportSource s, const juce::File& f);   // asynchronous; busy() until it lands
+    uint64_t exportReport(const juce::File& dest);          // 0 when unavailable
+    juce::String reportUnavailable() const;                 // "" when Export HTML + CSV can run now
+    juce::String reportViewText() const { return reportView_.getText(); }
+    juce::String reportStatus() const { return reportStatus_.getText(); }
 
     ResourcesComponent& resources() { return res_; }
     LibraryManagerComponent& manager() { return manager_; }   // Library Workspace > Library Manager (E7)
@@ -183,7 +195,9 @@ private:
     std::map<Domain, std::vector<juce::TextButton*>> segmentButtons_;
     juce::Label title_, experimental_;
     juce::Label leftovers_;   // non-blocking banner: unfinished writes (NAME.INCOMPLETE, .stale-*) in the recorded output folders (jobs::leftoverReport)
-    void checkLeftovers();    // read-only listing; on launch and whenever a page opens
+    void checkLeftovers();    // read-only listing on a worker thread (newest wins); on launch and whenever a page opens
+    void showLeftovers(const std::vector<std::pair<std::string, std::vector<std::string>>>& report);
+    uint64_t leftoverGen_ = 0, leftoverShown_ = 0;   // message thread
     juce::TextEditor inspector_;
 
     Domain domain_ = Domain::Library;
@@ -253,6 +267,15 @@ private:
     ui::studio::Verification verification_;
     bool verificationIsPackage_ = false;
     Domain verificationDomain_ = Domain::Validation;   // the page whose output the badges describe
+
+    // Validation & Reports › Reports
+    FlowPage reportsPage_;
+    juce::TextEditor reportView_;
+    juce::Label reportStatus_;
+    juce::TextButton* reportExportBtn_ = nullptr;
+    std::shared_ptr<const jobs::report::Report> report_;   // the report shown (message thread)
+    uint64_t reportGen_ = 0;                                // newest open request; older results are dropped
+    std::shared_ptr<std::atomic<uint64_t>> reportLatest_ = std::make_shared<std::atomic<uint64_t>>(0);   // reportGen_ for the workers: an older read stops
 
     // Export jobs (E6)
     uint64_t enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done = {});

@@ -26,6 +26,7 @@
 #include <atomic>
 #include <fcntl.h>
 #include <set>
+#include <unordered_set>
 #include <unistd.h>
 
 namespace ai_arranger::jobs::kit {
@@ -412,6 +413,8 @@ inline std::string manifestJson(const std::string& kitName, const std::vector<It
 // ── a small strict JSON reader for manifest.json (the repo has no general JSON parser; P2, Codex r1) ──
 // RFC 8259 values; strings with every escape (\uXXXX to UTF-8, surrogate pairs joined); nesting at most 16; trailing
 // bytes other than white space refused. Numbers are kept as their text. Bounded by the caller's file size limit.
+// Work is linear in the text: duplicate keys are found with a hash set per object (report export Codex r1 #1: a linear
+// scan made 500,000 keys quadratic), at most kMaxJsonNodes values, and an optional keepGoing checked every 4096 values.
 struct Json {
     enum class T { Null, Bool, Num, Str, Arr, Obj } t = T::Null;
     bool b = false;
@@ -420,10 +423,12 @@ struct Json {
     std::vector<std::pair<std::string, Json>> o;      // Obj, in file order (duplicate keys refused)
     const Json* get(const std::string& k) const { for (const auto& [n, v] : o) if (n == k) return &v; return nullptr; }
 };
+inline constexpr size_t kMaxJsonNodes = 2000000;   // values (objects, arrays, members, scalars) in one document
 namespace detail {
 struct JsonIn {
     const std::string& x;
-    size_t i = 0;
+    std::function<bool()> keepGoing;
+    size_t i = 0, nodes = 0;
     std::string err;
     void ws() { while (i < x.size() && (x[i] == ' ' || x[i] == '\t' || x[i] == '\n' || x[i] == '\r')) ++i; }
     bool fail(const std::string& m) { if (err.empty()) err = m + " at byte " + std::to_string(i); return false; }
@@ -486,6 +491,8 @@ struct JsonIn {
     }
     bool value(Json* v, int depth) {
         if (depth > 16) return fail("nested too deeply");
+        if (++nodes > kMaxJsonNodes) return fail("more than " + std::to_string(kMaxJsonNodes) + " values");
+        if ((nodes & 4095) == 0 && keepGoing && !keepGoing()) return fail("cancelled");
         ws();
         if (i >= x.size()) return fail("value expected");
         const char c = x[i];
@@ -494,11 +501,12 @@ struct JsonIn {
             ++i;
             ws();
             if (i < x.size() && x[i] == '}') { ++i; return true; }
+            std::unordered_set<std::string> keys;
             for (;;) {
                 std::string k;
                 ws();
                 if (!str(&k)) return false;
-                if (v->get(k)) return fail("duplicate key " + k);
+                if (!keys.insert(k).second) return fail("duplicate key " + k);
                 ws();
                 if (i >= x.size() || x[i++] != ':') return fail("':' expected");
                 Json m;
@@ -534,8 +542,8 @@ struct JsonIn {
 };
 }  // namespace detail
 // "" and *out set, or why `text` is not one JSON value.
-inline std::string parseJson(const std::string& text, Json* out) {
-    detail::JsonIn in{text};
+inline std::string parseJson(const std::string& text, Json* out, const std::function<bool()>& keepGoing = {}) {
+    detail::JsonIn in{text, keepGoing};
     if (!in.value(out, 0)) return in.err;
     in.ws();
     return in.i == text.size() ? "" : "trailing bytes after the JSON value at byte " + std::to_string(in.i);
