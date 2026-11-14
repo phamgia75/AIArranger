@@ -485,6 +485,11 @@ int main() {
             TEST("r1#2: the running job's folder was recorded before it wrote", started && has(before, (root / "io-a").string().c_str()));
             q.enqueue(styleUasf("second", {'u'}, root / "io-b" / "second.uasf"));
             TEST("r1#2: enqueue does not touch the output record on the caller thread", slurp(rec) == before);
+            fs::create_directories(root / "io-b" / "old-b.INCOMPLETE");
+            const auto report = leftoverReport();   // what a page opening runs, while io-b is only a note
+            TEST("r2#2: leftover detection with a note pending writes nothing (the record file is unchanged)", slurp(rec) == before);
+            TEST("r2#2: ... and still sees the noted folder's leftovers", !report.empty() && report[0].first == (root / "io-b").string() &&
+                 report[0].second == std::vector<std::string>{"old-b.INCOMPLETE"});
             release = true;
             for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }

@@ -11,7 +11,8 @@
 // leftover banner (leftoverReport) finds an unfinished write whichever window's queue made it. enqueue only notes the
 // folder in memory (it runs on the message thread: no file I/O there, report export Codex r1 #2); a queue's worker
 // writes every noted folder, in enqueue order, before it starts a job, so the record names a folder before its job can
-// leave anything there. recordedFolders() writes pending notes first, so a reader never misses one.
+// leave anything there. recordedFolders() applies pending notes in memory (never writes: a page opening runs it), so a
+// reader never misses one.
 
 #include "jobs/export_job.h"
 #include <algorithm>
@@ -41,16 +42,19 @@ inline std::vector<std::string> readRecord(const fs::path& file) {
     }
     return r;
 }
-inline void flushRecord(OutputRecord& r) {   // r.m held
-    if (r.pending.empty() || r.file.empty()) { r.pending.clear(); return; }
-    auto list = readRecord(r.file);
-    const auto before = list;
-    for (const auto& folder : r.pending) {
+inline std::vector<std::string> withPending(std::vector<std::string> list, const std::vector<std::string>& pending) {
+    for (const auto& folder : pending) {
         list.erase(std::remove(list.begin(), list.end(), folder), list.end());
         list.insert(list.begin(), folder);
     }
-    r.pending.clear();
     if (list.size() > kRecordedFolders) list.resize(kRecordedFolders);
+    return list;
+}
+inline void flushRecord(OutputRecord& r) {   // r.m held
+    if (r.pending.empty() || r.file.empty()) { r.pending.clear(); return; }
+    const auto before = readRecord(r.file);
+    const auto list = withPending(before, r.pending);
+    r.pending.clear();
     if (list == before) return;
     std::error_code ec;
     fs::create_directories(r.file.parent_path(), ec);
@@ -72,10 +76,10 @@ inline void flushOutputRecord() {
     std::lock_guard<std::mutex> l(detail::outputRecord().m);
     detail::flushRecord(detail::outputRecord());
 }
-inline std::vector<std::string> recordedFolders() {
+inline std::vector<std::string> recordedFolders() {   // read-only: pending notes applied in memory
     std::lock_guard<std::mutex> l(detail::outputRecord().m);
-    detail::flushRecord(detail::outputRecord());
-    return detail::readRecord(detail::outputRecord().file);
+    if (detail::outputRecord().file.empty()) return {};
+    return detail::withPending(detail::readRecord(detail::outputRecord().file), detail::outputRecord().pending);
 }
 inline void recordOutputFolder(const std::string& folder) {
     noteOutputFolder(folder);
