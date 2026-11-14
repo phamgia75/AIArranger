@@ -9,6 +9,8 @@
 #include "media/sound/drum_source.h"
 #include <chrono>
 #include <cstdio>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace ai_arranger;
@@ -495,6 +497,46 @@ int main() {
         }
         TEST("r1#2: the worker recorded the second folder, most recent first",
              (recordedFolders() == std::vector<std::string>{(root / "io-b").string(), (root / "io-a").string()}));
+        setOutputRecord({});
+    }
+    {   // Codex r3 #1: enqueue (message thread) never waits for another thread's record I/O. The record is a FIFO, so a
+        // reader blocks inside the open until the test opens the writing end: real slow I/O, no hook.
+        const auto rec = root / "state-fifo" / "record.txt";
+        fs::create_directories(rec.parent_path());
+        setOutputRecord(root / "state-fifo" / "plain.txt");
+        std::atomic<bool> release{false}, started{false};
+        auto first = styleUasf("first", {'u'}, root / "fifo-a" / "first.uasf");
+        first.write = [&](const fs::path&, const std::function<bool(double)>&) {
+            started = true;
+            while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return WriteResult{"stopped", ""};
+        };
+        JobQueue q;
+        q.enqueue(first);   // the worker flushes into plain.txt, then blocks in this writer
+        for (int i = 0; i < 500 && !started; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        TEST("r3#1: a FIFO record file made", ::mkfifo(rec.c_str(), 0600) == 0);
+        setOutputRecord(rec);   // nothing pending: no I/O
+        std::atomic<bool> reading{false};
+        std::thread reader([&] { reading = true; (void)recordedFolders(); });   // blocks opening the FIFO
+        while (!reading) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the reader is inside the open now
+        std::thread opener([&] {   // ends the slow I/O after 1.5 s whatever happens
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            const int fd = ::open(rec.c_str(), O_WRONLY);
+            if (fd >= 0) ::close(fd);
+        });
+        const auto t0 = std::chrono::steady_clock::now();
+        q.enqueue(styleUasf("second", {'u'}, root / "fifo-b" / "second.uasf"));
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("  info: r3#1 enqueue took %lld ms while another thread read the record\n", (long long)ms);
+        TEST("r3#1: enqueue returns within 200 ms while another thread holds the record in slow I/O", ms < 200);
+        opener.join();
+        reader.join();
+        fs::remove(rec);   // a plain file again, so the worker's flush of fifo-b completes
+        std::ofstream(rec) << "";
+        release = true;
+        for (int i = 0; i < 500 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        TEST("r3#1: the second folder is still recorded by the worker", recordedFolders() == std::vector<std::string>{(root / "fifo-b").string()});
         setOutputRecord({});
     }
     {   // Codex r1 #2: whether the output is a package is found by the job's worker, so the studio needs no file check
