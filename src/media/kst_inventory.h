@@ -73,6 +73,8 @@ constexpr const char* kLayoutKst = "Pa5X KST";
 constexpr const char* kLayoutPa700 = "Pa700/Pa1000-family SET";
 constexpr const char* kLayoutPa4x = "Pa4X-family SET (generation not determined)";
 constexpr const char* kLayoutUnknown = "unknown (no KST or SET markers)";
+// No .KST/.SET suffix and the names fit more than one family (or only a marker two families share): not guessed.
+constexpr const char* kLayoutAmbiguous = "ambiguous (no .KST/.SET suffix; names fit more than one family)";
 inline bool isSetLayout(const std::string& layout) { return layout == kLayoutPa700 || layout == kLayoutPa4x; }
 
 namespace detail {
@@ -165,6 +167,8 @@ inline std::string upper(std::string s) {
 // Pa700/Pa1000 markers (owner Pa700 SET, pa-studio-research FORMAT_MATRIX.md): GLOBAL/LIMITER.AUD,
 //   GLOBAL/MASTEREQ.AUD, SOUND/USERDK01.PCG, folder SONGBOOK/SONGDB.SBD. Pa4X's manual layout has none of them.
 //   The SONGDB.SBD folder is also OBSERVED in owner Pa5X KSTs, so it marks a Pa700 SET only without Pa5X markers.
+// Without a suffix, Pa5X markers together with Pa4X/Pa700 markers (Pa5X conversions keep a lower-case MULTISMP/ram.kmp),
+// or a SONGDB.SBD folder alone, give kLayoutAmbiguous: the names do not decide the family.
 // Pa4X-family markers (MAN4 PDF p.975): .STY/.PRF/.PAD, SOUND/USERDK.PCG, MULTISMP/RAM.KMP.
 // Pa5X markers (MAN5 p.721): .STG/.KSC/.PDC.
 inline std::string detectLayout(const std::filesystem::path& root, const Listing& l) {
@@ -184,9 +188,12 @@ inline std::string detectLayout(const std::filesystem::path& root, const Listing
         pa5x |= ext == ".STG" || ext == ".KSC" || ext == ".PDC";
     }
     if (ends(".KST")) return kLayoutKst;
-    if (pa700 || (songDb && !pa5x)) return kLayoutPa700;
-    if (ends(".SET") || pa4x) return kLayoutPa4x;
-    return pa5x ? kLayoutKst : kLayoutUnknown;
+    if (ends(".SET")) return pa700 || (songDb && !pa5x) ? kLayoutPa700 : kLayoutPa4x;
+    if (pa5x && (pa700 || pa4x)) return kLayoutAmbiguous;
+    if (pa700 || (songDb && pa4x)) return kLayoutPa700;
+    if (pa4x) return kLayoutPa4x;
+    if (pa5x) return kLayoutKst;
+    return songDb ? kLayoutAmbiguous : kLayoutUnknown;
 }
 
 }  // namespace detail

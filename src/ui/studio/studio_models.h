@@ -67,7 +67,8 @@ inline SourceProbe probeSource(const fs::path& dir) {
         // Pa5X-only extensions (manual v1.4 p.721-722 type table, as in kst_inventory.h); .KMP/.WAV/.MID also occur elsewhere.
         const uint32_t pa5x = count({".STG", ".KSC", ".PDC", ".CSC", ".SBD", ".SBL", ".GBL", ".PCG", ".PCM"});
         // E5 layout detection (kst_inventory.h): a .SET suffix, or Pa700/Pa1000 or Pa4X markers without one
-        if (setSuffix || media::isSetLayout(p.inv.layout)) p.kind = K::Pa4xSet;
+        if (p.inv.layout == media::kLayoutAmbiguous) p.error = "Ambiguous: " + p.inv.layout + ". Not opened as a KST or a SET.";
+        else if (setSuffix || media::isSetLayout(p.inv.layout)) p.kind = K::Pa4xSet;
         else if (pa5x > 0) p.kind = fs::exists(media::backupManifestPath(media::folderPath(dir)), ec) ? K::KstBackupCopy : K::Pa5xUserData;
         else if (count({".KSF", ".KMP"}) > 0) p.kind = K::KorgSamplingData;
         else if (count({".WAV"}) > 0 && count({".WAV"}) == p.inv.files) p.kind = K::WavFolder;
@@ -75,7 +76,7 @@ inline SourceProbe probeSource(const fs::path& dir) {
     }
     p.detected = kindName(p.kind);
     if (p.kind == K::Pa4xSet && !p.inv.layout.empty()) p.detected += ": " + p.inv.layout;
-    if (!p.layout)
+    if (!p.layout && p.error.empty())
         p.error = "Not a keyboard backup: no Style, Pad or Sound files found. Choose the folder that ends in .KST, "
                   "a package folder, or a folder of KMP/KSF/WAV samples.";
     return p;

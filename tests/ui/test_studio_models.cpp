@@ -63,6 +63,11 @@ int main() {
     TEST("unrecognised folder: not recognised, with what to choose instead", p.kind == K::NotRecognised && !p.layout &&
          p.error.find("Not a keyboard backup") != std::string::npos);
     TEST("a file is not a source", !probeSource(root / "misc/readme.txt").error.empty());
+    put(root / "mixed/STYLE/B/A.stg", "s");
+    put(root / "mixed/MULTISMP/ram.kmp", "k");
+    p = probeSource(root / "mixed");
+    TEST("suffix-less folder with Pa5X and Pa4X names: ambiguous, not opened as a KST or SET", p.kind == K::NotRecognised && !p.layout &&
+         p.error.find("Ambiguous") != std::string::npos);
 
     std::string err;
     const fs::path pkg = root / "organ";

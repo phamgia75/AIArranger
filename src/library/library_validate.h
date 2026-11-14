@@ -206,7 +206,7 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
     const RuleTable* t = tableFor(v.layout);
     if (!t) {
         v.table = "none";
-        v.findings.push_back({Severity::Error, "R-01", ".", "no rule table: the folder has no KST or SET markers (" + v.layout + ")",
+        v.findings.push_back({Severity::Error, "R-01", ".", "no rule table: layout " + v.layout + "; name the folder .KST or .SET if you know which it is",
                               "MAN5 p.721 (.KST) / MAN4 PDF p.973-975 (.SET)"});
         v.ok = true;
         return v;
