@@ -1829,7 +1829,25 @@ int main() {
                 st.resolveUnsavedStyle(U::Cancel);
                 st.styleUndo();
                 TEST("D33 P1 quit: Cancel then undo: clean again", !st.styleModel().dirty() && quits == 7);
-                for (const char* n : {"d33-slow1.INCOMPLETE", "d33-slow2.INCOMPLETE"}) fs::remove_all(root / n);   // the test's own cleanup (the app never deletes)
+                {   // Codex F2: a deferred Save-before-open never replaces a Style opened meanwhile
+                    const auto a = st.styleModel().path();
+                    edit("90");
+                    const auto f2 = st.manager().enqueueJob(slowJob(root / "f2-slow"), {});
+                    pump(100);
+                    st.openStyle(juce::File(sty.string()));   // B: asks; Save queues behind the slow job
+                    st.resolveUnsavedStyle(U::Save, juce::File((root / "f2-save.uasf").string()));
+                    st.styleUndo();                             // back to clean
+                    st.openStyle(juce::File((root / "gate53.uasf").string()));   // C opens at once (nothing unwritten)
+                    const bool cOpen = fs::equivalent(st.styleModel().path(), root / "gate53.uasf");
+                    st.selectJob(f2);
+                    st.cancelJob();
+                    waitIdle(10000);
+                    pump(300);
+                    TEST("Codex F2 studio: the earlier Save-before-open lands without replacing the Style opened meanwhile", !fs::equivalent(a, root / "gate53.uasf") &&
+                         cOpen && fs::equivalent(st.styleModel().path(), root / "gate53.uasf") && !st.unsavedPromptShown() &&
+                         fs::is_regular_file(root / "f2-save.uasf") && !st.styleModel().dirty());
+                }
+                for (const char* n : {"d33-slow1.INCOMPLETE", "d33-slow2.INCOMPLETE", "f2-slow.INCOMPLETE"}) fs::remove_all(root / n);   // the test's own cleanup (the app never deletes)
             }
             {
                 app::LiveHostComponent h;
