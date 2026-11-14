@@ -28,6 +28,14 @@ void LibraryManagerComponent::Pane::selectedRowsChanged(int row) {
     owner.refresh();
 }
 
+// JUCE sends no selectedRowsChanged for a click on the selected row, yet the click makes this pane the active one (D34 F1)
+void LibraryManagerComponent::Pane::listBoxItemClicked(int, const juce::MouseEvent&) {
+    if (owner.quiet_ || owner.active_ == side) return;
+    owner.active_ = side;
+    if (owner.view_ != View::Compat && owner.view_ != View::WhereUsed) owner.view_ = View::Details;
+    owner.refresh();
+}
+
 juce::TextButton& LibraryManagerComponent::button(const juce::String& text, std::function<void()> onClick) {
     auto* b = new juce::TextButton(text);
     owned_.add(b);
@@ -96,7 +104,8 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto r = [this](juce::Component& c) -> juce::Component* { return reasons_.count(dynamic_cast<juce::Button*>(&c)) ? reasons_.at(dynamic_cast<juce::Button*>(&c)) : nullptr; };
     rows_ = {{{openA_, 150}, {r(*openA_), 140}, {&a_.header, 0}},
              {{openB_, 150}, {r(*openB_), 140}, {&b_.header, 0}},
-             {{&search_, 300}, {details_, 80}, {&cmp, 90}, {&dup, 100}, {&planBtn, 70}, {&val, 90}, {&kc, 110}, {r(cmp), 260}, {r(dup), 0}}};
+             {{&search_, 300}, {details_, 80}, {&cmp, 90}, {&dup, 100}, {&planBtn, 70}, {&val, 90}, {&kc, 110}},
+             {{r(cmp), 260}, {r(dup), 260}, {r(kc), 0}}};   // their own row: beside the buttons they had no width left (D34 F3)
     actionRows_ = {{{&cp, 160}, {r(cp), 300}, {&mv, 160}, {r(mv), 220}, {&wholeFile_, 0}},
                    {{&value_, 300}, {&rn, 140}, {r(rn), 200}, {&sw, 170}, {r(sw), 0}},
                    {{&rm, 140}, {r(rm), 160}, {&cl, 100}, {r(cl), 160}, {&ex, 220}, {r(ex), 0}},
@@ -427,6 +436,7 @@ void LibraryManagerComponent::refresh(bool report) {
     if (view_ == View::Plan) key += "|" + std::to_string(planRev_);
     if (key == shownKey_) return;
     shownKey_ = key;
+    report_.setText("Updating...", false);   // never the previous request's report while this one is computed (D34 F2)
     if (!a_.lib && !b_.lib) {   // no library open: a fixed text, no worker (else computing() reads as running work, e.g. at quit)
         deliveredGen_ = ++reportGen_;
         report_.setText(u8(reportFor(view_, nullptr, nullptr, plan(), history_.text(), active_, -1, [] { return false; })), false);

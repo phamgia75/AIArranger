@@ -991,7 +991,7 @@ int main() {
                 bool shown = false;
                 std::function<void(juce::Component*)> walkLm = [&](juce::Component* c) {
                     if (auto* l = dynamic_cast<juce::Label*>(c); l && kcb && visibleIn(l, &st) && l->getText() == "Needs: an item selected in a list" &&
-                        l->getWidth() > 0 && l->getParentComponent() == kcb->getParentComponent() && l->getY() == kcb->getY() && l->getX() > kcb->getRight())
+                        l->getWidth() > 0 && l->getParentComponent() == kcb->getParentComponent() && l->getY() >= kcb->getBottom() && l->getY() < kcb->getBottom() + 34)
                         shown = true;
                     for (auto* ch : c->getChildren()) walkLm(ch);
                 };

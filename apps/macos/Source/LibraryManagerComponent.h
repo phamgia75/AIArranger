@@ -72,6 +72,7 @@ private:
         int getNumRows() override { return int(rows.size()); }
         void paintListBoxItem(int row, juce::Graphics& g, int w, int h, bool selectedRow) override;
         void selectedRowsChanged(int row) override;
+        void listBoxItemClicked(int row, const juce::MouseEvent&) override;   // a click on the row already selected changes no selection
         const library::Item* item() const { return lib && selected >= 0 ? &lib->items[size_t(selected)] : nullptr; }
     };
 
