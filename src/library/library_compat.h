@@ -1,7 +1,7 @@
 // P0 Keyboard Compatibility card (parity C15, C16): for one library item, per target keyboard, what is DOCUMENTED, which
 // documented limit the item exceeds, and what is UNKNOWN. READ-ONLY. Built only from:
 //   - the validator's sourced rule tables (library_validate.h R-01..R-18): the item's type folder and extension (R-04),
-//     the 48 slots of a SET bank file (R-16), the 4 GB User Sample memory as disk size (R-08), the one-way SET Data
+//     the 48 slots of a SET bank file (R-16), the 4 GB User Sample memory (R-08: always UNKNOWN), the one-way SET Data
 //     Conversion (R-13), and, for the item's own layout, every validator finding on the item, its folders or the library;
 //   - the documented import limit already in the repo: Pa5X USB devices are FAT32/FAT16 (MAN p.715), so one file is at
 //     most 4 GiB - 1 byte (jobs/import_kit.h kFat32MaxFile).
@@ -11,6 +11,7 @@
 #define AI_ARRANGER_LIBRARY_LIBRARY_COMPAT_H
 
 #include "library/library_validate.h"
+#include "media/sound/resource_graph.h"   // the two readings of "4 GB" (decimal / binary)
 
 namespace ai_arranger::library {
 
@@ -49,24 +50,29 @@ inline std::vector<CompatTarget> compatCard(const Library& L, const Item& it, co
         if (te != t->types.end() && te->second.count(ext)) add(Compat::Documented, "R-04", type + "/" + ext + " is a file type of this table");
         else c.lines.push_back({Compat::Unknown, "R-04", type + "/" + (ext.empty() ? "(no extension)" : ext) + " is not in this table: whether the keyboard reads it is UNKNOWN",
                                 t->rules.at("R-04").source});
-        // 48 slots per bank file (R-16)
+        // 48 slots per bank FILE (R-16): the highest slot of any item in the item's bank file, not only the selected one
         if (t->bankFileTypes.count(type)) {
-            if (it.slot < 0) add(Compat::Unknown, "R-16", "slot not known: the 48-slot bank limit cannot be checked");
-            else if (it.slot >= 48) add(Compat::Exceeds, "R-16", "slot " + std::to_string(it.slot + 1) + " is past the 48 slots of a bank file");
-            else add(Compat::Documented, "R-16", "slot " + std::to_string(it.slot + 1) + " is within the 48 slots of a bank file");
+            int top = -1;
+            for (const auto& o : L.items) if (o.file == it.file) top = std::max(top, o.slot);
+            if (top < 0) add(Compat::Unknown, "R-16", "slots not known: the 48-slot bank limit cannot be checked");
+            else if (top >= 48) add(Compat::Exceeds, "R-16", "bank file " + it.file + " holds slot " + std::to_string(top + 1) + ", past the 48 slots of a bank file");
+            else add(Compat::Documented, "R-16", "bank file " + it.file + " uses slots up to " + std::to_string(top + 1) + ", within the 48 slots of a bank file");
         }
-        // 4 GB User Sample memory, as disk size (R-08); FAT32 file size (MAN p.715)
+        // R-08: disk bytes are not sample memory and "4 GB" may be decimal or binary, so the card never decides it (the
+        // validator's own R-08 finding, if any, is shown below with its source)
         if (pa5x && (it.type == "Sample" || it.type == "Multisample"))
-            add(L.sampleDiskBytes > (uintmax_t(4) << 30) ? Compat::Exceeds : Compat::Documented, "R-08",
-                "library sample data " + std::to_string(L.sampleDiskBytes) + " disk bytes vs 4 GB User Sample memory (disk size, not RAM)");
+            add(Compat::Unknown, "R-08", "library sample data " + std::to_string(L.sampleDiskBytes) + " disk bytes; 4 GB User Sample memory read as " +
+                std::to_string(media::graph::kPa5xUserSampleBytesDecimal) + " or " + std::to_string(media::graph::kPa5xUserSampleBytesBinary) +
+                " bytes; disk size is not sample memory: fit UNKNOWN");
         if (pa5x) {
             const auto f = L.files.find(it.file);
             const uintmax_t size = f == L.files.end() ? it.bytes : f->second.size;
             c.lines.push_back({size > kFat32MaxFileBytes ? Compat::Exceeds : Compat::Documented, "FAT32",
                                "file " + std::to_string(size) + " bytes vs the FAT32 limit of 4 GiB - 1 byte", "MAN p.715 (FAT32/FAT16 USB devices); jobs/import_kit.h"});
         }
-        // the validator's findings for the item's own layout: on the item, a folder above it, or the whole library
-        if (t == own && v.ok)
+        // the validator's findings for the item's own layout: on the item, a folder above it, or the whole library. A partial
+        // validation (ok = false) keeps the findings made before it stopped, plus the UNKNOWN below.
+        if (t == own)
             for (const auto& f : v.findings)
                 if (f.path == "." || f.path == it.file || it.file.rfind(f.path + "/", 0) == 0)
                     c.lines.push_back({f.severity == Severity::Info ? Compat::Note : Compat::Exceeds, f.rule,

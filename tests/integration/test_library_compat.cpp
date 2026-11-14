@@ -74,14 +74,22 @@ int main() {
     std::vector<Synth> full;
     for (int s = 0; s < 49; ++s) full.push_back({0x06000030, 2, 17, uint8_t(s), "F", "f"});
     const std::string pnAny = build({{0x0A0A0010, 1, 0, 0, "G", "g"}}, 1);
-    const fs::path set = make(root / "set700", {{"GLOBAL/LIMITER.AUD", pnAny}, {"STYLE/USER01.STY", build(full, 1)}});
+    const fs::path set = make(root / "set700", {{"GLOBAL/LIMITER.AUD", pnAny}, {"STYLE/USER01.STY", build(full, 1)},
+                                                {"STYLE/USER02.STY", build({{0x06000030, 2, 17, 0, "S", "p"}}, 1)}});
     const auto setBefore = snapshot(set);
     const auto S = load(set);
     const auto sv = validate(set);
     const auto last = compatCard(S, itemAt(S, "STYLE/USER01.STY", 48), sv), first = compatCard(S, itemAt(S, "STYLE/USER01.STY", 0), sv);
     TEST("SET: slot 49 EXCEEDS the 48 slots (R-16, MAN4 p.975) on both SET tables", has(line(last, "Pa700/Pa1000 family", "R-16", Compat::Exceeds), "MAN4 PDF p.975") &&
          line(last, "Pa4X family", "R-16", Compat::Exceeds));
-    TEST("SET: slot 1 is DOCUMENTED within the 48 slots", line(first, "Pa4X family", "R-16", Compat::Documented) != nullptr);
+    // Codex r1 #2: the overflow is the bank FILE's (48 per bank file), so it shows on every SET target whatever slot is selected
+    TEST("SET: slot 1 of a 49-slot bank file is EXCEEDS on both SET targets, never DOCUMENTED",
+         has(line(first, "Pa4X family", "R-16", Compat::Exceeds), "MAN4 PDF p.975") && line(first, "Pa700/Pa1000 family", "R-16", Compat::Exceeds) &&
+         !line(first, "Pa4X family", "R-16", Compat::Documented) && !line(first, "Pa700/Pa1000 family", "R-16", Compat::Documented));
+    const auto ok16 = compatCard(S, itemAt(S, "STYLE/USER02.STY", 0), sv);
+    TEST("SET: an item of a bank file within 48 slots is DOCUMENTED on both SET targets",
+         line(ok16, "Pa4X family", "R-16", Compat::Documented) && line(ok16, "Pa700/Pa1000 family", "R-16", Compat::Documented) &&
+         !line(ok16, "Pa4X family", "R-16", Compat::Exceeds));
     TEST("Pa5X: a SET item only through the one-way Data Conversion (R-13, MAN5 p.737)", has(line(first, "Pa5X", "R-13", Compat::Documented), "MAN5 p.737"));
     TEST("Pa5X: .STY is not in the Pa5X table: UNKNOWN", line(first, "Pa5X", "R-04", Compat::Unknown) != nullptr);
 
@@ -96,12 +104,36 @@ int main() {
         Validation none;   // ok = false
         none.error = "cancelled";
         const auto c = compatCard(big, pcm, none);
-        TEST("Pa5X: sample data over 4 GB EXCEEDS R-08 (disk size, not RAM; MAN5 p.1174)", has(line(c, "Pa5X", "R-08", Compat::Exceeds), "MAN5 p.1174"));
+        // Codex r1 #3: disk bytes are not sample memory and "4 GB" is unit-ambiguous: the card's own R-08 line is never DOCUMENTED
+        TEST("Pa5X: R-08 from disk bytes is UNKNOWN with both 4 GB readings, never DOCUMENTED or EXCEEDS by the card itself",
+             has(line(c, "Pa5X", "R-08", Compat::Unknown), "4000000000") && has(line(c, "Pa5X", "R-08", Compat::Unknown), "4294967296") &&
+             !line(c, "Pa5X", "R-08", Compat::Documented) && !line(c, "Pa5X", "R-08", Compat::Exceeds));
+        big.sampleDiskBytes = 4100000000u;   // between the two readings
+        const auto amb = compatCard(big, pcm, none);
+        TEST("Pa5X: 4,100,000,000 disk bytes: R-08 UNKNOWN, not DOCUMENTED", line(amb, "Pa5X", "R-08", Compat::Unknown) && !line(amb, "Pa5X", "R-08", Compat::Documented));
+        big.sampleDiskBytes = 10;
+        const auto small = compatCard(big, pcm, none);
+        TEST("Pa5X: even 10 disk bytes: R-08 UNKNOWN, not DOCUMENTED", line(small, "Pa5X", "R-08", Compat::Unknown) && !line(small, "Pa5X", "R-08", Compat::Documented));
+        Validation v8;   // the validator's own R-08 WARN (binary 4 GiB, its rule table's source) stays EXCEEDS
+        v8.ok = true;
+        v8.findings.push_back({Severity::Warn, "R-08", ".", "PCM+KMP disk bytes exceed 4 GB", "MAN5 p.1174/p.1936: 4 GB User Sample memory (disk size here, not RAM)"});
+        TEST("Pa5X: the validator's R-08 finding stays EXCEEDS with its source", has(line(compatCard(big, pcm, v8), "Pa5X", "R-08", Compat::Exceeds), "MAN5 p.1174"));
         TEST("Pa5X: a 4 GiB file EXCEEDS the FAT32 limit", line(c, "Pa5X", "FAT32", Compat::Exceeds) != nullptr);
         TEST("an incomplete validation is UNKNOWN, never a pass", has(line(c, "Pa5X", "-", Compat::Unknown), "validation incomplete: cancelled"));
         TEST("FAT32 limit is 4 GiB - 1 byte", kFat32MaxFileBytes == 4294967295u);
     }
 
+    {   // Codex r1 #1: findings made before a later read failure stay EXCEEDS next to the incomplete-validation UNKNOWN
+        const fs::path p = make(root / "PART.KST", {{"STYLE/Loose.STG", "x"}, {"STYLE/ZZ/Unreadable.STG", "x"}});
+        fs::permissions(p / "STYLE/ZZ/Unreadable.STG", fs::perms::none);
+        const auto PL = load(p);
+        const auto pv = validate(p);
+        TEST("partial: the validator stops at the unreadable file with findings already made", !pv.ok && !pv.findings.empty());
+        const auto pc = compatCard(PL, itemAt(PL, "STYLE/Loose.STG"), pv);
+        TEST("partial: the R-05 already found on the item stays EXCEEDS", has(line(pc, "Pa5X", "R-05", Compat::Exceeds), "MAN5 p.731-732"));
+        TEST("partial: plus the incomplete-validation UNKNOWN", has(line(pc, "Pa5X", "-", Compat::Unknown), "validation incomplete"));
+        fs::permissions(p / "STYLE/ZZ/Unreadable.STG", fs::perms::owner_all);
+    }
     TEST("the folders are unchanged (read-only)", snapshot(kst) == before && snapshot(set) == setBefore);
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
