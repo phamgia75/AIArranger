@@ -1148,6 +1148,16 @@ int main() {
             waitIdle(5000);
             TEST("reports: NAME.export.json shown as an export report", st.reportViewText().contains("Export report: Report (HTML + CSV)") &&
                  st.reportViewText().contains("Verification L1: passed"));
+            {   // Codex r1 #1: a hostile many-keys report, superseded at once by a plan: the plan is shown, nothing stays busy
+                std::string many = "{";
+                for (int i = 0; i < 500000; ++i) many += (i ? ",\"" : "\"") + std::to_string(i) + "\":0";
+                put(root / "many.export.json", many + "}");
+                st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "many.export.json").string()));
+                st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "My Plan/plan.json").string()));
+                waitIdle(10000);
+                TEST("reports r1#1: a superseded hostile read does not hold the viewer; the newest report is shown", !st.busy() &&
+                     st.reportViewText().contains("Library Manager plan (EXPORT-ONLY)") && st.reportUnavailable().isEmpty());
+            }
             put(root / "other.json", "{\"a\": 1}");
             st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "other.json").string()));
             waitIdle(5000);

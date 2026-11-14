@@ -267,6 +267,7 @@ private:
     juce::TextButton* reportExportBtn_ = nullptr;
     std::shared_ptr<const jobs::report::Report> report_;   // the report shown (message thread)
     uint64_t reportGen_ = 0;                                // newest open request; older results are dropped
+    std::shared_ptr<std::atomic<uint64_t>> reportLatest_ = std::make_shared<std::atomic<uint64_t>>(0);   // reportGen_ for the workers: an older read stops
 
     // Export jobs (E6)
     uint64_t enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done = {});

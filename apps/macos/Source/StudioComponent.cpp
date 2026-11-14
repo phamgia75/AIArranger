@@ -864,14 +864,15 @@ void StudioComponent::openReport(ReportSource s, const juce::File& f) {
     namespace rp = jobs::report;
     ++jobs_;
     const auto gen = ++reportGen_;
+    reportLatest_->store(gen);   // a read still running for an older request stops at its next check
     reportStatus_.setText("Reading " + f.getFullPathName() + " (read-only, on a worker thread)...", juce::dontSendNotification);
     refreshAvailability();
     std::weak_ptr<bool> alive = alive_;
-    std::thread([this, alive, s, gen, path = f.getFullPathName().toStdString()] {
+    std::thread([this, alive, s, gen, latest = reportLatest_, path = f.getFullPathName().toStdString()] {
         auto r = std::make_shared<rp::Report>();
         std::string err;
-        const auto going = [alive] { return !alive.expired(); };
-        if (s == ReportSource::JsonFile) err = rp::loadJsonReport(path, r.get());
+        const auto going = [alive, latest, gen] { return !alive.expired() && latest->load() == gen; };
+        if (s == ReportSource::JsonFile) err = rp::loadJsonReport(path, r.get(), going);
         else if (s == ReportSource::Inventory) {
             const auto L = library::load(path, going);
             *r = rp::fromInventory(L);
@@ -1250,7 +1251,7 @@ void StudioComponent::refreshJobs(bool land) {
         if (ok && j.level.l1.state != st::Check::NotRun) {
             validationTarget_ = juce::File(juce::String::fromUTF8(j.dest.c_str()));
             verification_ = j.level;
-            verificationIsPackage_ = std::filesystem::is_regular_file(std::filesystem::path(j.dest) / media::sound::pkgio::FileSet::kPackageManifest);
+            verificationIsPackage_ = j.packageManifest;   // checked by the job's worker: no file I/O here
             verificationDomain_ = h->second.from;
         }
         addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + juce::String(j.type) + "  " +
