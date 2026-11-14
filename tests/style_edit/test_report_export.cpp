@@ -254,6 +254,16 @@ int main() {
         int checks = 0;
         const auto e = rp::loadJsonReport(root / "many.export.json", &r, [&] { return ++checks < 3; });
         TEST("r1#1: a read whose keepGoing turns false says cancelled, after a few checks", e == "cancelled" && checks >= 3 && checks <= 4);
+        // Codex r3 #2: keepGoing is checked before the file is opened and between read chunks; the file is closed
+        const auto lowestFd = [] { const int f = ::dup(0); ::close(f); return f; };
+        put(root / "small.plan.json", "{\"format\": \"aiarranger-library-plan\", \"steps\": []}");
+        TEST("r3#2: a read cancelled before it starts says cancelled", rp::loadJsonReport(root / "small.plan.json", &r, [] { return false; }) == "cancelled");
+        put(root / "padded.plan.json", std::string(4 << 20, ' ') + "{\"format\": \"aiarranger-library-plan\", \"steps\": []}");
+        const int fdBefore = lowestFd();
+        int calls = 0;
+        const auto ce = rp::loadJsonReport(root / "padded.plan.json", &r, [&] { return ++calls < 4; });
+        TEST("r3#2: a 4 MiB read superseded after 3 checks stops between chunks", ce == "cancelled" && calls == 4);
+        TEST("r3#2: ... and its file is closed", lowestFd() == fdBefore);
         TEST("r1#1: duplicate keys still refused", has(kit::parseJson("{\"a\": 1, \"b\": 2, \"a\": 3}", &j), "duplicate key a"));
     }
 

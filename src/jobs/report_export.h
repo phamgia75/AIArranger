@@ -392,8 +392,10 @@ inline std::string fromJsonText(const std::string& text, const std::string& sour
     return "not an AIArranger plan.json (aiarranger-library-plan) or export report (aiarranger-export-report/1)";
 }
 
-// A regular file (no symlink followed) of at most `limit` bytes. "" and *out set, or why not. Read-only.
-inline std::string readFile(const fs::path& p, uintmax_t limit, std::string* out) {
+// A regular file (no symlink followed) of at most `limit` bytes. "" and *out set, or why not ("cancelled" when
+// keepGoing turns false: checked before the open and between 64 KiB chunks; the file is closed). Read-only.
+inline std::string readFile(const fs::path& p, uintmax_t limit, std::string* out, const std::function<bool()>& keepGoing = {}) {
+    if (keepGoing && !keepGoing()) return "cancelled";
     std::FILE* f = media::detail::openRegular(AT_FDCWD, p.c_str());
     if (!f) return "cannot read " + p.string() + " (missing, or not a regular file)";
     out->clear();
@@ -402,6 +404,7 @@ inline std::string readFile(const fs::path& p, uintmax_t limit, std::string* out
     while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
         if (out->size() + n > limit) { std::fclose(f); return p.filename().string() + " is larger than " + std::to_string(limit) + " bytes"; }
         out->append(buf, n);
+        if (keepGoing && !keepGoing()) { std::fclose(f); out->clear(); return "cancelled"; }
     }
     const bool err = std::ferror(f);
     std::fclose(f);
@@ -412,7 +415,7 @@ inline std::string readFile(const fs::path& p, uintmax_t limit, std::string* out
 // stops the parse within 4096 values.
 inline std::string loadJsonReport(const fs::path& p, Report* out, const std::function<bool()>& keepGoing = {}) {
     std::string text;
-    if (auto e = readFile(p, kMaxJsonBytes, &text); !e.empty()) return e;
+    if (auto e = readFile(p, kMaxJsonBytes, &text, keepGoing); !e.empty()) return e;
     return fromJsonText(text, p.string(), out, keepGoing);
 }
 
