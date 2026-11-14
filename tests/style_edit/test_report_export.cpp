@@ -5,7 +5,10 @@
 
 #include "jobs/report_export.h"
 #include "jobs/export_specs.h"
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <fstream>
 #include <unistd.h>
 
@@ -200,6 +203,54 @@ int main() {
         TEST("check: an image tag in the HTML fails", has(rp::checkFolder(root / "check", inv), "report.html"));
     }
 
+    // ── Codex r1 #1: a hostile many-keys JSON under the 10 MiB cap is parsed in bounded time ──
+    bool hung = false;
+    {
+        std::string j = "{";
+        for (int i = 0; i < 500000; ++i) j += (i ? ",\"" : "\"") + std::to_string(i) + "\":0";
+        j += "}";
+        TEST("r1#1: the hostile JSON is under the 10 MiB file cap", j.size() < rp::kMaxJsonBytes);
+        const auto done = std::make_shared<std::atomic<bool>>(false);
+        const auto t0 = std::chrono::steady_clock::now();
+        std::thread([j, done] { rp::Report r; rp::fromJsonText(j, "x", &r); *done = true; }).detach();
+        while (!*done && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        TEST("r1#1: 500,000 distinct keys are parsed within 10 s", *done);
+        hung = !*done;
+    }
+
+    // ── Codex r1 #1: the parser's value cap, and a superseded read stops early ──
+    {
+        std::string arr = "[";
+        for (size_t i = 0; i < kit::kMaxJsonNodes; ++i) arr += i ? ",0" : "0";   // the array + kMaxJsonNodes elements
+        kit::Json j;
+        TEST("r1#1: more than kMaxJsonNodes values are refused", has(kit::parseJson(arr + "]", &j), "more than"));
+        std::string many = "{";
+        for (int i = 0; i < 500000; ++i) many += (i ? ",\"" : "\"") + std::to_string(i) + "\":0";
+        put(root / "many.export.json", many + "}");
+        rp::Report r;
+        int checks = 0;
+        const auto e = rp::loadJsonReport(root / "many.export.json", &r, [&] { return ++checks < 3; });
+        TEST("r1#1: a read whose keepGoing turns false says cancelled, after a few checks", e == "cancelled" && checks >= 3 && checks <= 4);
+        TEST("r1#1: duplicate keys still refused", has(kit::parseJson("{\"a\": 1, \"b\": 2, \"a\": 3}", &j), "duplicate key a"));
+    }
+
+    // ── Codex r1 #3: slot integers outside the valid range are refused before any conversion ──
+    {
+        const auto plan = [](const std::string& slot, const char* key) {
+            return std::string("{\"format\": \"aiarranger-library-plan\", \"steps\": [{\"n\": 1, \"op\": \"copy\", \"side\": \"A\", ") +
+                   (std::string(key) == "to_slot" ? "\"to_slot\": " + slot : "\"item\": {\"name\": \"x\", \"slot\": " + slot + "}") + "}]}";
+        };
+        for (const char* key : {"to_slot", "slot"})
+            for (const std::string bad : {"9223372036854775807", "99999999999999999999", "-9223372036854775808", "-2", "2147483648", "1.5", "1e3"}) {
+                rp::Report r;
+                TEST(("r1#3: " + std::string(key) + " " + bad + " is refused").c_str(), has(rp::fromJsonText(plan(bad, key), "p", &r), "slot"));
+            }
+        rp::Report r;
+        TEST("r1#3: the largest int slot is kept (shown 1-based)", rp::fromJsonText(plan("2147483647", "to_slot"), "p", &r).empty() &&
+             r.tables.size() == 1 && r.tables[0].rows.size() == 1 && r.tables[0].rows[0][10] == "2147483648");
+        TEST("r1#3: -1 is still \"first free\" (empty)", rp::fromJsonText(plan("-1", "to_slot"), "p", &r).empty() && r.tables[0].rows[0][10].empty());
+    }
+
     // ── the read-only loader: bounded, regular files only ──
     {
         rp::Report x;
@@ -212,5 +263,6 @@ int main() {
 
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
+    if (hung) { std::fflush(nullptr); std::_Exit(1); }   // a parse still running on its detached thread: do not wait for it
     return failures ? 1 : 0;
 }

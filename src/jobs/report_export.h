@@ -19,6 +19,7 @@
 #include "jobs/import_kit.h"            // parseJson, Json; export_job.h; package_verify.h
 #include "library/library_plan.h"       // writeLabFolder (sample_lab_io.h)
 #include "library/library_validate.h"
+#include <climits>
 #include <memory>
 
 namespace ai_arranger::jobs::report {
@@ -199,7 +200,7 @@ inline std::string text(const Report& r, size_t maxRows = 2000) {
 }
 
 // ── From the existing structs ──
-inline std::string slot1(long long s) { return s >= 0 ? std::to_string(s + 1) : ""; }   // 0-based -> shown 1-based, "" = none
+inline std::string slot1(int s) { return s >= 0 ? std::to_string((long long)s + 1) : ""; }   // 0-based -> shown 1-based, "" = none
 
 inline Report fromInventory(const library::Library& L) {
     using std::to_string;
@@ -263,18 +264,24 @@ inline std::string val(const Json* j) {
     }
     return "";
 }
-inline std::string slotOf(const Json* j) {
+// A slot as the plan writes it (an int, -1 = none / first free) shown 1-based; "" when absent. A number that is not an
+// integer in [-1, INT_MAX] sets *bad and is never converted (Codex r1 #3: strtoll range errors and s + 1 overflow).
+inline std::string slotOf(const Json* j, std::string* bad) {
     if (!j || j->t != Json::T::Num) return "";
-    char* end = nullptr;
-    const long long n = std::strtoll(j->s.c_str(), &end, 10);
-    return end && *end == '\0' ? slot1(n) : "";
+    const std::string& t = j->s;
+    const bool digits = t.size() <= 11 && t.find_first_not_of("-0123456789") == std::string::npos;
+    const long long n = digits ? std::strtoll(t.c_str(), nullptr, 10) : 0;   // at most 11 chars: no long long overflow
+    if (!digits || n < -1 || n > INT_MAX) { if (bad->empty()) *bad = "slot " + t.substr(0, 40) + " is not an integer from -1 to " + std::to_string(INT_MAX); return ""; }
+    return slot1(int(n));
 }
 inline const Json* at(const Json& o, const char* k) { return o.t == Json::T::Obj ? o.get(k) : nullptr; }
 }  // namespace detail
 
-inline Report fromPlanJson(const Json& j, const std::string& source) {
+// "" and *out set, or why the plan is refused (a slot out of range).
+inline std::string fromPlanJson(const Json& j, const std::string& source, Report* out) {
     using detail::at;
     using detail::val;
+    std::string bad;
     Report r{"plan", "Library Manager plan (EXPORT-ONLY)", source, {}, {}};
     r.facts = {{"Status", val(at(j, "status"))}, {"Apply", val(at(j, "apply")) + ": " + val(at(j, "apply_reason"))}};
     if (const Json* libs = at(j, "libraries"))
@@ -288,12 +295,14 @@ inline Report fromPlanJson(const Json& j, const std::string& source) {
         for (const auto& s : steps->a) {
             const Json* it = at(s, "item");
             const auto iv = [&](const char* k) { return it ? val(at(*it, k)) : std::string(); };
-            t.rows.push_back({val(at(s, "n")), val(at(s, "op")), val(at(s, "side")), iv("type"), iv("bank"), it ? detail::slotOf(at(*it, "slot")) : "",
-                              iv("name"), iv("file"), iv("file_sha256"), val(at(s, "to_bank")), detail::slotOf(at(s, "to_slot")), val(at(s, "new_name")),
+            t.rows.push_back({val(at(s, "n")), val(at(s, "op")), val(at(s, "side")), iv("type"), iv("bank"), it ? detail::slotOf(at(*it, "slot"), &bad) : "",
+                              iv("name"), iv("file"), iv("file_sha256"), val(at(s, "to_bank")), detail::slotOf(at(s, "to_slot"), &bad), val(at(s, "new_name")),
                               val(at(s, "banks")), val(at(s, "whole_file")), val(at(s, "summary")), val(at(s, "conflicts")), val(at(s, "warnings"))});
         }
+    if (!bad.empty()) return "plan refused: " + bad;
     r.tables = {t};
-    return r;
+    *out = std::move(r);
+    return "";
 }
 
 inline Report fromExportJson(const Json& j, const std::string& source) {
@@ -324,11 +333,11 @@ inline Report fromExportJson(const Json& j, const std::string& source) {
     return r;
 }
 
-// "" and *out set from a plan.json or NAME.export.json text, or why it is neither.
-inline std::string fromJsonText(const std::string& text, const std::string& source, Report* out) {
+// "" and *out set from a plan.json or NAME.export.json text, or why it is neither. `keepGoing` false = "cancelled".
+inline std::string fromJsonText(const std::string& text, const std::string& source, Report* out, const std::function<bool()>& keepGoing = {}) {
     Json j;
-    if (const auto e = parseJson(text, &j); !e.empty()) return "not valid JSON: " + e;
-    if (detail::val(detail::at(j, "format")) == "aiarranger-library-plan") { *out = fromPlanJson(j, source); return ""; }
+    if (const auto e = parseJson(text, &j, keepGoing); !e.empty()) return keepGoing && !keepGoing() ? "cancelled" : "not valid JSON: " + e;
+    if (detail::val(detail::at(j, "format")) == "aiarranger-library-plan") return fromPlanJson(j, source, out);
     if (detail::val(detail::at(j, "schema")) == "aiarranger-export-report/1") { *out = fromExportJson(j, source); return ""; }
     return "not an AIArranger plan.json (aiarranger-library-plan) or export report (aiarranger-export-report/1)";
 }
@@ -349,11 +358,12 @@ inline std::string readFile(const fs::path& p, uintmax_t limit, std::string* out
     return err ? "cannot read " + p.string() : "";
 }
 
-// Worker thread: a plan.json or NAME.export.json file as a Report.
-inline std::string loadJsonReport(const fs::path& p, Report* out) {
+// Worker thread: a plan.json or NAME.export.json file as a Report. `keepGoing` false (a newer read, a closed window)
+// stops the parse within 4096 values.
+inline std::string loadJsonReport(const fs::path& p, Report* out, const std::function<bool()>& keepGoing = {}) {
     std::string text;
     if (auto e = readFile(p, kMaxJsonBytes, &text); !e.empty()) return e;
-    return fromJsonText(text, p.string(), out);
+    return fromJsonText(text, p.string(), out, keepGoing);
 }
 
 // ── The output folder (report.html + one CSV per table) and its independent check ──
