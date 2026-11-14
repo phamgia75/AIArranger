@@ -986,6 +986,18 @@ int main() {
             TEST("library history: Undo and Where Used say what they need", lm.unavailable(A::Undo) == "Needs: a plan edit to undo" &&
                  lm.unavailable(A::WhereUsed) == "Needs: an item selected in a list");
             TEST("library manager: unavailable actions show their reason inline", reasonsShown());
+            {   // D34 F3: Compatibility's own reason is laid out next to it (Where Used's identical text sits in another row)
+                auto* kcb = find<juce::Button>(lm, "Compatibility");
+                bool shown = false;
+                std::function<void(juce::Component*)> walkLm = [&](juce::Component* c) {
+                    if (auto* l = dynamic_cast<juce::Label*>(c); l && kcb && visibleIn(l, &st) && l->getText() == "Needs: an item selected in a list" &&
+                        l->getWidth() > 0 && l->getParentComponent() == kcb->getParentComponent() && l->getY() == kcb->getY() && l->getX() > kcb->getRight())
+                        shown = true;
+                    for (auto* ch : c->getChildren()) walkLm(ch);
+                };
+                walkLm(&lm);
+                TEST("D34 F3 library manager: Compatibility's unavailable reason is shown beside it", kcb && !kcb->isEnabled() && shown);
+            }
             put(root / "Other.KST/STYLE/USER01/Ballad.STG", "s");       // same bytes as Mine.KST's
             put(root / "Other.KST/STYLE/USER02/Ballad.STG", "other");   // same name, other bank
             put(root / "Other.KST/PAD/USER09/Kick.PDC", "k");
@@ -1019,6 +1031,51 @@ int main() {
             pump(60);
             TEST("library manager: duplicates view: names flagged as name-only", lm.reportText().contains("NAME ONLY") &&
                  lm.reportText().contains("Style \"Ballad\": STYLE/USER01 STYLE/USER02"));
+            {   // D34 F1: a real mouse click on a row that is still selected makes its pane active again
+                std::vector<juce::ListBox*> lists;
+                std::function<void(juce::Component*)> walkLb = [&](juce::Component* c) {
+                    if (auto* l = dynamic_cast<juce::ListBox*>(c)) lists.push_back(l);
+                    for (auto* ch : c->getChildren()) walkLb(ch);
+                };
+                walkLb(&lm);
+                auto listOf = [&](int rows) -> juce::ListBox* { for (auto* l : lists) if (l->getListBoxModel() && l->getListBoxModel()->getNumRows() == rows) return l; return nullptr; };
+                auto* la = listOf(2);   // Mine.KST
+                auto* lb = listOf(3);   // Other.KST
+                auto clickRow = [&](juce::ListBox* l, int row) {
+                    juce::Component* c = nullptr;   // JUCE's own row component (it receives the mouse events of a real click)
+                    std::function<void(juce::Component*)> findRow = [&](juce::Component* x) {
+                        for (auto* ch : x->getChildren()) { if (!c && l->getRowNumberOfComponent(ch) == row) c = ch; findRow(ch); }
+                    };
+                    if (l) findRow(l);
+                    if (!c) { std::fprintf(stderr, "  FAIL: no row component %d\n", row); ++failures; return; }
+                    const auto now = juce::Time::getCurrentTime();
+                    const juce::MouseEvent e(juce::Desktop::getInstance().getMainMouseSource(), {4.0f, 4.0f}, {}, juce::MouseInputSource::defaultPressure,
+                                             0.0f, 0.0f, 0.0f, 0.0f, c, c, now, {4.0f, 4.0f}, now, 1, false);
+                    c->mouseDown(e);
+                    c->mouseUp(e);
+                    pump(60);
+                };
+                clickRow(la, 1);   // Ballad in A
+                waitLm(5000);
+                const bool a1 = lm.reportText().contains("Library A: Ballad");
+                lm.selectRow('A', 0);   // D34 F2: the old item's report is not shown while the new one is computed
+                const bool cleared = !lm.reportText().contains("Ballad");
+                waitLm(5000);
+                TEST("D34 F2 library manager: after a new selection the previous item's report is not shown before delivery", a1 && cleared &&
+                     lm.reportText().contains("Library A: Hit"));
+                clickRow(la, 1);
+                waitLm(5000);
+                clickRow(lb, 1);   // Ballad (STYLE/USER01) in B
+                waitLm(5000);
+                const bool b1 = lm.reportText().contains("Library B: Ballad");
+                clickRow(la, 1);   // A's row is still selected: no selectedRowsChanged, only the click
+                waitLm(5000);
+                TEST("D34 F1 library manager: clicking A's still-selected row makes A active again (report from A)", la && lb && b1 &&
+                     lm.reportText().contains("Library A: Ballad") && !lm.reportText().contains("Library B:"));
+                lb->deselectAllRows();   // back to the state the next tests expect: nothing selected in B, A active on Ballad
+                clickRow(la, 1);
+                waitLm(5000);
+            }
             lm.selectRow('A', 1);   // Ballad (rows sorted by bank: PAD/USER01 Hit, STYLE/USER01 Ballad)
             waitLm(5000);
             TEST("library manager: selecting an item shows its details and evidenced dependencies only", lm.reportText().contains("Library A: Ballad") &&
@@ -1029,6 +1086,7 @@ int main() {
             waitLm(5000);
             TEST("library manager: Copy is staged in the plan view, nothing written", lm.plan().size() == 1 && lm.reportText().contains("READY TO EXPORT") &&
                  lm.reportText().contains("same bytes: nothing to do") && lm.reportText().contains("EXPORT-ONLY"));
+            TEST("D34 F1 library manager: the Copy staged after re-clicking A's row starts from A", lm.plan().size() == 1 && lm.plan()[0].side == 'A');
             lm.selectRow('A', 0);   // Hit.PDC into B's selected bank: none selected there, so the same bank id
             lm.value().setText("STYLE/USER01", true);
             lm.addStep(A::SwapBanks);
@@ -1117,7 +1175,8 @@ int main() {
                  lm.reportText().contains("L3  measured on hardware: not measured"));
             lm.selectRow('A', 0);   // Hit: the card follows the selection
             waitLm(5000);
-            TEST("library manager: the Compatibility card follows the selection", lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad"));
+            TEST("library manager: the Compatibility card follows the selection", lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad") &&
+                 lm.reportText().contains("Keyboard Compatibility card"));
             {   // integ/p1-studio-plus merge #55 + #57: both selection-following views and every new button run their own handler
                 click(lm, "Where Used");
                 waitLm(5000);
@@ -1133,7 +1192,8 @@ int main() {
                 lm.selectRow('A', 0);   // Hit
                 waitLm(5000);
                 TEST("merge #55+#57: the Compatibility button shows the card; it stays and follows a new selection",
-                     kc && lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad") && !lm.reportText().contains("Where used:"));
+                     kc && lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad") && !lm.reportText().contains("Where used:") &&
+                     lm.reportText().contains("Keyboard Compatibility card"));
                 const auto before = lm.plan().size();   // empty: the cleared plan, redone above
                 click(lm, "Undo Step");
                 waitLm(5000);
