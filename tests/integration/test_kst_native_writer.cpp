@@ -114,6 +114,12 @@ static std::string smfWith(const std::string& trk) {
     s += "MTrk"; be32(s, uint32_t(trk.size()));
     return s + trk;
 }
+static std::string smfTracks(uint16_t format, const std::vector<std::string>& trks) {
+    std::string s = "MThd";
+    be32(s, 6); be16(s, format); be16(s, uint16_t(trks.size())); be16(s, 384);
+    for (const auto& t : trks) { s += "MTrk"; be32(s, uint32_t(t.size())); s += t; }
+    return s;
+}
 static Node pdcRef(uint8_t msb, uint8_t lsb, uint8_t pc) { return build::padClipTree({msb, lsb, pc}, {{0, 96, 60, 100}}); }
 
 int main() {
@@ -205,6 +211,26 @@ int main() {
         TEST("selects: valid SMF accepted; header-only, ntrks mismatch, short header, trailing bytes, alien chunk, no End-of-Track refused",
              ok(smfWith(eot)) && !ok(hdrOnly) && !ok(twoDeclared) && !ok(shortHdr) && !ok(smfWith(eot) + "abc") && !ok(alien) &&
              !ok(smfWith(std::string("\x00\xC0\x03", 3))) && !ok(smfWith(eot + std::string("\x00\xC0\x04", 3))));
+        // Codex r2 R2-1: data bytes must be < 0x80; SMF 1.0: meta and SysEx events cancel running status.
+        TEST("selects: a data byte with the high bit set is refused (B0 00 FF)", !ok(smfWith(std::string("\x00\xB0\x00\xFF\x00\xC0\x05\x00\xFF\x2F\x00", 11))));
+        TEST("selects: running status after a meta or SysEx event is refused",
+             !ok(smfWith(std::string("\x00\xC0\x05\x00\xFF\x01\x00\x00\x06\x00\xFF\x2F\x00", 13))) &&
+             !ok(smfWith(std::string("\x00\xC0\x05\x00\xF0\x01\xF7\x00\x06\x00\xFF\x2F\x00", 13))));
+        TEST("selects: format 2, and format 0 with two tracks, refused (SMF 1.0; only 0 and 1 observed)",
+             !ok(smfTracks(2, {eot})) && !ok(smfTracks(0, {eot, eot})) && ok(smfTracks(1, {eot, eot})));
+        // Codex r2 R2-2: format-1 tracks share channels; banks resolve across tracks in time order.
+        {
+            const std::string bankT1 = std::string("\x00\xB0\x00\x79\x00\xB0\x20\x40\x00\xFF\x2F\x00", 12);
+            const std::string pcT2at1 = std::string("\x01\xC0\x05\x00\xFF\x2F\x00", 7), pcT1at0 = std::string("\x00\xC0\x05\x00\xFF\x2F\x00", 7);
+            const std::string bankT2 = std::string("\x00\xB0\x00\x79\x00\xB0\x20\x40\x00\xFF\x2F\x00", 12);
+            std::vector<closure::Select> q;
+            std::string er, m = smfTracks(1, {bankT1, pcT2at1});
+            TEST("selects: CC0/CC32 in track 1 at tick 0 apply to a PC in track 2 at tick 1",
+                 closure::selects(reinterpret_cast<const uint8_t*>(m.data()), m.size(), q, er) && q.size() == 1 && q[0].msb == 121 && q[0].lsb == 64 && q[0].program == 5);
+            q.clear(); m = smfTracks(1, {pcT1at0, bankT2});
+            TEST("selects: equal ticks: lower track first (PC in track 1 at tick 0 is before the bank set in track 2 at tick 0)",
+                 closure::selects(reinterpret_cast<const uint8_t*>(m.data()), m.size(), q, er) && q.size() == 1 && q[0].msb == -1 && q[0].lsb == -1);
+        }
         const std::string over = smfWith(std::string("\x00\xF0\x7F\x42", 4));
         TEST("selects: SysEx length past the track refused", !closure::selects(reinterpret_cast<const uint8_t*>(over.data()), over.size(), s, e));
     }
@@ -223,6 +249,17 @@ int main() {
         TEST("closure on a generated mini-KST: 1 resolved, 1 slot empty, 1 file absent, 4 factory",
              c.ok && c.trees == 4 && c.resolved == 1 && c.slotEmpty == 1 && c.fileAbsent == 1 && c.factory == 4 &&
              c.dangling.count("USER01.PCG slot 6") && c.dangling.count("USERDK02.PCG slot 0"));
+        {
+            Node noBank = pdcRef(121, 64, 5);
+            noBank.children[0].payload = smfTracks(1, {std::string("\x00\xFF\x2F\x00", 4), std::string("\x00\xC0\x05\x00\xFF\x2F\x00", 7)});
+            const fs::path u = tmp / "UNRES.KST";
+            roottree::write(noBank, b, e); put(u / "PAD/B/NoBank.pdc", b);
+            const auto cu = closure::check(u);
+            TEST("closure: a PC with no bank set is UNRESOLVED, never factory", cu.ok && cu.unresolved == 1 && cu.factory == 0 && cu.resolved == 0);
+            const auto ru = assemble::build(tmp, "R6", {{"PAD", "B", "NoBank", noBank}});
+            TEST("assemble: an unresolved selection fails the gate before publication",
+                 !ru.ok && ru.message.find("unresolved") != std::string::npos && !fs::exists(tmp / "R6.KST"));
+        }
         put(k / "STYLE/B/Broken.stg", "Root\0\x01\0\0\0\0\x05xxxxx");
         TEST("closure reports an unparsable object instead of skipping it", !closure::check(k).ok && closure::check(k).problems.size() == 1);
     }
@@ -277,11 +314,13 @@ int main() {
     if (const char* owner = std::getenv("AIARR_KST_OWNER_COPY")) {
         const auto c = closure::check(owner);
         std::printf("  owner KST closure: %zu trees, %zu MIDI leaves; user refs resolved %zu, dangling %zu (slot empty %zu, file absent %zu); "
-                    "factory/GM %zu; problems %zu\n", c.trees, c.midis, c.resolved, c.danglingCount(), c.slotEmpty, c.fileAbsent, c.factory, c.problems.size());
-        TEST("owner KST closure: every object read", c.ok && c.trees > 0);
-        if (const char* want = std::getenv("AIARR_KST_OWNER_EXPECT")) {   // "resolved/dangling", e.g. from the research notes
-            char got[64];
-            std::snprintf(got, sizeof got, "%zu/%zu", c.resolved, c.danglingCount());
+                    "factory/GM %zu; unresolved %zu; problems %zu\n", c.trees, c.midis, c.resolved, c.danglingCount(), c.slotEmpty, c.fileAbsent, c.factory, c.unresolved, c.problems.size());
+        // Not "every object read": the owner copy holds MIDI leaves that break SMF 1.0 (research note W4); the exact
+        // number of refused leaves is pinned by AIARR_KST_OWNER_EXPECT instead, so any change is still caught.
+        TEST("owner KST closure: the folder was walked", c.error.empty() && c.trees > 0);
+        if (const char* want = std::getenv("AIARR_KST_OWNER_EXPECT")) {   // "resolved/dangling/unresolved/problems", e.g. from the research notes
+            char got[96];
+            std::snprintf(got, sizeof got, "%zu/%zu/%zu/%zu", c.resolved, c.danglingCount(), c.unresolved, c.problems.size());
             TEST("owner KST closure: counts match AIARR_KST_OWNER_EXPECT", std::string(want) == got);
         }
     } else std::printf("  SKIP: owner KST closure check (set AIARR_KST_OWNER_COPY to a local copy)\n");

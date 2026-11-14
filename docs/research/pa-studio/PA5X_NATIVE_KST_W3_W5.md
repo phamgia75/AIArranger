@@ -63,12 +63,26 @@ invented attribute or node is caught.
 - `kst_closure.h`: an original port of the research closure rule: MSB 121/120 with LSB 64-75 →
   `SOUND/USER(DK)nn.PCG` directory slot = Program Change. On the owner copy (private run, counts only):
   4 097 trees, 231 087 MIDI leaves, **32 156 resolved / 352 dangling** (320 slot empty, 32 file absent),
-  179 126 factory/GM, 0 problems. This is the research result, reproduced.
+  179 126 factory/GM, 0 problems. This is the research result, reproduced. (Measured at `8f94627`, before the Codex r2 rules.)
+- SMF rules of the closure reader (SMF 1.0 only; `selects()`): format 0 with exactly one track, or format 1; only
+  `MTrk` chunks; End of Track at every track end; no trailing bytes. Channel-message data bytes must be < 0x80.
+  Meta and SysEx events cancel running status. Bank state (CC0/CC32 per channel) is shared by all tracks. Events of
+  all tracks are merged by absolute tick. **Tie rule:** at equal ticks the lower track number comes first, then file
+  order within a track. A Program Change without both CC0 and CC32 set before it is **UNRESOLVED**. It is counted
+  apart from factory/GM, and the assembler refuses it.
+- Re-measured with these rules (Codex r2, counts only, 4 443 OK before and after): **32 152 resolved / 352
+  dangling** (320 slot empty, 32 file absent), 179 126 factory/GM, **0 unresolved, 4 problems**.
+  - The 4 problems are 4 Pad `Main.mid` leaves (3 objects, one of them also in a copied bank). Each has a CC11 in
+    track 1 at tick 24 with a data byte ≥ 0x80, which is invalid under SMF 1.0. They are refused, not guessed at.
+  - Each of these leaves holds exactly one user sound select. That accounts for resolved 32 156 → 32 152.
+  - The cross-track merge and the unresolved category changed no other count. In the owner copy every bank select
+    precedes its Program Change in the same track.
+  - The owner-gated test pins `AIARR_KST_OWNER_EXPECT=32152/352/0/4` (resolved/dangling/unresolved/problems).
 - `kst_assemble.h`: writes `<Name>.KST/` with only the type folders that hold data, one bank sub-folder and
   lower-case `.stg/.ksc/.pdc`. Optional KORF files are carried byte-for-byte after `panative::parse` accepts them.
   It refuses an existing path or manifest and any `/Volumes` target before the first write. Everything is staged in
   `NAME.KST.INCOMPLETE/`. There the files are read back (byte-compared and re-parsed), then checked: closure must
-  report 0 dangling and 0 problems, the validator 0 errors. The SHA-256 manifest is written and verified there too.
+  report 0 dangling, 0 unresolved and 0 problems, the validator 0 errors. The SHA-256 manifest is written and verified there too.
   Only then are the manifest and then the folder published, by non-replacing renames. A failure never leaves a
   final-named KST.
 - CLI: `aiarranger-resources kst-native closure KSTDIR` (read-only) and `kst-native demo OUTDIR` (the three W6 test

@@ -7,7 +7,7 @@
 //
 // Writing: only into a NEW folder (output_guard.h: no existing path, no mounted volume; an existing manifest is refused
 // too). Everything is staged in NAME.KST.INCOMPLETE/: the files are read back (byte-compared and re-parsed), then the
-// dependency closure (0 dangling, 0 problems), the structural validator (0 errors) and a SHA-256 manifest
+// dependency closure (0 dangling, 0 unresolved, 0 problems), the structural validator (0 errors) and a SHA-256 manifest
 // (NAME.KST.manifest.sha256, sha256sum format, verified) all run on the staged folder. Only when every check passed are
 // the manifest and then the folder published by non-replacing renames. Any failure leaves only NAME.KST.INCOMPLETE,
 // never a final-named KST; nothing is deleted except the emptied staging folder.
@@ -152,6 +152,7 @@ inline Result build(const std::filesystem::path& parent, const std::string& kstN
     r.userRefs = c.resolved + c.danglingCount();
     if (!c.ok) return fail("closure could not read every object: " + (c.problems.empty() ? c.error : c.problems.front()) + left);
     if (r.dangling) return fail("closure: " + std::to_string(r.dangling) + " dangling user reference(s)" + left);
+    if (c.unresolved) return fail("closure: " + std::to_string(c.unresolved) + " unresolved sound selection(s) (Program Change without CC0/CC32)" + left);
     const auto v = library::validate(stage);
     r.validatorErrors = v.count(library::Severity::Error);
     r.validatorWarnings = v.count(library::Severity::Warn);

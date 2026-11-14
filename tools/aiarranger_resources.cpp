@@ -11,7 +11,7 @@
 //   validate FOLDER                         file-level structural check of a KST or SET folder against the rule table
 //                                           of its layout (library/library_validate.h); exit 3 = an ERROR finding, 1 = unreadable
 //   kst-native closure KSTDIR               READ-ONLY / EXPERIMENTAL: user Sound references of every .STG/.KSC/.PDC vs SOUND/*.PCG
-//                                           (media/panative/kst_closure.h); exit 3 = dangling references, 1 = unreadable objects
+//                                           (media/panative/kst_closure.h); exit 3 = dangling or unresolved references, 1 = unreadable objects
 //   kst-native demo OUTDIR                  EXPERIMENTAL, NOT HARDWARE-VERIFIED: writes the three W6 test KSTs (one Pad, one
 //                                           KBD Set, one Style; factory/GM sounds, no samples) as NEW folders in OUTDIR
 // Every command also takes --evidence FILE (repeatable, before the other arguments): an owner-authorized
@@ -76,9 +76,9 @@ int main(int argc, char** argv) {
         const auto c = panative::closure::check(argv[3]);
         for (const auto& p : c.problems) std::fprintf(stderr, "UNREADABLE: %s\n", p.c_str());
         for (const auto& [ref, n] : c.dangling) std::printf("DANGLING %s (%zu)\n", ref.c_str(), n);
-        std::printf("Root trees %zu, MIDI leaves %zu; user refs resolved %zu, dangling %zu (slot empty %zu, file absent %zu); factory/GM %zu%s\n",
-                    c.trees, c.midis, c.resolved, c.danglingCount(), c.slotEmpty, c.fileAbsent, c.factory, c.error.empty() ? "" : (" ERROR: " + c.error).c_str());
-        return !c.ok ? 1 : c.danglingCount() ? 3 : 0;
+        std::printf("Root trees %zu, MIDI leaves %zu; user refs resolved %zu, dangling %zu (slot empty %zu, file absent %zu); factory/GM %zu; unresolved %zu%s\n",
+                    c.trees, c.midis, c.resolved, c.danglingCount(), c.slotEmpty, c.fileAbsent, c.factory, c.unresolved, c.error.empty() ? "" : (" ERROR: " + c.error).c_str());
+        return !c.ok ? 1 : c.danglingCount() || c.unresolved ? 3 : 0;
     }
     if (cmd == "kst-native" && argc == 4 && std::string(argv[2]) == "demo") {
         int bad = 0;
