@@ -167,9 +167,10 @@ inline std::string upper(std::string s) {
 // Pa700/Pa1000 markers (owner Pa700 SET, pa-studio-research FORMAT_MATRIX.md): GLOBAL/LIMITER.AUD,
 //   GLOBAL/MASTEREQ.AUD, SOUND/USERDK01.PCG, folder SONGBOOK/SONGDB.SBD. Pa4X's manual layout has none of them.
 //   The SONGDB.SBD folder is also OBSERVED in owner Pa5X KSTs, so it marks a Pa700 SET only without Pa5X markers.
-// Without a suffix, Pa5X markers together with Pa4X/Pa700 markers (Pa5X conversions keep a lower-case MULTISMP/ram.kmp),
-// or a SONGDB.SBD folder alone, give kLayoutAmbiguous: the names do not decide the family.
-// Pa4X-family markers (MAN4 PDF p.975): .STY/.PRF/.PAD, SOUND/USERDK.PCG, MULTISMP/RAM.KMP.
+// Shared names, not family markers: the SONGDB.SBD folder and MULTISMP/RAM.KMP (MAN4 p.975, and kept as ram.kmp by the
+// Pa5X's own SET conversions in owner KSTs). With a .SET suffix RAM.KMP still counts toward a SET (as before).
+// Without a suffix: Pa5X markers together with Pa4X/Pa700 markers, or only shared names, give kLayoutAmbiguous.
+// Pa4X-family markers (MAN4 PDF p.975): .STY/.PRF/.PAD, SOUND/USERDK.PCG.
 // Pa5X markers (MAN5 p.721): .STG/.KSC/.PDC.
 inline std::string detectLayout(const std::filesystem::path& root, const Listing& l) {
     // The folder's own name, however it was spelled ("X.KST", "X.KST/", "X.KST/.", "."): resolve it first.
@@ -179,12 +180,13 @@ inline std::string detectLayout(const std::filesystem::path& root, const Listing
     if (dir.filename().empty()) dir = dir.parent_path();
     const std::string name = upper(dir.filename().string());
     auto ends = [&](const char* s) { const std::string x(s); return name.size() >= x.size() && name.compare(name.size() - x.size(), x.size(), x) == 0; };
-    bool pa700 = false, pa4x = false, pa5x = false, songDb = false;
+    bool pa700 = false, pa4x = false, pa5x = false, songDb = false, ramKmp = false;
     for (const auto& d : l.dirs) songDb |= upper(d) == "SONGBOOK/SONGDB.SBD";
     for (const auto& [rel, e] : l.files) {
         const std::string r = upper(rel), ext = upper(std::filesystem::path(rel).extension().string());
         pa700 |= r == "GLOBAL/LIMITER.AUD" || r == "GLOBAL/MASTEREQ.AUD" || r == "SOUND/USERDK01.PCG";
-        pa4x |= ext == ".STY" || ext == ".PRF" || ext == ".PAD" || r == "SOUND/USERDK.PCG" || r == "MULTISMP/RAM.KMP";
+        pa4x |= ext == ".STY" || ext == ".PRF" || ext == ".PAD" || r == "SOUND/USERDK.PCG";
+        ramKmp |= r == "MULTISMP/RAM.KMP";
         pa5x |= ext == ".STG" || ext == ".KSC" || ext == ".PDC";
     }
     if (ends(".KST")) return kLayoutKst;
@@ -193,7 +195,7 @@ inline std::string detectLayout(const std::filesystem::path& root, const Listing
     if (pa700 || (songDb && pa4x)) return kLayoutPa700;
     if (pa4x) return kLayoutPa4x;
     if (pa5x) return kLayoutKst;
-    return songDb ? kLayoutAmbiguous : kLayoutUnknown;
+    return songDb || ramKmp ? kLayoutAmbiguous : kLayoutUnknown;
 }
 
 }  // namespace detail
@@ -309,7 +311,9 @@ inline std::string format(const Inventory& inv, const std::string& label, uintma
     o << (isSetLayout(inv.layout) ? "\nBy documented SET file type (Pa4X manual OS 3.1 PDF p.973-975; identification by extension only):\n"
                                   : "\nBy documented Pa5X file type (manual v1.4 p.721; identification by extension only):\n");
     for (const auto& [k, v] : inv.by_type) o << "  " << k << "  " << v.files << " files, " << v.bytes << " bytes\n";
+    const bool kst = inv.layout == kLayoutKst;   // unknown/ambiguous: neither KST nor SET advice is given
     o << "\nPCM folder: " << (!inv.has_pcm_folder ? "no"
+          : !kst && !isSetLayout(inv.layout) ? "YES. Layout not determined, so no keyboard-specific advice is given."
           : isSetLayout(inv.layout)
           ? "YES. This SET holds User Samples. A Pa5X reads a SET only through its one-way Data Conversion (manual p.737)."
           : "YES. This KST holds User Samples: loading the WHOLE KST on a Pa5X deletes the User Samples in memory "
@@ -332,6 +336,11 @@ inline std::string format(const Inventory& inv, const std::string& label, uintma
           << "  No Pa5X memory budget applied: this is a SET (Pa4X/Pa700 family); a Pa5X reads a SET only through its one-way\n"
           << "  Data Conversion (Pa5X manual p.737). The SET's own keyboard limits are not modelled.\n"
           << "\nFile contents were not interpreted. Compare against the keyboard's Media listing (HARDWARE VALIDATION PENDING).\n";
+        return o.str();
+    }
+    if (!kst) {
+        o << "\nLayout not determined: no Pa5X memory budget and no load advice applied. Name the folder .KST or .SET if you\n"
+          << "know which it is. File contents were not interpreted.\n";
         return o.str();
     }
     o << formatMemoryEstimate(inv, budget);

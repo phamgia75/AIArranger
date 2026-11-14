@@ -95,7 +95,7 @@ int main() {
         const fs::path k = make(root / "SONGDB", kst);   // no .KST suffix: Pa5X markers + SONGDB.SBD folder
         TEST("a suffix-less Pa5X KST with SONGBOOK/SONGDB.SBD is still a KST, not a Pa700 SET",
              ai_arranger::media::scan(k).layout == ai_arranger::media::kLayoutKst);
-        const auto amb = validate(make(root / "AMBIG", {{"STYLE/B/A.stg", "x"}, {"MULTISMP/ram.kmp", "x"}}));
+        const auto amb = validate(make(root / "AMBIG", {{"STYLE/B/A.stg", "x"}, {"STYLE/USER01.STY", "x"}}));
         TEST("ambiguous suffix-less folder: no rule table, one R-01 ERROR naming the ambiguity (never a pass)",
              amb.ok && amb.table == "none" && rules(amb) == std::set<std::string>{"R-01"} &&
              amb.findings[0].message.find("ambiguous") != std::string::npos);
