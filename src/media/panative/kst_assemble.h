@@ -69,7 +69,7 @@ inline std::string contentRefusal(const std::string& type, const roottree::Node&
     for (const auto* m : mids) {
         std::vector<closure::Select> s;
         std::string e;
-        if (!closure::selects(reinterpret_cast<const uint8_t*>(m->payload.data()), m->payload.size(), s, e)) return "MIDI leaf " + m->name + ": " + e;
+        if (!closure::leafSelects(*m, s, e)) return "MIDI leaf " + m->name + ": " + e;
     }
     return "";
 }

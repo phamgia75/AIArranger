@@ -73,7 +73,8 @@ inline bool parseNodes(const uint8_t* p, size_t o, size_t end, int depth, std::v
 
 // depth/nodes count exactly as parseNodes does (Root's children are depth 1), so write() never emits what parse() refuses.
 inline bool writeNode(const Node& n, bool top, std::string& out, std::string& err, int depth, size_t& nodes) {
-    if (!top && depth > kMaxDepth) { err = "nesting deeper than " + std::to_string(kMaxDepth); return false; }
+    // The parser reads every Branch's child list (even an empty one) at depth + 1, so a Branch needs depth + 1 <= kMaxDepth.
+    if (!top && (depth > kMaxDepth || (n.kind == Node::Branch && depth + 1 > kMaxDepth))) { err = "nesting deeper than " + std::to_string(kMaxDepth); return false; }
     if (!top && ++nodes > kMaxNodes) { err = "more than " + std::to_string(kMaxNodes) + " nodes"; return false; }
     if (out.size() > kMaxFileBytes) { err = "tree larger than the reader's limit"; return false; }
     if (top != (n.kind == Node::Root)) { err = top ? "top-level node is not Root" : "Root below the top level"; return false; }

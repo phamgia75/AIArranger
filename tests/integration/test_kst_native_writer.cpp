@@ -232,6 +232,22 @@ int main() {
                  closure::selects(reinterpret_cast<const uint8_t*>(m.data()), m.size(), q, er) && q.size() == 1 && q[0].msb == -1 && q[0].lsb == -1);
         }
         const std::string over = smfWith(std::string("\x00\xF0\x7F\x42", 4));
+        {
+            // Codex r3 R3-1: bank/PC events are bounded per file (owner maximum 4 per MIDI leaf). Running-status
+            // Program Changes "00 nn" are 2 bytes each: kMaxSelectEvents + 1 of them must be refused, kMaxSelectEvents not.
+            auto pcs = [](size_t count) {
+                std::string t("\x00\xC0\x00", 3);
+                for (size_t i = 1; i < count; ++i) t += std::string("\x00\x00", 2);
+                return smfWith(t + std::string("\x00\xFF\x2F\x00", 4));
+            };
+            const std::string atMax = pcs(closure::kMaxSelectEvents), over = pcs(closure::kMaxSelectEvents + 1);
+            std::vector<closure::Select> q;
+            std::string er;
+            const bool okMax = closure::selects(reinterpret_cast<const uint8_t*>(atMax.data()), atMax.size(), q, er) && q.size() == closure::kMaxSelectEvents;
+            q.clear();
+            const bool refused = !closure::selects(reinterpret_cast<const uint8_t*>(over.data()), over.size(), q, er) && er.find("events") != std::string::npos && q.empty();
+            TEST("selects: more than kMaxSelectEvents bank/PC events refused, exactly kMaxSelectEvents accepted", okMax && refused);
+        }
         TEST("selects: SysEx length past the track refused", !closure::selects(reinterpret_cast<const uint8_t*>(over.data()), over.size(), s, e));
     }
     char tmpl[] = "/tmp/aiarr_kstw_XXXXXX";
@@ -259,6 +275,17 @@ int main() {
             const auto ru = assemble::build(tmp, "R6", {{"PAD", "B", "NoBank", noBank}});
             TEST("assemble: an unresolved selection fails the gate before publication",
                  !ru.ok && ru.message.find("unresolved") != std::string::npos && !fs::exists(tmp / "R6.KST"));
+        }
+        {
+            // Codex r3 R3-2: all 231 087 owner MIDI leaves end in lower-case ".mid"; any other case is refused, not skipped.
+            Node upperMid = pdcRef(121, 64, 5);
+            upperMid.children[0].name = "Main.MID";
+            const fs::path um = tmp / "UPMID.KST";
+            roottree::write(upperMid, b, e); put(um / "PAD/B/Up.pdc", b);
+            const auto cm = closure::check(um);
+            TEST("closure: a MIDI leaf named .MID is a problem, not skipped", !cm.ok && cm.problems.size() == 1 && cm.problems[0].find(".mid") != std::string::npos);
+            const auto rm = assemble::build(tmp, "R7", {{"PAD", "B", "Up", upperMid}});
+            TEST("assemble: a MIDI leaf named .MID refused before any write", !rm.ok && rm.message.find(".mid") != std::string::npos && !fs::exists(tmp / "R7.KST.INCOMPLETE"));
         }
         put(k / "STYLE/B/Broken.stg", "Root\0\x01\0\0\0\0\x05xxxxx");
         TEST("closure reports an unparsable object instead of skipping it", !closure::check(k).ok && closure::check(k).problems.size() == 1);

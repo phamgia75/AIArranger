@@ -22,6 +22,10 @@
 
 namespace ai_arranger::media::panative::closure {
 
+// Bank-select (CC0, CC32) and Program Change events read per SMF. Owner maximum 4 per MIDI leaf (231 087 leaves); the
+// bound keeps a 1024x margin and stops a hostile file (2-byte running-status PCs) from allocating GBs.
+constexpr size_t kMaxSelectEvents = 4096;
+
 struct Select { int channel; int msb, lsb; int program; };   // msb/lsb -1 = not set before the Program Change
 
 // Sound selects of one SMF in time order. False (error set) on anything outside the SMF 1.0 rules checked here:
@@ -93,6 +97,8 @@ inline bool selects(const uint8_t* p, size_t n, std::vector<Select>& out, std::s
             if (size_t(k) > end - o) return fail("channel message runs past its track");
             for (int d = 0; d < k; ++d)
                 if (p[o + size_t(d)] & 0x80) return fail("channel message data byte with the high bit set");
+            if (((hi == 0xB0 && (p[o] == 0 || p[o] == 32)) || hi == 0xC0) && evs.size() >= kMaxSelectEvents)
+                return fail("more than " + std::to_string(kMaxSelectEvents) + " bank-select/Program Change events");
             if (hi == 0xB0 && (p[o] == 0 || p[o] == 32)) evs.push_back({tick, track, ch, p[o], p[o + 1]});
             else if (hi == 0xC0) evs.push_back({tick, track, ch, -1, p[o]});
             o += size_t(k);
@@ -126,9 +132,16 @@ inline std::string upper(std::string s) { for (auto& c : s) c = char(std::touppe
 
 inline void collect(const roottree::Node& n, std::vector<const roottree::Node*>& mids) {
     for (const auto& c : n.children) {
-        if (c.kind == roottree::Node::Leaf) { if (c.name.size() > 4 && c.name.compare(c.name.size() - 4, 4, ".mid") == 0) mids.push_back(&c); }
+        if (c.kind == roottree::Node::Leaf) { if (c.name.size() > 4 && upper(c.name.substr(c.name.size() - 4)) == ".MID") mids.push_back(&c); }
         else collect(c, mids);
     }
+}
+
+// Sound selects of one collected MIDI leaf. Only the lower-case ".mid" suffix was observed (231 087/231 087 owner
+// leaves); any other case is refused, not read or skipped.
+inline bool leafSelects(const roottree::Node& m, std::vector<Select>& out, std::string& error) {
+    if (m.name.compare(m.name.size() - 4, 4, ".mid") != 0) { error = "MIDI leaf name does not end in lower-case .mid (the only case observed)"; return false; }
+    return selects(reinterpret_cast<const uint8_t*>(m.payload.data()), m.payload.size(), out, error);
 }
 
 // Read-only check of one KST folder.
@@ -159,7 +172,7 @@ inline Result check(const std::filesystem::path& kst) {
             ++r.midis;
             std::vector<Select> sel;
             std::string err;
-            if (!selects(reinterpret_cast<const uint8_t*>(m->payload.data()), m->payload.size(), sel, err)) { r.problems.push_back(rel + ":" + m->name + ": " + err); continue; }
+            if (!leafSelects(*m, sel, err)) { r.problems.push_back(rel + ":" + m->name + ": " + err); continue; }
             for (const auto& s : sel) {
                 if ((s.msb == 120 || s.msb == 121) && s.lsb >= 64 && s.lsb <= 75) {
                     char f[24];

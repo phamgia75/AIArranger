@@ -70,6 +70,13 @@ invented attribute or node is caught.
   all tracks are merged by absolute tick. **Tie rule:** at equal ticks the lower track number comes first, then file
   order within a track. A Program Change without both CC0 and CC32 set before it is **UNRESOLVED**. It is counted
   apart from factory/GM, and the assembler refuses it.
+- Bounds and names (Codex r3):
+  - At most `kMaxSelectEvents` = 4 096 bank-select/Program Change events per MIDI leaf. The owner maximum is 4 per
+    leaf over 231 087 leaves, so this is a 1024× margin. A file over the bound is refused before the event is stored.
+  - MIDI leaves are found by a case-insensitive `.mid` suffix. Only lower-case `.mid` is accepted (231 087/231 087
+    observed). Any other case is refused, not skipped.
+  - The Root-tree writer refuses a Branch at depth 32 even when it is empty, because the parser reads its child list
+    at depth 33.
 - Re-measured with these rules (Codex r2, counts only, 4 443 OK before and after): **32 152 resolved / 352
   dangling** (320 slot empty, 32 file absent), 179 126 factory/GM, **0 unresolved, 4 problems**.
   - The 4 problems are 4 distinct owner Pad objects. Each one's MIDI leaf carries a CC11 data byte ≥ 0x80 (track 1,

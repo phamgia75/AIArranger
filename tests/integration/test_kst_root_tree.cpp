@@ -154,6 +154,18 @@ int main() {
         Node r32; r32.kind = Node::Root; r32.name = "\x01"; r32.children.push_back(d32);
         TEST("writer refuses more than kMaxNodes nodes and nesting past kMaxDepth; depth 32 written and parsed",
              W(wide) == "REFUSED" && W(r33) == "REFUSED" && W(r32) != "REFUSED" && P(W(r32)).ok && !P(W(r33) == "REFUSED" ? "" : W(r33)).ok);
+        // Codex r3 R3-3: the parser descends into every Branch's (possibly empty) child list at depth + 1, so an empty
+        // Branch at depth 32 is refused there; the writer must refuse it too. Leaf boundary: depth 32 ok, 33 refused.
+        auto chain = [](Node inner, int wraps) {
+            for (int i = 0; i < wraps; ++i) { Node b2; b2.kind = Node::Branch; b2.name = "b"; b2.children.push_back(inner); inner = b2; }
+            Node r; r.kind = Node::Root; r.name = "\x01"; r.children.push_back(inner); return r;
+        };
+        Node emptyB; emptyB.kind = Node::Branch; emptyB.name = "e";
+        const Node e32 = chain(emptyB, 31), e31 = chain(emptyB, 30);
+        TEST("writer: an empty Branch at depth 32 refused (parser refuses it), at depth 31 written and parsed",
+             W(e32) == "REFUSED" && P(W(e31)).ok);
+        TEST("writer: leaf boundary unchanged (leaf at depth 32 written and parsed, 33 refused)",
+             W(r32) != "REFUSED" && P(W(r32)).ok && W(r33) == "REFUSED");
         TEST("more nodes than the node limit refused (memory bound), 1000 accepted",
              !P(root(many)).ok && P(root(many)).error.find("nodes") != std::string::npos && P(root(few)).ok);
     }
