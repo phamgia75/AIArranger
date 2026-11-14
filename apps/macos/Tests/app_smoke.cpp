@@ -979,7 +979,8 @@ int main() {
             st.showDomain(D::Library, 4);
             TEST("library manager: a Library segment, shown", st.currentPage() == &lm && lm.isVisible());
             TEST("library manager: Compare and Copy say what they need", lm.unavailable(A::Compare) == "Needs: a library open on both sides" &&
-                 lm.unavailable(A::Copy) == "Needs: an item selected in a list" && lm.unavailable(A::Export).startsWith("Needs: a plan step"));
+                 lm.unavailable(A::Copy) == "Needs: an item selected in a list" && lm.unavailable(A::Export).startsWith("Needs: a plan step") &&
+                 lm.unavailable(A::Compat) == "Needs: an item selected in a list");
             TEST("library manager: unavailable actions show their reason inline", reasonsShown());
             put(root / "Other.KST/STYLE/USER01/Ballad.STG", "s");       // same bytes as Mine.KST's
             put(root / "Other.KST/STYLE/USER02/Ballad.STG", "other");   // same name, other bank
@@ -1076,6 +1077,19 @@ int main() {
             waitLm(5000);
             TEST("library manager E8: Validation view runs the structural validator on both sides", lm.reportText().contains("Library A: Structural validation") &&
                  lm.reportText().contains("Rule table: Pa5X KST") && lm.reportText().contains("not verified on a keyboard"));
+            // P0 Keyboard Compatibility card: the selected item, per target keyboard, sourced rule tables only (C15, C16)
+            lm.selectRow('A', 1);   // Ballad
+            lm.showView(V::Compat);
+            waitLm(5000);
+            TEST("library manager: Compatibility card per keyboard, Pa5X first, every line sourced, never verified",
+                 lm.reportText().contains("Keyboard Compatibility card") && lm.reportText().contains("STYLE/USER01/Ballad.STG") &&
+                 lm.reportText().indexOf("Pa5X: NOT VERIFIED ON A PA5X") < lm.reportText().indexOf("Pa4X family: NOT VERIFIED") &&
+                 lm.reportText().contains("DOCUMENTED  R-04  STYLE/.STG") && lm.reportText().contains("[MAN5 p.721") &&
+                 lm.reportText().contains("L3  measured on hardware: not measured"));
+            lm.selectRow('A', 0);   // Hit: the card follows the selection
+            waitLm(5000);
+            TEST("library manager: the Compatibility card follows the selection", lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad"));
+            lm.showView(V::Details);
             const auto bytesOf = [](const fs::path& d) {
                 std::map<std::string, std::string> m;
                 for (const auto& e : fs::recursive_directory_iterator(d))
