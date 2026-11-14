@@ -23,6 +23,8 @@
 #include "engine/midi/coremidi_in.h"
 #include "engine/chord/fingered_detector.h"
 #include "midi/coremidi/coremidi_output_provider.h"
+#include "midi/pa5x_profile.h"
+#include "engine/arranger/style_player.h"
 
 namespace ai_arranger::app {
 
@@ -70,9 +72,13 @@ public:
     // always restarted (RAII, even if the swap throws), and the transport is left
     // stopped — the UI must press Start again. Caller passes an already-parsed
     // style, so a bad file never reaches here and the old style is untouched.
-    void reloadStyle(const uasf::StyleDefinition& style) {
+    // `layout` says which engine channel carries which Style part (sffPartLayout() for an
+    // SFF1 import); the output routing is rebuilt for it while the transport is stopped.
+    void reloadStyle(const uasf::StyleDefinition& style, const midi::PartLayout& layout) {
+        routing_.layout = layout;
         if (!running_) {                 // no tick thread yet: nothing to race
             facade_.loadStyle(style);
+            applyRouting();
             return;
         }
         stopTimer();                     // quiesce: waits for the in-flight tick
@@ -82,6 +88,7 @@ public:
         facade_.transportStop();         // enqueue Stop …
         facade_.tick(0);                 // … and drain it now: flush notes + pump, no time advance
         facade_.loadStyle(style);        // safe swap: no concurrent reader, clock stopped
+        applyRouting();                  // stopped: the facade accepts the map
         // transport left stopped; tick restarts via guard.
     }
 
@@ -92,8 +99,12 @@ public:
     // device synchronously first, so its all-notes-off never leaks to the new one.
     // Transport is left stopped after the switch (press Start to resume).
     void switchOutput(int index) {
+        // The name is taken now, while the chosen device is enumerable (review of 27ca014).
+        routing_.destination.clear();
+        for (const auto& d : midi_out_.enumerate()) if (index >= 0 && d.index == index) routing_.destination = d.name;
         if (!running_) {                 // no tick thread yet: plain select
             facade_.selectMidiOutput(index);
+            applyRouting();
             return;
         }
         stopTimer();                     // quiesce: waits for the in-flight tick
@@ -101,6 +112,7 @@ public:
         facade_.panic();                 // stop + all-sound-off + clear active notes …
         facade_.tick(0);                 // … applied now on the quiesced engine
         facade_.selectMidiOutput(index); // silences old device, then attaches new
+        applyRouting();                  // Pa5X SOUND -> preset routing; anything else identity
         // transport left stopped; tick restarts via guard.
     }
 
@@ -141,6 +153,10 @@ private:
     // RAII TickGuard in reloadStyle() can re-arm it on any exit path).
     void restartTick() noexcept { startTimer(1); }
 
+    // Output routing for the chosen destination and the loaded style's part layout
+    // (pa5x::HostOutputRouting). Called only with the transport stopped.
+    void applyRouting() { facade_.setOutputChannelMap(routing_.map()); }
+    midi::pa5x::HostOutputRouting routing_{"", midi::partLayoutFromRoles(arranger::buildDemoStyle())};   // boot style
     // Declared before facade_: the facade constructor captures &midi_in_/&midi_out_.
     midi::CoreMidiIn             midi_in_;
     midi::CoreMidiOutputProvider midi_out_;

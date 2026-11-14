@@ -29,16 +29,19 @@ std::vector<uint8_t> makeChunk(const std::string& id, const std::vector<uint8_t>
     return buf;
 }
 
-// Build a 47-byte Ctb2 entry with the validated field offsets.
+// Build a 47-byte Ctb2 entry: zone split 0/127 (middle zone only), the given
+// 6-byte middle zone {NTR, NTT, High Key, Note Low, Note High, RTR} at [28..33],
+// and a deliberately different decoy in the unused low/high zones.
 std::vector<uint8_t> makeCtb2Entry(const std::string& name, uint8_t srcCh,
-                                   uint8_t low, uint8_t high,
-                                   uint8_t ntr, uint8_t nttRaw) {
+                                   const std::vector<uint8_t>& midZone) {
     std::vector<uint8_t> e(47, 0);
     e[0] = srcCh;
     for (size_t i = 0; i < 8; ++i)
         e[1 + i] = (i < name.size()) ? static_cast<uint8_t>(name[i]) : ' ';
     e[9]  = srcCh;
-    e[20] = low; e[21] = high; e[22] = ntr; e[23] = nttRaw;
+    e[20] = 0; e[21] = 127;
+    const uint8_t decoy[6] = {0, 2, 7, 0, 127, 3};   // Root Trans / Chord
+    for (int i = 0; i < 6; ++i) { e[22 + i] = decoy[i]; e[34 + i] = decoy[i]; e[28 + i] = midZone[i]; }
     return e;
 }
 
@@ -49,7 +52,7 @@ CasmTrackConfig makeCfg(const std::string& name, uint8_t srcCh,
     c.name = name;
     c.source_channel = srcCh;
     c.dest_channel = srcCh;
-    c.low_key = 0; c.high_key = 127;
+    c.note_low = 0; c.note_high = 127;
     c.ntr = ntr; c.ntt = ntt; c.ntt_bass = nttBass;
     c.is_megavoice = false;
     return c;
@@ -123,6 +126,32 @@ int main() {
         auto buf = makeChunk("CASM", std::vector<uint8_t>(64, 0));
         Sff1Reader r; auto res = r.parseBuffer(buf, "casm_sections.sty");
         TEST("Sections parsed vector exists", res.sections_parsed.empty());
+    }
+
+    // ── Ctb2: the middle zone [28..33] applies, not the low zone [22..27] ──
+    {
+        auto guitar = makeCtb2Entry("Chord1", 11, {2, 0, 0, 0, 127, 1});
+        auto bass   = makeCtb2Entry("Bass", 10, {0, 0x81, 11, 24, 127, 2});
+        auto buf = makeCasmChunk({{"Main A", {guitar, bass}}});
+        Sff1Reader r; auto res = r.parseBuffer(buf, "ctb2_zones.sty");
+        const bool two = res.casm_configs.size() == 2;
+        TEST("Ctb2: two configs", two);
+        if (two) {
+            const auto& g = res.casm_configs[0];
+            const auto& b = res.casm_configs[1];
+            TEST("Ctb2: NTR/NTT from the middle zone (Guitar / All-Purpose)",
+                 g.ntr == 2 && g.ntt == 0 && !g.ntt_bass);
+            TEST("Ctb2: bass flag, High Key, note limits, RTR from the middle zone",
+                 b.ntr == 0 && b.ntt == 1 && b.ntt_bass && b.high_key == 11 &&
+                 b.note_low == 24 && b.note_high == 127 && b.rtr == 2);
+            TEST("Ctb2: zone split kept", b.zone_low == 0 && b.zone_high == 127);
+            TEST("Ctb2: Guitar NTR with NTT 0 counts as chord-following",
+                 Sff1ReportGenerator::computeScore(res).harmonic_fidelity == 1.0);
+        }
+        std::vector<uint8_t> shortEntry(guitar.begin(), guitar.begin() + 33);
+        auto buf2 = makeCasmChunk({{"Main A", {shortEntry}}});
+        Sff1Reader r2; auto res2 = r2.parseBuffer(buf2, "ctb2_short.sty");
+        TEST("Ctb2: entry without a full middle zone is skipped", res2.success && res2.casm_configs.empty());
     }
 
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);

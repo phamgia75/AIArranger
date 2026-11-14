@@ -31,6 +31,9 @@ struct PerformerSession {
     std::string midi_output_name;    // routing (device name; "" = none)
     uint8_t     ui_layout = 0;       // 0=desktop, 1=stage
     uint8_t     theme = 0;           // theme index
+    // Output routing (midi/output_routing.h text, e.g. "drum=10,bass=9,..."); "" = none
+    // (identity output). Optional on load: files written before it load unchanged.
+    std::string output_routing;
 };
 
 class SessionPersistence {

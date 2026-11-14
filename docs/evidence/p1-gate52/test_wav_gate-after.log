@@ -1,0 +1,34 @@
+Test: WAV gate (#52)
+  PASS: EXTENSIBLE 16-in-16 with the data chunk ending the file decodes exactly
+  PASS: EXTENSIBLE 16-in-24 (valid 16): exact, no dither
+  PASS: EXTENSIBLE 16-in-32 (valid 16): exact
+  PASS: EXTENSIBLE 20-in-24: padding bits ignored (garbage there decodes like zeros)
+  PASS: EXTENSIBLE 24-in-32 decodes like the same 24-bit PCM
+  PASS: EXTENSIBLE float 32 decodes within 1 LSB
+  PASS: refused: blockAlign != channels * container bytes (block align 4 is not channels * container bytes (2))
+  PASS: refused: EXTENSIBLE blockAlign mismatch (block align 4 is not channels * container bytes (2))
+  PASS: refused: valid bits above the container (valid bits 28 do not fit the 24-bit container)
+  PASS: refused: cbSize too small (extensible fmt cbSize 10 below 22)
+  PASS: refused: EXTENSIBLE fmt chunk shorter than 40 (extensible fmt chunk shorter than 40 bytes)
+  PASS: refused: subformat GUID not PCM/float (unsupported subformat (only PCM or IEEE float))
+  PASS: refused: ADPCM subformat (unsupported subformat (only PCM or IEEE float))
+  PASS: refused: zero channels (only mono or stereo is supported)
+  PASS: refused: rate 0 (sample rate 0 Hz outside the accepted input range 4000-192000 Hz)
+  PASS: refused: data chunk longer than the file (chunk overruns the file)
+  PASS: refused: data chunk not whole frames (data chunk does not hold whole frames)
+  PASS: refused: EXTENSIBLE 24-bit data not whole frames (data chunk does not hold whole frames)
+  PASS: refused: not RIFF (not a RIFF/WAVE file)
+  PASS: refused: fmt chunk too short (fmt chunk too short)
+  PASS: 1 Hz WAV refused at read (rate outside the accepted input range)
+  PASS: 4 MHz WAV refused at read
+  PASS: batch convert: the 1 Hz file is not read, with the rate reason
+  PASS: drum kit: the 1 Hz file is refused with the rate reason
+  PASS: batch convert: output over 1 048 576 frames refused before resampling
+  PASS: kit builds
+  PASS: KMP job done
+  PASS: KMP report: pan, exclusive groups, groups and level are never EXACT
+  PASS: KMP report: the level cut (not written) and the clamped +3 dB are MISSING
+  PASS: TXPERF report keeps pan/level EXACT (written there)
+  info: dumped 17 files to /private/tmp/claude-501/-Users-mac-orca-workspaces-AIArranger-burrfish/e4d90341-1e6e-44e0-972d-0797f0cc4a65/scratchpad/dump-after (batch error: '')
+
+30 passed, 0 failed

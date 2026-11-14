@@ -1,4 +1,5 @@
 #include "session/session_persistence.h"
+#include "midi/output_routing.h"
 
 #include <fstream>
 #include <limits>
@@ -10,13 +11,23 @@ namespace ai_arranger::session {
 
 namespace {
 
-bool readInt(const std::string& j, const std::string& key, long& out) {
+// Position just past the ':' of "key": — a property name, not the same text inside a
+// value (a style named "tempo_bpm" or "output_routing" must not be read as that key).
+// Values are written with esc(), so a quote inside a value is always preceded by '\\'.
+size_t findKey(const std::string& j, const std::string& key) {
     const std::string needle = "\"" + key + "\"";
-    size_t p = j.find(needle);
+    for (size_t p = j.find(needle); p != std::string::npos; p = j.find(needle, p + 1)) {
+        if (p > 0 && j[p - 1] == '\\') continue;
+        size_t q = p + needle.size();
+        while (q < j.size() && (j[q] == ' ' || j[q] == '\t' || j[q] == '\n' || j[q] == '\r')) ++q;
+        if (q < j.size() && j[q] == ':') return q + 1;
+    }
+    return std::string::npos;
+}
+
+bool readInt(const std::string& j, const std::string& key, long& out) {
+    size_t p = findKey(j, key);
     if (p == std::string::npos) return false;
-    p = j.find(':', p + needle.size());
-    if (p == std::string::npos) return false;
-    ++p;
     while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) ++p;
     size_t start = p;
     if (p < j.size() && (j[p] == '-' || j[p] == '+')) ++p;
@@ -28,10 +39,7 @@ bool readInt(const std::string& j, const std::string& key, long& out) {
 
 // Reads "key": "value" (no escape handling needed for our simple values).
 bool readStr(const std::string& j, const std::string& key, std::string& out) {
-    const std::string needle = "\"" + key + "\"";
-    size_t p = j.find(needle);
-    if (p == std::string::npos) return false;
-    p = j.find(':', p + needle.size());
+    size_t p = findKey(j, key);
     if (p == std::string::npos) return false;
     p = j.find('"', p);
     if (p == std::string::npos) return false;
@@ -57,6 +65,7 @@ bool SessionPersistence::isValid(const PerformerSession& s) noexcept {
     if (s.chord_scan_mode > 3) return false;
     if (s.groove_profile > 4) return false;
     if (s.ui_layout > 1) return false;
+    if (!s.output_routing.empty() && !midi::parseRoutingProfile(s.output_routing)) return false;
     return true;
 }
 
@@ -74,7 +83,8 @@ std::string SessionPersistence::serialize(const PerformerSession& s) {
       << "  \"groove_profile\": " << (int)s.groove_profile << ",\n"
       << "  \"midi_output_name\": \"" << esc(s.midi_output_name) << "\",\n"
       << "  \"ui_layout\": " << (int)s.ui_layout << ",\n"
-      << "  \"theme\": " << (int)s.theme << "\n"
+      << "  \"theme\": " << (int)s.theme << ",\n"
+      << "  \"output_routing\": \"" << esc(s.output_routing) << "\"\n"
       << "}\n";
     return o.str();
 }
@@ -110,6 +120,7 @@ bool SessionPersistence::deserialize(const std::string& j, PerformerSession& out
     readStr(j, "midi_output_name", s.midi_output_name); // optional
     if (!field("ui_layout", s.ui_layout)) return false;
     if (!field("theme", s.theme)) return false;
+    readStr(j, "output_routing", s.output_routing);     // optional (added after v1 files existed)
 
     if (!isValid(s)) return false;
     out = s;

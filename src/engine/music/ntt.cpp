@@ -24,17 +24,24 @@ PcSet chordTones(ChordType t) noexcept {
         case ChordType::Sus4:  return {{0, 5, 7}, 3};
         case ChordType::Sus2:  return {{0, 2, 7}, 3};
         case ChordType::Power: return {{0, 7}, 2};
+        // The 4th tone takes the source maj7's degree: the 6th / b7 replaces it.
+        case ChordType::Maj6:   return {{0, 4, 7, 9}, 4};
+        case ChordType::Min6:   return {{0, 3, 7, 9}, 4};
+        case ChordType::Min7b5: return {{0, 3, 6, 10}, 4};
+        case ChordType::Dom9:   return {{0, 4, 7, 10, 2}, 5};   // 9th last: degree map uses 0-3
         default:               return {{0, 4, 7}, 3};
     }
 }
 
 bool isMinorish(ChordType t) noexcept {
     return t == ChordType::Minor || t == ChordType::Min7 ||
-           t == ChordType::Dim   || t == ChordType::Dim7;
+           t == ChordType::Dim   || t == ChordType::Dim7 ||
+           t == ChordType::Min6  || t == ChordType::Min7b5;
 }
 
 bool isDominantish(ChordType t) noexcept {
-    return t == ChordType::Dom7 || t == ChordType::Sus4 || t == ChordType::Sus2;
+    return t == ChordType::Dom7 || t == ChordType::Dom9 ||
+           t == ChordType::Sus4 || t == ChordType::Sus2;
 }
 
 // Target scale for an NTT mode + chord type. Scale modes select an explicit
@@ -46,6 +53,9 @@ PcSet scaleFor(NttMode mode, ChordType t) noexcept {
         case NttMode::NaturalMinor:  return {{0, 2, 3, 5, 7, 8, 10}, 7};
         case NttMode::Dorian:        return {{0, 2, 3, 5, 7, 9, 10}, 7};
         default:
+            // Chord-specific scales where natural minor would clash with a chord tone.
+            if (t == ChordType::Min6)   return {{0, 2, 3, 5, 7, 9, 10}, 7}; // dorian (natural 6)
+            if (t == ChordType::Min7b5) return {{0, 1, 3, 5, 6, 8, 10}, 7}; // locrian (b5)
             if (isMinorish(t))    return {{0, 2, 3, 5, 7, 8, 10}, 7}; // natural minor
             if (isDominantish(t)) return {{0, 2, 4, 5, 7, 9, 10}, 7}; // mixolydian
             return {{0, 2, 4, 5, 7, 9, 11}, 7};                       // major
@@ -85,7 +95,7 @@ int nearestRepresentative(int rel, const PcSet& s) noexcept {
 
 uint8_t transpose(uint8_t note, Chord target,
                   NtrRule ntr, NttMode ntt,
-                  uint8_t srcRootMidi) noexcept {
+                  uint8_t srcRootMidi, RegisterLimits limits) noexcept {
     if (target.type == ChordType::NoChord) return note;
     if (ntr == NtrRule::Bypass || ntt == NttMode::Bypass) return note;
 
@@ -120,6 +130,18 @@ uint8_t transpose(uint8_t note, Chord target,
         dstRel = nearestRepresentative(dstRel, ct);
     }
 
+    // Slash chord (spec §6.3 bass: "if there is a bassNote, the lowest bass note prefers the
+    // bassNote"): in Bass mode the source root plays the chord's bass pitch class, by the smaller
+    // move (C/E: up a third; C/G: down a fourth). Root position (bass == root) and bass 0 (no
+    // slash information) are unchanged. The bassNote may be foreign to the chord (C/D).
+    // shortcut: per-note, so a polyphonic bass voicing (C2+E2 over C/F -> F2+E2) can leave another
+    // voice lowest; needs voicing-aware transposition if real styles stack bass notes (Codex review 7507012).
+    if (ntt == NttMode::Bass && degree == 0 && target.bass != 0) {
+        int b = (static_cast<int>(target.bass) - static_cast<int>(target.root)) % 12;
+        if (b < 0) b += 12;
+        if (b != 0) dstRel = b > 6 ? b - 12 : b;
+    }
+
     // ── NTR root handling ────────────────────────────────────────────
     // Only the root's pitch class transposes (up 0..11 from the source root): the
     // detectors report the lowest played note, so F2 and F4 are the same chord
@@ -128,9 +150,19 @@ uint8_t transpose(uint8_t note, Chord target,
     if (ntr != NtrRule::RootFixed) {
         rootDelta = (static_cast<int>(target.root) - static_cast<int>(srcRootMidi)) % 12;
         if (rootDelta < 0) rootDelta += 12;
+        // High Key (Yamaha: "chords with a root higher than the limit are played
+        // in the octave immediately below"); 11 = never.
+        if (ntr == NtrRule::RootTransposition && rootDelta > limits.highKey) rootDelta -= 12;
     }
 
     int result = static_cast<int>(note) + rootDelta + (dstRel - rel);
+
+    // Note Limit: nearest octave inside the range. A range under an octave
+    // cannot hold every pitch class, so it is ignored (the importer never sets one).
+    if (limits.noteHigh <= 127 && limits.noteHigh >= limits.noteLow + 11) {
+        while (result < limits.noteLow)  result += 12;
+        while (result > limits.noteHigh) result -= 12;
+    }
 
     // Fold into valid MIDI range without losing pitch class.
     while (result < 0)   result += 12;

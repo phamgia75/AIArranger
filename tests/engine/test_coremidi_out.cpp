@@ -33,6 +33,10 @@ int main() {
     TEST("Channel folded into status", midiEventToBytes(ev(MidiEventType::NoteOn, 5, 60, 100), b) == 3 && b[0] == 0x95);
     TEST("Channel masked to 4 bits", midiEventToBytes(ev(MidiEventType::NoteOn, 200, 60, 100), b) == 3 && (b[0] & 0xF0) == 0x90);
     TEST("NoteOff → 0x80", midiEventToBytes(ev(MidiEventType::NoteOff, 0, 60, 0), b) == 3 && b[0] == 0x80);
+    TEST("Clock/Start/Stop → 1 byte, channel ignored",
+         midiEventToBytes(ev(MidiEventType::TimingClock, 9, 0, 0), b) == 1 && b[0] == 0xF8 &&
+         midiEventToBytes(ev(MidiEventType::Start, 9, 0, 0), b) == 1 && b[0] == 0xFA &&
+         midiEventToBytes(ev(MidiEventType::Stop, 9, 0, 0), b) == 1 && b[0] == 0xFC);
     TEST("ControlChange → 0xB0", midiEventToBytes(ev(MidiEventType::ControlChange, 0, 7, 127), b) == 3 && b[0] == 0xB0);
     TEST("ProgramChange → 2 bytes", midiEventToBytes(ev(MidiEventType::ProgramChange, 0, 5, 0), b) == 2 && b[0] == 0xC0);
     TEST("ChannelPressure → 2 bytes", midiEventToBytes(ev(MidiEventType::ChannelPressure, 0, 64, 0), b) == 2);

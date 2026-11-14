@@ -1,34 +1,16 @@
 #include "LiveHostComponent.h"
+#include "ResourcesComponent.h"
+#include "StudioComponent.h"
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/chord_input.h"
+#include "session/chord_label.h"
 
 namespace ai_arranger::app {
 
 namespace {
-const char* kNoteNames[12] = {"C", "C#", "D", "D#", "E", "F",
-                              "F#", "G", "G#", "A", "A#", "B"};
-
-const char* chordTypeName(arranger::ChordType t) {
-    using CT = arranger::ChordType;
-    switch (t) {
-        case CT::Major: return "";       case CT::Minor: return "m";
-        case CT::Dim:   return "dim";    case CT::Aug:   return "aug";
-        case CT::Maj7:  return "maj7";   case CT::Min7:  return "m7";
-        case CT::Dom7:  return "7";      case CT::Dim7:  return "dim7";
-        case CT::Sus4:  return "sus4";   case CT::Sus2:  return "sus2";
-        case CT::Power: return "5";      default:        return "";
-    }
-}
-
 juce::String formatChord(const session::EngineSnapshot& s) {
-    if (static_cast<arranger::ChordType>(s.chordType) == arranger::ChordType::NoChord)
-        return "--";
-    juce::String name = kNoteNames[s.chordRoot % 12];
-    name << chordTypeName(static_cast<arranger::ChordType>(s.chordType));
-    if (s.chordBass != 0 && s.chordBass != s.chordRoot)
-        name << "/" << kNoteNames[s.chordBass % 12];
-    return name;
+    return juce::String(session::chordLabel(s.chordType, s.chordRoot, s.chordBass));
 }
 
 void styleLabel(juce::Label& l, const juce::String& text, float pt = 15.0f) {
@@ -100,10 +82,28 @@ LiveHostComponent::LiveHostComponent() {
     addAndMakeVisible(autoFillBtn_);
     refreshBtn_.onClick = [this] { driver_.retryMidi(); refreshDevices(); };   // #23
     loadBtn_.onClick    = [this] { loadStyleDialog(); };
+    resourcesBtn_.onClick = [this] {
+        if (!resourcesWindow_) {
+            struct Window : juce::DocumentWindow {
+                Window() : DocumentWindow("AI Arranger - Sounds & Resources", juce::Colours::black, DocumentWindow::allButtons) {
+                    setUsingNativeTitleBar(true);
+                    setContentOwned(new ResourcesComponent(), true);
+                    setResizable(true, true);
+                    centreWithSize(getWidth(), getHeight());
+                }
+                void closeButtonPressed() override { setVisible(false); }
+            };
+            resourcesWindow_ = std::make_unique<Window>();
+        }
+        resourcesWindow_->setVisible(true);
+        resourcesWindow_->toFront(true);
+    };
+
+    studioBtn_.onClick = [this] { showStudio(); };
 
     panicBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
 
-    for (auto* b : {&refreshBtn_, &loadBtn_, &startBtn_, &stopBtn_, &syncBtn_,
+    for (auto* b : {&refreshBtn_, &loadBtn_, &resourcesBtn_, &studioBtn_, &startBtn_, &stopBtn_, &syncBtn_,
                     &introBtn_, &varA_, &varB_, &varC_, &varD_, &fillBtn_,
                     &breakBtn_, &endingBtn_, &panicBtn_})
         addAndMakeVisible(*b);
@@ -161,12 +161,13 @@ void LiveHostComponent::loadStyleDialog() {
         // reloadStyle() quiesces the engine tick thread (stopTimer blocks until the
         // in-flight callback returns) before swapping, so the load never races
         // tick(). Transport is left stopped — press Start to play the new style.
-        driver_.reloadStyle(mr.style);
+        driver_.reloadStyle(mr.style, midi::sffPartLayout());   // SFF1 part channels 9-16
         styleLabel(styleLabel_, "Style: " + juce::String(f.getFileNameWithoutExtension()));
     });
 }
 
 void LiveHostComponent::timerCallback() {
+    driver_.midiIn().pollReconnect();   // re-attach the selected input after a USB replug
     const auto s = driver_.facade().snapshot();
 
     chordLabel_.setText(formatChord(s), juce::dontSendNotification);
@@ -226,7 +227,11 @@ void LiveHostComponent::resized() {
     loadBtn_.setBounds(styleRow.removeFromLeft(120));
     styleRow.removeFromLeft(8);
     refreshBtn_.setBounds(styleRow.removeFromLeft(90));
-    styleRow.removeFromLeft(12);
+    styleRow.removeFromLeft(8);
+    resourcesBtn_.setBounds(styleRow.removeFromRight(110));
+    styleRow.removeFromRight(6);
+    studioBtn_.setBounds(styleRow.removeFromRight(80));
+    styleRow.removeFromLeft(4);
     styleLabel_.setBounds(styleRow);
     area.removeFromTop(10);
 
@@ -266,6 +271,46 @@ void LiveHostComponent::resized() {
     auto bottom = area.removeFromTop(34);
     panicBtn_.setBounds(bottom.removeFromLeft(140));
     statusLabel_.setBounds(bottom);
+}
+
+StudioComponent* LiveHostComponent::showStudio() {
+    if (!studioWindow_) {
+        struct Window : juce::DocumentWindow {
+            explicit Window(std::function<void()> showHost)
+                : DocumentWindow("AI Music Studio", juce::Colours::black, DocumentWindow::allButtons) {
+                setUsingNativeTitleBar(true);
+                setContentOwned(new StudioComponent(std::move(showHost)), true);
+                setResizable(true, true);
+                setResizeLimits(1100, 700, 4096, 4096);
+                centreWithSize(getWidth(), getHeight());
+            }
+            void closeButtonPressed() override { setVisible(false); }
+        };
+        studioWindow_ = std::make_unique<Window>([this] { if (auto* w = getTopLevelComponent()) w->toFront(true); });
+    }
+    studioWindow_->setVisible(true);
+    studioWindow_->toFront(true);
+    return studio();
+}
+
+ResourcesComponent* LiveHostComponent::resources() const {
+    return resourcesWindow_ ? dynamic_cast<ResourcesComponent*>(resourcesWindow_->getContentComponent()) : nullptr;
+}
+StudioComponent* LiveHostComponent::studio() const {
+    return studioWindow_ ? dynamic_cast<StudioComponent*>(studioWindow_->getContentComponent()) : nullptr;
+}
+
+void LiveHostComponent::confirmQuit(std::function<void()> quit) {
+    auto* res = resources();
+    auto* studio = this->studio();
+    if (!studio && res && res->busy()) studio = showStudio();   // the quit guard's Wait / Cancel / Keep Working prompt lives there
+    if (!studio) { quit(); return; }
+    if (res) studio->setOtherWork("work in the Sounds & Resources window (Generate, Backup KST or a render)", [res] { return res->busy(); },
+                                  [res] { res->cancelJobs(); });
+    if (!studio->requestQuit(std::move(quit))) {   // deferred: show where the choice is
+        studioWindow_->setVisible(true);
+        studioWindow_->toFront(true);
+    }
 }
 
 } // namespace ai_arranger::app

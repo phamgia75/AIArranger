@@ -1,0 +1,220 @@
+# Pa5X KST resource model
+
+**Status: REVIEWED (2026-11-06).** Every DOC claim was re-checked against the manual text, with page numbers. No KST has been opened in PA Manager or decoded, so every dependency below is documented, not verified on data.
+
+Labels:
+
+- **OBSERVED**: seen on PA Manager v5.2 on Windows (`PA_MANAGER_WINDOWS_FUNCTIONAL_AUDIT.md` §3a).
+- **DOC**: Pa5X User Manual v1.4 (2025-11-25), printed page numbers. Paraphrased; no tables reproduced.
+- **UNKNOWN**: no evidence.
+
+Dependencies are **never** inferred from file or folder names (project rule).
+
+## 1. Container
+
+| Statement | Label |
+|---|---|
+| A `.KST` is a reserved **folder** holding all the User data of one Pa5X, organized in reserved sub-folders (p.721, p.731) | DOC |
+| Inside the KST, data is grouped by **type**, then by **bank** (folder), then by individual file (p.731-732) | DOC |
+| PA Manager's KST Explorer treats a KST as a folder and summarizes it without loading. One original KST showed: 3.40 GB; STY 1893, PRF 1105, PAD 1029, PCG 16, PCM 231 | OBSERVED (summary only) |
+| A KST that contains User Samples has a **PCM** folder (p.736) | DOC |
+| A real Pa5X KST copy (`Korg Pa5x Gold Set.KST`, 667 files) has 15 upper-case type folders (STYLE, KEYBOARDSET, PAD, SOUND, PCM, MULTISMP, SONGBOOK, CHORDSEQUENCE, SETTINGS, MIDIPRESET, VOICEPRESET, GUITARPRESET, QTPRESET, MAXXAUDIOPRESET, MATRIXPRESET); STYLE, KEYBOARDSET, PAD, CHORDSEQUENCE and SONGBOOK hold bank sub-folders, the others hold files directly (audit §3c) | OBSERVED (file listing only) |
+| What PA Manager's labels count: whether "STY" counts `.STG` files, "PRF" `.KSC` Keyboard Sets and "PAD" `.PDC` | **UNKNOWN**. The labels differ from the manual's extensions, so the mapping is not assumed |
+
+## 2. Resource types (p.721-722)
+
+The table lists the documented extensions. The meaning column is a short paraphrase, and the last column says how each type is organized and referenced (p.722-723).
+
+| Extension | Resource | Organization |
+|---|---|---|
+| `KSC` | Keyboard Set (library) | free files/folders, by name |
+| `STG` | Style | free files/folders, by name |
+| `PDC` | Pad | free files/folders, by name |
+| `CSC` | Chord Sequence | free files/folders, by name |
+| `PCG` | Sound (Pa5X's own; Triton `.PCG` is a different, read-only import) | **reference grid** (fixed positions) |
+| `KMP` | Multisample | **UNKNOWN**: grid or free |
+| `PCM` | Sample | **UNKNOWN**: grid or free |
+| `MPR`, `VOC`, `GTR` | MIDI / Mic / Guitar Presets | reference grid |
+| `GBL`, `SBD`, `SBL` | Global, SongBook database and Set List (bundles only) | – |
+| `MID`, `MP3`, `JBX`, `TXT`, `ARG`, `QTP`, `MXP`, `AIF`, `WAV` | songs, text, arrangements, presets, audio | – |
+| Read only: `PKG`, `KAR`, Triton `PCG` / `KMP` / `KSF`, `SF2` | OS packages, karaoke, imports | – |
+
+**Key documented rule (p.722-723):**
+
+- **Reference-grid** data must always sit "where expected by other types of data": positions are fixed, so empty locations exist.
+- Name-organized data (Styles, Keyboard Sets, Pads, Chord Sequences, Songs) is listed alphabetically.
+
+How to read this: the manual says grid data must be found "where expected by other types of data" and that its positions are fixed. That implies other resources refer to Sounds by **position**, but the manual does not spell out a reference format. *How* a Style or Keyboard Set file encodes its Sound reference is **UNKNOWN** (undecoded; roadmap P1.10, blocked).
+
+## 3. Dependency graph
+
+Solid arrows are documented; `?` marks an edge whose existence or mechanism is not documented.
+
+```
+Style (.STG) ──> Sound per Style track (whole Style), optionally per Style Element (p.932)
+      ├──> 4 Keyboard Sets recalled when the Style is selected (p.84)
+      └──> 4 Pads recalled when the Style is selected (p.194)
+Keyboard Set (.KSC) ──> the set of Sounds played on the keyboard (p.84)
+Pad (.PDC) ──?──> Sound                 (chapter title only, p.932: UNKNOWN)
+Sound (.PCG) ──> 1-2 stereo Multisamples per oscillator (High/Low, velocity switch),
+                 chosen as bank FTY|USR + number (p.1076-1077) ──> Samples (?)
+Drum Kit = a special Sound (p.934) ──> per key, layers ──> Drum Samples, bank FTY|USR + number (p.1091)
+SongBook entry ──> Style / Keyboard Set / Sounds / Pads / MID / MP3 / TXT (p.737)
+```
+
+| Edge | Evidence | Label |
+|---|---|---|
+| Style → Sound for each Style track, for the whole Style. Per-Style-Element Sounds can override it (Style Edit). Saved with the Style (User Styles only) | p.932-934 | DOC |
+| Style → 4 Keyboard Sets assigned to the KEYBOARD SET buttons each time the Style (or SongBook Entry) is selected | p.84 | DOC |
+| Style → its 4 Pads, recalled when the Style is selected | p.194 | DOC |
+| Keyboard Set → the Sounds playing together on the keyboard, with their settings | p.84 | DOC |
+| Pad → Sound | Only the chapter title "Choosing the Style and Pad Sounds" (p.932); the mechanism was not found | **UNKNOWN** |
+| Drum Kits (including Percussion Kits) are special Sounds: one percussive instrument per key, not transposed | p.934 | DOC |
+| Sound oscillator → 1-2 stereo multisamples (High/Low, velocity switch), selected in the editor by bank (FTY factory / USR user) + number | p.1076-1077 | DOC (editor view; file encoding UNKNOWN) |
+| USR multisamples are loaded "when loading some User Sounds" | p.1077 | DOC |
+| Multisample → Samples | Not read in the manual | **UNKNOWN** |
+| Drum Kit key → layers → drum samples by bank (FTY/USR) + number, velocity switching | p.1091 | DOC (editor view) |
+| Which Style uses which Sound in a **real** KST | PA Manager "Search Where this Sound is used…" lists, per Style, the **Style Element × track** using a Sound (audit §3e) | **OBSERVED** (PA Manager view; encoding UNKNOWN) |
+| Keyboard Set → Sound, Pad → Sound in a real KST | Same search reports per-type use counts for KBD SETs and PADs (0 for the Sound tested) | **OBSERVED** (search exists; no positive case seen yet) |
+| Drum Kit key → sample | DK Report: per key, RAM/ROM/RAM [Comp] + sample number + name (audit §3e) | **OBSERVED** (PA Manager view) |
+| One user sample shared by several keys of a Drum Kit | Same sample number on two keys in the DK Report | **OBSERVED** |
+| Ordinary Sound → Multisample in a real KST | Sample Manager "Search Where this MultiSample is used…": per Sound and oscillator slot (OSC High / Low) (audit §3f) | **OBSERVED** (PA Manager view; encoding UNKNOWN) |
+| One Multisample shared by several Sounds | One multisample used 9 times by 3 Sounds | **OBSERVED** |
+| Multisample → Sample, zone model | Zone editor: per zone sample, From/To key, Original Note, Level, Pitch; no per-zone velocity range; velocity layers at Sound level (OSC High/Low) | **OBSERVED** (PA Manager view) |
+| Sample properties | Rate, bit depth, duration, original note, loop start/end (frames), Normal/Compressed/Locked, mono/stereo, PreLoad | **OBSERVED** (PA Manager view) |
+| User Sound MIDI address | Unused Sound Report "Sound Pos": `121, 63+bank, pos-1`; User DK `120, 64, pos-1` (interpreted as MSB/LSB/PC) | **OBSERVED** (PA Manager figures) · HW pending |
+| Duplicate / unused detection | PA Manager: Sound duplicates by name and by content; unused Sounds after scanning all Styles | **OBSERVED** (feature exists) |
+| User Sound / Drum Kit slot capacity | PA Manager: 12 banks × 128 and 6 × 128 (= 1 536 / 768, manual p.1935) | **OBSERVED** (PA Manager model) + DOC |
+| Sample Manager tabs (Sample / Drum Sample / MultiSample) and columns (ID, Sample Name, File Size, Sample Rate, Duration, Orig Note, Loop Start, Loop End, Type, PreLoad) | PA Manager v5.2, nothing loaded | OBSERVED |
+
+### 3a. Sound resource chain (PA Manager v5.2 views + manual)
+
+Labels: **OBS** = seen in PA Manager on the research copy (audit §3e-3f); **DOC** = manual; **UNK** = unknown. Every edge below is a relationship PA Manager *displays*. Where it is stored inside `.PCG` / `.KMP` / `.PCM` is **not decoded**: no offsets, no link fields, and nothing is inferred from file names.
+
+```
+Style ──(Element × track)──> Sound            OBS (Sound "Search Where used"), DOC p.932
+Keyboard Set ──> Sound                         DOC p.84; OBS: PA Manager searches it (0 hits seen)
+Pad ──> Sound                                  OBS: PA Manager searches it (0 hits seen); DOC: UNK
+Sound ──> oscillator slot (OSC n, High | Low)  OBS (MultiSample "Search Where used"), DOC p.1076-1077
+OSC slot ──> Multisample (1 per High/Low)      OBS, DOC
+Multisample ──> zones ──> Sample               OBS (zone editor, MultiSample Info)
+Drum Kit ──(key)──> drum sample (RAM | ROM | RAM compressed)   OBS (DK Report)
+Sample ──> audio data (rate, bits, loop, compression, mono/stereo)   OBS (Sample tab)
+```
+
+**Velocity versus key, two separate levels (OBS + DOC):**
+
+| Level | What it maps | Where seen |
+|---|---|---|
+| Sound oscillator | **Velocity**: each oscillator has a High and a Low Multisample, switched by velocity | DOC p.1076-1077; PA Manager reports uses as "OSC High: n" / "OSC Low: n" |
+| Multisample zone | **Key**: From key, To key, Original Note, Level (dB), Pitch, one Sample per zone | Zone editor; it shows **no velocity range per zone** |
+
+So "velocity layers" belong to the Sound, and "key splits" belong to the Multisample. The **root note** exists twice: each Sample has its own Orig Note, and a Multisample zone has an Original Note that can differ (C4 vs G3 seen, audit §3h); the zone value is the one PA Manager edits. A converter that brings in an SF2 instrument with per-zone velocity ranges cannot map them onto one Pa5X Multisample: it needs the Sound's High/Low switch (two layers at most per oscillator, DOC) or more oscillators. This matches the manual's SF2 import caution (p.1206) that `sf2-check` already reports. Whether the Pa5X rejects or flattens such imports is HARDWARE VALIDATION PENDING.
+
+**Shared resources and reference counts (OBS):**
+
+| Resource | Shared by | Evidence |
+|---|---|---|
+| Sound | Several Style Elements and tracks (13 uses of one Drum Kit in one Style) | Sound "Search Where used" |
+| Multisample | Several Sounds and oscillator slots (one multisample: 9 uses, 3 Sounds) | MultiSample "Search Where used" |
+| Sample | Several keys of one Drum Kit (same sample number on 2 keys) | DK Report |
+| Sample → Multisample | Not yet seen whether one Sample is in two Multisamples | UNK |
+
+PA Manager's **copy closure** (Copy Options, audit §3i) follows the same edges: a Style copy pulls the User Sounds of its 8 tracks, optionally of its 4 linked Keyboard Sets and 4 Pads, filtered by mute and volume, and dedupes against Sounds already in the target. That is the `closure()` of §6.3 with filters.
+
+PA Manager also flags **unreferenced** items: "No Ref (n)" for samples, "Check for Unused Sounds" for Sounds (a Sound with no Style/KBD SET/PAD use). It therefore keeps, or computes, a reference count per resource. Consequences for any tool, AIArranger included:
+- deleting or replacing a shared resource affects every referrer; a remap or delete is only safe after a full reverse lookup;
+- memory is per unique resource, not per use: a sample used by 9 oscillators is stored once. A disk-size sum over unique files (P2.3) is therefore the right *lower bound* shape, but not a RAM figure.
+
+## 4. Load / merge behaviour on the Pa5X (DOC, p.733-736)
+
+These are the semantics an independent tool must respect:
+
+- **Granularity:** a whole KST, one data type, one bank, or single files can be loaded.
+- **Merge vs Replace:**
+  - **Replace All** deletes every existing User file of that type;
+  - otherwise files **merge**, and only same-name files are replaced.
+  - Replaced data is deleted.
+- **User Samples are special:**
+  - loading a whole KST with User-Sample-based Sounds **deletes all User Samples in memory**;
+  - loading individual Sounds keeps the samples already there.
+  - If sample memory or the sample count overflows, the load is aborted and the newly loaded samples are removed; existing ones stay.
+- **Merging samples from several KSTs:** load one KST, then load single Sounds from the others, then save the whole memory to a KST.
+- **Pa4X conversion (p.737-738):**
+  - Sounds, Drum Kits, Samples, Keyboard Sets, Styles, Pads and SongBook are converted;
+  - Global, MIDI Presets and Voice Presets are not;
+  - missing source data stays missing;
+  - a `ConvertReport.txt` is written into the new KST.
+
+## 5. PA Manager (Windows) features relevant here
+
+- **OBSERVED:**
+  - KST Explorer: per-KST size and type counts without loading;
+  - Sample Manager: Sample / Drum Sample / MultiSample tabs, compression and decompression, import of aif / wav / kmp / …;
+  - a sample memory budget per model (default "400 MB | PA4X", Total 419430400 bytes).
+- **OBSERVED later (audit §3e-§3i; this list was UNKNOWN on 2026-11-06):**
+  - "used by" views: Search Where this Sound / MultiSample is used, DK Report, Check for Unused Sounds;
+  - remap and copy dialogs: Global Sound ReMAP, RE-MAP MODE toggle, Copy from another KST with Copy Options (options only; nothing executed).
+- **UNKNOWN:**
+  - what an executed copy or remap writes (needs separate authorization, even on a copy);
+  - export formats beyond "Export All Samples to .Wav" and Export MultiSample;
+  - ~~whether a Pa5X memory budget is offered~~: yes, "[4 GB] | PA5X" (OBSERVED, audit §3d).
+
+## 6. Proposed independent implementation in AIArranger (macOS / iPadOS)
+
+Only documented behaviour is used, with no PA Manager code and no decoding of protected executables.
+
+1. **Done in `2226694` (no decoding):** `kst-inventory` (P1.9) reports, for a KST **copy**:
+   - the type folder → bank folder grouping (p.731-732), plus counts by documented extension;
+   - whether a **PCM** folder exists. If it does, it warns that loading the whole KST on a Pa5X deletes the User Samples in memory (p.736);
+   - per-type counts and sizes, for comparison with PA Manager's KST Explorer summary.
+
+   Still to do: a run on the research copy, to compare with PA Manager's KST Explorer.
+
+   Read-only and never writes a KST. It runs the same on macOS and on iPadOS (sandboxed folder access).
+2. **Memory estimate (P2.3, done):** `kst-inventory` sums `.PCM` / `.KMP` disk bytes against a budget (`--budget-bytes`, default PA Manager's 4 GiB PA5X profile). It is a **disk-size** figure: PA Manager's own Used Size differs from the file total, and Pa5X sample-RAM allocation is UNKNOWN.
+3. **Dependency graph (design only; edges blocked on P1.10):** the API below is read-only and fixes the data model the PA Manager views imply (§3a). Until the reference encoding is decoded *and validated against authorized data*, the only source of edges is none: the graph has typed nodes from `kst-inventory` and an empty edge list, never name-guessed edges.
+
+   ```cpp
+   namespace ai_arranger::kst {
+   enum class Kind { Style, KeyboardSet, Pad, Sound, DrumKit, Multisample, Sample };
+   struct NodeId { Kind kind; uint32_t bank; uint32_t slot; };      // PA Manager's bank/position
+   enum class Via { ElementTrack, KeyboardSetPart, PadSlot, OscHigh, OscLow, Zone, DrumKey };
+   struct Edge { NodeId from, to; Via via; uint32_t detail; };        // element×track, osc no., zone no., key
+   enum class Source { None, PaManagerReport, DecodedValidated };     // where an edge came from
+   struct Graph {
+       std::vector<NodeId> nodes;
+       std::vector<Edge> edges;
+       Source source = Source::None;                                   // UI must show it
+       std::vector<Edge> usersOf(NodeId) const;                        // reverse lookup ("Search Where used")
+       std::vector<Edge> usesOf(NodeId) const;                         // forward
+       uint32_t refCount(NodeId) const;                                // 0 = unused / "No Ref"
+       struct ClosureOptions {                                          // mirrors PA Manager Copy Options (audit §3i)
+           uint8_t styleTracks = 0xFF;                                  // BASS, DK, PERC, ACC1-5
+           bool keyboardSets = false, pads = false;                     // STS1-4, PAD1-4 (off by default)
+           bool skipMuted = true, skipZeroVolume = false, skipEmptyTrack = false;
+       };
+       std::vector<NodeId> closure(NodeId, ClosureOptions = {}) const;  // everything a Style needs (merge plan, memory)
+   };
+   Graph load(const std::filesystem::path& kstCopy);                   // never writes; nodes only until P1.10
+   }
+   ```
+
+   Rules: no mutating calls; every edge carries its `Source`; `closure()` defaults to PA Manager's observed Copy Options defaults; dedup against a target (PA Manager's "reMap to an existing Sound if a Duplicate is found") is a separate, later merge-*plan* step, not part of the graph; `closure()` feeds a future memory estimate over **unique** samples and a future merge *plan* (no writes). Implementation waits for P1.10; writing this code now would only produce an empty graph.
+4. **Write / merge:** superseded by owner decision D13 (2026-11-13): native KST writing is a strategic objective, built
+   only on documented or owner-observed semantics; staged plan in `docs/research/pa-studio/PA5X_KST_WRITER_ROADMAP.md` §2. In any case it must reproduce the §4 semantics (grid positions, Replace All vs merge, the User Sample deletion rule).
+
+Parser feasibility plan, gates and oracle: `KST_PARSER_FEASIBILITY.md`.
+
+## 7. Missing evidence
+
+- ~~A research copy loaded in PA Manager~~: done (audit §3d-3f), including "used by" views for Sounds and Multisamples.
+- ~~The meaning of PA Manager's STY / PRF / PAD / PCG / PCM counts~~: file counts per type folder (audit §3f).
+- ~~KST Merge and Remapping dialogs~~: observed, not applied (audit §3f). Still UNKNOWN: what a tile click does in RE-MAP MODE, and exactly which Sounds "Automatically Copy Related USER Sounds" copies.
+- Whether one Sample can belong to two Multisamples.
+- What PreLoad marks and how the 420 MB preload buffer is filled (audit §3h).
+- Where any reference is stored inside `.STG` / `.KSC` / `.PDC` / `.PCG` / `.KMP` (P1.10, blocked).
+- PA Manager's export menu and formats.
+- ~~The Pa5X sample-memory size in the manual~~: found, 4 GB uncompressed User Sample memory, up to 8 GB of samples when compressed (DOC, MAN pp.1174, 1176, 1936); matches PA Manager's 4 GB "PA5X" budget (OBSERVED, audit §3d). Correction from `PA_MANAGER_PA5X_CONSOLIDATED_RESEARCH.md` X1.
+
+Windows access was blocked by the Mac console lock on 2026-11-06. On 2026-11-07 the research copy's folder structure was listed (OBSERVED rows above; audit §3c); it was then opened read-only in KST Manager with no file changes (audit §3d).

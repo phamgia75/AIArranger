@@ -1,4 +1,4 @@
-// AIArranger C ABI bridge implementation (Gate 4 skeleton).
+// AIArranger C ABI bridge implementation (Gate 4 skeleton; P2.4 host MIDI ports).
 //
 // Thin, exception-free adapter from the pure C surface (aiarranger_engine.h) to
 // the portable LiveEngineFacade. It adds NO engine behaviour: every call forwards
@@ -12,7 +12,20 @@
 #include "session/engine_contract.h"
 #include "session/engine_lifecycle.h"
 
+#include "engine/chord/fingered_detector.h"
+#include "engine/chord/fingered_on_bass_detector.h"
+#include "engine/chord/single_finger_detector.h"
+#include "engine/midi/midi_bytes.h"
+#include "engine/trace/mpsc_ring.h"
+#include "engine/uasf/deserializer.h"
+#include "midi/midi_input_parser.h"
+#include "midi/midi_input_source.h"
+#include "midi/midi_output_provider.h"
+
+#include <atomic>
+#include <mutex>
 #include <new>
+#include <vector>
 
 using ai_arranger::session::LiveEngineFacade;
 using ai_arranger::session::EngineError;
@@ -40,9 +53,93 @@ static_assert(AIARR_LIFECYCLE_SUSPENDED  == static_cast<int>(LifecycleState::Sus
 static_assert(AIARR_LIFECYCLE_STOPPED    == static_cast<int>(LifecycleState::Stopped), "ABI drift");
 static_assert(AIARR_LIFECYCLE_SHUTDOWN   == static_cast<int>(LifecycleState::ShutDown), "ABI drift");
 
-// The opaque handle is just the portable facade, headless in this gate.
+namespace {
+namespace midi = ai_arranger::midi;
+namespace uasf = ai_arranger::uasf;
+
+// Host-fed input port (index 0). The host thread injects bytes; the mutex only
+// orders inject() against setSink() from start()/stop() (neither is realtime).
+class HostMidiInput final : public midi::IMidiInputSource {
+public:
+    void setSink(MessageSink sink) noexcept override {
+        std::lock_guard<std::mutex> lk(m_);
+        sink_ = std::move(sink);
+    }
+    std::vector<midi::MidiSourceInfo> enumerateSources() const noexcept override {
+        try { return {midi::MidiSourceInfo{0, "Host"}}; } catch (...) { return {}; }
+    }
+    int  sourceCount() const noexcept override { return 1; }
+    bool selectSource(int index) noexcept override {
+        if (index != 0 && index != -1) return false;
+        selected_.store(index, std::memory_order_relaxed);
+        return true;
+    }
+    int  selectedSource() const noexcept override { return selected_.load(std::memory_order_relaxed); }
+    bool hasLiveSource() const noexcept override { return selectedSource() == 0; }
+    uint64_t receivedCount() const noexcept override { return received_.load(std::memory_order_relaxed); }
+
+    static constexpr size_t kMaxBytes = 256;   // every message is >= 1 byte
+
+    // False when the port is not selected. len <= kMaxBytes (caller checks).
+    bool inject(const uint8_t* bytes, size_t len) noexcept {
+        if (!hasLiveSource()) return false;
+        midi::MidiInputMessage msgs[kMaxBytes];
+        const size_t n = midi::parseMidiInput(bytes, len, msgs, kMaxBytes);
+        std::lock_guard<std::mutex> lk(m_);
+        for (size_t i = 0; i < n; ++i) if (sink_) sink_(msgs[i]);
+        received_.fetch_add(n, std::memory_order_relaxed);
+        return true;
+    }
+
+private:
+    std::mutex m_;
+    MessageSink sink_;
+    std::atomic<int> selected_{-1};
+    std::atomic<uint64_t> received_{0};
+};
+
+// Host-drained output port (index 0). Producer: the engine's tick thread.
+class HostMidiOutput final : public midi::IMidiOutputProvider {
+public:
+    std::vector<midi::MidiOutDeviceInfo> enumerate() override { return {midi::MidiOutDeviceInfo{0, "Host"}}; }
+    bool select(int index) override {
+        if (index != 0 && index != -1) return false;
+        selected_.store(index, std::memory_order_relaxed);
+        return true;
+    }
+    int  selected() const override { return selected_.load(std::memory_order_relaxed); }
+    bool hasLiveDestination() const override { return selected() == 0; }
+    bool send(const uasf::MidiEvent& ev) override {
+        if (!hasLiveDestination()) return false;
+        if (!ring_.try_push(ev)) {   // host not draining: a lost NoteOff would stick
+            overflow_.store(true, std::memory_order_release);
+            return false;
+        }
+        dispatched_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    uint64_t dispatchedCount() const override { return dispatched_.load(std::memory_order_relaxed); }
+    bool pop(uasf::MidiEvent& ev) noexcept { return ring_.try_pop(ev); }
+    // True once after messages were lost; the drainer then appends silence.
+    bool takeOverflow() noexcept { return overflow_.exchange(false, std::memory_order_acq_rel); }
+
+private:
+    ai_arranger::trace::MpscRing<uasf::MidiEvent, 1024> ring_;
+    std::atomic<bool> overflow_{false};
+    std::atomic<int> selected_{-1};
+    std::atomic<uint64_t> dispatched_{0};
+};
+} // namespace
+
+// The opaque handle: the portable facade wired to the host MIDI ports.
 struct AiArrEngine {
-    LiveEngineFacade facade{nullptr, nullptr};
+    HostMidiInput  in;
+    HostMidiOutput out;
+    ai_arranger::chord::FingeredDetector       fingered;
+    ai_arranger::chord::FingeredOnBassDetector onBass;
+    ai_arranger::chord::SingleFingerDetector   singleFinger;
+    LiveEngineFacade facade{&in, &out};
+    AiArrEngine() noexcept { facade.setChordScanMode(&fingered); }
 };
 
 extern "C" {
@@ -145,6 +242,75 @@ AiArrError aiarr_engine_last_error(const AiArrEngine* engine, AiArrError* out) {
 AiArrLifecycleState aiarr_engine_lifecycle_state(const AiArrEngine* engine) {
     if (!engine) return AIARR_LIFECYCLE_CREATED;
     return static_cast<AiArrLifecycleState>(static_cast<int>(engine->facade.lifecycleState()));
+}
+
+AiArrError aiarr_engine_load_style_uasf(AiArrEngine* engine, const uint8_t* data, uint32_t size) {
+    if (!engine || !data) return AIARR_ERR_NULL_ARGUMENT;
+    try {
+        const auto r = ai_arranger::uasf::UasfDeserializer().deserialize(std::vector<uint8_t>(data, data + size));
+        if (!r.success) return AIARR_ERR_UNSUPPORTED;
+        return static_cast<AiArrError>(static_cast<int>(engine->facade.loadStyle(r.style)));
+    } catch (...) {   // only the input copy above can throw here
+        return AIARR_ERR_UNSUPPORTED;
+    }
+    // shortcut: the deserializer and the loadStyle chain are noexcept, so an
+    // allocation failure inside them terminates (engine-wide, pre-existing);
+    // upgrade if hosts must survive OOM during a style load.
+}
+
+AiArrError aiarr_engine_set_chord_mode(AiArrEngine* engine, int32_t mode) {
+    if (!engine) return AIARR_ERR_NULL_ARGUMENT;
+    const ai_arranger::chord::IChordScanMode* m = nullptr;
+    switch (mode) {
+        case AIARR_CHORD_MODE_FINGERED:         m = &engine->fingered; break;
+        case AIARR_CHORD_MODE_FINGERED_ON_BASS: m = &engine->onBass; break;
+        case AIARR_CHORD_MODE_SINGLE_FINGER:    m = &engine->singleFinger; break;
+        default: return AIARR_ERR_UNSUPPORTED;
+    }
+    engine->facade.setChordScanMode(m);
+    return AIARR_OK;
+}
+
+AiArrError aiarr_engine_select_midi_input(AiArrEngine* engine, int32_t index) {
+    if (!engine) return AIARR_ERR_NULL_ARGUMENT;
+    return engine->facade.selectMidiInput(index) ? AIARR_OK : AIARR_ERR_DEVICE_UNAVAILABLE;
+}
+
+AiArrError aiarr_engine_select_midi_output(AiArrEngine* engine, int32_t index) {
+    if (!engine) return AIARR_ERR_NULL_ARGUMENT;
+    // Switching away mid-play would strand the NoteOffs of sounding notes.
+    if (index != engine->out.selected() && engine->facade.snapshot().playing) return AIARR_ERR_INVALID_STATE;
+    return engine->facade.selectMidiOutput(index) ? AIARR_OK : AIARR_ERR_DEVICE_UNAVAILABLE;
+}
+
+AiArrError aiarr_engine_send_midi_in(AiArrEngine* engine, const uint8_t* bytes, uint32_t length) {
+    if (!engine || (!bytes && length)) return AIARR_ERR_NULL_ARGUMENT;
+    if (length > HostMidiInput::kMaxBytes) return AIARR_ERR_UNSUPPORTED;
+    return engine->in.inject(bytes, length) ? AIARR_OK : AIARR_ERR_DEVICE_UNAVAILABLE;
+}
+
+AiArrError aiarr_engine_read_midi_out(AiArrEngine* engine, AiArrMidiMessage* out,
+                                      uint32_t capacity, uint32_t* count) {
+    if (!engine || !count || (!out && capacity)) return AIARR_ERR_NULL_ARGUMENT;
+    uint32_t n = 0;
+    ai_arranger::uasf::MidiEvent ev{};
+    while (n < capacity && engine->out.pop(ev)) {
+        uint8_t b[3] = {0, 0, 0};
+        const size_t len = ai_arranger::midi::encodeMidiEvent(ev, b);
+        if (len == 0) continue;
+        out[n++] = AiArrMidiMessage{b[0], b[1], b[2], static_cast<uint8_t>(len)};
+    }
+    // Messages were lost (buffer full): once the backlog is out, silence every
+    // channel (All Sound Off + All Notes Off) so no lost NoteOff leaves a stuck note.
+    constexpr uint32_t kSilence = 32;
+    if (n + kSilence <= capacity && engine->out.takeOverflow()) {
+        for (uint8_t ch = 0; ch < 16; ++ch) {
+            out[n++] = AiArrMidiMessage{static_cast<uint8_t>(0xB0 | ch), 120, 0, 3};
+            out[n++] = AiArrMidiMessage{static_cast<uint8_t>(0xB0 | ch), 123, 0, 3};
+        }
+    }
+    *count = n;
+    return AIARR_OK;
 }
 
 } // extern "C"

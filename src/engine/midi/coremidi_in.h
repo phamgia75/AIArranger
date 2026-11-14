@@ -65,8 +65,26 @@ public:
         return received_.load(std::memory_order_relaxed);
     }
 
-private:
+    // Hot-plug recovery (non-realtime; call from a UI/control thread, e.g. a
+    // periodic timer). The selected source is remembered by CoreMIDI unique ID.
+    // If that device disappeared, the port is disconnected (hasLiveSource() is
+    // false); when a source with the same unique ID reappears it is reconnected.
+    // Never connects to a different device. Cheap (one CoreMIDI source scan), so
+    // a ~30 Hz UI timer is fine. Call on the thread that calls selectSource().
+    // Returns hasLiveSource().
+    bool pollReconnect() noexcept;
+    int32_t selectedUniqueId() const noexcept {
+        return selected_uid_.load(std::memory_order_acquire);
+    }
+    uint64_t reconnectCount() const noexcept {
+        return reconnects_.load(std::memory_order_relaxed);
+    }
+
+    // CoreMIDI read callback (readRefCon = this). Public only so a test can feed it a
+    // MIDIPacketList built in memory, without a MIDI server or device.
     static void readProc(const MIDIPacketList* pktList, void* readRefCon, void* srcRefCon);
+
+private:
     static void notifyProc(const MIDINotification* msg, void* refCon);
 
     // Stop sink delivery and spin until any in-flight readProc has returned. Call
@@ -80,6 +98,8 @@ private:
     std::atomic<MIDIEndpointRef> source_{0};   // 0 = none/disconnected
     std::string                  selected_name_;
     std::atomic<int>             selected_index_{-1};
+    std::atomic<int32_t>         selected_uid_{0};  // 0 = nothing selected
+    std::atomic<uint64_t>        reconnects_{0};
 
     MessageSink                  sink_{nullptr};
     std::atomic<bool>            accepting_{false}; // true only while sink_ is live
