@@ -571,6 +571,7 @@ void StudioComponent::openStyle(const juce::File& sty) {
         askUnsaved("Open " + sty.getFileName(), "Open");
         return;
     }
+    pendingStyle_ = juce::File();   // this open supersedes one still waiting for its Save job (Codex F2)
     loadStyle(sty, false);
 }
 
