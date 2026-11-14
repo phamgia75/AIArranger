@@ -71,7 +71,11 @@ inline bool parseNodes(const uint8_t* p, size_t o, size_t end, int depth, std::v
     return true;
 }
 
-inline bool writeNode(const Node& n, bool top, std::string& out, std::string& err) {
+// depth/nodes count exactly as parseNodes does (Root's children are depth 1), so write() never emits what parse() refuses.
+inline bool writeNode(const Node& n, bool top, std::string& out, std::string& err, int depth, size_t& nodes) {
+    if (!top && depth > kMaxDepth) { err = "nesting deeper than " + std::to_string(kMaxDepth); return false; }
+    if (!top && ++nodes > kMaxNodes) { err = "more than " + std::to_string(kMaxNodes) + " nodes"; return false; }
+    if (out.size() > kMaxFileBytes) { err = "tree larger than the reader's limit"; return false; }
     if (top != (n.kind == Node::Root)) { err = top ? "top-level node is not Root" : "Root below the top level"; return false; }
     if (top && n.name != "\x01") { err = "Root name is not the byte 0x01"; return false; }
     if (n.name.find('\0') != std::string::npos) { err = "node name contains NUL"; return false; }
@@ -81,7 +85,7 @@ inline bool writeNode(const Node& n, bool top, std::string& out, std::string& er
     const size_t at = out.size();
     out.append(4, '\0');
     if (n.kind == Node::Leaf) out += n.payload;
-    else for (const auto& c : n.children) if (!writeNode(c, false, out, err)) return false;
+    else for (const auto& c : n.children) if (!writeNode(c, false, out, err, depth + 1, nodes)) return false;
     const size_t len = out.size() - at - 4;
     if (len > 0xFFFFFFFFu) { err = "node larger than 4 GiB: " + n.name; return false; }
     for (int i = 0; i < 4; ++i) out[at + i] = char(len >> (8 * (3 - i)));
@@ -109,7 +113,8 @@ inline Tree parse(const uint8_t* p, size_t n) {
 // Serializes a tree. Refuses (returns false, out untouched) any tree parse() could not have produced.
 inline bool write(const Node& root, std::string& out, std::string& error) {
     std::string b;
-    if (!detail::writeNode(root, true, b, error)) return false;
+    size_t nodes = 0;
+    if (!detail::writeNode(root, true, b, error, 0, nodes)) return false;
     if (b.size() > kMaxFileBytes) { error = "tree larger than the reader's limit"; return false; }
     out = std::move(b);
     return true;

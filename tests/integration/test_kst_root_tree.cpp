@@ -144,6 +144,16 @@ int main() {
         std::string many, few;
         for (int i = 0; i < 70000; ++i) many += leaf("", "");
         for (int i = 0; i < 1000; ++i) few += leaf("", "");
+        // Codex r1 C3: the writer must refuse what the parser refuses.
+        Node wide; wide.kind = Node::Root; wide.name = "\x01";
+        wide.children.resize(65537);
+        Node deepN; deepN.kind = Node::Leaf; deepN.name = "x";
+        for (int i = 0; i < 32; ++i) { Node b2; b2.kind = Node::Branch; b2.name = "b"; b2.children.push_back(deepN); deepN = b2; }
+        Node d32 = deepN.children[0];   // 31 branches + leaf at depth 32
+        Node r33; r33.kind = Node::Root; r33.name = "\x01"; r33.children.push_back(deepN);
+        Node r32; r32.kind = Node::Root; r32.name = "\x01"; r32.children.push_back(d32);
+        TEST("writer refuses more than kMaxNodes nodes and nesting past kMaxDepth; depth 32 written and parsed",
+             W(wide) == "REFUSED" && W(r33) == "REFUSED" && W(r32) != "REFUSED" && P(W(r32)).ok && !P(W(r33) == "REFUSED" ? "" : W(r33)).ok);
         TEST("more nodes than the node limit refused (memory bound), 1000 accepted",
              !P(root(many)).ok && P(root(many)).error.find("nodes") != std::string::npos && P(root(few)).ok);
     }

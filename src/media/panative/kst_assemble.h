@@ -5,11 +5,12 @@
 // object per file named after it with a lower-case .stg/.ksc/.pdc extension, no top-level files. Optional KORF files
 // (.PCG .PCM .KMP ...) are carried byte-for-byte after the existing reader accepted them, never re-encoded.
 //
-// Writing: only into a NEW folder (output_guard.h: no existing path, no mounted volume), built under NAME.INCOMPLETE and
-// published by one non-replacing rename. Then, read back: every object re-parsed and byte-compared, the structural
-// validator (0 errors), the dependency closure (0 dangling, 0 problems), and a SHA-256 manifest beside the folder
-// (NAME.KST.manifest.sha256, sha256sum format, re-verified). Any failure leaves the folder as NAME.INCOMPLETE or
-// reports it; nothing is deleted.
+// Writing: only into a NEW folder (output_guard.h: no existing path, no mounted volume; an existing manifest is refused
+// too). Everything is staged in NAME.KST.INCOMPLETE/: the files are read back (byte-compared and re-parsed), then the
+// dependency closure (0 dangling, 0 problems), the structural validator (0 errors) and a SHA-256 manifest
+// (NAME.KST.manifest.sha256, sha256sum format, verified) all run on the staged folder. Only when every check passed are
+// the manifest and then the folder published by non-replacing renames. Any failure leaves only NAME.KST.INCOMPLETE,
+// never a final-named KST; nothing is deleted except the emptied staging folder.
 #ifndef AI_ARRANGER_MEDIA_PANATIVE_KST_ASSEMBLE_H
 #define AI_ARRANGER_MEDIA_PANATIVE_KST_ASSEMBLE_H
 
@@ -123,46 +124,61 @@ inline Result build(const std::filesystem::path& parent, const std::string& kstN
         files.emplace_back(c.rel, std::move(bytes));
     }
 
-    const fs::path work = incompletePath(out);
+    // Staged layout: NAME.KST.INCOMPLETE/NAME.KST/... and NAME.KST.INCOMPLETE/NAME.KST.manifest.sha256. Every check runs
+    // on the staged folder; only then the manifest and then the folder are renamed beside each other (non-replacing).
+    const fs::path work = incompletePath(out), stage = work / out.filename(), stagedMan = work / backupManifestPath(out).filename();
     if (!fs::create_directory(work, ec) || ec) return fail("cannot create " + work.string());
+    const std::string left = " (staged files left in " + work.string() + ")";
     std::string err;
     for (const auto& [rel, bytes] : files) {
-        fs::create_directories(work / fs::path(rel).parent_path(), ec);
-        if (ec) return fail("cannot create a folder for " + rel + " (left in " + work.string() + ")");
-        if (!writeNew(work / rel, bytes, err)) return fail(err + " (left in " + work.string() + ")");
+        fs::create_directories(stage / fs::path(rel).parent_path(), ec);
+        if (ec) return fail("cannot create a folder for " + rel + left);
+        if (!writeNew(stage / rel, bytes, err)) return fail(err + left);
     }
-    // Read back before publishing.
+    // Read back: identical bytes, and every file re-parsed by its own reader.
     for (const auto& [rel, bytes] : files) {
         std::string back;
-        if (!roottree::readBytes(work / rel, back, err) || back != bytes) return fail("read-back mismatch: " + rel + " (left in " + work.string() + ")");
+        if (!roottree::readBytes(stage / rel, back, err) || back != bytes) return fail("read-back mismatch: " + rel + left);
+        const auto* q = reinterpret_cast<const uint8_t*>(back.data());
+        if (roottree::looksLikeRootTree(q, back.size())) {
+            const auto t = roottree::parse(q, back.size());
+            std::string again;
+            if (!t.ok || !roottree::write(t.root, again, err) || again != back) return fail("read-back does not re-parse: " + rel + left);
+        } else if (!panative::parse(q, back.size()).ok) return fail("read-back does not re-parse: " + rel + left);
     }
-    if (!publishNewFolder(work, out)) return fail("refusing: " + out.string() + " appeared during the write (work left in " + work.string() + ")");
-    r.folder = out;
-    r.files = files.size();
-
-    // Manifest beside the folder (never inside: a saved KST has no top-level files).
-    std::string man;
-    bool cancelled = false;
-    for (const auto& [rel, bytes] : files) {
-        const auto h = media::detail::sha256File(out / rel, {}, &cancelled, &err);
-        if (h.empty()) return fail("cannot hash " + rel);
-        man += h + "  " + rel + "\n";
-    }
-    r.manifest = backupManifestPath(out);
-    if (!writeNew(r.manifest, man, err)) return fail(err);
-    if (const auto bad = media::verifyBackup(out); !bad.empty()) return fail("manifest check failed:\n" + bad);
-
-    const auto v = library::validate(out);
-    r.validatorErrors = v.count(library::Severity::Error);
-    r.validatorWarnings = v.count(library::Severity::Warn);
-    if (!v.ok) return fail("validator could not finish: " + v.error);
-    if (r.validatorErrors) return fail("validator: " + std::to_string(r.validatorErrors) + " error(s)\n" + library::validationText(v));
-    const auto c = closure::check(out);
+    const auto c = closure::check(stage);
     r.dangling = c.danglingCount();
     r.factoryRefs = c.factory;
     r.userRefs = c.resolved + c.danglingCount();
-    if (!c.ok) return fail("closure could not read every object: " + (c.problems.empty() ? c.error : c.problems.front()));
-    if (r.dangling) return fail("closure: " + std::to_string(r.dangling) + " dangling user reference(s)");
+    if (!c.ok) return fail("closure could not read every object: " + (c.problems.empty() ? c.error : c.problems.front()) + left);
+    if (r.dangling) return fail("closure: " + std::to_string(r.dangling) + " dangling user reference(s)" + left);
+    const auto v = library::validate(stage);
+    r.validatorErrors = v.count(library::Severity::Error);
+    r.validatorWarnings = v.count(library::Severity::Warn);
+    if (!v.ok) return fail("validator could not finish: " + v.error + left);
+    if (r.validatorErrors) return fail("validator: " + std::to_string(r.validatorErrors) + " error(s)" + left + "\n" + library::validationText(v));
+    // Manifest (beside the folder: a saved KST has no top-level files), written and verified while staged.
+    std::string man;
+    bool cancelled = false;
+    for (const auto& [rel, bytes] : files) {
+        const auto h = media::detail::sha256File(stage / rel, {}, &cancelled, &err);
+        if (h.empty()) return fail("cannot hash " + rel + left);
+        man += h + "  " + rel + "\n";
+    }
+    if (!writeNew(stagedMan, man, err)) return fail(err + left);
+    if (const auto bad = media::verifyManifest(stage, stagedMan, {}, nullptr); !bad.empty()) return fail("manifest check failed" + left + ":\n" + bad);
+    // Publish: manifest first, then the folder. If the folder cannot be published, the manifest goes back to the
+    // staging folder, so a failure never leaves a final-named KST (nor a final-named manifest).
+    const fs::path finalMan = backupManifestPath(out);
+    if (!publishNewFolder(stagedMan, finalMan)) return fail("refusing: " + finalMan.string() + " appeared during the build" + left);
+    if (!publishNewFolder(stage, out)) {
+        const bool back = publishNewFolder(finalMan, stagedMan);
+        return fail("refusing: " + out.string() + " appeared during the build" + left + (back ? "" : "; could not move " + finalMan.string() + " back"));
+    }
+    fs::remove(work, ec);   // the staging folder is empty now; remove() never deletes a non-empty folder
+    r.folder = out;
+    r.manifest = finalMan;
+    r.files = files.size();
     r.ok = true;
     r.message = "wrote " + out.string() + " (" + std::to_string(r.files) + " files), NOT HARDWARE-VERIFIED";
     return r;

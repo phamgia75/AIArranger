@@ -195,6 +195,16 @@ int main() {
         std::string tr = smfWith(t); tr.resize(tr.size() - 5);
         s.clear();
         TEST("selects: truncated track refused", !closure::selects(reinterpret_cast<const uint8_t*>(tr.data()), tr.size(), s, e));
+        // Codex r1 C2: structure an SMF must have (all 231 087 owner MIDI leaves have it; counts from a private run).
+        auto ok = [&](const std::string& m) { std::vector<closure::Select> q; std::string er; return closure::selects(reinterpret_cast<const uint8_t*>(m.data()), m.size(), q, er); };
+        const std::string eot = std::string("\x00\xC0\x03\x00\xFF\x2F\x00", 7);
+        std::string hdrOnly = smfWith(eot).substr(0, 14), twoDeclared = smfWith(eot), shortHdr = smfWith(eot), alien = smfWith(eot);
+        twoDeclared[11] = 2;
+        shortHdr[7] = 5;
+        alien += "XTRA"; be32(alien, 0);
+        TEST("selects: valid SMF accepted; header-only, ntrks mismatch, short header, trailing bytes, alien chunk, no End-of-Track refused",
+             ok(smfWith(eot)) && !ok(hdrOnly) && !ok(twoDeclared) && !ok(shortHdr) && !ok(smfWith(eot) + "abc") && !ok(alien) &&
+             !ok(smfWith(std::string("\x00\xC0\x03", 3))) && !ok(smfWith(eot + std::string("\x00\xC0\x04", 3))));
         const std::string over = smfWith(std::string("\x00\xF0\x7F\x42", 4));
         TEST("selects: SysEx length past the track refused", !closure::selects(reinterpret_cast<const uint8_t*>(over.data()), over.size(), s, e));
     }
@@ -243,7 +253,9 @@ int main() {
         roottree::readBytes(tmp / "src/USER01.PCG", a, e); roottree::readBytes(tmp / "N5.KST/SOUND/USER01.PCG", bb, e);
         TEST("assemble: carried KORF copied byte-for-byte; the user reference resolves", c.ok && c.userRefs == 1 && c.dangling == 0 && a == bb);
         const auto d = assemble::build(tmp, "N6", {{"PAD", "B", "Dangles", pdcRef(121, 64, 6)}});
-        TEST("assemble: a dangling user reference fails the build (reported, folder kept)", !d.ok && d.message.find("dangling") != std::string::npos && fs::exists(tmp / "N6.KST"));
+        TEST("assemble: a dangling user reference fails before publication (no final-named KST or manifest; work kept)",
+             !d.ok && d.message.find("dangling") != std::string::npos && !fs::exists(tmp / "N6.KST") && !fs::exists(tmp / "N6.KST.manifest.sha256") &&
+             fs::exists(tmp / "N6.KST.INCOMPLETE"));
         // Review findings (Level 1, author-run): each refusal must happen before anything is published.
         put(tmp / "R1.KST.manifest.sha256", "stale");
         TEST("assemble: an existing manifest is refused before any write",

@@ -66,9 +66,11 @@ invented attribute or node is caught.
   179 126 factory/GM, 0 problems. This is the research result, reproduced.
 - `kst_assemble.h`: writes `<Name>.KST/` with only the type folders that hold data, one bank sub-folder and
   lower-case `.stg/.ksc/.pdc`. Optional KORF files are carried byte-for-byte after `panative::parse` accepts them.
-  It writes only into a new folder (`outputFolderRefusal`: no existing path, no `/Volumes`), builds under
-  `.INCOMPLETE`, reads every file back, and publishes with one non-replacing rename. It then writes a SHA-256
-  manifest beside the folder and verifies it. Last, the validator must report 0 errors and the closure 0 dangling.
+  It refuses an existing path or manifest and any `/Volumes` target before the first write. Everything is staged in
+  `NAME.KST.INCOMPLETE/`. There the files are read back (byte-compared and re-parsed), then checked: closure must
+  report 0 dangling and 0 problems, the validator 0 errors. The SHA-256 manifest is written and verified there too.
+  Only then are the manifest and then the folder published, by non-replacing renames. A failure never leaves a
+  final-named KST.
 - CLI: `aiarranger-resources kst-native closure KSTDIR` (read-only) and `kst-native demo OUTDIR` (the three W6 test
   KSTs: Pad, KBD Set, Style; GM2 sounds MSB 121/120 LSB 0, no samples).
 

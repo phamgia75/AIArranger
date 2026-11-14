@@ -29,7 +29,9 @@ inline bool selects(const uint8_t* p, size_t n, std::vector<Select>& out, std::s
     auto fail = [&](const std::string& e) { error = e; return false; };
     if (n < 14 || std::memcmp(p, "MThd", 4) != 0) return fail("not a Standard MIDI File");
     const uint32_t hl = be32(p + 4);
-    if (hl > n - 8) return fail("header runs past the file");
+    if (hl < 6 || hl > n - 8) return fail("header length is not 6..file size");
+    const unsigned declared = unsigned(p[10]) << 8 | p[11];
+    unsigned found = 0;
     size_t o = 8 + size_t(hl);
     auto vlq = [&](size_t& q, size_t end, uint32_t& v) {
         v = 0;
@@ -43,20 +45,26 @@ inline bool selects(const uint8_t* p, size_t n, std::vector<Select>& out, std::s
     };
     while (n - o >= 8) {
         const uint32_t len = be32(p + o + 4);
-        const bool trk = std::memcmp(p + o, "MTrk", 4) == 0;
+        // Only MTrk chunks were observed (231 087/231 087 owner MIDI leaves): anything else is refused, not skipped.
+        if (std::memcmp(p + o, "MTrk", 4) != 0) return fail("chunk other than MTrk");
         o += 8;
         if (len > n - o) return fail("chunk runs past the file");
         const size_t end = o + len;
-        if (!trk) { o = end; continue; }
+        ++found;
+        bool endOfTrack = false;
         std::map<std::pair<int, int>, int> bank;   // (channel, 0|32) -> value, per track
         uint8_t status = 0;
         while (o < end) {
             uint32_t v;
+            if (endOfTrack) return fail("event after End of Track");
             if (!vlq(o, end, v) || o >= end) return fail("event runs past its track");
             const uint8_t b = p[o];
             if (b == 0xFF) {
+                if (end - o < 2) return fail("meta event runs past its track");
+                const uint8_t type = p[o + 1];
                 o += 2;
-                if (o > end || !vlq(o, end, v) || v > end - o) return fail("meta event runs past its track");
+                if (!vlq(o, end, v) || v > end - o) return fail("meta event runs past its track");
+                endOfTrack = type == 0x2F && v == 0;
                 o += v;
                 continue;
             }
@@ -77,7 +85,10 @@ inline bool selects(const uint8_t* p, size_t n, std::vector<Select>& out, std::s
             }
             o += size_t(k);
         }
+        if (!endOfTrack) return fail("track does not end with End of Track");
     }
+    if (o != n) return fail("trailing bytes after the last track");
+    if (found != declared) return fail("header declares " + std::to_string(declared) + " tracks, file has " + std::to_string(found));
     return true;
 }
 
