@@ -1,7 +1,8 @@
 // E8 structural validator (library/library_validate.h): one clean synthetic folder per layout, then one mutation per
 // rule, each expected to fire exactly that rule. Synthetic folders only (placeholder-free bytes, Pa-native containers
 // from tests/support/panative_fixture.h); no owner data. Every folder is checked unchanged after validation.
-// Optional: AIARR_LIBRARY_OWNER_SET names a local COPY of an owner SET folder; it is only read, and only counts are printed.
+// Optional: AIARR_LIBRARY_OWNER_SET names a local COPY of an owner SET folder; AIARR_LIBRARY_OWNER_KST names one or more
+// local COPIES of owner Pa5X KST folders (separated by ':'). They are only read, never committed; only counts are printed.
 
 #include "library/library_validate.h"
 #include "../support/panative_fixture.h"
@@ -50,7 +51,12 @@ int main() {
 
     // ── Pa5X KST ──
     const Tree kst = {{"STYLE/BANK01/My Style.STG", "x"}, {"KEYBOARDSET/BANK01/My Kbs.KSC", "x"}, {"PAD/BANK01/P.PDC", "x"},
-                      {"SOUND/USER01.PCG", "x"}, {"MULTISMP/USER.KMP", "x"}, {"PCM/RAM01.PCM", "x"}, {"CONVERTREPORT.TXT", "x"}};
+                      {"SOUND/USER01.PCG", "x"}, {"MULTISMP/USER.KMP", "x"}, {"PCM/RAM01.PCM", "x"}, {"CONVERTREPORT.TXT", "x"},
+                      // layouts OBSERVED in owner Pa5X KST copies (2026-11-14, names only; bytes here are synthetic)
+                      {"MATRIXPRESET/My Matrix.MTP", "x"}, {"SETTINGS/My Setting.ksc", "x"}, {"SETTINGS/SETUP.GBL", "x"},
+                      {"CHORDSEQUENCE/BANK01/", ""}, {"PAD/BANK02/", ""}, {"STYLE/BANK01/metadir.json", "{}"},
+                      {"KEYBOARDSET/BANK01/metadir.json", "{}"}, {"SONGBOOK/LISTDB.SBL", "x"}, {"SONGBOOK/SONGDB.SBD/BANK01.SBD", "x"},
+                      {"ConversionReport.txt", "x"}};
     const auto good = validate(make(root / "GOOD.KST", kst));
     TEST("clean KST: Pa5X table, no error or warning, only the PCM note (R-13 INFO)",
          good.ok && good.layout == ai_arranger::media::kLayoutKst && rules(good) == std::set<std::string>{"R-13"} && good.count(Severity::Info) == 1);
@@ -64,6 +70,16 @@ int main() {
         {"R-09", {{"PAD/BANK01/a:b.PDC", "x"}}},
         {"R-10", {{"SOUND/USER02.PCG", std::string(kPlaceholder) + " sound"}}},
         {"R-11", {{"STYLE/BANK01/._My Style.STG", "x"}}},
+        // malformed variants of the observed layouts: the allowances are exact, not a blanket pass
+        {"R-04", {{"SOUND/metadir.json", "{}"}}},                // metadir.json only inside a bank folder
+        {"R-04", {{"STYLE/BANK01/other.json", "{}"}}},           // only that one name
+        {"R-04", {{"PAD/BANK01/metadir.json", "{}"}}},           // only in STYLE/KEYBOARDSET banks (where observed)
+        {"R-04", {{"SETTINGS/x.STG", "x"}}},                     // SETTINGS takes .GBL (+ the one observed My Setting.ksc)
+        {"R-04", {{"SETTINGS/Ballad.ksc", "x"}}},                // only that one .KSC name was observed there
+        {"R-04", {{"MATRIXPRESET/x.KSC", "x"}}},
+        {"R-05", {{"SONGBOOK/OTHER.SBL", "x"}}},                 // only LISTDB.SBL sits directly in SONGBOOK
+        {"R-05", {{"SONGBOOK/SONGDB.SBD/X/BANK01.SBD", "x"}}},   // no deeper than type/bank
+        {"R-06", {{"CONVERSION_REPORT.TXT", "x"}}},              // only the two report names seen
     };
     int i = 0;
     for (const auto& [rule, extra] : kstCases) {
@@ -71,7 +87,19 @@ int main() {
         auto got = rules(v);
         got.erase("R-13");
         if (rule == "R-03") got.erase("R-05");   // an unknown type folder with a bank sub-folder is also "grid type with sub-folders"
-        TEST(("KST mutation fires " + rule + " only").c_str(), v.ok && got == std::set<std::string>{rule});
+        TEST(("KST mutation fires " + rule + " only: " + extra.begin()->first).c_str(), v.ok && got == std::set<std::string>{rule});
+    }
+    TEST("observed layouts stay provisional: R-03/R-04/R-05/R-06 are WARN, never ERROR",
+         pa5xKstTable().rules.at("R-03").severity == Severity::Warn && pa5xKstTable().rules.at("R-04").severity == Severity::Warn &&
+         pa5xKstTable().rules.at("R-05").severity == Severity::Warn && pa5xKstTable().rules.at("R-06").severity == Severity::Warn);
+    {
+        const fs::path k = make(root / "SONGDB", kst);   // no .KST suffix: Pa5X markers + SONGDB.SBD folder
+        TEST("a suffix-less Pa5X KST with SONGBOOK/SONGDB.SBD is still a KST, not a Pa700 SET",
+             ai_arranger::media::scan(k).layout == ai_arranger::media::kLayoutKst);
+        const auto amb = validate(make(root / "AMBIG", {{"STYLE/B/A.stg", "x"}, {"STYLE/USER01.STY", "x"}}));
+        TEST("ambiguous suffix-less folder: no rule table, one R-01 ERROR naming the ambiguity (never a pass)",
+             amb.ok && amb.table == "none" && rules(amb) == std::set<std::string>{"R-01"} &&
+             amb.findings[0].message.find("ambiguous") != std::string::npos);
     }
     {
         Tree nokmp = kst;
@@ -185,6 +213,27 @@ int main() {
                     v.count(Severity::Warn), v.count(Severity::Info));
         TEST("owner SET copy: validated, Pa700 table, no ERROR, unchanged", v.ok && v.layout == ai_arranger::media::kLayoutPa700 &&
              v.count(Severity::Error) == 0 && snapshot(owner) == snap);
+    }
+
+    if (const char* list = std::getenv("AIARR_LIBRARY_OWNER_KST")) {
+        std::stringstream ss(list);
+        for (std::string owner; std::getline(ss, owner, ':');) {
+            if (owner.empty()) continue;
+            // size + mtime per entry: the copies hold gigabytes, so bytes are not loaded (the validator only reads 64 B/file)
+            auto stamp = [](const fs::path& r) {
+                std::map<std::string, std::pair<uintmax_t, long long>> m;
+                for (const auto& e : fs::recursive_directory_iterator(r))
+                    m[e.path().string()] = {e.is_regular_file() ? e.file_size() : 0, (long long)e.last_write_time().time_since_epoch().count()};
+                return m;
+            };
+            const auto before = stamp(owner);
+            const auto v = validate(owner);
+            std::printf("  owner KST %s: layout %s, %zu error(s), %zu warning(s), %zu info\n", fs::path(owner).filename().c_str(), v.layout.c_str(),
+                        v.count(Severity::Error), v.count(Severity::Warn), v.count(Severity::Info));
+            for (const auto& f : v.findings) if (f.severity != Severity::Info) std::printf("    %s %s %s\n", severityName(f.severity), f.rule.c_str(), f.path.c_str());
+            TEST("owner KST copy: validated, Pa5X table, no ERROR, no WARN, unchanged",
+                 v.ok && v.layout == ai_arranger::media::kLayoutKst && v.count(Severity::Error) == 0 && v.count(Severity::Warn) == 0 && stamp(owner) == before);
+        }
     }
 
     fs::remove_all(root);

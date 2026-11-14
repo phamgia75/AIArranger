@@ -210,6 +210,25 @@ int main() {
         TEST("both libraries are unchanged (mtime and SHA-256)", stamp(load(sa)) == before && stamp(load(sb)) == beforeB);
     }
 
+    // ── Codex r3 on feat/kst-structure-evidence: bank metadir.json (OBSERVED in owner KSTs) is not a resource item ──
+    {
+        const fs::path km = root / "Meta.KST";
+        put(km / "STYLE/A/Alpha.STG", "a");
+        put(km / "STYLE/A/metadir.json", "{}");
+        put(km / "STYLE/B/zeta.STG", "b");
+        put(km / "STYLE/B/metadir.json", "{}");   // sorts before zeta: must not decide the bank type either
+        put(km / "STYLE/C/Beta.STG", "c");
+        const auto M = load(km);
+        TEST("metadir.json: kept as a file, not listed as an item, bank type stays Style",
+             M.ok && M.files.count("STYLE/A/metadir.json") && M.items.size() == 3 && M.banks.at("STYLE/A").type == "Style" &&
+             M.banks.at("STYLE/B").type == "Style" && M.banks.at("STYLE/A").files == 2);
+        TEST("metadir.json: a STYLE bank swap is not refused as 'different types'",
+             evaluate(M, M, {{Op::BankSwap, 'A', 0, "STYLE/A", -1, "STYLE/C"}}).steps[0].conflicts.empty() &&
+             evaluate(M, M, {{Op::BankSwap, 'A', 0, "STYLE/B", -1, "STYLE/C"}}).steps[0].conflicts.empty());
+        put(km / "PAD/A/metadir.json", "{}");      // not observed in PAD: an ordinary (Other) file, as before
+        TEST("metadir.json outside STYLE/KEYBOARDSET banks stays an ordinary item", load(km).items.size() == 4);
+    }
+
     // ── Codex review E7 (C1-C4): each check failed before its fix ──
     {
         // C2: a bank swap moves the simulated file paths too, so a later copy into the swapped bank sees the file

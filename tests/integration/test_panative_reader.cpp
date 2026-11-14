@@ -125,6 +125,32 @@ int main() {
          [&] { put(root / "K.KST/STYLE/A.STY", "s"); return scan(root / "K.KST").layout == kLayoutKst; }());
     TEST(".STG without suffix -> Pa5X KST", [&] { put(root / "plain/STYLE/A.STG", "s"); return scan(root / "plain").layout == kLayoutKst; }());
     TEST("no markers -> unknown", [&] { put(root / "misc/A.BIN", "s"); return scan(root / "misc").layout == kLayoutUnknown; }());
+    // no suffix and not enough evidence: AMBIGUOUS, never a guess (owner directive #59)
+    TEST("no suffix, Pa5X + Pa4X markers -> ambiguous",
+         [&] { put(root / "mix1/STYLE/B/A.stg", "s"); put(root / "mix1/STYLE/USER01.STY", "k"); return scan(root / "mix1").layout == kLayoutAmbiguous; }());
+    TEST("no suffix, Pa5X files + ram.kmp (a Pa5X conversion keeps it) -> Pa5X KST",
+         [&] { put(root / "conv/STYLE/B/A.stg", "s"); put(root / "conv/MULTISMP/ram.kmp", "k"); return scan(root / "conv").layout == kLayoutKst; }());
+    TEST("no suffix, only ram.kmp + SONGDB.SBD (names both families share) -> ambiguous, not a Pa700 SET",
+         [&] { put(root / "shr/MULTISMP/ram.kmp", "k"); put(root / "shr/SONGBOOK/SONGDB.SBD/BANK01.SBD", "b"); return scan(root / "shr").layout == kLayoutAmbiguous; }());
+    TEST("no suffix, only MULTISMP/RAM.KMP -> ambiguous, not a Pa4X SET",
+         [&] { put(root / "rk/MULTISMP/RAM.KMP", "k"); put(root / "rk/PCM/RAM01.PCM", "p"); return scan(root / "rk").layout == kLayoutAmbiguous; }());
+    {
+        const std::string f = format(scan(root / "rk"), "x");
+        TEST("ambiguous report: no KST advice, no Pa5X budget", f.find("This KST holds") == std::string::npos &&
+             f.find("Sample memory estimate") == std::string::npos && f.find("Layout not determined") != std::string::npos);
+    }
+    TEST("Pa4X SET with .SET suffix and RAM.KMP stays a Pa4X SET",
+         [&] { put(root / "R.SET/MULTISMP/RAM.KMP", "k"); return scan(root / "R.SET").layout == kLayoutPa4x; }());
+    TEST("no suffix, Pa5X + Pa700 markers -> ambiguous",
+         [&] { put(root / "mix2/PAD/B/P.pdc", "p"); put(root / "mix2/GLOBAL/LIMITER.AUD", "a"); return scan(root / "mix2").layout == kLayoutAmbiguous; }());
+    TEST("no suffix, only a SONGBOOK/SONGDB.SBD folder (Pa5X and Pa700 share it) -> ambiguous",
+         [&] { put(root / "sdb/SONGBOOK/SONGDB.SBD/BANK01.SBD", "b"); return scan(root / "sdb").layout == kLayoutAmbiguous; }());
+    TEST("no suffix, SONGDB.SBD + Pa4X-family files -> Pa700-family SET (unchanged)",
+         [&] { put(root / "sdb4/SONGBOOK/SONGDB.SBD/BANK01.SBD", "b"); put(root / "sdb4/STYLE/USER01.STY", "s"); return scan(root / "sdb4").layout == kLayoutPa700; }());
+    TEST("no suffix, empty type folders only -> unknown",
+         [&] { fs::create_directories(root / "emp/STYLE/BANK01"); fs::create_directories(root / "emp/SOUND"); return scan(root / "emp").layout == kLayoutUnknown; }());
+    TEST(".SET suffix keeps deciding the family even with a SONGDB.SBD folder",
+         [&] { put(root / "S2.SET/SONGBOOK/SONGDB.SBD/BANK01.SBD", "b"); return scan(root / "S2.SET").layout == kLayoutPa700; }());
     fs::remove_all(root);
 
     // Optional: owner data (never in CI). Every file must be a valid container; the folder must read as Pa700-family.

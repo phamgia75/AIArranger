@@ -1,8 +1,8 @@
 #!/bin/sh
 # aiarranger-resources validate (E8): the synthetic KST generator follows the observed layout, so the only findings are
-# its 7 placeholder files (R-10 ERROR, exit 3); a missing folder and an unreadable file are NOT validated (exit 1).
+# its 11 placeholder files (R-10 ERROR, exit 3); a missing folder and an unreadable file are NOT validated (exit 1).
 # Every check counts on its own. Usage: test_validate_cli.sh BUILD_DIR PYTHON REPO_DIR [EXPECTED_R10]
-B="$1"; PY="$2"; REPO="$3"; WANT_R10="${4:-7}"; T=$(mktemp -d); fails=0
+B="$1"; PY="$2"; REPO="$3"; WANT_R10="${4:-11}"; T=$(mktemp -d); fails=0
 check() { if eval "$2"; then echo "  PASS: $1"; else echo "  FAIL: $1"; fails=$((fails+1)); fi; }
 "$PY" -I "$REPO/tools/make_synthetic_kst_library.py" "$T/s" >/dev/null; rc=$?
 check "generator ran" "[ $rc -eq 0 ]"

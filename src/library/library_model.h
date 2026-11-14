@@ -41,6 +41,15 @@ inline const char* typeOf(const std::string& upperExt) {
     return it == t.end() ? "Other" : it->second;
 }
 
+// Bank metadata OBSERVED in owner Pa5X KSTs (STYLE and KEYBOARDSET banks only, content not read): a file of the
+// library, not a resource item, and it never decides a bank's type. `upperRel` is TYPE/BANK/NAME in upper case.
+inline bool isKstBankMetadata(const std::string& upperRel) {
+    const auto a = upperRel.find('/'), b = a == std::string::npos ? a : upperRel.find('/', a + 1);
+    if (b == std::string::npos || upperRel.find('/', b + 1) != std::string::npos || upperRel.compare(b + 1, std::string::npos, "METADIR.JSON") != 0) return false;
+    const std::string type = upperRel.substr(0, a);
+    return type == "STYLE" || type == "KEYBOARDSET";
+}
+
 // Slots per SET bank file: 48 for Style, Keyboard Set and Pad banks (MAN4 p.975). 0 = not documented.
 inline int bankCapacity(Format f, const std::string& type) {
     return f == Format::PaSet && (type == "Style" || type == "Keyboard Set" || type == "Pad") ? 48 : 0;
@@ -143,10 +152,15 @@ inline Library load(const fs::path& root, const std::function<bool()>& keepGoing
         else bank = parts.size() >= 3 ? parts[0] + "/" + parts[1] : parts.size() == 2 ? parts[0] : "(root)";
         FileInfo fi{e.size, sha, ""};
         auto& b = L.banks[bank];
-        if (b.files == 0) b.type = type;
-        else if (b.type != type) b.type = "mixed";
         ++b.files;
         b.bytes += e.size;
+        if (L.format == Format::Pa5xKst && isKstBankMetadata(media::detail::upper(rel))) {   // a file, not an item
+            L.bytes += e.size;
+            L.files[rel] = fi;
+            continue;
+        }
+        if (b.type.empty()) b.type = type;
+        else if (b.type != type) b.type = "mixed";
         bool listed = false;
         if (L.format == Format::PaSet) {
             const auto c = media::panative::readFile(e.abs);
