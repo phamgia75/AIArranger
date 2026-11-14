@@ -3,7 +3,8 @@
 // Library Workspace > Library Manager (E7): two read-only libraries side by side (a Pa5X KST folder or a Pa-family SET
 // folder each), one search box over both, and four views: item Details (with evidenced dependencies only), Compare
 // (file level), Duplicates (SHA-256 files; names flagged as name-only) and Plan (staged copy / move / rename / bank
-// swap steps with their conflicts and warnings) and Validation (the structural validator, E8). A plan is exported as a
+// swap steps with their conflicts and warnings), Validation (the structural validator, E8) and Compatibility (the
+// selected item's Keyboard Compatibility card, library/library_compat.h: sourced rule tables only, read-only). A plan is exported as a
 // document, or (E8) executed at file level into a NEW library, a copy of the target, by an export job (E6: the studio's
 // queue, both libraries as its sources); the sources are never written. Every unavailable action shows its reason next to it. Loading, comparing and
 // exporting run on worker threads; nothing here touches MIDI or audio.
@@ -12,13 +13,14 @@
 #include "JobPort.h"
 #include "library/latest_worker.h"
 #include "library/library_apply.h"
+#include "library/library_compat.h"
 
 namespace ai_arranger::app {
 
 class LibraryManagerComponent : public juce::Component, private juce::Timer {
 public:
-    enum class View { Details, Compare, Duplicates, Plan, Validation };
-    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Export, Execute, Reveal, Validate };
+    enum class View { Details, Compare, Duplicates, Plan, Validation, Compat };
+    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Export, Execute, Reveal, Validate, Compat };
 
     LibraryManagerComponent();
     ~LibraryManagerComponent() override;

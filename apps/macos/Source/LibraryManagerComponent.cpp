@@ -24,7 +24,7 @@ void LibraryManagerComponent::Pane::selectedRowsChanged(int row) {
     if (owner.quiet_) return;   // the list was rebuilt by refilter(), not clicked
     selected = row >= 0 && row < int(rows.size()) ? int(rows[size_t(row)]) : -1;
     owner.active_ = side;
-    owner.view_ = View::Details;
+    owner.view_ = owner.view_ == View::Compat ? View::Compat : View::Details;   // the card follows the selection
     owner.refresh();
 }
 
@@ -78,6 +78,7 @@ LibraryManagerComponent::LibraryManagerComponent() {
     });
     auto& rev = act(Action::Reveal, "Reveal", [this] { lastOutput_.revealToUser(); });
     auto& val = act(Action::Validate, "Validate", [this] { showView(View::Validation); });
+    auto& kc = act(Action::Compat, "Compatibility", [this] { showView(View::Compat); });
     wholeFile_.setTooltip("SET only: Copy, Move and Rename act on the selected item's whole bank file (e.g. STYLE/USER03.STY) as a file. "
                           "Item-level SET edits cannot be executed (payload and record trailer UNKNOWN).");
     wholeFile_.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
@@ -92,7 +93,7 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto r = [this](juce::Component& c) -> juce::Component* { return reasons_.count(dynamic_cast<juce::Button*>(&c)) ? reasons_.at(dynamic_cast<juce::Button*>(&c)) : nullptr; };
     rows_ = {{{openA_, 150}, {r(*openA_), 140}, {&a_.header, 0}},
              {{openB_, 150}, {r(*openB_), 140}, {&b_.header, 0}},
-             {{&search_, 300}, {details_, 80}, {&cmp, 90}, {&dup, 100}, {&planBtn, 70}, {&val, 90}, {r(cmp), 260}, {r(dup), 0}}};
+             {{&search_, 300}, {details_, 80}, {&cmp, 90}, {&dup, 100}, {&planBtn, 70}, {&val, 90}, {&kc, 110}, {r(cmp), 260}, {r(dup), 0}}};
     actionRows_ = {{{&cp, 160}, {r(cp), 300}, {&mv, 160}, {r(mv), 220}, {&wholeFile_, 0}},
                    {{&value_, 300}, {&rn, 140}, {r(rn), 200}, {&sw, 170}, {r(sw), 0}},
                    {{&rm, 140}, {r(rm), 160}, {&cl, 100}, {r(cl), 160}, {&ex, 220}, {r(ex), 0}},
@@ -222,6 +223,7 @@ juce::String LibraryManagerComponent::unavailable(Action a) const {
             return a_.lib && b_.lib ? "" : "Needs: a library open on both sides";
         case Action::Reveal: return lastOutput_.isDirectory() ? "" : "Needs: an executed plan";
         case Action::Validate: return a_.lib || b_.lib ? "" : "Needs: an open library";
+        case Action::Compat: return act.item() ? "" : "Needs: an item selected in a list";
     }
     return "";
 }
@@ -266,6 +268,7 @@ void LibraryManagerComponent::showView(View v) {
     }
     if (v == View::Duplicates && unavailable(Action::Duplicates).isNotEmpty()) return;
     if (v == View::Validation && unavailable(Action::Validate).isNotEmpty()) return;
+    if (v == View::Compat && unavailable(Action::Compat).isNotEmpty()) return;
     view_ = v;
     refresh();
 }
@@ -376,6 +379,13 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
             for (const auto& [side, L] : {std::pair{'A', A}, std::pair{'B', B}})
                 if (L && !stale()) t += std::string("Library ") + side + ": " + lib::validationText(lib::validate(L->root, going)) + "\n";
             return t;
+        case View::Compat: {   // the validator reads the library's files: this worker, never the message thread
+            if (!act || selected < 0) return "Select an item for its Keyboard Compatibility card.";
+            const auto& it = act->items[size_t(selected)];
+            const auto v = lib::validate(act->root, going);
+            if (stale()) return t;
+            return std::string("Library ") + active + ": " + lib::compatCardText(it, lib::compatCard(*act, it, v, going));
+        }
         case View::Compare: break;
     }
     return t;
@@ -395,7 +405,7 @@ void LibraryManagerComponent::refresh(bool report) {
     const auto* sel = pane(active_).item();
     const auto ptr = [](const auto& p) { return std::to_string(reinterpret_cast<uintptr_t>(p.get())); };
     std::string key = std::to_string(int(view_)) + "|" + ptr(a_.lib) + "|" + ptr(b_.lib);
-    if (view_ == View::Details) key += std::string("|") + active_ + "|" + std::to_string(sel ? pane(active_).selected : -1);
+    if (view_ == View::Details || view_ == View::Compat) key += std::string("|") + active_ + "|" + std::to_string(sel ? pane(active_).selected : -1);
     if (view_ == View::Plan) key += "|" + std::to_string(planRev_);
     if (key == shownKey_) return;
     shownKey_ = key;
