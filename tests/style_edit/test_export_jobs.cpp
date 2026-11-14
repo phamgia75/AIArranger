@@ -563,7 +563,7 @@ int main() {
     }
     {   // Codex r1 #2: whether the output is a package is found by the job's worker, so the studio needs no file check
         const auto pkg = run(soundPackage(organ, root / "src", "", root / "pm-organ"));
-        const auto one = run(styleUasf("pm", {'u'}, root / "pm.uasf"));
+        const auto one = run(styleUasf("pm", realUasf(), root / "pm.uasf"));
         TEST("r1#2: a published package is flagged by the job (PACKAGE.sha256)", pkg.phase == Phase::Done && pkg.packageManifest);
         TEST("r1#2: a single-file output is not", one.phase == Phase::Done && !one.packageManifest);
     }
