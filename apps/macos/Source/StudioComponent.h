@@ -19,6 +19,7 @@
 #include "ui/studio/studio_models.h"
 #include "ui/studio/studio_tools.h"
 #include "ui/studio/style_studio_model.h"
+#include <optional>
 
 namespace ai_arranger::app {
 
@@ -104,7 +105,10 @@ public:
     void importSmfTrack(const juce::File& mid);
     void exportStyleSmf(const juce::File& mid);   // an export job (EXPERIMENTAL, L1); the status says when it lands
     juce::String leftoverText() const { return leftovers_.isVisible() ? leftovers_.getText() : juce::String(); }
-    void saveStyleUasf(const juce::File& uasf);   // direct and synchronous (writeNewFile): the Save choice of the unwritten-edits prompt needs it
+    // An E6 export job (staged, read back, parsed and validated, then published); the edits count as written only for the
+    // Style as it was when the job was made. `landed` runs on the message thread once the job has finished (any outcome).
+    // false: not started (the status says why).
+    bool saveStyleUasf(const juce::File& uasf, std::function<void()> landed = {});
     const ui::studio::StyleStudioModel& styleModel() const { return style_; }
     juce::String styleStatus() const { return styleStatus_.getText(); }
     juce::String kmpText() const { return kmpReport_.getText(); }
@@ -115,7 +119,7 @@ public:
     // time: validate, dependencies, destination guard, preview, estimate, write into NAME.INCOMPLETE, publish, SHA-256,
     // verify, report beside the output. The KMP/KSF writer and the Sample Lab writes enqueue jobs too.
     enum class ExportJob { SoundPackage, KmpFolder, KstBackup, StyleSmf, StyleUasf };
-    uint64_t exportJob(ExportJob j, const juce::File& dest);   // 0 when unavailable
+    uint64_t exportJob(ExportJob j, const juce::File& dest, std::function<void()> landed = {});   // 0 when unavailable
     juce::String exportUnavailable(ExportJob j);
     uint64_t importKitJob(const juce::File& outputs, const juce::File& dest);   // E9 Pa5X Import Kit from a folder of outputs
     void selectJob(uint64_t id);
@@ -225,7 +229,8 @@ private:
     bool quitWhenIdle_ = false;               // Wait or Cancel Jobs and Quit chosen: polled until busy() is false
     juce::Label* workStatus_ = nullptr;
     juce::TextButton *waitQuitBtn_ = nullptr, *cancelQuitBtn_ = nullptr, *keepWorkingBtn_ = nullptr;
-    bool styleResolved_ = false;              // Save or Discard was chosen for this quit: the Style is not asked about again
+    std::optional<std::vector<uint8_t>> styleDiscardedAt_;   // Discard chosen for this quit: the Style (UASF bytes) it holds for
+    void finishQuit(std::function<void()> quit);            // the last unwritten-Style check before quit() runs
     void askRunningWork(std::function<void()> quit);
     bool quitIfStyleWritten(std::function<void()> quit);   // the unwritten-Style check (b80f49a)
     void quitWhenIdle();

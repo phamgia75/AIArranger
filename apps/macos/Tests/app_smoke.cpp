@@ -1565,8 +1565,8 @@ int main() {
                  st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() && !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
             st.openStyle(juce::File(sty.string()));
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "kept.uasf").string()));
-            const bool openWaits = st.styleModel().dirty() && !fs::equivalent(st.styleModel().path(), sty) && !st.jobList().empty() &&
-                                   st.jobList().back().type == "Style as UASF" && !jobs::finished(st.jobList().back().phase);
+            const bool openWaits = st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 99 && !st.jobList().empty() &&   // not reloaded yet
+                                   st.jobList().back().type == "Style as UASF";   // the job may be finished, but not landed (message thread)
             waitIdle(10000);
             pump(100);
             TEST("D33 P2 studio: Save-before-open runs as an export job; the other Style opens only after it is Done", openWaits);

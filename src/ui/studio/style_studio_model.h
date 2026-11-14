@@ -261,7 +261,8 @@ public:
         if (level) *level = checkStyleSmf(out);
         return "";   // the edits stay unwritten: an SMF does not keep element names or track roles (only Save UASF does)
     }
-    // UASF (our own format) of the edited Style. Written only when the UASF validator has no ERROR.
+    // UASF (our own format) of the edited Style. Written only when the UASF validator has no ERROR. Blocking: for tools and
+    // tests; the studio saves through the E6 job (jobs::styleUasf with uasfBytes()/markWritten), never on the message thread.
     std::string saveUasf(const std::filesystem::path& out) {
         if (!ed_) return "open a Style first";
         uasf::UasfSerializer ser;

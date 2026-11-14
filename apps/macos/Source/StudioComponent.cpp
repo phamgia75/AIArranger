@@ -609,7 +609,7 @@ void StudioComponent::resolveRunningWork(WorkChoice c) {
     if (c == WorkChoice::KeepWorking) {
         pendingWorkQuit_ = nullptr;
         quitWhenIdle_ = false;
-        styleResolved_ = false;   // a later quit asks about unwritten Style edits again
+        styleDiscardedAt_.reset();   // a later quit asks about unwritten Style edits again
         for (auto* b : {waitQuitBtn_, cancelQuitBtn_, keepWorkingBtn_}) b->setVisible(false);
         workStatus_->setText("Quit cancelled: the work keeps running.", juce::dontSendNotification);
         ioPage_.resized();
@@ -646,7 +646,15 @@ void StudioComponent::quitWhenIdle() {
         b->setVisible(false);
     workStatus_->setText("", juce::dontSendNotification);
     ioPage_.resized();
-    if (std::exchange(styleResolved_, false)) { quit(); return; }   // Saved or discarded on the Style page already: not asked again
+    finishQuit(std::move(quit));
+}
+
+// Right before the app terminates: unwritten Style edits quit only when Discard was chosen for exactly this Style; an
+// edit, undo or redo since then (or a Save that failed, was cancelled or was overtaken by an edit) asks again.
+void StudioComponent::finishQuit(std::function<void()> quit) {
+    const bool discarded = styleDiscardedAt_ && *styleDiscardedAt_ == style_.uasfBytes();
+    styleDiscardedAt_.reset();
+    if (discarded) { quit(); return; }
     quitIfStyleWritten(std::move(quit));
 }
 
@@ -670,9 +678,28 @@ void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& sav
     const auto next = pendingStyle_;
     auto quit = pendingQuit_;
     if (next == juce::File() && !quit) return;
-    if (c == UnsavedChoice::Save) {
-        saveStyleUasf(saveAs);
-        if (style_.dirty()) return;   // not written (the status says why): keep asking, nothing is lost
+    if (c == UnsavedChoice::Save) {   // an export job: the open waits for it; the quit goes through the work guard
+        const bool otherWork = busy();
+        auto landed = [this, next] {
+            if (next == juce::File() || pendingStyle_ != next) return;   // asked about another Style meanwhile
+            if (style_.dirty()) {   // failed, cancelled, or edited during the job: nothing opened, ask again
+                const auto why = styleStatus_.getText();
+                askUnsaved("Open " + next.getFileName(), "Open");
+                styleStatus_.setText(why + ". " + styleStatus_.getText(), juce::dontSendNotification);
+                return;
+            }
+            pendingStyle_ = juce::File();
+            loadStyle(next, false);
+        };
+        if (!saveStyleUasf(saveAs, quit ? std::function<void()>{} : std::function<void()>(landed))) return;   // not started: keep asking
+        for (auto* b : {pendSave_, pendDiscard_, pendCancel_}) b->setVisible(false);
+        if (!quit) return;   // pendingStyle_ stays until the job lands
+        pendingQuit_ = nullptr;
+        styleDiscardedAt_.reset();   // Save holds only once nothing is unwritten (finishQuit checks)
+        if (pendingWorkQuit_) pendingWorkQuit_ = std::move(quit);
+        else askRunningWork(std::move(quit));
+        if (!otherWork) resolveRunningWork(WorkChoice::Wait);   // only the save runs: quit once it has landed
+        return;
     }
     pendingStyle_ = juce::File();
     pendingQuit_ = nullptr;
@@ -683,9 +710,9 @@ void StudioComponent::resolveUnsavedStyle(UnsavedChoice c, const juce::File& sav
         refreshStyle();
         return;
     }
-    if (quit) {   // Saved or discarded: quit, but only through the work guard (an export may have started meanwhile)
-        if (!busy()) { quit(); return; }
-        styleResolved_ = true;
+    if (quit) {   // Discarded: quit, but only through the work guard (an export may have started meanwhile)
+        styleDiscardedAt_ = style_.uasfBytes();   // for the Style exactly as it is now
+        if (!busy()) { finishQuit(std::move(quit)); return; }
         if (pendingWorkQuit_) pendingWorkQuit_ = std::move(quit);
         else askRunningWork(std::move(quit));
         return;
@@ -1047,10 +1074,11 @@ void StudioComponent::exportStyleSmf(const juce::File& mid) {
         styleStatus_.setText("Not written: " + exportUnavailable(ExportJob::StyleSmf), juce::dontSendNotification);
 }
 
-void StudioComponent::saveStyleUasf(const juce::File& f) {
-    const auto why = style_.saveUasf(f.getFullPathName().toStdString());
-    styleStatus_.setText(why.empty() ? "Wrote " + f.getFullPathName() : "Not written: " + juce::String(why), juce::dontSendNotification);
-    refreshStyle();
+bool StudioComponent::saveStyleUasf(const juce::File& f, std::function<void()> landed) {
+    styleStatus_.setText("Saving " + f.getFullPathName() + " (export job; Import / Export Center lists every job)...", juce::dontSendNotification);
+    if (exportJob(ExportJob::StyleUasf, f, std::move(landed)) != 0) return true;
+    styleStatus_.setText("Not written: " + exportUnavailable(ExportJob::StyleUasf), juce::dontSendNotification);
+    return false;
 }
 
 // ── Export jobs (E6): one serial queue; each finished job lands on the page that started it and becomes the
@@ -1071,7 +1099,7 @@ juce::String StudioComponent::exportUnavailable(ExportJob j) {
     return "";
 }
 
-uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
+uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest, std::function<void()> landed) {
     if (exportUnavailable(j).isNotEmpty()) return 0;
     const std::string d = dest.getFullPathName().toStdString();
     auto& cv = res_.converter();
@@ -1088,13 +1116,14 @@ uint64_t StudioComponent::exportJob(ExportJob j, const juce::File& dest) {
             auto spec = j == ExportJob::StyleSmf ? jobs::styleSmf(path.filename().string(), style_.smfExport(), d, path)
                                                  : jobs::styleUasf(path.filename().string(), uasf, d, path);
             const bool smf = j == ExportJob::StyleSmf;
-            return enqueue(std::move(spec), nullptr, [this, uasf, path, smf](const jobs::JobState& s) {
+            return enqueue(std::move(spec), nullptr, [this, uasf, path, smf, landed = std::move(landed)](const jobs::JobState& s) {
                 const bool ok = s.phase == jobs::Phase::Done;
                 styleStatus_.setText(ok ? "Wrote " + juce::String(s.dest) + "  " + juce::String::fromUTF8(st::badgeLine(s.level).c_str()) + (smf ? " (EXPERIMENTAL)" : "")
                                         : "Not written: " + juce::String(s.reason),
                                      juce::dontSendNotification);
                 if (ok && !smf && style_.path() == path) style_.markWritten(uasf);
                 refreshStyle();
+                if (landed) landed();
             });
         }
     }

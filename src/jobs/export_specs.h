@@ -329,8 +329,19 @@ inline ExportSpec styleUasf(std::string styleName, std::vector<uint8_t> uasf, fs
             v.l1 = {Check::Failed, bad};
             return std::pair<Verification, std::string>{v, bad};
         }
+        // Independent of the editor: the staged file itself must parse and pass the validator before it counts as saved.
+        const auto r = uasf::UasfDeserializer().deserializeFromFile(out.string());
+        std::string bad = r.success ? "" : "does not parse with the UASF reader: " + r.error;
+        if (r.success)
+            for (const auto& i : uasf::UasfValidator().validate(r.style).issues)
+                if (i.severity == uasf::ValidationIssue::ERROR) { bad = "refused by the UASF validator: " + i.message; break; }
+        if (!bad.empty()) {
+            v.l1 = {Check::Failed, bad};
+            return std::pair<Verification, std::string>{v, bad};
+        }
         v.l1.detail = "not applicable: UASF is AIArranger's own format, not a Pa5X file (read back matches the bytes written)";
-        return std::pair<Verification, std::string>{v, "UASF written; it was checked by the UASF validator on every edit. No Pa5X level applies."};
+        return std::pair<Verification, std::string>{v, "UASF written, read back, parsed by the UASF reader and checked by the UASF validator. "
+                                                       "No Pa5X level applies."};
     };
     return s;
 }
