@@ -283,6 +283,15 @@ inline std::string planReport(const Library& A, const Library& B, const std::vec
         o << i + 1 << ". " << ev.steps[i].summary << "\n";
         for (const auto& x : ev.steps[i].conflicts) o << "     CONFLICT  " << x << "\n";
         for (const auto& x : ev.steps[i].warnings) o << "     warning   " << x << "\n";
+        const auto& s = ev.steps[i];
+        const char side = plan[i].side, other = side == 'A' ? 'B' : 'A';
+        if (!s.conflicts.empty()) o << "     effect    none: blocked by its conflicts\n";
+        else if (s.ops.empty()) o << "     effect    no file change (nothing to do, or an edit inside a SET bank file, which Execute Plan refuses)\n";
+        for (const auto& f : s.ops)
+            o << "     effect    " << (f.kind == FileOp::CopyIn ? std::string("adds ") + other + ":" + f.to + " (a copy of " + side + ":" + f.from + ")"
+                                     : f.kind == FileOp::Rename ? std::string("renames ") + side + ":" + f.from + " -> " + f.to
+                                     : std::string("swaps bank ") + (f.folder ? "folders " : "files ") + side + ":" + f.from + " <-> " + f.to)
+              << ", in the NEW library Execute Plan writes\n";
     }
     return o.str();
 }

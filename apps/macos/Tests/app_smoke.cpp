@@ -983,6 +983,8 @@ int main() {
             TEST("library manager: Compare and Copy say what they need", lm.unavailable(A::Compare) == "Needs: a library open on both sides" &&
                  lm.unavailable(A::Copy) == "Needs: an item selected in a list" && lm.unavailable(A::Export).startsWith("Needs: a plan step") &&
                  lm.unavailable(A::Compat) == "Needs: an item selected in a list");
+            TEST("library history: Undo and Where Used say what they need", lm.unavailable(A::Undo) == "Needs: a plan edit to undo" &&
+                 lm.unavailable(A::WhereUsed) == "Needs: an item selected in a list");
             TEST("library manager: unavailable actions show their reason inline", reasonsShown());
             put(root / "Other.KST/STYLE/USER01/Ballad.STG", "s");       // same bytes as Mine.KST's
             put(root / "Other.KST/STYLE/USER02/Ballad.STG", "other");   // same name, other bank
@@ -1075,6 +1077,30 @@ int main() {
             TEST("library manager E8: a blocked plan says why Execute is refused", lm.reportText().contains("Execute Plan: refused: the plan has 1 conflict(s)"));
             TEST("library manager E8: Reveal needs an executed plan", lm.unavailable(A::Reveal) == "Needs: an executed plan");
             lm.clearPlan();
+            TEST("library history: Clear Plan is undoable", lm.plan().empty() && lm.unavailable(A::Undo).isEmpty() &&
+                 lm.unavailable(A::Redo) == "Needs: an undone plan edit");
+            lm.undo();
+            waitLm(5000);
+            TEST("library history: Undo restores the cleared steps; history and per-step effects shown", lm.plan().size() == 2 &&
+                 lm.reportText().contains("(next: clear 2 step(s))") && lm.reportText().contains("effect    no file change") &&
+                 lm.reportText().contains("effect    none: blocked by its conflicts"));
+            lm.undo();
+            waitLm(5000);
+            TEST("library history: multi-step undo", lm.plan().size() == 1 && lm.plan()[0].op == library::Op::Copy && lm.reportText().contains("2 to redo"));
+            lm.redo();
+            lm.redo();
+            waitLm(5000);
+            TEST("library history: redo re-applies both edits, sources untouched", lm.plan().empty() && !lm.history().canRedo() &&
+                 fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
+            lm.selectRow('A', 1);   // Ballad
+            lm.showView(V::WhereUsed);
+            waitLm(5000);
+            TEST("where used: a Style's referrers are not modelled: UNKNOWN, none inferred", lm.reportText().contains("Where used: Style \"Ballad\"") &&
+                 lm.reportText().contains("references UNKNOWN") && lm.reportText().contains("Known references: none") &&
+                 lm.reportText().contains("what refers to a Style is not modelled"));
+            lm.selectRow('A', 0);   // Hit.PDC
+            waitLm(5000);
+            TEST("where used follows the selection", lm.reportText().contains("Where used: Pad \"Hit\""));
             lm.showView(V::Validation);
             waitLm(5000);
             TEST("library manager E8: Validation view runs the structural validator on both sides", lm.reportText().contains("Library A: Structural validation") &&
@@ -1092,6 +1118,31 @@ int main() {
             lm.selectRow('A', 0);   // Hit: the card follows the selection
             waitLm(5000);
             TEST("library manager: the Compatibility card follows the selection", lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad"));
+            {   // integ/p1-studio-plus merge #55 + #57: both selection-following views and every new button run their own handler
+                click(lm, "Where Used");
+                waitLm(5000);
+                const bool wu = lm.reportText().contains("Where used: Pad \"Hit\"") && !lm.reportText().contains("Keyboard Compatibility card");
+                lm.selectRow('A', 1);   // Ballad
+                waitLm(5000);
+                TEST("merge #55+#57: the Where Used button shows Where Used; it stays and follows a new selection",
+                     wu && lm.reportText().contains("Where used: Style \"Ballad\"") && !lm.reportText().contains("Keyboard Compatibility card"));
+                click(lm, "Compatibility");
+                waitLm(5000);
+                const bool kc = lm.reportText().contains("Keyboard Compatibility card") && lm.reportText().contains("STYLE/USER01/Ballad.STG") &&
+                                !lm.reportText().contains("Where used:");
+                lm.selectRow('A', 0);   // Hit
+                waitLm(5000);
+                TEST("merge #55+#57: the Compatibility button shows the card; it stays and follows a new selection",
+                     kc && lm.reportText().contains("PAD/USER01/Hit.PDC") && !lm.reportText().contains("Ballad") && !lm.reportText().contains("Where used:"));
+                const auto before = lm.plan().size();   // empty: the cleared plan, redone above
+                click(lm, "Undo Step");
+                waitLm(5000);
+                const bool undone = lm.plan().size() == 2 && lm.history().canRedo();
+                click(lm, "Redo Step");
+                waitLm(5000);
+                TEST("merge #55+#57: the Undo Step / Redo Step buttons undo and redo the plan edit (no other action)",
+                     before == 0 && undone && lm.plan().empty() && !lm.history().canRedo());
+            }
             lm.showView(V::Details);
             const auto bytesOf = [](const fs::path& d) {
                 std::map<std::string, std::string> m;
@@ -1102,6 +1153,11 @@ int main() {
             const auto mineBefore = bytesOf(root / "Mine.KST"), otherBefore = bytesOf(root / "Other.KST");
             lm.selectRow('A', 0);   // Hit.PDC: B has no PAD/USER01, so the copy makes that bank in B's copy
             lm.addStep(A::Copy);
+            lm.selectRow('B', 0);   // Kick.PDC: a rename staged, then undone; Execute must not run it (#55)
+            lm.value().setText("Kick2", true);
+            lm.addStep(A::Rename);
+            lm.value().setText("", true);
+            TEST("library history #55: the rename is staged, then undone before Execute", lm.plan().size() == 2 && (lm.undo(), lm.plan().size() == 1));
             waitLm(5000);
             TEST("library manager E8: a conflict-free plan is ready to execute", lm.plan().size() == 1 && lm.reportText().contains("Execute Plan: ready") &&
                  lm.unavailable(A::Execute).isEmpty());
@@ -1117,6 +1173,8 @@ int main() {
             TEST("library manager E8: result shown with its label and checks; Reveal available",
                  lm.reportText().contains("Plan executed into a NEW library") && lm.reportText().contains("file-level operation; not verified on a keyboard") &&
                  lm.reportText().contains("PASS  plan re-check") && lm.progressText().startsWith("Executed: ") && lm.unavailable(A::Reveal).isEmpty());
+            TEST("library history #55: the executed library is the plan shown after the undo (the undone rename is not in it)",
+                 !fs::exists(outLib / "PAD/USER09/Kick2.PDC") && lm.reportText().contains("1. copy A:PAD/USER01") && !lm.reportText().contains("2. rename"));
             TEST("library manager E8: both sources byte-identical after the execution", bytesOf(root / "Mine.KST") == mineBefore &&
                  bytesOf(root / "Other.KST") == otherBefore);
             lm.clearPlan();
