@@ -871,18 +871,26 @@ void StudioComponent::openReport(ReportSource s, const juce::File& f) {
     std::thread([this, alive, s, gen, latest = reportLatest_, path = f.getFullPathName().toStdString()] {
         auto r = std::make_shared<rp::Report>();
         std::string err;
+        auto text = std::make_shared<std::string>();
         const auto going = [alive, latest, gen] { return !alive.expired() && latest->load() == gen; };
-        if (s == ReportSource::JsonFile) err = rp::loadJsonReport(path, r.get(), going);
-        else if (s == ReportSource::Inventory) {
-            const auto L = library::load(path, going);
-            *r = rp::fromInventory(L);
-            if (!L.ok) err = "library not read: " + L.error;
-        } else {
-            const auto v = library::validate(path, going);
-            *r = rp::fromValidation(v);
-            if (!v.ok) err = "NOT validated: " + v.error;
+        try {   // a detached thread: an allocation failure (or anything else) is reported, never terminates the app (Codex r2 #1)
+            if (s == ReportSource::JsonFile) err = rp::loadJsonReport(path, r.get(), going);
+            else if (s == ReportSource::Inventory) {
+                const auto L = library::load(path, going);
+                *r = rp::fromInventory(L);
+                if (!L.ok) err = "library not read: " + L.error;
+            } else {
+                const auto v = library::validate(path, going);
+                *r = rp::fromValidation(v);
+                if (!v.ok) err = "NOT validated: " + v.error;
+            }
+            if (err.empty()) *text = rp::text(*r);
+        } catch (const std::bad_alloc&) {
+            err = "not enough memory to read this report";
+        } catch (const std::exception& e) {
+            err = std::string("cannot read this report: ") + e.what();
         }
-        const auto text = std::make_shared<const std::string>(err.empty() ? rp::text(*r) : std::string());
+        if (!err.empty()) { r = std::make_shared<rp::Report>(); text->clear(); }   // free a partial result before landing
         juce::MessageManager::callAsync([this, alive, gen, r, err, text] {
             if (alive.expired()) return;
             --jobs_;
@@ -1191,9 +1199,22 @@ uint64_t StudioComponent::importKitJob(const juce::File& outputs, const juce::Fi
 
 // shortcut: lists the recorded output folders (at most jobs::kRecordedFolders) on the message thread (fast on a local
 // disk); move it to a worker if an output folder can be a slow network volume.
-void StudioComponent::checkLeftovers() {
+void StudioComponent::checkLeftovers() {   // the record and folder listings are file reads: a worker does them (Codex r2 #2)
+    const auto gen = ++leftoverGen_;
+    std::weak_ptr<bool> alive = alive_;
+    std::thread([this, alive, gen] {
+        auto report = std::make_shared<const std::vector<std::pair<std::string, std::vector<std::string>>>>(jobs::leftoverReport());
+        juce::MessageManager::callAsync([this, alive, gen, report] {
+            if (alive.expired() || gen != leftoverGen_) return;   // a newer listing lands instead
+            leftoverShown_ = gen;
+            showLeftovers(*report);
+        });
+    }).detach();
+}
+
+void StudioComponent::showLeftovers(const std::vector<std::pair<std::string, std::vector<std::string>>>& report) {
     juce::StringArray parts;
-    for (const auto& [dir, names] : jobs::leftoverReport()) {
+    for (const auto& [dir, names] : report) {
         juce::StringArray shown;
         for (size_t i = 0; i < names.size() && i < 4; ++i) shown.add(juce::String::fromUTF8(names[i].c_str()));
         if (names.size() > 4) shown.add("and " + juce::String(int(names.size() - 4)) + " more");

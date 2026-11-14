@@ -105,6 +105,7 @@ public:
     void importSmfTrack(const juce::File& mid);
     void exportStyleSmf(const juce::File& mid);   // an export job (EXPERIMENTAL, L1); the status says when it lands
     juce::String leftoverText() const { return leftovers_.isVisible() ? leftovers_.getText() : juce::String(); }
+    bool leftoversChecking() const { return leftoverShown_ != leftoverGen_; }   // the banner's listing is still running
     void saveStyleUasf(const juce::File& uasf);   // direct and synchronous (writeNewFile): the Save choice of the unwritten-edits prompt needs it
     const ui::studio::StyleStudioModel& styleModel() const { return style_; }
     juce::String styleStatus() const { return styleStatus_.getText(); }
@@ -190,7 +191,9 @@ private:
     std::map<Domain, std::vector<juce::TextButton*>> segmentButtons_;
     juce::Label title_, experimental_;
     juce::Label leftovers_;   // non-blocking banner: unfinished writes (NAME.INCOMPLETE, .stale-*) in the recorded output folders (jobs::leftoverReport)
-    void checkLeftovers();    // read-only listing; on launch and whenever a page opens
+    void checkLeftovers();    // read-only listing on a worker thread (newest wins); on launch and whenever a page opens
+    void showLeftovers(const std::vector<std::pair<std::string, std::vector<std::string>>>& report);
+    uint64_t leftoverGen_ = 0, leftoverShown_ = 0;   // message thread
     juce::TextEditor inspector_;
 
     Domain domain_ = Domain::Library;
