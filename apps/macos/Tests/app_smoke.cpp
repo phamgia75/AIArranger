@@ -1104,6 +1104,57 @@ int main() {
                  bytesOf(root / "Other.KST") == otherBefore);
             lm.clearPlan();
         }
+        phase("studio: reports viewer");
+        {   // Validation & Reports > Reports (P1, C17/C18): read-only viewer, reads off the message thread, HTML + CSV as an export job
+            namespace rp = jobs::report;
+            st.showDomain(D::Validation, 1);
+            TEST("reports: Validation & Reports has a Reports segment", st.segmentNames(D::Validation).joinIntoString("|") == "Checks|Reports" && st.segment() == 1);
+            TEST("reports: export needs an open report and says so", st.reportUnavailable().startsWith("Needs: a report open") && reasonsShown());
+            st.openReport(app::StudioComponent::ReportSource::Inventory, juce::File((root / "Mine.KST").string()));
+            TEST("reports: the inventory is read off the message thread (busy, not shown yet)", st.busy() && !st.reportViewText().contains("Library inventory"));
+            waitIdle(5000);
+            TEST("reports: inventory shown from the Library struct", st.reportViewText().contains("Library inventory: Mine.KST") &&
+                 st.reportViewText().contains("Ballad") && st.reportViewText().contains("Not verified on a Pa5X") && st.reportStatus().startsWith("Showing (read-only)"));
+            const auto out = root / "Inventory Report";
+            const auto id = st.exportReport(juce::File(out.string()));
+            const bool busyAfter = st.busy();
+            waitIdle(10000);
+            const auto all = st.jobList();
+            const auto job = std::find_if(all.begin(), all.end(), [&](const jobs::JobState& j) { return j.id == id; });
+            TEST("reports: export runs as an export job on a worker thread", id != 0 && busyAfter && job != all.end() && job->type == "Report (HTML + CSV)" &&
+                 job->phase == jobs::Phase::Done && job->writerThread != 0 && job->writerThread != jobs::thisThread());
+            std::vector<std::vector<std::string>> rows;
+            TEST("reports: report.html + CSVs published with PACKAGE.sha256 and the job report, nothing staged left",
+                 fs::is_regular_file(out / "report.html") && fs::is_regular_file(out / "banks.csv") && fs::is_regular_file(out / "PACKAGE.sha256") &&
+                 fs::is_regular_file(root / "Inventory Report.export.json") && !fs::exists(root / "Inventory Report.INCOMPLETE"));
+            TEST("reports: the written HTML is self-contained and items.csv parses", rp::htmlRefusal(slurp(out / "report.html")).empty() &&
+                 rp::parseCsv(slurp(out / "items.csv"), &rows).empty() && rows.size() == 3 && rows[0][3] == "name");
+            TEST("reports: status shows the published folder at L1 only", st.reportStatus().startsWith("Exported: ") &&
+                 st.reportStatus().contains(juce::String::fromUTF8("\xE2\x97\x86 L1  \xE2\x97\x87 L2  \xE2\x97\x87 L3")));
+            st.exportReport(juce::File((root / "Mine.KST/reports").string()));
+            waitIdle(5000);
+            TEST("reports: an export inside the library it reports on is refused (D18)", st.reportStatus().startsWith("Report NOT written") &&
+                 st.reportStatus().contains("overlaps") && !fs::exists(root / "Mine.KST/reports") && !fs::exists(root / "Mine.KST/reports.INCOMPLETE"));
+            st.openReport(app::StudioComponent::ReportSource::Validation, juce::File((root / "Mine.KST").string()));
+            waitIdle(5000);
+            TEST("reports: validation findings shown with their sources", st.reportViewText().contains("Structural validation: Mine.KST") &&
+                 st.reportViewText().contains("== Findings ("));
+            st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "My Plan/plan.json").string()));
+            waitIdle(5000);
+            TEST("reports: plan.json shown as the plan's steps", st.reportViewText().contains("Library Manager plan (EXPORT-ONLY)") &&
+                 st.reportViewText().contains("== Steps (2) ==") && st.reportViewText().contains("1 | copy | A |") &&
+                 st.reportViewText().contains("2 | bank-swap |"));
+            st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "Inventory Report.export.json").string()));
+            waitIdle(5000);
+            TEST("reports: NAME.export.json shown as an export report", st.reportViewText().contains("Export report: Report (HTML + CSV)") &&
+                 st.reportViewText().contains("Verification L1: passed"));
+            put(root / "other.json", "{\"a\": 1}");
+            st.openReport(app::StudioComponent::ReportSource::JsonFile, juce::File((root / "other.json").string()));
+            waitIdle(5000);
+            TEST("reports: another JSON is refused with the reason; export unavailable again", st.reportStatus().startsWith("Not shown: not an AIArranger") &&
+                 st.reportUnavailable().startsWith("Needs: a report open"));
+            TEST("reports: the library is unchanged", fs::last_write_time(root / "Mine.KST/STYLE/USER01/Ballad.STG") == stamp);
+        }
         phase("studio: sample lab");
         {
             media::sound::Sample sm;

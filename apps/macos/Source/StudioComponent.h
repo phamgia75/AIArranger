@@ -16,6 +16,7 @@
 #include "ResourcesComponent.h"
 #include "WaveView.h"
 #include "jobs/job_queue.h"
+#include "jobs/report_export.h"
 #include "ui/studio/studio_models.h"
 #include "ui/studio/studio_tools.h"
 #include "ui/studio/style_studio_model.h"
@@ -125,6 +126,16 @@ public:
     std::vector<jobs::JobState> jobList() const { return queue_->snapshot(); }
     juce::String jobListText() const { return jobView_.getText(); }
     int jobListTop() const { return jobView_.getY(); }
+
+    // Validation & Reports > Reports (P1, parity C17/C18): a READ-ONLY viewer of the existing reports (plan.json,
+    // NAME.export.json, a library's inventory or structural validation), each read on a worker thread (newest wins), and
+    // Export HTML + CSV as an export job (E6: a NEW folder, staged, checked, published; the report's source only read).
+    enum class ReportSource { JsonFile, Inventory, Validation };
+    void openReport(ReportSource s, const juce::File& f);   // asynchronous; busy() until it lands
+    uint64_t exportReport(const juce::File& dest);          // 0 when unavailable
+    juce::String reportUnavailable() const;                 // "" when Export HTML + CSV can run now
+    juce::String reportViewText() const { return reportView_.getText(); }
+    juce::String reportStatus() const { return reportStatus_.getText(); }
 
     ResourcesComponent& resources() { return res_; }
     LibraryManagerComponent& manager() { return manager_; }   // Library Workspace > Library Manager (E7)
@@ -248,6 +259,14 @@ private:
     ui::studio::Verification verification_;
     bool verificationIsPackage_ = false;
     Domain verificationDomain_ = Domain::Validation;   // the page whose output the badges describe
+
+    // Validation & Reports › Reports
+    FlowPage reportsPage_;
+    juce::TextEditor reportView_;
+    juce::Label reportStatus_;
+    juce::TextButton* reportExportBtn_ = nullptr;
+    std::shared_ptr<const jobs::report::Report> report_;   // the report shown (message thread)
+    uint64_t reportGen_ = 0;                                // newest open request; older results are dropped
 
     // Export jobs (E6)
     uint64_t enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done = {});

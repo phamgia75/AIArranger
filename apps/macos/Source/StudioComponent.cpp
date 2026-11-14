@@ -399,14 +399,42 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     validationPage_.addAndMakeVisible(jobsLog_);
     jobsLog_.setText("Jobs (this session)\n", false);
 
+    // ── Validation & Reports › Reports (read-only viewer; Export HTML + CSV is an export job) ──
+    styleText(reportView_);
+    reportView_.setText("No report open. Open a plan.json or NAME.export.json, or a library folder's inventory or structural validation. "
+                        "Everything is only read; Export HTML + CSV writes a NEW folder.", false);
+    reportStatus_.setColour(juce::Label::textColourId, juce::Colours::white);
+    auto& openJson = button("Open Report File...", [this] {
+        chooseFolder("plan.json or NAME.export.json (read-only)", [this](juce::File f) { openReport(ReportSource::JsonFile, f); }, true, "*.json");
+    });
+    auto& openInv = button("Library Inventory...", [this] {
+        chooseFolder("Library folder (Pa5X KST or Pa-family SET; read-only)", [this](juce::File f) { openReport(ReportSource::Inventory, f); });
+    });
+    auto& openVal = button("Library Validation...", [this] {
+        chooseFolder("Library folder to validate (read-only)", [this](juce::File f) { openReport(ReportSource::Validation, f); });
+    });
+    reportExportBtn_ = &button("Export HTML + CSV...", [this] {
+        chooseSave("New report folder (report.html + CSV files)", "*", [this](juce::File f) { exportReport(f); });
+    });
+    reportsPage_.rows = {
+        {{&openJson, 170}, {&openInv, 170}, {&openVal, 170}},
+        {{reportExportBtn_, 200}, {&reasonFor(*reportExportBtn_), 0}},
+        {{&reportStatus_, 0}},
+        {{&label("HTML: one self-contained file (no script, no external reference). CSV: RFC 4180, one file per table, formula cells "
+                 "prefixed with '. Not verified on a Pa5X.", kText2), 0}},
+    };
+    reportsPage_.fill = &reportView_;
+    for (auto& row : reportsPage_.rows) for (auto& [c, w] : row) reportsPage_.addAndMakeVisible(c);
+    reportsPage_.addAndMakeVisible(reportView_);
+
     segments_[D::Library] = {{"Sources", -1, &sourcesPage_}, {"Resource Graph", 0}, {"KST Library", 1}, {"Memory Check", 2}, {"Library Manager", -1, &manager_}};
     segments_[D::ImportExport] = {{"Routes", -1, &ioPage_}};
     segments_[D::SampleLab] = {{"Convert Sound", 3}, {"Sample Plugin", 4}, {"Quality Report", -1, &qualityPage_},
                                {"KMP / KSF Writer", -1, &kmpPage_}, {"Tools", -1, &labPage_}};
     segments_[D::StyleStudio] = {{"Style Editor", -1, &stylePage_}};
-    segments_[D::Validation] = {{"Checks", -1, &validationPage_}};
+    segments_[D::Validation] = {{"Checks", -1, &validationPage_}, {"Reports", -1, &reportsPage_}};
     for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
-                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
+                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_, (juce::Component*)&reportsPage_,
                     (juce::Component*)&manager_})
         addChildComponent(p);
     for (auto& [d, segs] : segments_)
@@ -502,7 +530,7 @@ void StudioComponent::showDomain(Domain d, int segment) {
 
     const auto& seg = segs[size_t(segment)];
     for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
-                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
+                    (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_, (juce::Component*)&reportsPage_,
                     (juce::Component*)&manager_})
         p->setVisible(p == seg.page);
     res_.setVisible(seg.resTab >= 0);
@@ -830,6 +858,59 @@ void StudioComponent::runJob(const juce::String& name, std::function<std::pair<j
             refreshInspector();
         });
     }).detach();
+}
+
+void StudioComponent::openReport(ReportSource s, const juce::File& f) {
+    namespace rp = jobs::report;
+    ++jobs_;
+    const auto gen = ++reportGen_;
+    reportStatus_.setText("Reading " + f.getFullPathName() + " (read-only, on a worker thread)...", juce::dontSendNotification);
+    refreshAvailability();
+    std::weak_ptr<bool> alive = alive_;
+    std::thread([this, alive, s, gen, path = f.getFullPathName().toStdString()] {
+        auto r = std::make_shared<rp::Report>();
+        std::string err;
+        const auto going = [alive] { return !alive.expired(); };
+        if (s == ReportSource::JsonFile) err = rp::loadJsonReport(path, r.get());
+        else if (s == ReportSource::Inventory) {
+            const auto L = library::load(path, going);
+            *r = rp::fromInventory(L);
+            if (!L.ok) err = "library not read: " + L.error;
+        } else {
+            const auto v = library::validate(path, going);
+            *r = rp::fromValidation(v);
+            if (!v.ok) err = "NOT validated: " + v.error;
+        }
+        const auto text = std::make_shared<const std::string>(err.empty() ? rp::text(*r) : std::string());
+        juce::MessageManager::callAsync([this, alive, gen, r, err, text] {
+            if (alive.expired()) return;
+            --jobs_;
+            if (gen == reportGen_) {   // a newer open wins
+                if (err.empty()) report_ = r;
+                else report_.reset();
+                reportView_.setText(juce::String::fromUTF8(text->c_str()), false);
+                reportStatus_.setText(err.empty() ? "Showing (read-only): " + juce::String::fromUTF8(r->title.c_str())
+                                                  : "Not shown: " + juce::String::fromUTF8(err.c_str()), juce::dontSendNotification);
+            }
+            refreshAvailability();
+        });
+    }).detach();
+}
+
+juce::String StudioComponent::reportUnavailable() const {
+    if (jobs_ > 0) return "Needs: the running read to finish";
+    return report_ ? "" : "Needs: a report open (Open Report File..., Library Inventory... or Library Validation...)";
+}
+
+uint64_t StudioComponent::exportReport(const juce::File& dest) {
+    if (reportUnavailable().isNotEmpty()) return 0;
+    reportStatus_.setText("Exporting " + juce::String::fromUTF8(report_->title.c_str()) + " as an export job...", juce::dontSendNotification);
+    return enqueue(jobs::reportExport(report_, dest.getFullPathName().toStdString()), nullptr, [this](const jobs::JobState& j) {
+        reportStatus_.setText(j.phase == jobs::Phase::Done ? "Exported: " + juce::String::fromUTF8(j.dest.c_str()) + "  " +
+                                                                 juce::String::fromUTF8(st::badgeLine(j.level).c_str())
+                                                           : "Report NOT written: " + juce::String::fromUTF8(j.reason.c_str()),
+                              juce::dontSendNotification);
+    });
 }
 
 // The record is applied against a FRESH L1/L2 check: files changed since the last Verify Package never get L3.
@@ -1221,6 +1302,7 @@ void StudioComponent::refreshAvailability() {
     const bool samples = source_ && (source_->kind == K::KorgSamplingData || source_->kind == K::WavFolder);
     setUnavailable(*toSampleLab_, samples ? "" : "Needs: a KMP/KSF or WAV folder as the open source");
     setUnavailable(*useSourceBtn_, source_ ? "" : "Needs: a source opened in Library Workspace");
+    setUnavailable(*reportExportBtn_, reportUnavailable());
     setUnavailable(*paInspectBtn_, paNativeUnavailable());
     setUnavailable(*kmpBtn_, kmpUnavailable());
     for (auto& [t, b] : labButtons_) setUnavailable(*b, labUnavailable(t));
@@ -1312,7 +1394,7 @@ void StudioComponent::resized() {
     r.removeFromTop(10);
     if (leftovers_.isVisible()) { leftovers_.setBounds(r.removeFromTop(40)); r.removeFromTop(8); }
     for (auto* p : {(juce::Component*)&res_, (juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
-                    (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_,
+                    (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_, (juce::Component*)&reportsPage_,
                     (juce::Component*)&manager_})
         p->setBounds(r);
 }
