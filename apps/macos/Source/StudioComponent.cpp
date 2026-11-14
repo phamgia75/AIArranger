@@ -472,15 +472,20 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     title_.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     title_.setColour(juce::Label::textColourId, juce::Colours::white);
-    experimental_.setText("EXPERIMENTAL", juce::dontSendNotification);
-    experimental_.setColour(juce::Label::textColourId, kExperimental);
     addAndMakeVisible(title_);
-    addChildComponent(experimental_);
     addAndMakeVisible(segmentBar_);
     styleText(inspector_);
     inspector_.setColour(juce::TextEditor::backgroundColourId, kSurface);
     addAndMakeVisible(inspector_);
 
+    // VoiceOver reads a pane or field by its title (UX a11y audit A1); buttons already speak their text and reason
+    for (auto [c, t] : std::initializer_list<std::pair<juce::Component*, const char*>>{
+             {&inspector_, "Inspector"}, {&libraryView_, "Source library (read-only)"}, {&kmpReport_, "KMP / KSF Writer report"},
+             {&labReport_, "Sample Lab Tools report"}, {&labBars_, "Bars"}, {&labBeats_, "Beats"}, {&labStart_, "Loop start"},
+             {&labEnd_, "Loop end"}, {&labSnap_, "Loop snap"}, {&labXfade_, "Loop crossfade"}, {&quality_, "Quality report"},
+             {&styleReport_, "Style report"}, {&styleElem_, "Style element"}, {&styleTrack_, "Style track"}, {&styleOp_, "Edit operation"},
+             {&styleValue_, "Edit value"}, {&jobsLog_, "Validation results"}, {&jobView_, "Export jobs"}})
+        c->setTitle(t);
     setWantsKeyboardFocus(true);
     refreshAvailability();
     setSize(1440, 900);
@@ -518,7 +523,6 @@ void StudioComponent::showDomain(Domain d, int segment) {
     for (int i = 0; i < kDomains; ++i) domainButtons_[size_t(i)]->setToggleState(false, juce::dontSendNotification);
     for (auto* b : domainButtons_) if (b->getButtonText() == domainName(d)) b->setToggleState(true, juce::dontSendNotification);
     title_.setText(domainName(d), juce::dontSendNotification);
-    experimental_.setVisible(d == Domain::StyleStudio);
 
     // segmented control, same place on every screen (spec §2); built once per domain
     for (auto& [dd, bs] : segmentButtons_)
@@ -1432,9 +1436,7 @@ void StudioComponent::resized() {
     }
     inspector_.setBounds(r.removeFromRight(300).reduced(8, 12));
     r.reduce(16, 12);
-    auto head = r.removeFromTop(32);
-    experimental_.setBounds(head.removeFromRight(120));
-    title_.setBounds(head);
+    title_.setBounds(r.removeFromTop(32));
     r.removeFromTop(6);
     segmentBar_.setBounds(r.removeFromTop(28));
     {

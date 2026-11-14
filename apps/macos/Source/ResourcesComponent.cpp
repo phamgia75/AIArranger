@@ -123,6 +123,7 @@ ResourcesComponent::ResourcesComponent() {
     kstPage_.addAndMakeVisible(verifyBtn_);
     cancelBackupBtn_.onClick = [this] { cancelBackup(); };
     cancelBackupBtn_.setEnabled(false);
+    cancelBackupBtn_.setTooltip("Stops a running Backup KST or Verify Backup; available only while one runs");
     kstPage_.addAndMakeVisible(backupBtn_);
     kstPage_.addAndMakeVisible(cancelBackupBtn_);
     kstPage_.addAndMakeVisible(backupBar_);
@@ -146,6 +147,11 @@ ResourcesComponent::ResourcesComponent() {
         memPage_.addAndMakeVisible(*c);
 
     const auto bg = juce::Colour(0xff1e1e1e);
+    for (auto [c, t] : std::initializer_list<std::pair<juce::Component*, const char*>>{
+             {&tree_, "Resource Graph"}, {&details_, "Resource details"}, {&summary_, "Summary and memory budget"},
+             {&kstOut_, "KST Library results"}, {&memBefore_, "Memory Info before import"}, {&memAfter_, "Memory Info after import"},
+             {&memOut_, "Memory comparison"}})
+        c->setTitle(t);   // VoiceOver names (UX a11y audit A1)
     tabs_.addTab("Resource Graph", bg, &graphPage_, false);
     tabs_.addTab("KST Library", bg, &kstPage_, false);
     tabs_.addTab("Memory Check", bg, &memPage_, false);

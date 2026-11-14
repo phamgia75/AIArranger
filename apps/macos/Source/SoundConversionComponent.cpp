@@ -56,6 +56,11 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                         juce::dontSendNotification);
     mapping_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
     mapping_.setTitle("Key mapping (proposed; edit and press Preview)");
+    name_.setTitle("Sound name");
+    order_.setTitle("Layers, softest first");
+    splits_.setTitle("Velocity splits");
+    preview_.setAccessibleTitle("Key map preview and checks");
+    recipe_.setAccessibleTitle("Sound recipe");
     mapping_.setTextToShowWhenEmpty("Press Preview: AIArranger measures each sample's pitch and proposes a key map here.", juce::Colour(0xff9090a0));
     addChildComponent(mapping_);
     zoneMap_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
@@ -100,6 +105,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                        });
     };
     for (auto* b : {&folderBtn_, &previewBtn_, &generateBtn_}) addAndMakeVisible(*b);
+    generateBtn_.setTooltip("Available after Preview; writes a new local package folder");
     generateBtn_.setEnabled(false);
 }
 

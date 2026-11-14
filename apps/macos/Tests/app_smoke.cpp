@@ -2312,6 +2312,40 @@ int main() {
         TEST("studio: nothing is labelled Pa5X-compatible", !st.inspectorText().containsIgnoreCase("compatible") &&
              !st.jobsText().containsIgnoreCase("Pa5X-compatible") && !st.libraryText().containsIgnoreCase("compatible"));
 
+        {   // UX a11y audit A1/A2: VoiceOver reads the accessibility title. Every text pane, input, list and popup in the
+            // whole Studio tree (Sounds & Resources tabs included) needs one, and every disabled button its reason (tooltip = AX help).
+            juce::StringArray unnamed, noReason;
+            std::function<void(juce::Component&, const juce::String&)> walk = [&](juce::Component& c, const juce::String& path) {
+                const auto where = path + "/" + (c.getComponentID().isNotEmpty() ? c.getComponentID() : juce::String(typeid(c).name()));
+                const bool field = dynamic_cast<juce::TextEditor*>(&c) || dynamic_cast<juce::ComboBox*>(&c) || dynamic_cast<juce::ListBox*>(&c) ||
+                                   dynamic_cast<juce::TreeView*>(&c) || dynamic_cast<juce::CodeEditorComponent*>(&c);
+                // The handlers of these types return the component title (JUCE 8.0.4 sources); off-screen there is no peer, so
+                // getAccessibilityHandler() is null here and the title is checked directly.
+                if (field && c.isAccessible() && c.getTitle().trim().isEmpty()) unnamed.add(where);
+                if (auto* b = dynamic_cast<juce::Button*>(&c); b && !b->isEnabled() && b->getTooltip().trim().isEmpty())
+                    noReason.add(b->getButtonText().isNotEmpty() ? b->getButtonText() : where);
+                if (dynamic_cast<juce::ComboBox*>(&c) || dynamic_cast<juce::TextEditor*>(&c)) return;   // their own internals
+                for (auto* k : c.getChildren()) walk(*k, where);
+            };
+            for (D d : {D::Library, D::ImportExport, D::SampleLab, D::StyleStudio, D::Validation})   // pages are children only while shown
+                for (int i = 0; i < st.segmentNames(d).size(); ++i) { st.showDomain(d, i); pump(20); walk(st, {}); }
+            unnamed.removeDuplicates(false);
+            noReason.removeDuplicates(false);
+            for (const auto& u : unnamed) std::printf("  info: no accessible name: %s\n", u.toRawUTF8());
+            for (const auto& u : noReason) std::printf("  info: disabled without a reason: %s\n", u.toRawUTF8());
+            TEST("a11y: every text pane, input, list and popup in the Studio has an accessible name", unnamed.isEmpty());
+            TEST("a11y: every disabled button in the Studio says why (tooltip, read by VoiceOver)", noReason.isEmpty());
+        }
+        {   // Labelling rules §2: EXPERIMENTAL marks Pa5X-bound actions and outputs, not a whole domain (UASF saves and reports are ordinary)
+            st.showDomain(D::StyleStudio);
+            bool header = false;
+            for (auto* c : st.getChildren())
+                if (auto* l = dynamic_cast<juce::Label*>(c); l && l->isVisible() && l->getText() == "EXPERIMENTAL") header = true;
+            TEST("labels: no domain-wide EXPERIMENTAL header on Style Studio; the Pa5X SMF actions keep theirs",
+                 !header && find<juce::Button>(st.page(D::StyleStudio), "Export Pa5X SMF (EXPERIMENTAL)...") != nullptr &&
+                 find<juce::Button>(st.page(D::ImportExport), "Style as Pa5X SMF (EXPERIMENTAL)") != nullptr);
+        }
+
         if (const char* dir = std::getenv("AIARR_SNAPSHOT_DIR"); dir && *dir) {   // offscreen renders for a later look; not a hands-on check
             st.setValidationTarget(juce::File(pkg.string()));
             fs::remove_all(pkg);

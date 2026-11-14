@@ -98,6 +98,11 @@ LibraryManagerComponent::LibraryManagerComponent() {
     search_.onTextChange = [this] { refilter(); };
     value_.setTextToShowWhenEmpty("value: new name, or the other bank (e.g. STYLE/USER05)", kText2);
     value_.onTextChange = [this] { refresh(); };
+    search_.setTitle("Search both libraries");
+    value_.setTitle("New name or other bank");
+    report_.setTitle("Library Manager report");
+    a_.list.setTitle("Library A items");
+    b_.list.setTitle("Library B items");
     hint_.setColour(juce::Label::textColourId, kText2);
     hint_.setText("Sources are only read. Copy/Move target: the bank of the item selected on the other side, else the same bank id; first free slot. "
                   "Execute Plan writes a NEW library (file-level operation; not verified on a keyboard).", juce::dontSendNotification);
