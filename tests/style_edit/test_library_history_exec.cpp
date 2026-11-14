@@ -29,6 +29,16 @@ static bool has(const std::string& s, const std::string& what) { return s.find(w
 static std::string slurp(const fs::path& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
 static void put(const fs::path& p, const std::string& s) { fs::create_directories(p.parent_path()); std::ofstream(p, std::ios::binary) << s; }
 static std::string blob(const std::string& tag) { return "synthetic test bytes, not a Korg file: " + tag + "\n"; }
+// The modification time with its nanoseconds, from the platform's native stat field (Linux CI and macOS).
+static const struct timespec& mtimeOf(const struct stat& s) {
+#if defined(__APPLE__)
+    return s.st_mtimespec;
+#elif defined(__linux__)
+    return s.st_mtim;
+#else
+#error "test_library_history_exec: add this platform's nanosecond stat mtime field"
+#endif
+}
 // Every entry below `root` (and root itself): kind, a file's SHA-256, size, mtime (ns), mode.
 static std::map<std::string, std::string> snapshot(const fs::path& root) {
     std::map<std::string, std::string> m;
@@ -40,7 +50,7 @@ static std::map<std::string, std::string> snapshot(const fs::path& root) {
         const std::string what = S_ISREG(s.st_mode) ? "file " + media::detail::sha256File(p, [](size_t) { return true; }, &cancelled, &err) + err
                                  : S_ISDIR(s.st_mode) ? "dir" : "other";
         m[p == root ? "." : fs::relative(p, root).generic_string()] = what + " size " + std::to_string(s.st_size) + " mtime " +
-            std::to_string(s.st_mtimespec.tv_sec) + "." + std::to_string(s.st_mtimespec.tv_nsec) + " mode " + std::to_string(s.st_mode);
+            std::to_string(mtimeOf(s).tv_sec) + "." + std::to_string(mtimeOf(s).tv_nsec) + " mode " + std::to_string(s.st_mode);
     };
     add(root);
     for (const auto& e : fs::recursive_directory_iterator(root)) add(e.path());
