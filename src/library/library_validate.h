@@ -49,7 +49,7 @@ struct RuleTable {
     std::vector<std::string> bankFilePrefixes;           // SET: documented/observed bank file names, PREFIXnn (R-17)
     std::map<std::string, RuleInfo> rules;
     std::set<std::string> typeFiles;                     // "TYPE/NAME" files allowed directly in a banked type folder (R-05), upper case
-    std::set<std::string> bankFiles;                     // names allowed in any bank sub-folder whatever the extension (R-04), upper case
+    std::set<std::string> bankFiles;                     // "TYPE/NAME" files allowed in that type's bank sub-folders whatever the extension (R-04), upper case
 };
 
 inline const RuleTable& pa5xKstTable() {
@@ -81,7 +81,7 @@ inline const RuleTable& pa5xKstTable() {
          {"R-14", {Severity::Warn, "MAN5 p.736 (User Sample Sounds) + OBSERVED MULTISMP folder"}},
          {"R-18", {Severity::Error, "FAT32/exFAT names are case-insensitive (general file-system rule, not Korg-specific)"}}},
         {"SONGBOOK/LISTDB.SBL"},   // OBSERVED beside the SONGDB.SBD bank folder in all three owner KSTs
-        {"METADIR.JSON"}};         // OBSERVED in STYLE and KEYBOARDSET bank folders of the owner KST; content not read
+        {"STYLE/METADIR.JSON", "KEYBOARDSET/METADIR.JSON"}};   // OBSERVED only there (38 + 27 banks of the owner KST); content not read
     return t;
 }
 
@@ -264,7 +264,7 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
         ++has[type];
         if (ext == ".PCM" || ext == ".KMP") sampleBytes += e.size;
         const auto te = t->types.find(type);
-        const bool bankMeta = parts.size() == 3 && t->banked.count(type) && t->bankFiles.count(parts[2]);
+        const bool bankMeta = parts.size() == 3 && t->banked.count(type) && t->bankFiles.count(type + "/" + parts[2]);
         if (te != t->types.end() && !te->second.count(ext) && !bankMeta) {
             std::string want;
             for (const auto& x : te->second) want += (want.empty() ? "" : "/") + x;
