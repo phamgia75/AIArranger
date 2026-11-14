@@ -72,8 +72,10 @@ invented attribute or node is caught.
   apart from factory/GM, and the assembler refuses it.
 - Re-measured with these rules (Codex r2, counts only, 4 443 OK before and after): **32 152 resolved / 352
   dangling** (320 slot empty, 32 file absent), 179 126 factory/GM, **0 unresolved, 4 problems**.
-  - The 4 problems are 4 Pad `Main.mid` leaves (3 objects, one of them also in a copied bank). Each has a CC11 in
-    track 1 at tick 24 with a data byte ≥ 0x80, which is invalid under SMF 1.0. They are refused, not guessed at.
+  - The 4 problems are 4 distinct owner Pad objects. Each one's MIDI leaf carries a CC11 data byte ≥ 0x80 (track 1,
+    tick 24), which does not conform to SMF 1.0. The reader refuses them; it does not guess. A private investigation
+    note is in the research folder. It concludes GENUINELY_MALFORMED: no SMF 1.0 reading parses these tracks. Across
+    1 029 owner Pad leaves, 4 of 2 747 CC11 values are > 0x7F, and no other data byte ≥ 0x80 occurs.
   - Each of these leaves holds exactly one user sound select. That accounts for resolved 32 156 → 32 152.
   - The cross-track merge and the unresolved category changed no other count. In the owner copy every bank select
     precedes its Program Change in the same track.
@@ -95,3 +97,5 @@ invented attribute or node is caught.
 2. The SysEx parameter block layout (track volume/pan/FX), needed to set anything beyond the sound.
 3. Defaults the Pa5X assumes for omitted elements: chord table, sync, loop and tempo of a Style.
 4. Whether a Style needs more than the Drum track, or tracks in every element, to be accepted.
+5. Residual: the Pa5X itself wrote the 4 non-conformant Pad leaves above. A future importer of owner files may need a
+   documented lenient mode for exactly this case (an 8-bit CC11 value). Not implemented; owner decision.
