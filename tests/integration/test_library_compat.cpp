@@ -41,6 +41,16 @@ static const CompatLine* line(const std::vector<CompatTarget>& card, const std::
     return nullptr;
 }
 static bool has(const CompatLine* l, const std::string& text) { return l && (l->text + " [" + l->source + "]").find(text) != std::string::npos; }
+// Any line of `kbd` with this rule and status that contains every text.
+static bool any(const std::vector<CompatTarget>& card, const std::string& kbd, const std::string& rule, Compat s, std::initializer_list<const char*> texts) {
+    for (const auto& c : card)
+        if (c.keyboard == kbd)
+            for (const auto& l : c.lines)
+                if (l.rule == rule && l.status == s &&
+                    std::all_of(texts.begin(), texts.end(), [&](const char* t) { return (l.text + " [" + l.source + "]").find(t) != std::string::npos; })) return true;
+    return false;
+}
+static const char* kKbds[] = {"Pa5X", "Pa4X family", "Pa700/Pa1000 family"};
 
 int main() {
     std::printf("Test: Keyboard Compatibility card (sourced rule tables only)\n");
@@ -64,11 +74,17 @@ int main() {
     TEST("every target: L3 not measured", std::all_of(card.begin(), card.end(), [](const CompatTarget& c) {
              return std::any_of(c.lines.begin(), c.lines.end(), [](const CompatLine& l) { return l.rule == "L3" && l.text.find("not measured") != std::string::npos; }); }));
     const std::string text = compatCardText(itemAt(L, "STYLE/BANK01/Ballad.STG"), card);
-    TEST("text: never a compatibility claim, every target NOT VERIFIED", text.find("Pa5X: NOT VERIFIED ON A PA5X") != std::string::npos &&
-         text.find("NOT VERIFIED ON A PA4X FAMILY KEYBOARD") != std::string::npos && text.find(" compatible") == std::string::npos);
+    TEST("text: never a compatibility claim, every target NOT VERIFIED", text.find("hardware: not verified on a Pa5X\n") != std::string::npos &&
+         text.find("hardware: not verified on a Pa4X family keyboard") != std::string::npos && text.find(" compatible") == std::string::npos);
+    // owner #57 (d): provenance vs verification
+    for (const char* k : kKbds)
+        TEST((std::string("wording: ") + k + " has an explicit 'hardware: not verified' line").c_str(),
+             any(card, k, "HW", Compat::Unknown, {"hardware: not verified on a"}));
+    TEST("wording: DOCUMENTED is defined as a documented rule applied by software, not verification",
+         text.find("DOCUMENTED = a documented rule, applied by software") != std::string::npos && text.find("not a verification") != std::string::npos);
     const auto loose = compatCard(L, itemAt(L, "STYLE/Loose.STG"), v);
     TEST("Pa5X: the validator's R-05 finding on this item is EXCEEDS with its source", has(line(loose, "Pa5X", "R-05", Compat::Exceeds), "MAN5 p.731-732"));
-    TEST("validator findings only on the item's own layout table", !line(loose, "Pa4X family", "R-05", Compat::Exceeds));
+    TEST("the Pa4X table finds no R-05 on a file directly in a type folder (banks are files there)", !line(loose, "Pa4X family", "R-05", Compat::Exceeds));
 
     // ── Pa700 SET: a Style bank file with 49 slots (R-16), the one-way Data Conversion for the Pa5X (R-13) ──
     std::vector<Synth> full;
@@ -90,7 +106,7 @@ int main() {
     TEST("SET: an item of a bank file within 48 slots is DOCUMENTED on both SET targets",
          line(ok16, "Pa4X family", "R-16", Compat::Documented) && line(ok16, "Pa700/Pa1000 family", "R-16", Compat::Documented) &&
          !line(ok16, "Pa4X family", "R-16", Compat::Exceeds));
-    TEST("Pa5X: a SET item only through the one-way Data Conversion (R-13, MAN5 p.737)", has(line(first, "Pa5X", "R-13", Compat::Documented), "MAN5 p.737"));
+    TEST("Pa5X: a SET item only through the one-way Data Conversion (R-13, MAN5 p.737)", has(line(first, "Pa5X", "R-13", Compat::Note), "MAN5 p.737"));
     TEST("Pa5X: .STY is not in the Pa5X table: UNKNOWN", line(first, "Pa5X", "R-04", Compat::Unknown) != nullptr);
 
     // ── limits from the tables on a synthetic model (no 4 GB file written) ──
@@ -101,12 +117,14 @@ int main() {
         big.sampleDiskBytes = (uintmax_t(4) << 30) + 1;
         Item pcm{"PCM/RAM01.PCM", "Sample", "PCM", "RAM01", -1, -1, 0, "file name"};
         big.files["PCM/RAM01.PCM"].size = uintmax_t(1) << 32;
-        Validation none;   // ok = false
+        Validation none;   // ok = false, run with the Pa5X table on this (folder-less) model
         none.error = "cancelled";
+        none.table = pa5xKstTable().name;
         const auto c = compatCard(big, pcm, none);
         // Codex r1 #3: disk bytes are not sample memory and "4 GB" is unit-ambiguous: the card's own R-08 line is never DOCUMENTED
-        TEST("Pa5X: R-08 from disk bytes is UNKNOWN with both 4 GB readings, never DOCUMENTED or EXCEEDS by the card itself",
-             has(line(c, "Pa5X", "R-08", Compat::Unknown), "4000000000") && has(line(c, "Pa5X", "R-08", Compat::Unknown), "4294967296") &&
+        // owner #57 (c): sample RAM is never inferred from disk sizes: UNKNOWN with the reason
+        TEST("Pa5X: R-08 is UNKNOWN with the reason (no measured or documented sample-memory figure), never DOCUMENTED or EXCEEDS",
+             any(c, "Pa5X", "R-08", Compat::Unknown, {"no measured", "disk size is not sample memory"}) &&
              !line(c, "Pa5X", "R-08", Compat::Documented) && !line(c, "Pa5X", "R-08", Compat::Exceeds));
         big.sampleDiskBytes = 4100000000u;   // between the two readings
         const auto amb = compatCard(big, pcm, none);
@@ -114,12 +132,14 @@ int main() {
         big.sampleDiskBytes = 10;
         const auto small = compatCard(big, pcm, none);
         TEST("Pa5X: even 10 disk bytes: R-08 UNKNOWN, not DOCUMENTED", line(small, "Pa5X", "R-08", Compat::Unknown) && !line(small, "Pa5X", "R-08", Compat::Documented));
-        Validation v8;   // the validator's own R-08 WARN (binary 4 GiB, its rule table's source) stays EXCEEDS
+        Validation v8;   // the validator's R-08 WARN is a disk-size figure: never shown as an EXCEEDS of sample memory (owner #57 c)
         v8.ok = true;
+        v8.table = pa5xKstTable().name;
         v8.findings.push_back({Severity::Warn, "R-08", ".", "PCM+KMP disk bytes exceed 4 GB", "MAN5 p.1174/p.1936: 4 GB User Sample memory (disk size here, not RAM)"});
-        TEST("Pa5X: the validator's R-08 finding stays EXCEEDS with its source", has(line(compatCard(big, pcm, v8), "Pa5X", "R-08", Compat::Exceeds), "MAN5 p.1174"));
+        const auto c8 = compatCard(big, pcm, v8);
+        TEST("Pa5X: the validator's disk-size R-08 is not EXCEEDS; R-08 stays UNKNOWN", !line(c8, "Pa5X", "R-08", Compat::Exceeds) && line(c8, "Pa5X", "R-08", Compat::Unknown));
         TEST("Pa5X: a 4 GiB file EXCEEDS the FAT32 limit", line(c, "Pa5X", "FAT32", Compat::Exceeds) != nullptr);
-        TEST("an incomplete validation is UNKNOWN, never a pass", has(line(c, "Pa5X", "-", Compat::Unknown), "validation incomplete: cancelled"));
+        TEST("an incomplete validation is UNKNOWN, never a pass", any(c, "Pa5X", "-", Compat::Unknown, {"validation against this table incomplete; unresolved: cancelled"}));
         TEST("FAT32 limit is 4 GiB - 1 byte", kFat32MaxFileBytes == 4294967295u);
     }
 
@@ -131,8 +151,24 @@ int main() {
         TEST("partial: the validator stops at the unreadable file with findings already made", !pv.ok && !pv.findings.empty());
         const auto pc = compatCard(PL, itemAt(PL, "STYLE/Loose.STG"), pv);
         TEST("partial: the R-05 already found on the item stays EXCEEDS", has(line(pc, "Pa5X", "R-05", Compat::Exceeds), "MAN5 p.731-732"));
-        TEST("partial: plus the incomplete-validation UNKNOWN", has(line(pc, "Pa5X", "-", Compat::Unknown), "validation incomplete"));
+        TEST("partial: plus the incomplete-validation UNKNOWN", any(pc, "Pa5X", "-", Compat::Unknown, {"validation incomplete"}));
+        // owner #57 (a) + dispatcher: EVERY target carries the UNKNOWN with the unresolved file and its error
+        for (const char* k : kKbds)
+            TEST((std::string("partial: ") + k + " shows the unresolved file and its error").c_str(),
+                 any(pc, k, "-", Compat::Unknown, {"validation incomplete", "STYLE/ZZ/Unreadable.STG", "Permission denied"}));
         fs::permissions(p / "STYLE/ZZ/Unreadable.STG", fs::perms::owner_all);
+    }
+    {   // owner #57 (b): each keyboard evaluated against ITS own table, never a copy of the source layout's result
+        const fs::path p = make(root / "ph700", {{"GLOBAL/LIMITER.AUD", pnAny}, {"STYLE/USER01.STY", std::string(kPlaceholder) + "-x"}});
+        const auto before7 = snapshot(p);
+        const auto PL = load(p);
+        const auto pc = compatCard(PL, itemAt(PL, "STYLE/USER01.STY"), validate(p));
+        for (const char* k : kKbds)
+            TEST((std::string("independent: ") + k + " runs its own R-10 (placeholder) check").c_str(), any(pc, k, "R-10", Compat::Exceeds, {"placeholder"}));
+        TEST("independent: the Pa4X table's R-01 (.SET suffix, MAN4 p.973) fires on the Pa4X target only",
+             any(pc, "Pa4X family", "R-01", Compat::Exceeds, {"MAN4 PDF p.973"}) && !line(pc, "Pa700/Pa1000 family", "R-01", Compat::Exceeds));
+        TEST("independent: the Pa5X table's R-01 (.KST, MAN5 p.721) fires on the Pa5X target", any(pc, "Pa5X", "R-01", Compat::Exceeds, {"MAN5 p.721"}));
+        TEST("independent: the folder is unchanged", snapshot(p) == before7);
     }
     TEST("the folders are unchanged (read-only)", snapshot(kst) == before && snapshot(set) == setBefore);
     fs::remove_all(root);

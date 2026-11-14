@@ -384,7 +384,7 @@ static std::string reportFor(LibraryManagerComponent::View view, std::shared_ptr
             const auto& it = act->items[size_t(selected)];
             const auto v = lib::validate(act->root, going);
             if (stale()) return t;
-            return std::string("Library ") + active + ": " + lib::compatCardText(it, lib::compatCard(*act, it, v));
+            return std::string("Library ") + active + ": " + lib::compatCardText(it, lib::compatCard(*act, it, v, going));
         }
         case View::Compare: break;
     }

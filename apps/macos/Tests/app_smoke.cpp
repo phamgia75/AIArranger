@@ -1083,7 +1083,8 @@ int main() {
             waitLm(5000);
             TEST("library manager: Compatibility card per keyboard, Pa5X first, every line sourced, never verified",
                  lm.reportText().contains("Keyboard Compatibility card") && lm.reportText().contains("STYLE/USER01/Ballad.STG") &&
-                 lm.reportText().indexOf("Pa5X: NOT VERIFIED ON A PA5X") < lm.reportText().indexOf("Pa4X family: NOT VERIFIED") &&
+                 lm.reportText().indexOf("hardware: not verified on a Pa5X") < lm.reportText().indexOf("hardware: not verified on a Pa4X family keyboard") &&
+                 lm.reportText().contains("DOCUMENTED = a documented rule, applied by software") &&
                  lm.reportText().contains("DOCUMENTED  R-04  STYLE/.STG") && lm.reportText().contains("[MAN5 p.721") &&
                  lm.reportText().contains("L3  measured on hardware: not measured"));
             lm.selectRow('A', 0);   // Hit: the card follows the selection
