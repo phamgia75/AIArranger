@@ -175,8 +175,12 @@ int main() {
         std::error_code ec;
         fs::create_symlink("/Volumes", root / "vol", ec);
         e.clear();
-        TEST("--out through a symlink into /Volumes is refused: " + e, !ec && snd::writeKorgFolder(one, root / "vol" / vol.filename() / "Keys", "", &e).empty() &&
-             e.find("mounted volume") != std::string::npos && !fs::exists(vol));
+        const bool made = !ec && !snd::writeKorgFolder(one, root / "vol" / vol.filename() / "Keys", "", &e).empty();
+        if (fs::is_directory("/Volumes"))   // macOS: the mount folder exists, the link resolves into it, and the guard refuses
+            TEST("--out through a symlink into /Volumes is refused: " + e, !ec && !made && e.find("mounted volume") != std::string::npos && !fs::exists(vol));
+        else   // no /Volumes (Linux): the link leads nowhere. Not mounted-volume coverage: Linux mount points have no guard (D44)
+            TEST("no /Volumes here: a write through a link to it fails and creates nothing (no mounted-volume rule on this OS): " + e,
+                 !ec && !made && !e.empty() && !fs::exists(vol) && fs::is_symlink(fs::symlink_status(root / "vol")) && !fs::exists(root / "vol"));
     }
     {   // an apostrophe in a name: the printed read-back command must still be one shell word per argument
         x = one; x.name = "Bob's Lead";

@@ -173,12 +173,25 @@ int main() {
         TEST("D18 C1 the source is the output's NAME.INCOMPLETE: refused before any rename, the source stays", kbs.phase == Phase::Failed &&
              has(kbs.reason, "source") && fs::is_regular_file(root / "archive.INCOMPLETE/STYLE/BANK01.STY") && named(root, "archive.INCOMPLETE.stale-").empty() &&
              !fs::exists(root / "archive"));
-        // ... also when the names differ only by case (case-insensitive volume, the macOS default)
+        // ... and when the names differ only by case. Whether `archive` and `ARCHIVE` are one path depends on the volume
+        // (case-insensitive: the macOS default; case-sensitive: Linux, or a case-sensitive APFS volume): probed in the test
+        // folder itself, never assumed from the OS.
+        put(root / "case-probe", "p");
+        const bool foldsCase = fs::exists(root / "CASE-PROBE");
+        fs::remove(root / "case-probe");
+        std::printf("  (test folder %s)\n", foldsCase ? "is case-insensitive" : "is case-sensitive");
+        TEST("D18 C1 the job's case detection agrees with the probe of the test folder", jobs::detail::caseInsensitive(root) == foldsCase);
         auto kc = kstBackup(root / "archive.INCOMPLETE", root / "ARCHIVE");
         kc.moveLeftoverAside = true;
         const auto kcs = run(kc);
-        TEST("D18 C1 the same check ignores case on a case-insensitive volume", kcs.phase == Phase::Failed && fs::exists(root / "archive.INCOMPLETE/STYLE/BANK01.STY") &&
-             named(root, "archive.INCOMPLETE.stale-").empty() && named(root, "ARCHIVE.INCOMPLETE.stale-").empty());
+        if (foldsCase)
+            TEST("D18 C1 the same check ignores case on a case-insensitive volume", kcs.phase == Phase::Failed && fs::exists(root / "archive.INCOMPLETE/STYLE/BANK01.STY") &&
+                 named(root, "archive.INCOMPLETE.stale-").empty() && named(root, "ARCHIVE.INCOMPLETE.stale-").empty());
+        else   // two different folders: not an overlap, so the backup runs; the source is still never moved, renamed or changed
+            TEST("D18 C1 on a case-sensitive volume ARCHIVE is another folder: the backup runs and publishes, the source stays as it was",
+                 kcs.phase == Phase::Done && fs::is_regular_file(root / "ARCHIVE/STYLE/BANK01.STY") &&
+                 slurp(root / "archive.INCOMPLETE/STYLE/BANK01.STY") == std::string(100, 's') && !fs::exists(root / "ARCHIVE.INCOMPLETE") &&
+                 named(root, "archive.INCOMPLETE.stale-").empty() && named(root, "ARCHIVE.INCOMPLETE.stale-").empty());
         // generic for every job type: an output inside a source folder is refused
         put(root / "srcdir/a.txt", "x");
         auto inside = soundPackage(organ, root / "srcdir", "", root / "srcdir/pkg");
