@@ -51,6 +51,30 @@ inline bool safeName(const std::string& s) {
     return !library::detail::fatBad(s);
 }
 
+// The tree must be the object its folder says (top-level marker as observed) and every MIDI leaf must be an SMF the
+// closure reader accepts, so nothing is published that our own readers would reject.
+inline std::string contentRefusal(const std::string& type, const roottree::Node& t) {
+    const roottree::Node* clip = nullptr;
+    bool stage = false;
+    for (const auto& c : t.children) {
+        if (c.kind == roottree::Node::Leaf && c.name == "ClipDescription.xml") clip = &c;
+        if (c.kind == roottree::Node::Leaf && c.name == "StageDescription.xml") stage = true;
+    }
+    const auto clipType = [&](const char* ty) { return clip && clip->payload.find(std::string("<CLIP type=\"") + ty + "\"") != std::string::npos; };
+    if (type == "STYLE" ? !(stage && !clip) : type == "PAD" ? !clipType("PadClip") || stage : !clipType("KeyboardSetClip") || stage)
+        return "the tree is not a " + type + " object (top-level ClipDescription/StageDescription does not match)";
+    std::vector<const roottree::Node*> mids;
+    closure::collect(t, mids);
+    for (const auto* m : mids) {
+        std::vector<closure::Select> s;
+        std::string e;
+        if (!closure::selects(reinterpret_cast<const uint8_t*>(m->payload.data()), m->payload.size(), s, e)) return "MIDI leaf " + m->name + ": " + e;
+    }
+    return "";
+}
+
+// shortcut: path-based writes inside the fresh NAME.INCOMPLETE (not openat-pinned like kst_backup.h); a concurrent local
+// process swapping that folder could redirect them. Upgrade to the kst_backup.h *at() pattern before an app/job path.
 inline bool writeNew(const std::filesystem::path& p, const std::string& bytes, std::string& err) {
     std::FILE* f = std::fopen(p.c_str(), "wbx");   // exclusive: never replaces
     if (!f) { err = "cannot create " + p.string(); return false; }
@@ -69,6 +93,7 @@ inline Result build(const std::filesystem::path& parent, const std::string& kstN
     if (objects.empty() && carried.empty()) return fail("refusing: nothing to write");
     const fs::path out = parent / (kstName + ".KST");
     if (const auto why = outputFolderRefusal(out); !why.empty()) return fail(why);
+    if (std::error_code mec; fs::symlink_status(backupManifestPath(out), mec).type() != fs::file_type::not_found) return fail("refusing: " + backupManifestPath(out).string() + " already exists");
     std::error_code ec;
     if (!fs::is_directory(parent, ec)) return fail("refusing: parent folder does not exist: " + parent.string());
 
@@ -81,6 +106,7 @@ inline Result build(const std::filesystem::path& parent, const std::string& kstN
         if (!safeName(o.bank) || !safeName(o.name + ext)) return fail("refusing: unsafe bank or object name in " + o.type);
         std::string bytes, err;
         if (!roottree::write(o.tree, bytes, err)) return fail("refusing: " + o.type + "/" + o.name + ": " + err);
+        if (const auto why = contentRefusal(o.type, o.tree); !why.empty()) return fail("refusing: " + o.type + "/" + o.name + ": " + why);
         const std::string rel = o.type + "/" + o.bank + "/" + o.name + ext;
         if (!seen.insert(closure::upper(rel)).second) return fail("refusing: two objects map to " + rel + " (names differ only in case?)");
         files.emplace_back(rel, std::move(bytes));

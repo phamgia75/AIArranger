@@ -244,6 +244,17 @@ int main() {
         TEST("assemble: carried KORF copied byte-for-byte; the user reference resolves", c.ok && c.userRefs == 1 && c.dangling == 0 && a == bb);
         const auto d = assemble::build(tmp, "N6", {{"PAD", "B", "Dangles", pdcRef(121, 64, 6)}});
         TEST("assemble: a dangling user reference fails the build (reported, folder kept)", !d.ok && d.message.find("dangling") != std::string::npos && fs::exists(tmp / "N6.KST"));
+        // Review findings (Level 1, author-run): each refusal must happen before anything is published.
+        put(tmp / "R1.KST.manifest.sha256", "stale");
+        TEST("assemble: an existing manifest is refused before any write",
+             !assemble::build(tmp, "R1", kits[0].objects).ok && !fs::exists(tmp / "R1.KST") && !fs::exists(tmp / "R1.KST.INCOMPLETE"));
+        TEST("assemble: a MIDI leaf the reader cannot parse (tick >= 2^28, 5-byte delta) is refused before any write",
+             !assemble::build(tmp, "R2", {{"PAD", "B", "Late", build::padClipTree({121, 0, 0}, {{0x10000000u, 96, 60, 100}})}}).ok &&
+             !fs::exists(tmp / "R2.KST") && !fs::exists(tmp / "R2.KST.INCOMPLETE"));
+        TEST("assemble: an object whose tree is not its type (a Style as PAD, a Pad as STYLE) is refused",
+             !assemble::build(tmp, "R3", {{"PAD", "B", "X", kits[2].objects[0].tree}}).ok &&
+             !assemble::build(tmp, "R4", {{"STYLE", "B", "X", kits[0].objects[0].tree}}).ok &&
+             !assemble::build(tmp, "R5", {{"KEYBOARDSET", "B", "X", kits[0].objects[0].tree}}).ok && !fs::exists(tmp / "R3.KST"));
         size_t all = 0;
         for (const auto& kit : kits) { const auto k = assemble::build(tmp / "src", kit.name, kit.objects); all += k.ok && k.validatorErrors == 0 && k.dangling == 0; }
         TEST("assemble: the three W6 test KSTs (Pad, KBD Set, Style) build, validate and close", all == 3);

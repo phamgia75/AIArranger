@@ -139,6 +139,14 @@ int main() {
         for (int i = 0; i < 30; ++i) ok = branch("b", ok);
         TEST("nesting deeper than the limit refused, 30 levels accepted", !P(root(deep)).ok && P(root(ok)).ok);
     }
+    {
+        // Review finding: a 60 MB file of empty leaves took 1.24 GB RSS (6.3 M nodes); observed maximum is 513 nodes.
+        std::string many, few;
+        for (int i = 0; i < 70000; ++i) many += leaf("", "");
+        for (int i = 0; i < 1000; ++i) few += leaf("", "");
+        TEST("more nodes than the node limit refused (memory bound), 1000 accepted",
+             !P(root(many)).ok && P(root(many)).error.find("nodes") != std::string::npos && P(root(few)).ok);
+    }
 
     // The two KST containers tell each other apart.
     const std::string korf = build({{0x12020010, 6, 0, 0, "Generated Sample", "raw"}}, 1);

@@ -30,6 +30,8 @@ namespace ai_arranger::media::panative::build {
 
 using roottree::Node;
 
+// shortcut: values above 127 (key, velocity, CC/PC data) are masked to 7 bits, not refused; inputs are program-defined
+// (demo), add a refusal before taking user input.
 struct SoundSelect { uint8_t msb = 121, lsb = 0, program = 0; };   // CC0, CC32, Program Change (channel 1, as observed)
 struct Note { uint32_t tick = 0, length = 96; uint8_t key = 60, velocity = 100; };
 

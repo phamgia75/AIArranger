@@ -25,6 +25,7 @@
 namespace ai_arranger::media::panative::roottree {
 
 constexpr int kMaxDepth = 32;   // deepest observed STG nesting is under 10; deeper input is refused, not recursed into
+constexpr size_t kMaxNodes = 65536;   // observed maximum 513 per file; bounds memory (~80 B per node) on hostile input
 
 struct Node {
     enum Kind { Root, Branch, Leaf } kind = Leaf;
@@ -43,13 +44,14 @@ namespace detail {
 inline const char* tagOf(Node::Kind k) { return k == Node::Root ? "Root" : k == Node::Branch ? "Branch" : "Leaf"; }
 
 // Parses the nodes in [o, end) of p into out. Every length is checked before use.
-inline bool parseNodes(const uint8_t* p, size_t o, size_t end, int depth, std::vector<Node>& out, std::string& err) {
+inline bool parseNodes(const uint8_t* p, size_t o, size_t end, int depth, std::vector<Node>& out, std::string& err, size_t& nodes) {
     if (depth > kMaxDepth) { err = "nesting deeper than " + std::to_string(kMaxDepth) + " at " + std::to_string(o); return false; }
     while (o < end) {
         const void* t = std::memchr(p + o, 0, end - o);
         if (!t) { err = "node tag not terminated at " + std::to_string(o); return false; }
         const size_t te = size_t(static_cast<const uint8_t*>(t) - p);
         const std::string tag(reinterpret_cast<const char*>(p + o), te - o);
+        if (++nodes > kMaxNodes) { err = "more than " + std::to_string(kMaxNodes) + " nodes"; return false; }
         Node n;
         if (tag == "Branch") n.kind = Node::Branch;
         else if (tag == "Leaf") n.kind = Node::Leaf;
@@ -62,7 +64,7 @@ inline bool parseNodes(const uint8_t* p, size_t o, size_t end, int depth, std::v
         const size_t len = panative::detail::be32(p + ne + 1), body = ne + 5;
         if (len > end - body) { err = "node at " + std::to_string(o) + " runs past its parent"; return false; }
         if (n.kind == Node::Leaf) n.payload.assign(reinterpret_cast<const char*>(p + body), len);
-        else if (!parseNodes(p, body, body + len, depth + 1, n.children, err)) return false;
+        else if (!parseNodes(p, body, body + len, depth + 1, n.children, err, nodes)) return false;
         out.push_back(std::move(n));
         o = body + len;
     }
@@ -98,7 +100,8 @@ inline Tree parse(const uint8_t* p, size_t n) {
     if (panative::detail::be32(p + 7) != n - 11) { t.error = "Root length does not match the file size (truncated or trailing bytes)"; return t; }
     t.root.kind = Node::Root;
     t.root.name = "\x01";
-    if (!detail::parseNodes(p, 11, n, 1, t.root.children, t.error)) { t.root.children.clear(); return t; }
+    size_t nodes = 0;
+    if (!detail::parseNodes(p, 11, n, 1, t.root.children, t.error, nodes)) { t.root.children.clear(); return t; }
     t.ok = true;
     return t;
 }
