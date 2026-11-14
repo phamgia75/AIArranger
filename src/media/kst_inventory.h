@@ -164,6 +164,7 @@ inline std::string upper(std::string s) {
 // Folder suffix first (.KST: MAN5 p.721; .SET: MAN4 PDF p.973), then names only:
 // Pa700/Pa1000 markers (owner Pa700 SET, pa-studio-research FORMAT_MATRIX.md): GLOBAL/LIMITER.AUD,
 //   GLOBAL/MASTEREQ.AUD, SOUND/USERDK01.PCG, folder SONGBOOK/SONGDB.SBD. Pa4X's manual layout has none of them.
+//   The SONGDB.SBD folder is also OBSERVED in owner Pa5X KSTs, so it marks a Pa700 SET only without Pa5X markers.
 // Pa4X-family markers (MAN4 PDF p.975): .STY/.PRF/.PAD, SOUND/USERDK.PCG, MULTISMP/RAM.KMP.
 // Pa5X markers (MAN5 p.721): .STG/.KSC/.PDC.
 inline std::string detectLayout(const std::filesystem::path& root, const Listing& l) {
@@ -174,8 +175,8 @@ inline std::string detectLayout(const std::filesystem::path& root, const Listing
     if (dir.filename().empty()) dir = dir.parent_path();
     const std::string name = upper(dir.filename().string());
     auto ends = [&](const char* s) { const std::string x(s); return name.size() >= x.size() && name.compare(name.size() - x.size(), x.size(), x) == 0; };
-    bool pa700 = false, pa4x = false, pa5x = false;
-    for (const auto& d : l.dirs) pa700 |= upper(d) == "SONGBOOK/SONGDB.SBD";
+    bool pa700 = false, pa4x = false, pa5x = false, songDb = false;
+    for (const auto& d : l.dirs) songDb |= upper(d) == "SONGBOOK/SONGDB.SBD";
     for (const auto& [rel, e] : l.files) {
         const std::string r = upper(rel), ext = upper(std::filesystem::path(rel).extension().string());
         pa700 |= r == "GLOBAL/LIMITER.AUD" || r == "GLOBAL/MASTEREQ.AUD" || r == "SOUND/USERDK01.PCG";
@@ -183,7 +184,7 @@ inline std::string detectLayout(const std::filesystem::path& root, const Listing
         pa5x |= ext == ".STG" || ext == ".KSC" || ext == ".PDC";
     }
     if (ends(".KST")) return kLayoutKst;
-    if (pa700) return kLayoutPa700;
+    if (pa700 || (songDb && !pa5x)) return kLayoutPa700;
     if (ends(".SET") || pa4x) return kLayoutPa4x;
     return pa5x ? kLayoutKst : kLayoutUnknown;
 }
