@@ -48,8 +48,7 @@ struct RuleTable {
     std::set<std::string> bankFileTypes;                 // SET: type folders whose files are 48-slot bank files (R-16, R-17)
     std::vector<std::string> bankFilePrefixes;           // SET: documented/observed bank file names, PREFIXnn (R-17)
     std::map<std::string, RuleInfo> rules;
-    std::set<std::string> typeFiles;                     // "TYPE/NAME" files allowed directly in a banked type folder (R-05), upper case
-    std::set<std::string> bankFiles;                     // "TYPE/NAME" files allowed in that type's bank sub-folders whatever the extension (R-04), upper case
+    std::set<std::string> exactFiles;                    // whole relative paths allowed whatever the R-04/R-05 rules say, upper case
 };
 
 inline const RuleTable& pa5xKstTable() {
@@ -58,7 +57,7 @@ inline const RuleTable& pa5xKstTable() {
         "Pa5X KST (MAN5 + one OBSERVED KST listing)",
         ".KST",
         {{"STYLE", {".STG"}}, {"KEYBOARDSET", {".KSC"}}, {"PAD", {".PDC"}}, {"CHORDSEQUENCE", {".CSC"}}, {"SONGBOOK", {".SBD", ".SBL"}},
-         {"SOUND", {".PCG"}}, {"PCM", {".PCM"}}, {"MULTISMP", {".KMP"}}, {"SETTINGS", {".GBL", ".KSC"}}, {"MIDIPRESET", {".MPR"}},
+         {"SOUND", {".PCG"}}, {"PCM", {".PCM"}}, {"MULTISMP", {".KMP"}}, {"SETTINGS", {".GBL"}}, {"MIDIPRESET", {".MPR"}},
          {"VOICEPRESET", {".VOC"}}, {"GUITARPRESET", {".GTR"}}, {"QTPRESET", {".QTP"}}, {"MAXXAUDIOPRESET", {".MXP"}}, {"MATRIXPRESET", {".MTP"}}},
         {"STYLE", "KEYBOARDSET", "PAD", "CHORDSEQUENCE", "SONGBOOK"},
         {},
@@ -68,7 +67,7 @@ inline const RuleTable& pa5xKstTable() {
         {{"R-01", {Severity::Error, "MAN5 p.721: a KST is a reserved folder named .KST"}},
          {"R-02", {Severity::Error, "MAN5 p.721: the KST holds the User data"}},
          {"R-03", {Severity::Warn, obs}},
-         {"R-04", {Severity::Warn, "MAN5 p.721 extension table + folder pairing OBSERVED (owner KST copies: .MTP, SETTINGS .KSC, bank metadir.json)"}},
+         {"R-04", {Severity::Warn, "MAN5 p.721 extension table + folder pairing OBSERVED (owner KST copies: .MTP, SETTINGS/My Setting.ksc, bank metadir.json)"}},
          {"R-05", {Severity::Warn, "MAN5 p.731-732 (type, bank, file) + OBSERVED (owner KST copies: SONGBOOK/LISTDB.SBL, empty banks)"}},
          {"R-06", {Severity::Warn, "MAN5 p.738 ConvertReport.txt; OBSERVED ConversionReport.txt in Pa5X-converted owner KSTs"}},
          {"R-07", {Severity::Error, "an empty file is no resource (file level)"}},
@@ -80,8 +79,9 @@ inline const RuleTable& pa5xKstTable() {
          {"R-13", {Severity::Info, "MAN5 p.736: loading the whole KST deletes the User Samples in memory"}},
          {"R-14", {Severity::Warn, "MAN5 p.736 (User Sample Sounds) + OBSERVED MULTISMP folder"}},
          {"R-18", {Severity::Error, "FAT32/exFAT names are case-insensitive (general file-system rule, not Korg-specific)"}}},
-        {"SONGBOOK/LISTDB.SBL"},   // OBSERVED beside the SONGDB.SBD bank folder in all three owner KSTs
-        {"STYLE/METADIR.JSON", "KEYBOARDSET/METADIR.JSON"}};   // OBSERVED only there (38 + 27 banks of the owner KST); content not read
+        // OBSERVED in owner KSTs: LISTDB.SBL beside the SONGDB.SBD bank folder (3/3), My Setting.ksc beside SETUP.GBL.
+        // Bank metadir.json (STYLE/KEYBOARDSET only) is library::isKstBankMetadata.
+        {"SONGBOOK/LISTDB.SBL", "SETTINGS/MY SETTING.KSC"}};
     return t;
 }
 
@@ -264,13 +264,14 @@ inline Validation validate(const fs::path& root, const std::function<bool()>& ke
         ++has[type];
         if (ext == ".PCM" || ext == ".KMP") sampleBytes += e.size;
         const auto te = t->types.find(type);
-        const bool bankMeta = parts.size() == 3 && t->banked.count(type) && t->bankFiles.count(type + "/" + parts[2]);
-        if (te != t->types.end() && !te->second.count(ext) && !bankMeta) {
+        const std::string urel = media::detail::upper(rel);
+        const bool exact = t->exactFiles.count(urel) || (t == &pa5xKstTable() && isKstBankMetadata(urel));
+        if (te != t->types.end() && !te->second.count(ext) && !exact) {
             std::string want;
             for (const auto& x : te->second) want += (want.empty() ? "" : "/") + x;
             add("R-04", rel, "extension " + (ext.empty() ? std::string("(none)") : ext) + " not expected in " + type + " (expected " + (want.empty() ? "no files" : want) + ")");
         }
-        if (t->banked.count(type) && parts.size() == 2 && !t->typeFiles.count(type + "/" + parts[1])) add("R-05", rel, "file directly in a bank-organized type folder (observed: inside a bank sub-folder)");
+        if (t->banked.count(type) && parts.size() == 2 && !exact) add("R-05", rel, "file directly in a bank-organized type folder (observed: inside a bank sub-folder)");
         const bool expected = te != t->types.end() && te->second.count(ext);
         if (expected && t->bankFileTypes.count(type) && parts.size() == 2 && !detail::bankFileName(p.stem().string(), t->bankFilePrefixes)) {
             std::string want;

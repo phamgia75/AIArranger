@@ -74,7 +74,8 @@ int main() {
         {"R-04", {{"SOUND/metadir.json", "{}"}}},                // metadir.json only inside a bank folder
         {"R-04", {{"STYLE/BANK01/other.json", "{}"}}},           // only that one name
         {"R-04", {{"PAD/BANK01/metadir.json", "{}"}}},           // only in STYLE/KEYBOARDSET banks (where observed)
-        {"R-04", {{"SETTINGS/x.STG", "x"}}},                     // SETTINGS takes .GBL/.KSC only
+        {"R-04", {{"SETTINGS/x.STG", "x"}}},                     // SETTINGS takes .GBL (+ the one observed My Setting.ksc)
+        {"R-04", {{"SETTINGS/Ballad.ksc", "x"}}},                // only that one .KSC name was observed there
         {"R-04", {{"MATRIXPRESET/x.KSC", "x"}}},
         {"R-05", {{"SONGBOOK/OTHER.SBL", "x"}}},                 // only LISTDB.SBL sits directly in SONGBOOK
         {"R-05", {{"SONGBOOK/SONGDB.SBD/X/BANK01.SBD", "x"}}},   // no deeper than type/bank

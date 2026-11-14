@@ -56,7 +56,7 @@ B["STYLE/BANK02/Style Three.stg"] = blob("style three", 2048)
 TYPE_EXT = {"STYLE": ".stg", "KEYBOARDSET": ".ksc", "PAD": ".pdc", "SOUND": ".PCG", "MATRIXPRESET": ".MTP",
             "SETTINGS": ".GBL", "SONGBOOK": (".SBL", ".SBD"), "CHORDSEQUENCE": ".csc"}
 BANKED = {"STYLE", "KEYBOARDSET", "PAD", "SONGBOOK", "CHORDSEQUENCE"}
-TYPE_FILES = {"SONGBOOK/LISTDB.SBL"}   # directly in a banked type folder (library_validate.h typeFiles)
+TYPE_FILES = {"SONGBOOK/LISTDB.SBL"}   # directly in a banked type folder (library_validate.h exactFiles)
 
 def write(out):
     if os.path.exists(out):
