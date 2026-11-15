@@ -14,6 +14,9 @@
 //                                           (media/panative/kst_closure.h); exit 3 = dangling or unresolved references, 1 = unreadable objects
 //   kst-native demo OUTDIR                  EXPERIMENTAL, NOT HARDWARE-VERIFIED: writes the three W6 test KSTs (one Pad, one
 //                                           KBD Set, one Style; factory/GM sounds, no samples) as NEW folders in OUTDIR
+//   kst-native from-set SETDIR OUT.KST       SET -> KST phase 1 (media/panative/set_to_kst.h): the SET's PCM/PCG/KMP/SBL
+//                                           byte-identical in the NEW folder OUT.KST (export job, report beside it); Styles,
+//                                           KBD Sets, Pads, SongBook are BLOCKED and listed. NOT VERIFIED ON A PA5X
 // Every command also takes --evidence FILE (repeatable, before the other arguments): an owner-authorized
 // aiarranger-evidence file (media/sound/evidence_import.h) added as a separate evidence source.
 // PKG is a package folder written by aiarranger-sound (it holds RESOURCES.tsv); every sample is checked
@@ -24,6 +27,7 @@
 #include "media/kst_inventory.h"
 #include "media/panative/kst_closure.h"
 #include "media/panative/kst_demo.h"
+#include "jobs/export_specs.h"   // kst-native from-set: the SET -> KST export job (E9 publish)
 #include "media/panative/panative_reader.h"
 #include "media/sound/evidence_import.h"
 #include "media/sound/memory_check.h"
@@ -45,6 +49,7 @@ static int usage() {
                          "       aiarranger-resources validate FOLDER   (KST or SET folder, file level, read-only)\n"
                          "       aiarranger-resources kst-native closure KSTDIR   (read-only, experimental)\n"
                          "       aiarranger-resources kst-native demo OUTDIR   (writes 3 NOT HARDWARE-VERIFIED test KSTs)\n"
+                         "       aiarranger-resources kst-native from-set SETDIR OUT.KST   (resources only, NOT VERIFIED ON A PA5X)\n"
                          "  any command: --evidence FILE (owner-authorized evidence, repeatable)\n");
     return 1;
 }
@@ -79,6 +84,17 @@ int main(int argc, char** argv) {
         std::printf("Root trees %zu, MIDI leaves %zu; user refs resolved %zu, dangling %zu (slot empty %zu, file absent %zu); factory/GM %zu; unresolved %zu%s\n",
                     c.trees, c.midis, c.resolved, c.danglingCount(), c.slotEmpty, c.fileAbsent, c.factory, c.unresolved, c.error.empty() ? "" : (" ERROR: " + c.error).c_str());
         return !c.ok ? 1 : c.danglingCount() || c.unresolved ? 3 : 0;
+    }
+    if (cmd == "kst-native" && argc == 5 && std::string(argv[2]) == "from-set") {   // D54 B1: SET -> KST phase 1
+        ai_arranger::jobs::JobState st;
+        st.id = 1;
+        ai_arranger::jobs::runExport(ai_arranger::jobs::setToKst(argv[3], argv[4]), st, [] { return false; }, [](const ai_arranger::jobs::JobState&) {});
+        if (st.phase != ai_arranger::jobs::Phase::Done) {
+            std::fprintf(stderr, "KST NOT written (%s): %s\n", ai_arranger::jobs::phaseName(st.stoppedAt), st.reason.c_str());
+            return 1;
+        }
+        std::printf("Written: %s\n%s\n%s\nReport: %s\n", st.dest.c_str(), st.verifyText.c_str(), st.writerText.c_str(), st.reportPath.c_str());
+        return 0;
     }
     if (cmd == "kst-native" && argc == 4 && std::string(argv[2]) == "demo") {
         int bad = 0;

@@ -9,6 +9,7 @@
 
 #include "jobs/export_job.h"
 #include "library/library_apply.h"
+#include "media/panative/set_to_kst.h"
 #include "media/samplelab/drum_builder.h"
 #include "media/sound/package_graph.h"
 #include "ui/sound/sound_conversion_model.h"
@@ -381,6 +382,110 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
                            : ui::studio::Level{Check::Failed, "files do not match the backup manifest"};
         v.l2 = {Check::NotRun, "not applicable: no Pa5X KST reader (container UNKNOWN)"};
         return std::pair<Verification, std::string>{v, bad.empty() ? "Backup verified against " + media::backupManifestPath(out).string() : bad};
+    };
+    return s;
+}
+
+// SET -> KST phase 1 (D54 B1, media/panative/set_to_kst.h): a NEW folder NAME.KST holding the SET's CARRY members
+// byte-identical at their lower-cased paths; nothing for BLOCKED/DROPPED members, which the CONVERSION report (writer
+// report and conversion lines, in NAME.KST.export.md/.json beside it) lists with their reasons. Every CARRY file is
+// hashed at validation; the write re-reads and refuses a source that changed since; verify checks the staged folder
+// holds exactly those bytes, re-parses each as KORF and runs the W5 staged checks (closure, validator). Writes go
+// through the job's pinned output folder (writeAt, E9 identity-checked publish). STRUCTURALLY VALID - NOT VERIFIED ON A PA5X.
+inline ExportSpec setToKst(fs::path set, fs::path dest) {
+    namespace s2k = media::panative::settokst;
+    struct State { s2k::Plan plan; s2k::Deps deps; std::string report; std::map<std::string, std::string> sha; };   // sha: dest -> SHA-256
+    const auto st = std::make_shared<State>();
+    ExportSpec s;
+    s.type = "SET -> KST (resources only)";
+    s.source = set.string();
+    s.sources = {set};
+    s.dest = std::move(dest);
+    s.validate = [st, set, d = detail::absFolder(s.dest)] {
+        if (!detail::isDir(set)) return "refusing: " + set.string() + " is not a folder";
+        if (media::samplelab::sameOrBelow(d, set)) return "refusing: the KST may not be inside the SET " + set.string();
+        const std::string leaf = d.filename().string();
+        if (leaf.size() <= 4 || leaf.compare(leaf.size() - 4, 4, ".KST") != 0 || !media::panative::assemble::safeName(leaf.substr(0, leaf.size() - 4)))
+            return "refusing: the output must be a folder named NAME.KST with a safe NAME: " + leaf;
+        st->plan = s2k::inventory(set);
+        if (const auto why = s2k::refusal(st->plan); !why.empty()) return why;
+        st->sha.clear();
+        for (const auto& m : st->plan.members) {
+            if (m.kind != s2k::Kind::Carry) continue;
+            bool c = false;
+            std::string err;
+            const auto h = media::detail::sha256File(m.abs, [](size_t) { return true; }, &c, &err);
+            if (h.empty()) return "cannot read " + m.rel + ": " + err;
+            st->sha[m.dest] = h;
+        }
+        st->deps = s2k::dependencies(st->plan);
+        st->report = s2k::report(st->plan, st->deps);
+        return std::string();
+    };
+    s.dependencies = [st](std::vector<std::string>& notes, uint64_t& sampleBytes) {
+        const auto& p = st->plan;
+        notes.push_back(std::to_string(p.count(s2k::Kind::Carry)) + " member(s) carried byte-identical; " + std::to_string(p.count(s2k::Kind::Blocked)) +
+                        " BLOCKED (Styles, Keyboard Sets, Pads, SongBook: OC31 not decoded), " + std::to_string(p.count(s2k::Kind::Dropped)) +
+                        " DROPPED (MAN5 p.737), " + std::to_string(p.count(s2k::Kind::Unknown)) + " UNKNOWN (not carried)");
+        for (const auto& n : st->deps.notes) notes.push_back(n);
+        for (const auto& m : p.members) if (m.kind == s2k::Kind::Carry && m.dest.rfind("PCM/", 0) == 0) sampleBytes += m.bytes;
+        return std::vector<std::string>{};   // BLOCKED members are reported, not blocking: this conversion is resources only
+    };
+    s.preview = [st] {
+        std::vector<OutFile> r;
+        for (const auto& m : st->plan.members) if (m.kind == s2k::Kind::Carry) r.push_back({m.dest, m.bytes});
+        std::sort(r.begin(), r.end(), [](const OutFile& a, const OutFile& b) { return a.rel < b.rel; });
+        return r;
+    };
+    s.writeAt = [st](int outFd, const fs::path& out, const std::function<bool(double)>& progress) {
+        snd::pkgio::FileSet files;
+        files.root = out;
+        files.pin(outFd);
+        const double n = double(st->sha.size());
+        size_t i = 0;
+        for (const auto& m : st->plan.members) {
+            if (m.kind != s2k::Kind::Carry) continue;
+            std::string bytes, err;
+            if (!media::panative::roottree::readBytes(m.abs, bytes, err)) return WriteResult{"cannot read " + m.rel + ": " + err, ""};
+            media::Sha256 h;
+            h.update(bytes.data(), bytes.size());
+            if (h.hex() != st->sha.at(m.dest)) return WriteResult{"refusing: " + m.rel + " changed since it was checked", ""};
+            files.save(m.dest, bytes);
+            if (!files.ok) return WriteResult{"cannot write " + m.dest, ""};
+            if (!progress(double(++i) / n)) return WriteResult{"cancelled", ""};
+        }
+        if (const auto e = files.checkFiles(); !e.empty()) return WriteResult{"the written folder does not match: " + e, ""};
+        return WriteResult{"", st->report};
+    };
+    s.verify = [st](const fs::path& out) {
+        Verification v;
+        v.l2 = {Check::NotRun, "not verified on a Pa5X"};
+        const auto failed = [&](const std::string& why) {
+            v.l1 = {Check::Failed, why};
+            return std::pair<Verification, std::string>{v, why};
+        };
+        const auto now = listFiles(out);
+        if (now.size() != st->sha.size()) return failed("the staged KST holds " + std::to_string(now.size()) + " files, " + std::to_string(st->sha.size()) + " expected");
+        for (const auto& f : now) {
+            const auto it = st->sha.find(f.rel);
+            if (it == st->sha.end()) return failed("unexpected staged file " + f.rel);
+            bool c = false;
+            std::string err;
+            if (media::detail::sha256File(out / f.rel, [](size_t) { return true; }, &c, &err) != it->second)
+                return failed(f.rel + " is not byte-identical to its SET member");
+            if (!media::panative::readFile(out / f.rel).ok) return failed(f.rel + " does not re-parse as a KORF container");
+        }
+        media::panative::assemble::Result r;
+        if (const auto why = media::panative::assemble::stagedRefusal(out, r); !why.empty()) return failed(why);
+        v.l1 = {Check::Passed, std::to_string(now.size()) + " carried file(s) byte-identical to the SET, KORF re-parsed, closure 0 dangling, validator 0 errors"};
+        return std::pair<Verification, std::string>{v, std::string(s2k::kLabel) + ". " + v.l1.detail + " (" + std::to_string(r.validatorWarnings) + " validator warning(s))."};
+    };
+    s.conversion = [st] {
+        detail::Conversion c;
+        for (const auto& m : st->plan.members)
+            c.push_back(m.kind == s2k::Kind::Carry ? std::pair<std::string, std::string>{"EXACT", m.rel + " -> " + m.dest + " (byte-identical)"}
+                                                   : std::pair<std::string, std::string>{"MISSING", std::string(s2k::kindName(m.kind)) + " " + m.rel + ": " + m.reason});
+        return c;
     };
     return s;
 }

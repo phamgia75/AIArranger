@@ -84,6 +84,25 @@ inline bool writeNew(const std::filesystem::path& p, const std::string& bytes, s
     return true;
 }
 
+// The checks a staged KST must pass before it is published: dependency closure (0 dangling, 0 unresolved, 0 problems)
+// and the structural validator (0 errors). Fills r's counts; "" = passed, else why not (`left` appended as by build).
+// Shared with the SET -> KST export job (jobs::setToKst), which stages through the E9 job runner instead.
+inline std::string stagedRefusal(const std::filesystem::path& stage, Result& r, const std::string& left = "") {
+    const auto c = closure::check(stage);
+    r.dangling = c.danglingCount();
+    r.factoryRefs = c.factory;
+    r.userRefs = c.resolved + c.danglingCount();
+    if (!c.ok) return "closure could not read every object: " + (c.problems.empty() ? c.error : c.problems.front()) + left;
+    if (r.dangling) return "closure: " + std::to_string(r.dangling) + " dangling user reference(s)" + left;
+    if (c.unresolved) return "closure: " + std::to_string(c.unresolved) + " unresolved sound selection(s) (Program Change without CC0/CC32)" + left;
+    const auto v = library::validate(stage);
+    r.validatorErrors = v.count(library::Severity::Error);
+    r.validatorWarnings = v.count(library::Severity::Warn);
+    if (!v.ok) return "validator could not finish: " + v.error + left;
+    if (r.validatorErrors) return "validator: " + std::to_string(r.validatorErrors) + " error(s)" + left + "\n" + library::validationText(v);
+    return "";
+}
+
 // Writes parent/<kstName>.KST. Read-only on every source.
 inline Result build(const std::filesystem::path& parent, const std::string& kstName, const std::vector<Object>& objects,
                     const std::vector<Carried>& carried = {}) {
@@ -146,18 +165,7 @@ inline Result build(const std::filesystem::path& parent, const std::string& kstN
             if (!t.ok || !roottree::write(t.root, again, err) || again != back) return fail("read-back does not re-parse: " + rel + left);
         } else if (!panative::parse(q, back.size()).ok) return fail("read-back does not re-parse: " + rel + left);
     }
-    const auto c = closure::check(stage);
-    r.dangling = c.danglingCount();
-    r.factoryRefs = c.factory;
-    r.userRefs = c.resolved + c.danglingCount();
-    if (!c.ok) return fail("closure could not read every object: " + (c.problems.empty() ? c.error : c.problems.front()) + left);
-    if (r.dangling) return fail("closure: " + std::to_string(r.dangling) + " dangling user reference(s)" + left);
-    if (c.unresolved) return fail("closure: " + std::to_string(c.unresolved) + " unresolved sound selection(s) (Program Change without CC0/CC32)" + left);
-    const auto v = library::validate(stage);
-    r.validatorErrors = v.count(library::Severity::Error);
-    r.validatorWarnings = v.count(library::Severity::Warn);
-    if (!v.ok) return fail("validator could not finish: " + v.error + left);
-    if (r.validatorErrors) return fail("validator: " + std::to_string(r.validatorErrors) + " error(s)" + left + "\n" + library::validationText(v));
+    if (const auto why = stagedRefusal(stage, r, left); !why.empty()) return fail(why);
     // Manifest (beside the folder: a saved KST has no top-level files), written and verified while staged.
     std::string man;
     bool cancelled = false;
