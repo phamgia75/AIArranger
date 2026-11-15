@@ -92,11 +92,39 @@ endif()
 
 # Tests that exercise the Apple platform layer directly (CoreMidiOut /
 # CoreMidiOutputProvider / mach host time). Built and run on Apple only.
-# Genos style corpus used by the import/playback acceptance tests. The files are
-# user-owned Yamaha content (issue #27): this can point at a private copy. Without a
-# corpus the corpus tests fail; they are not disabled (issue #27 decides how it leaves).
-set(AIARR_GENOS_CORPUS_DIR "${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1" CACHE PATH
-    "Directory holding the Genos .sty acceptance corpus")
+# Genos style corpus for the private acceptance run. The files are user-owned Yamaha
+# content and are not in this repository (issue #27): point this at a private copy
+# outside the repo. Each test below that uses it is registered as `test_x` (public
+# checks, run everywhere) and `test_x_corpus` (the corpus checks): with no corpus the
+# `_corpus` entries print CORPUS UNAVAILABLE and are reported as Skipped, never passed.
+set(AIARR_GENOS_CORPUS_DIR "" CACHE PATH
+    "Directory holding the private Genos .sty acceptance corpus (issue #27)")
+# Public checks plus corpus checks (tests/support/genos_corpus.h).
+set(GENOS_CORPUS_TESTS
+    test_aiarranger_convert_cli test_auto_fill test_genos_facade_runtime test_korg_sound_map
+    test_scheduler_timing test_section_lifecycle test_sff1_mapper_casm_ntr test_sff1_smf_decode
+    test_sff1_tempo test_style_load_safety test_time_signature test_uasf_deterministic_init
+    test_uasf_golden test_uasf_tempo)
+# Corpus checks only: registered as `test_x_corpus` alone (their public mirror is
+# tests/exporters/test_synthetic_corpus.cpp on the CC0 fixtures/synthetic styles).
+set(GENOS_CORPUS_ONLY_TESTS
+    test_corpus_split_validation test_korg_corpus_conversion test_per_channel_split
+    test_sff1_load_and_play_e2e test_sty_to_uasf_roundtrip)
+function(aiarr_add_test name)
+    if(NOT name IN_LIST GENOS_CORPUS_ONLY_TESTS)
+        add_test(NAME ${name} COMMAND ${name})
+    endif()
+    if(name IN_LIST GENOS_CORPUS_TESTS OR name IN_LIST GENOS_CORPUS_ONLY_TESTS)
+        add_test(NAME ${name}_corpus COMMAND ${name} --corpus)
+        set_tests_properties(${name}_corpus PROPERTIES SKIP_RETURN_CODE 77 LABELS private-corpus)
+    endif()
+endfunction()
+file(GLOB _genos_sty "${AIARR_GENOS_CORPUS_DIR}/*.sty")
+if(AIARR_GENOS_CORPUS_DIR AND _genos_sty)
+    message(STATUS "AIArranger: private Genos corpus at ${AIARR_GENOS_CORPUS_DIR}")
+else()
+    message(STATUS "AIArranger: no private Genos corpus; the *_corpus tests will report Skipped (issue #27)")
+endif()
 
 set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety)
 
@@ -141,7 +169,7 @@ foreach(test_file ${TEST_SRC})
     target_compile_definitions(${test_name} PRIVATE
         CORPUS_DIR="${AIARR_GENOS_CORPUS_DIR}"
         REPO_DIR="${CMAKE_SOURCE_DIR}")
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    aiarr_add_test(${test_name})
 endforeach()
 
 # ── Gate 12 realtime performer-layer tests ────────────────────────────
@@ -181,7 +209,7 @@ foreach(test_file ${EXPORTER_TEST_SRC})
         REPO_DIR="${CMAKE_SOURCE_DIR}"
         CONVERT_BIN="$<TARGET_FILE:aiarranger-convert>")
     add_dependencies(${test_name} aiarranger-convert)   # the CLI exit-code test runs it
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    aiarr_add_test(${test_name})
 endforeach()
 
 # ── Style Studio editing core tests (synthetic styles built in-test) ──

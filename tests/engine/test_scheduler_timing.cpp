@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 
@@ -31,7 +32,9 @@ static uasf::MidiEvent ev(uint64_t tick, uint8_t note) {
     return {uasf::MidiEventType::NoteOn, 0, note, 100, tick};
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_scheduler_timing", corpusRun); rc >= 0) return rc;
     std::printf("Test: scheduler dispatches every due event (no head-of-line blocking)\n");
 
     {   // A future event at the head does not hold back due events.
@@ -61,7 +64,7 @@ int main() {
         TEST("the 200 event fires at 200", got == std::vector<uint8_t>({3, 2, 1}));
         TEST("nothing left", s.pendingCount() == 0);
     }
-    {   // Real Genos style, heavy swing: nothing dispatched more than one block late.
+    if (corpusRun) {   // Real Genos style, heavy swing: nothing dispatched more than one block late.
         std::string sty;
         std::error_code ec;
         for (const auto& e : std::filesystem::directory_iterator(CORPUS_DIR, ec))

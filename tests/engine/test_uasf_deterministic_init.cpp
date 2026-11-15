@@ -25,6 +25,7 @@
 #include <new>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::uasf;
@@ -143,7 +144,9 @@ static std::vector<uint16_t> playbackFlags(const std::vector<uint8_t>& b) {
     return o == b.size() ? flags : std::vector<uint16_t>{};
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_uasf_deterministic_init", corpusRun); rc >= 0) return rc;
     std::printf("Test: UASF deterministic default init + serialization\n");
 
     // ── 1. Documented member defaults, independent of prior memory contents ──
@@ -169,52 +172,54 @@ int main() {
              })));
     }
 
-    // ── 2. Real Genos imports serialize byte-identically across runs ──
-    const char* needles[] = {"POP_ACOUSTIC_2", "CLASSIC_6_8", "BALLAD_FOLK", "C_WHISPER"};
-    int found = 0;
-    for (const char* needle : needles) {
-        const std::string sty = findCorpusSty(needle);
-        if (sty.empty()) continue;
-        ++found;
-        scrubHeap(0xA5);
-        const auto a = importAndSerialize(sty);
-        scrubHeap(0x5A);
-        const auto b = importAndSerialize(sty);
-        const auto c = importAndSerialize(sty);
-        const std::string tag = needle;
-        TEST((tag + ": import+serialize succeeds").c_str(), !a.empty());
-        TEST((tag + ": byte-identical across 3 runs (heap scrubbed between)").c_str(),
-             a == b && b == c);
-        const auto flags = playbackFlags(a);
-        bool allZero = !flags.empty();
-        for (uint16_t f : flags) allZero = allZero && f == 0;
-        TEST((tag + ": importer sets no playback_flags (none are known for SFF1)").c_str(),
-             allZero);
+    if (corpusRun) {
+        // ── 2. Real Genos imports serialize byte-identically across runs ──
+        const char* needles[] = {"POP_ACOUSTIC_2", "CLASSIC_6_8", "BALLAD_FOLK", "C_WHISPER"};
+        int found = 0;
+        for (const char* needle : needles) {
+            const std::string sty = findCorpusSty(needle);
+            if (sty.empty()) continue;
+            ++found;
+            scrubHeap(0xA5);
+            const auto a = importAndSerialize(sty);
+            scrubHeap(0x5A);
+            const auto b = importAndSerialize(sty);
+            const auto c = importAndSerialize(sty);
+            const std::string tag = needle;
+            TEST((tag + ": import+serialize succeeds").c_str(), !a.empty());
+            TEST((tag + ": byte-identical across 3 runs (heap scrubbed between)").c_str(),
+                 a == b && b == c);
+            const auto flags = playbackFlags(a);
+            bool allZero = !flags.empty();
+            for (uint16_t f : flags) allZero = allZero && f == 0;
+            TEST((tag + ": importer sets no playback_flags (none are known for SFF1)").c_str(),
+                 allZero);
 
-        UasfDeserializer des;
-        const auto r = des.deserialize(a);
-        bool meta = r.success;
-        for (const auto& s : r.style.sections)
-            for (const auto& t : s.tracks)
-                meta = meta && recommendationIsDefault(t.articulation.recommended) &&
-                       !t.articulation.has_keyswitch;
-        TEST((tag + ": round-tripped tracks carry default playback/keyswitch metadata").c_str(),
-             meta);
-    }
-    // Corpus is committed (IMPORTER_GOLDEN_CORPUS_POLICY): missing = hard failure.
-    TEST("all 4 committed Genos fixtures found", found == 4);
+            UasfDeserializer des;
+            const auto r = des.deserialize(a);
+            bool meta = r.success;
+            for (const auto& s : r.style.sections)
+                for (const auto& t : s.tracks)
+                    meta = meta && recommendationIsDefault(t.articulation.recommended) &&
+                           !t.articulation.has_keyswitch;
+            TEST((tag + ": round-tripped tracks carry default playback/keyswitch metadata").c_str(),
+                 meta);
+        }
+        // The corpus run has a corpus (IMPORTER_GOLDEN_CORPUS_POLICY): missing = hard failure.
+        TEST("all 4 committed Genos fixtures found", found == 4);
 
-    // ── 3. Committed importer fixtures equal a fresh deterministic import ──
-    const std::pair<const char*, const char*> fixtures[] = {
-        {"POP_ACOUSTIC_2", "/POP_ACOUSTIC_2.uasf"},
-        {"CLASSIC_6_8", "/CLASSIC_6_8.uasf"},
-    };
-    for (const auto& [needle, file] : fixtures) {
-        const auto committed = readFile(std::string(CORPUS_DIR) + file);
-        const auto fresh = importAndSerialize(findCorpusSty(needle), /*withLimits=*/false);
-        const std::string tag = needle;
-        TEST((tag + ".uasf: committed fixture == fresh import (no garbage bytes)").c_str(),
-             !committed.empty() && committed == fresh);
+        // ── 3. Committed importer fixtures equal a fresh deterministic import ──
+        const std::pair<const char*, const char*> fixtures[] = {
+            {"POP_ACOUSTIC_2", "/POP_ACOUSTIC_2.uasf"},
+            {"CLASSIC_6_8", "/CLASSIC_6_8.uasf"},
+        };
+        for (const auto& [needle, file] : fixtures) {
+            const auto committed = readFile(std::string(CORPUS_DIR) + file);
+            const auto fresh = importAndSerialize(findCorpusSty(needle), /*withLimits=*/false);
+            const std::string tag = needle;
+            TEST((tag + ".uasf: committed fixture == fresh import (no garbage bytes)").c_str(),
+                 !committed.empty() && committed == fresh);
+        }
     }
 
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);

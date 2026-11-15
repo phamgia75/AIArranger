@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::uasf;
@@ -52,7 +53,9 @@ static Bytes block(uint32_t tag, const Bytes& payload) {
 }
 static Bytes u32Bytes(uint32_t v) { Bytes b; putU32(b, v); return b; }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_uasf_tempo", corpusRun); rc >= 0) return rc;
     std::printf("Test: UASF style tempo persistence\n");
 
     {   // 1-3. round trip: 90, 120, real corpus tempos, range boundaries
@@ -88,7 +91,7 @@ int main() {
         const auto j = des(junk);
         TEST("flags 0: trailing bytes ignored as before", j.success && j.style.tempo_bpm == kDefaultTempoBpm);
     }
-    {   // 5. committed tempo-aware corpus fixtures carry the imported tempo
+    if (corpusRun) {   // 5. committed tempo-aware corpus fixtures carry the imported tempo
         const auto pop = UasfDeserializer().deserializeFromFile(std::string(CORPUS_DIR) + "/POP_ACOUSTIC_2.uasf");
         const auto cls = UasfDeserializer().deserializeFromFile(std::string(CORPUS_DIR) + "/CLASSIC_6_8.uasf");
         TEST("POP_ACOUSTIC_2.uasf loads at 100 BPM", pop.success && pop.style.tempo_bpm == 100);

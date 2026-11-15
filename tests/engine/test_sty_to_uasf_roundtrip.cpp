@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <set>
 #include <string>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::importers::sff1;
@@ -70,13 +71,14 @@ static int countNoteEvents(const uasf::StyleDefinition& s) {
 }
 
 int main() {
+    if (const int rc = genos_corpus::require("test_sty_to_uasf_roundtrip"); rc >= 0) return rc;
     std::printf("Test: .sty -> .uasf note-preservation roundtrip\n");
 
     const std::string sty = findCorpusSty("POP_ACOUSTIC_2");
     if (sty.empty()) {
-        std::printf("  ℹ️  SKIP: no POP_ACOUSTIC_2 corpus .sty under %s\n", CORPUS_DIR);
-        std::printf("\nResults: %d passed, %d failed\n", passes, failures);
-        return 0;
+        // The corpus is configured (genos_corpus::require), so a missing style is a failure, not a skip.
+        std::fprintf(stderr, "  FAIL: no POP_ACOUSTIC_2 corpus .sty under %s\n", CORPUS_DIR);
+        return 1;
     }
     std::printf("  corpus: %s\n", sty.c_str());
 

@@ -11,6 +11,7 @@
 #include "importers/sff1/sff1_mapper.h"
 #include <cstdio>
 #include <string>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger::importers::sff1;
 
@@ -27,7 +28,9 @@ static CasmTrackConfig cfg(const std::string& name, uint8_t ch, uint8_t ntr, uin
     return c;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_sff1_mapper_casm_ntr", corpusRun); rc >= 0) return rc;
     std::printf("Test: SFF1 mapper per-section CASM NTR/NTT\n");
 
     // ── Synthetic: same track name, different rules per section; empty name ──
@@ -61,7 +64,7 @@ int main() {
     }
 
     // ── Real corpus: every CASM track's mapped NTR/NTT equals its Ctb2 ──
-    {
+    if (corpusRun) {
         const std::string path = std::string(CORPUS_DIR) +
             "/C_WHISPER_SC_GENOS.S718---da1df5af-1207-4d84-bf3d-99b5d051b92b.sty";
         Sff1Reader reader;

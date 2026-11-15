@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <sstream>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::exporters::korg;
@@ -49,7 +50,9 @@ static const TrackRow* row(const Report& r, uint8_t srcCh) {
     return nullptr;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_korg_sound_map", corpusRun); rc >= 0) return rc;
     std::printf("Test: Pa5X sound map, MegaVoice report, round-trip compare\n");
 
     // ── Loader / schema ──
@@ -127,21 +130,23 @@ int main() {
     { const auto back = load(tpl);
       TEST("template loads: 0 sounds, 8 unresolved", back.ok && back.sounds.empty() && back.unresolved.size() == 8); }
 
-    // ── Corpus templates ──
-    size_t styles = 0;
-    for (const auto& f : std::filesystem::directory_iterator(CORPUS_DIR)) {
-        if (f.path().extension() != ".sty") continue;
-        importers::sff1::Sff1Reader reader;
-        const auto p = reader.parseFile(f.path().string());
-        importers::sff1::Sff1ToUasfMapper toUasf;
-        const auto c = toUasf.map(p);
-        MapOptions o;
-        o.route = routeFromCasm(p);
-        const auto r = mapToKorg(c.style, o);
-        const auto t = load(soundMapTemplate(r.report, f.path().filename().string()));
-        if (r.ok && t.ok && t.sounds.empty() && t.unresolved.size() == 8) ++styles;
+    if (corpusRun) {
+        // ── Corpus templates ──
+        size_t styles = 0;
+        for (const auto& f : std::filesystem::directory_iterator(CORPUS_DIR)) {
+            if (f.path().extension() != ".sty") continue;
+            importers::sff1::Sff1Reader reader;
+            const auto p = reader.parseFile(f.path().string());
+            importers::sff1::Sff1ToUasfMapper toUasf;
+            const auto c = toUasf.map(p);
+            MapOptions o;
+            o.route = routeFromCasm(p);
+            const auto r = mapToKorg(c.style, o);
+            const auto t = load(soundMapTemplate(r.report, f.path().filename().string()));
+            if (r.ok && t.ok && t.sounds.empty() && t.unresolved.size() == 8) ++styles;
+        }
+        TEST("corpus: 4 templates load with every track unresolved", styles == 4);
     }
-    TEST("corpus: 4 templates load with every track unresolved", styles == 4);
 
     // ── Round-trip comparator ──
     Style a;

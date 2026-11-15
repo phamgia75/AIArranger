@@ -13,6 +13,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger::uasf;
 
@@ -31,15 +32,17 @@ static std::vector<Key> keys(const TrackDefinition& t) {
     return k;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_uasf_golden", corpusRun); rc >= 0) return rc;
     std::printf("Test: UASF golden files load, validate and round-trip\n");
     const std::string golden = std::string(REPO_DIR) + "/tests/golden/uasf/";
     const std::string corpus = std::string(CORPUS_DIR) + "/";
-    const std::vector<std::string> files = {
-        golden + "gate-3-demo-v1.uasf",
-        corpus + "POP_ACOUSTIC_2.uasf",
-        corpus + "CLASSIC_6_8.uasf",
-    };
+    std::vector<std::string> files = {golden + "gate-3-demo-v1.uasf"};
+    if (corpusRun) {   // conversions of the private Genos styles (issue #27)
+        files.push_back(corpus + "POP_ACOUSTIC_2.uasf");
+        files.push_back(corpus + "CLASSIC_6_8.uasf");
+    }
 
     for (const auto& path : files) {
         const std::string name = path.substr(path.find_last_of('/') + 1);

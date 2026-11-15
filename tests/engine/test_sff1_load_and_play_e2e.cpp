@@ -39,6 +39,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::importers::sff1;
@@ -264,6 +265,7 @@ static void runFixture(const std::string& label, const std::string& needle) {
 }
 
 int main() {
+    if (const int rc = genos_corpus::require("test_sff1_load_and_play_e2e"); rc >= 0) return rc;
     std::printf("Test: SFF1 load-and-play end-to-end (4 Genos fixtures)\n");
 
     struct { const char* label; const char* needle; } fixtures[] = {
@@ -279,13 +281,13 @@ int main() {
         runFixture(f.label, f.needle);
     }
 
-    // The corpus is committed (acceptance golden files), so a missing fixture is
-    // a hard failure — never a silent soft-skip to green. This catches a broken
-    // checkout, a wrong CORPUS_DIR, or an accidentally-deleted/renamed fixture.
+    // The corpus run (genos_corpus::require) has a corpus, so a missing fixture is
+    // a hard failure — never a silent soft-skip to green. This catches an
+    // incomplete private copy or an accidentally-deleted/renamed fixture.
     if (found < 4) {
         std::fprintf(stderr,
             "\n  ❌ FAIL: expected all 4 committed Genos SFF1 fixtures under %s, "
-            "found only %d/4.\n     They are a committed acceptance corpus "
+            "found only %d/4.\n     They are the private acceptance corpus "
             "(docs/governance/IMPORTER_GOLDEN_CORPUS_POLICY.md); a missing fixture "
             "or wrong\n     CORPUS_DIR must fail the build, not pass silently.\n",
             CORPUS_DIR, found);

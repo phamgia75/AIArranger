@@ -14,6 +14,7 @@
 #include "importers/sff1/sff1_mapper.h"
 #include <cstdio>
 #include <string>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 
@@ -23,7 +24,9 @@ static int failures = 0, passes = 0;
     else { std::printf("  PASS: %s\n", name); passes++; } \
 } while(0)
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_time_signature", corpusRun); rc >= 0) return rc;
     std::printf("Test: time signature bar grid\n");
 
     {
@@ -40,7 +43,7 @@ int main() {
         TEST("7/8 @480: 1680-tick bar", (c.setResolution(480), c.ticksPerBar() == 1680));
     }
 
-    {
+    if (corpusRun) {
         importers::sff1::Sff1Reader reader;
         const auto pr = reader.parseFile(std::string(CORPUS_DIR) +
             "/CLASSIC_6_8_SC_GENOS.S718---36428220-aac8-423d-9a87-79f1594df699.sty");

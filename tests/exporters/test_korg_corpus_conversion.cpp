@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <map>
 #include <tuple>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::exporters::korg;
@@ -79,6 +80,7 @@ static std::vector<NoteKey> actualNotes(const Element& el) {
 }
 
 int main() {
+    if (const int rc = genos_corpus::require("test_korg_corpus_conversion"); rc >= 0) return rc;
     std::printf("Test: Genos corpus -> Korg Pa5X Style SMF\n");
     const std::map<std::string, std::pair<uint32_t, uint8_t>> expect = {   // tempo, meter numerator
         {"POP_ACOUSTIC_2", {100, 4}}, {"CLASSIC_6_8", {90, 6}}, {"BALLAD_FOLK", {105, 4}}, {"C_WHISPER", {76, 4}}};

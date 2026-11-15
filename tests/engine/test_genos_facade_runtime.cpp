@@ -28,6 +28,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 
@@ -52,10 +53,18 @@ static std::string findCorpusSty(const std::string& needle) {
     return {};
 }
 
+// The public run probes the CC0 styles in fixtures/synthetic, the private corpus run the Genos ones (#27).
+static bool g_corpusRun = false;
+static std::string findSty(const std::string& needle) {
+    if (g_corpusRun) return findCorpusSty(needle);
+    const std::string p = genos_corpus::synthetic(needle.c_str());
+    return std::filesystem::exists(p) ? p : std::string();
+}
+
 static void probe(const char* needle, uint32_t expectedBpm) {
     const std::string tag = needle;
-    const std::string sty = findCorpusSty(needle);
-    TEST(tag + ": corpus .sty present", !sty.empty());
+    const std::string sty = findSty(needle);
+    TEST(tag + ": .sty present", !sty.empty());
     if (sty.empty()) return;
 
     importers::sff1::Sff1Reader reader;
@@ -101,7 +110,7 @@ static void probe(const char* needle, uint32_t expectedBpm) {
             last = s.section;
             const int64_t pos = s.positionTicks;
             trace.emplace_back(last, tpBar ? pos / tpBar : -1);
-            // 48 samples @48 kHz, <=1920 PPQN, <=120 BPM here = <4 ticks per step.
+            // 48 samples @48 kHz, <=1920 PPQN, <=132 BPM here = <5 ticks per step.
             if (tpBar && pos % tpBar > 8 && trace.size() > 1) offGrid = true;
         }
     };
@@ -206,20 +215,28 @@ static void probe(const char* needle, uint32_t expectedBpm) {
     f.stop();
 }
 
-int main() {
-    std::printf("Test: real Genos styles through LiveEngineFacade\n");
-    // Expected BPM from each file's FF 51 (600000 / 666667 / 571429 / 789473 us/q).
-    probe("POP_ACOUSTIC_2", 100);
-    probe("CLASSIC_6_8", 90);
-    probe("BALLAD_FOLK", 105);
-    probe("C_WHISPER", 76);
+int main(int argc, char** argv) {
+    if (const int rc = genos_corpus::gate(argc, argv, "test_genos_facade_runtime", g_corpusRun); rc >= 0) return rc;
+    std::printf("Test: imported styles through LiveEngineFacade\n");
+    if (g_corpusRun) {
+        // Expected BPM from each file's FF 51 (600000 / 666667 / 571429 / 789473 us/q).
+        probe("POP_ACOUSTIC_2", 100);
+        probe("CLASSIC_6_8", 90);
+        probe("BALLAD_FOLK", 105);
+        probe("C_WHISPER", 76);
+    } else {
+        // The generator's tempos (fixtures/synthetic/README.md).
+        probe("SYNTH_POP_SFF2", 120);
+        probe("SYNTH_FULL_SFF2", 92);
+        probe("SYNTH_WALTZ_68", 132);
+    }
 
     // A style swapped in while playing keeps the running grid (no mid-song
     // jump), but the next Start must adopt the new style's PPQN + meter.
     {
         importers::sff1::Sff1Reader reader;
         importers::sff1::Sff1ToUasfMapper mapper;
-        const auto mr = mapper.map(reader.parseFile(findCorpusSty("CLASSIC_6_8")));
+        const auto mr = mapper.map(reader.parseFile(findSty(g_corpusRun ? "CLASSIC_6_8" : "SYNTH_WALTZ_68")));
         midi::FakeMidiOutputProvider out; out.setDevices({{0, "synth"}});
         session::LiveEngineFacade f(nullptr, &out);
         f.selectMidiOutput(0);
@@ -228,7 +245,7 @@ int main() {
         f.transportStart();
         for (int i = 0; i < 4000; ++i) f.tick(48);
         // A load while playing is rejected (Issue #4): the 6/8 grid stays.
-        TEST("load while playing rejected, CLASSIC_6_8 grid kept",
+        TEST("load while playing rejected, the 6/8 style's grid kept",
              f.loadStyle(arranger::buildDemoStyle()) == session::EngineError::InvalidState &&
              f.session().clock().ticksPerBar() == 5760);
         f.transportStop();

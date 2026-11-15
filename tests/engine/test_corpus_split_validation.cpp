@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <set>
 #include <string>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::importers::sff1;
@@ -28,6 +29,7 @@ static int passes = 0;
 #endif
 
 int main() {
+    if (const int rc = genos_corpus::require("test_corpus_split_validation"); rc >= 0) return rc;
     std::printf("Test: Gate 10B Task F — corpus-wide split validation\n");
     namespace fs = std::filesystem;
 

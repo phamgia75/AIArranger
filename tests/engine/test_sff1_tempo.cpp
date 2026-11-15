@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger::importers::sff1;
 
@@ -64,7 +65,9 @@ static size_t noteCount(const ParseResult& p) {
     return n;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_sff1_tempo", corpusRun); rc >= 0) return rc;
     std::printf("Test: SFF1 SMF Set Tempo import\n");
 
     {   // 1-3. valid FF 51: exact raw MPQN at its tick, and the BPM conversion
@@ -162,7 +165,7 @@ int main() {
         TEST("range: 400 BPM (150000 us/q) accepted", bpmOf(parse(smf({cat({tempo(150000), kNote, kEot})}))) == 400);
     }
 
-    {   // 13. real Genos corpus: one FF 51 at tick 0 each (independently decoded
+    if (corpusRun) {   // 13. real Genos corpus: one FF 51 at tick 0 each (independently decoded
         //     from the files: format 0, single MTrk, 1920 PPQN).
         struct Want { const char* needle; uint32_t mpqn; uint32_t bpm; };
         const Want want[] = {{"POP_ACOUSTIC_2", 600000, 100}, {"CLASSIC_6_8", 666667, 90},
