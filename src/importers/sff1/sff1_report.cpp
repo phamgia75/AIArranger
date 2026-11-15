@@ -67,8 +67,9 @@ CompatibilityScore Sff1ReportGenerator::computeScore(const ParseResult& result) 
         if (cfg.ntt_bass) score.bass_tracks++;
         // A track follows the chord when it has a non-bypass transposition
         // table or the bass-note flag. Pure drum tracks (NTT bypass, no bass)
-        // do not, and are excluded from harmonic coverage.
-        if (cfg.ntt != 0 || cfg.ntt_bass) chordAware++;
+        // do not, and are excluded from harmonic coverage. Under NTR 2 (Guitar)
+        // NTT 0 is "All-Purpose", which follows the chord.
+        if (cfg.ntr == 2 || cfg.ntt != 0 || cfg.ntt_bass) chordAware++;
     }
     if (score.casm_tracks > 0) {
         score.harmonic_fidelity = static_cast<double>(chordAware) /

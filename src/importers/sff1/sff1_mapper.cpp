@@ -8,6 +8,17 @@
 namespace ai_arranger::importers::sff1 {
 
 namespace {
+
+// CASM register limits -> UASF. High Key only acts under NTR Root Trans (0)
+// (Wierzba/Bedesem v2.1 §5.2.8); Note Limit always. Out-of-spec values keep the
+// defaults (no effect) rather than inventing a register.
+void setRegisterLimits(uasf::ArticulationMetadata& a, const CasmTrackConfig& c) noexcept {
+    a.high_key = (c.ntr == 0 && c.high_key <= 11) ? c.high_key : 11;
+    const bool limitsOk = c.note_high <= 127 && c.note_low <= c.note_high &&
+                          c.note_high - c.note_low >= 11;
+    a.note_low  = limitsOk ? c.note_low : 0;
+    a.note_high = limitsOk ? c.note_high : 127;
+}
 // UASF SectionHeader::bars is uint16.
 constexpr uint64_t kMaxSectionBars = 0xFFFF;
 
@@ -126,6 +137,7 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             track.role = mapCasmTrackRole(*cfg);
             track.articulation.ntr = cfg->ntr;
             track.articulation.ntt = cfg->ntt;
+            setRegisterLimits(track.articulation, *cfg);
         } else {
             // No CASM metadata for this channel: fall back to the
             // GM drum convention, else treat as a melodic phrase.
@@ -352,6 +364,7 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             // Strings), so never look it up by name across the whole file.
             track.articulation.ntr = t.ntr;
             track.articulation.ntt = t.ntt;
+            setRegisterLimits(track.articulation, t);
 
             sec.tracks.push_back(std::move(track));
         }

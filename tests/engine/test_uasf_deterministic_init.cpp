@@ -87,13 +87,19 @@ static std::string findCorpusSty(const std::string& needle) {
     return {};
 }
 
-static std::vector<uint8_t> importAndSerialize(const std::string& sty) {
+// withLimits=false: drop the CASM register limits (TRNS block, added 2026-11-06)
+// so the result is comparable with fixtures committed before them. The fixtures
+// derive from the restricted corpus (#27), so they are not re-committed.
+static std::vector<uint8_t> importAndSerialize(const std::string& sty, bool withLimits = true) {
     importers::sff1::Sff1Reader reader;
     auto pr = reader.parseFile(sty);
     if (!pr.success) return {};
     importers::sff1::Sff1ToUasfMapper mapper;
     auto mr = mapper.map(pr);
     if (!mr.success) return {};
+    if (!withLimits)
+        for (auto& s : mr.style.sections)
+            for (auto& t : s.tracks) { t.articulation.high_key = 11; t.articulation.note_low = 0; t.articulation.note_high = 127; }
     UasfSerializer ser;
     auto out = ser.serialize(mr.style);
     return out.data;
@@ -205,7 +211,7 @@ int main() {
     };
     for (const auto& [needle, file] : fixtures) {
         const auto committed = readFile(std::string(CORPUS_DIR) + file);
-        const auto fresh = importAndSerialize(findCorpusSty(needle));
+        const auto fresh = importAndSerialize(findCorpusSty(needle), /*withLimits=*/false);
         const std::string tag = needle;
         TEST((tag + ".uasf: committed fixture == fresh import (no garbage bytes)").c_str(),
              !committed.empty() && committed == fresh);

@@ -191,6 +191,19 @@ the product host links. Rules:
   these calls returned `AIARR_OK` for a dropped or ignored command, contrary to
   §6. What the engine then did with an accepted command shows in the snapshot.
 
+**Contract 1.1.0 (P2.4, additive):** the bridge owns one host-fed MIDI port per
+direction (index 0; -1 = disconnected; both start disconnected), so
+`hasMidiInput`/`hasMidiOutput` now report 1. New entry points:
+`aiarr_engine_load_style_uasf` (owner thread; `UNSUPPORTED` for invalid data,
+`INVALID_STATE` while playing), `aiarr_engine_set_chord_mode` (Fingered /
+Fingered On Bass / Single Finger; owner thread), `aiarr_engine_select_midi_input`
+/ `_output`, `aiarr_engine_send_midi_in` (≤256 raw bytes per call, one injecting
+thread), `aiarr_engine_read_midi_out` (drain into caller-owned
+`AiArrMidiMessage[]`, one draining thread). Physical device choice stays in the
+host (CoreMIDI on iPad/macOS). No existing signature, enumerator value or struct
+layout changed. Tests: `test_bridge_p24.cpp` (incl. concurrent inject/tick/drain
+under TSan) and the pure-C `test_bridge_c_consumer.c`.
+
 Exercised by `tests/bridge/test_bridge_roundtrip.cpp` (create → capabilities →
 lifecycle → transport → tick → snapshot → stop → destroy; null-handle safety;
 200× create/destroy). This is the shape the Gate 5 Swift host imports via a module
@@ -204,7 +217,7 @@ map.
   silently swallowed; command-queue overflow surfaces as `QueueFull`, bad device
   index as `DeviceUnavailable`.
 - **Contract version:** `kEngineContractVersion = MAJOR<<16 | MINOR<<8 | PATCH`
-  (currently `1.0.3` — 1.0.1 made the implementation honour §2: MPSC
+  (currently `1.1.0` — 1.1.0 appended the P2.4 entry points above; 1.0.1 made the implementation honour §2: MPSC
   command queue + lossless drain; 1.0.2 made command results honour this
   section — a dropped or out-of-range command no longer returns success (#18);
   1.0.3 made `hasSuspendResume` report only a callable API (#19); no
@@ -227,10 +240,11 @@ validation):
 
 - Runtime `suspend()`/`resume()` on the facade + bridge (device-retention
   semantics) — the state machine models them; the binding lands with hardware.
-- MIDI device binding through the bridge (enumerate/select in/out) — Gate 4's
-  bridge is headless.
-- Style-file loading through the bridge (path → `importer-sff1` →
-  `StyleDefinition`), and MIDI input-event injection through the bridge.
+- ~~MIDI device binding through the bridge~~: done in 1.1.0 as host-fed ports;
+  physical device enumeration stays in the host.
+- ~~MIDI input-event injection~~ and UASF style loading: done in 1.1.0.
+  Still deferred: loading a vendor `.sty` through the bridge (path →
+  `importer-sff1`); the host converts to UASF first.
 - Swift module map / SwiftPM packaging of `arranger-bridge`; iPad SwiftUI views
   that poll `AiArrSnapshot` and issue `AiArrError`-returning commands.
 - Any change to CoreMIDI teardown / scheduler / timer / latch — remains frozen

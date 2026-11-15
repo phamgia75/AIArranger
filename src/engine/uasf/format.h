@@ -79,6 +79,20 @@ constexpr uint32_t kFlagExtensions = 1u << 0;
 // 'TMPO': style tempo, payload = uint32 whole BPM in [kMinTempoBpm, kMaxTempoBpm]
 // (types.h). Absent = no stored tempo (the reader uses 120 BPM, as v1.0 did).
 constexpr uint32_t kExtTempo = 0x4F504D54;
+// 'TRNS': per-track register limits (ArticulationMetadata high_key/note_low/
+// note_high), payload = N x {u8 section, u8 track, u8 high_key 0-11, u8 note_low,
+// u8 note_high}, note_high - note_low >= 11. Written only for tracks that differ
+// from the defaults (11, 0, 127); absent = defaults, as before.
+constexpr uint32_t kExtTranspose = 0x534E5254;
+// 'KEXP': Korg Pa5X Style SMF export settings (StyleDefinition::korg_export), payload =
+// u8 version 1, u8 R + R x {u8 source ch 0-15, u8 part ch 0-15},
+// u8 S + S x {u8 Korg ch 8-15, u8 msb, u8 lsb, u8 pc},
+// u16 E + E x {u8 section type 0-14, u8 Korg ch 8-15, u8 msb, u8 lsb, u8 pc}; values 0-127, keys unique,
+// sorted. Written only when not empty; absent = no settings, as before.
+constexpr uint32_t kExtKorgExport = 0x5058454B;
+// 'SNAM': section names set in the Studio (SectionDefinition::keep_name), payload =
+// N x {u8 section index (ascending, unique), u8 length 1-64, name bytes}. Absent = defaults, as before.
+constexpr uint32_t kExtSectionNames = 0x4D414E53;
 
 // ── Validation constants ───────────────────────────────────────────
 

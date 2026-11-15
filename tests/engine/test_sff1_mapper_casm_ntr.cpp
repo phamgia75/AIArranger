@@ -23,7 +23,7 @@ static int failures = 0, passes = 0;
 static CasmTrackConfig cfg(const std::string& name, uint8_t ch, uint8_t ntr, uint8_t ntt) {
     CasmTrackConfig c{};
     c.name = name; c.source_channel = ch; c.dest_channel = ch; c.ntr = ntr; c.ntt = ntt;
-    c.low_key = 0; c.high_key = 127;
+    c.note_low = 0; c.note_high = 127;
     return c;
 }
 

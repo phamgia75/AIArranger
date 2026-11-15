@@ -2,6 +2,8 @@
 #define AI_ARRANGER_UASF_TYPES_H
 
 #include <cstdint>
+#include <map>
+#include <utility>
 #include <string>
 #include <vector>
 #include <optional>
@@ -19,6 +21,10 @@ enum class MidiEventType : uint8_t {
     ProgramChange    = 0xC0,
     ChannelPressure  = 0xD0,
     PitchBend        = 0xE0,
+    // System Real-Time (1 byte, `channel` ignored). Output only, never in a style.
+    TimingClock      = 0xF8,
+    Start            = 0xFA,
+    Stop             = 0xFC,
 };
 
 struct MidiEvent {
@@ -94,6 +100,15 @@ struct ArticulationMetadata {
     PlaybackRecommendation recommended;
     uint8_t ntr = 0;             // Note Transposition Rule (0=Root,1=Fifth,2=Chord,3=Bass,6=Fixed)
     uint8_t ntt = 0;             // Note Transposition Table (from CASM)
+    // Register limits applied after NTR/NTT (CASM Ctb2; defaults = no effect):
+    uint8_t high_key = 11;       // 0-11: chord roots above this pitch class play an octave down
+    uint8_t note_low = 0;        // octave-fold notes below this MIDI note up
+    uint8_t note_high = 127;     // octave-fold notes above this MIDI note down
+    bool hasRegisterLimits() const noexcept { return high_key != 11 || note_low != 0 || note_high != 127; }
+    // What the UASF 'TRNS' block may hold (writer and reader share this rule).
+    static bool registerLimitsValid(uint8_t hk, uint8_t lo, uint8_t hi) noexcept {
+        return hk <= 11 && hi <= 127 && lo <= hi && hi - lo >= 11;
+    }
     std::string vendor;
     std::string vendor_articulation;
     bool has_keyswitch = false;
@@ -122,6 +137,9 @@ struct SectionDefinition {
     uint32_t beats_per_bar = 0;
     uint32_t beat_note = 0;       // denominator (4 = quarter note)
     std::vector<TrackDefinition> tracks;
+    // The name is stored in UASF ('SNAM'): set by a Studio rename or a new element, and on names read from 'SNAM'.
+    // Other names (the importer's) are not stored, as before (the reader gives "Section <index>").
+    bool keep_name = false;
 };
 
 // ── Style Definition ─────────────────────────────────────────────────
@@ -130,6 +148,21 @@ struct SectionDefinition {
 inline constexpr uint32_t kMinTempoBpm = 20;
 inline constexpr uint32_t kMaxTempoBpm = 400;
 inline constexpr uint32_t kDefaultTempoBpm = 120;   // a style with no tempo
+
+// ── Korg Pa5X Style SMF export settings (extension 'KEXP') ───────────
+// Export-only data: the player never reads it. User-supplied Pa5X sounds (bank MSB/LSB + program, never inferred)
+// and the part each source channel plays (the CASM route), so a Style keeps them through Save UASF and undo.
+
+struct KorgSound { uint8_t msb = 0, lsb = 0, pc = 0; };
+inline bool operator==(const KorgSound& a, const KorgSound& b) { return a.msb == b.msb && a.lsb == b.lsb && a.pc == b.pc; }
+inline bool operator!=(const KorgSound& a, const KorgSound& b) { return !(a == b); }
+
+struct KorgExportSettings {
+    std::map<uint8_t, uint8_t> route;                    // source channel -> part channel it plays (0-15)
+    std::map<uint8_t, KorgSound> sounds;                 // Korg track channel (8-15) -> sound in every element
+    std::map<std::pair<SectionType, uint8_t>, KorgSound> element_sounds;   // (element, Korg channel) -> that element's sound
+    bool empty() const { return route.empty() && sounds.empty() && element_sounds.empty(); }
+};
 
 struct StyleDefinition {
     std::string name;
@@ -143,6 +176,7 @@ struct StyleDefinition {
     // (header + payload, file order) so a read/write round trip preserves them
     // (UASF_VERSIONING_POLICY: unknown fields MUST be preserved).
     std::vector<uint8_t> unknown_extensions;
+    KorgExportSettings korg_export;   // 'KEXP'
 };
 
 } // namespace ai_arranger::uasf

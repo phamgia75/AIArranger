@@ -66,9 +66,10 @@ int main() {
     TEST("Intro A/B -> i1/i2", std::string(korgMarkerFor(T::Intro1)) == "i1cv1" && std::string(korgMarkerFor(T::Intro2)) == "i2cv1");
     TEST("Fill AA/BB -> f1/f2", std::string(korgMarkerFor(T::Fill1)) == "f1cv1" && std::string(korgMarkerFor(T::Fill2)) == "f2cv1");
     TEST("Ending A/B -> e1/e2", std::string(korgMarkerFor(T::Ending1)) == "e1cv1" && std::string(korgMarkerFor(T::Ending2)) == "e2cv1");
-    TEST("Intro C / Fill CC,DD / Ending C / Break: no code",
-         !korgMarkerFor(T::Intro3) && !korgMarkerFor(T::Fill3) && !korgMarkerFor(T::Fill4) &&
-         !korgMarkerFor(T::Ending3) && !korgMarkerFor(T::Break));
+    TEST("Intro C / Fill CC,DD / Ending C -> i3 / f3,f4 / e3 (manual p.1035)",
+         std::string(korgMarkerFor(T::Intro3)) == "i3cv1" && std::string(korgMarkerFor(T::Fill3)) == "f3cv1" &&
+         std::string(korgMarkerFor(T::Fill4)) == "f4cv1" && std::string(korgMarkerFor(T::Ending3)) == "e3cv1");
+    TEST("Break: held back (no code emitted)", !korgMarkerFor(T::Break));
 
     // ── Full mapping on a synthetic style ──
     const auto note = [](uint8_t ch, uint8_t p, uint64_t on, uint64_t off, uint8_t v = 100) {
@@ -104,11 +105,14 @@ int main() {
     TEST("mapped output validates", validate(r.style).empty());
     const Element* v1 = find(r.style, "v1cv1");
     TEST("Main A exported as v1cv1, 1 bar 4/4", v1 && v1->length == 7680 && v1->num == 4 && v1->den == 4);
-    TEST("Fill CC, Break, zero-length Fill AA not exported", !find(r.style, "f1cv1") && r.style.elements.size() == 2);
+    const Element* f3 = find(r.style, "f3cv1");
+    TEST("Fill CC exported as f3cv1", f3 && f3->length == 7680);
+    TEST("Break and zero-length Fill AA not exported", !find(r.style, "f1cv1") && !find(r.style, "br") &&
+         r.style.elements.size() == 3);
     TEST("Break row explains why", r.report.sections.size() == 5 &&
          r.report.sections[3].marker.empty() && r.report.sections[3].note.find("Break") != std::string::npos);
     TEST("zero-length section reported", r.report.sections[4].note == "zero-length section");
-    TEST("dropped sections counted", r.report.dropped[kDropSection] == 4);
+    TEST("dropped sections counted (Break's 2 events)", r.report.dropped[kDropSection] == 2);
 
     TEST("Yamaha bank/PC dropped (3 events)", r.report.dropped[kDropVoiceSelect] == 3 &&
          count(*v1, 0xC0 | 11) == 0 && count(*v1, 0xB0 | 11, 0) == 0);
