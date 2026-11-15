@@ -7,6 +7,8 @@
 // without both variables it prints ORACLE UNAVAILABLE and exits 77 (Skipped, never passed).
 
 #include "jobs/export_specs.h"
+#include "jobs/job_queue.h"
+#include <thread>
 #include "../support/panative_fixture.h"
 #include <cstdio>
 #include <cstdlib>
@@ -363,6 +365,58 @@ int main(int argc, char** argv) {
             put(d2b / "SOUND/USER01.PCG", b);
         });
         TEST("D2: a member replaced by an identical new file after validation is refused", f.phase == Phase::Failed && !fs::exists(out / "D2B.KST"));
+    }
+
+    // ---- Codex r3 ---------------------------------------------------------------------------------------------------
+    {
+        // E2: the SET path renamed and replaced DURING the member checks (after the first path check) is refused
+        const fs::path e2 = root / "e2.SET";
+        makeSet(e2, {1}, {1});
+        bool fired = false;
+        s2k::sourceCheckHook = [&](const std::string&) {
+            if (fired) return;
+            fired = true;
+            fs::rename(e2, root / "e2.old");
+            makeSet(e2, {1}, {1});
+        };
+        const auto a = run(setToKst(e2, out / "E2.KST"));
+        s2k::sourceCheckHook = {};
+        TEST("E2: the SET path replaced during the member checks is refused", fired && a.phase == Phase::Failed && !fs::exists(out / "E2.KST"));
+
+        // E3: the destination is checked before anything is read, and no finished job keeps snapshot bytes
+        const fs::path e3 = root / "e3.SET";
+        makeSet(e3, {1, 2}, {1, 2});
+        fs::create_directories(out / "TAKEN.KST");
+        s2k::contentReads = 0;
+        const auto taken = run(setToKst(e3, out / "TAKEN.KST"));
+        TEST("E3: an existing destination is refused before any source is read", taken.phase == Phase::Failed && has(taken.reason, "already exists") && s2k::contentReads == 0);
+        const auto baseline = s2k::retainedSnapshotBytes.load();
+        {
+            JobQueue q;
+            q.enqueue(setToKst(e3, out / "E3A.KST"));                        // done
+            q.enqueue(setToKst(e3, out / "E3A.KST"));                        // refused: exists now
+            q.enqueue(setToKst(root / "broken.SET", out / "E3B.KST"));       // failed: not KORF
+            const auto c = q.enqueue(setToKst(e3, out / "E3C.KST"));         // cancelled while queued or running
+            q.cancel(c);
+            q.enqueue(setToKst(e3, out / "E3D.KST"));                        // done
+            for (int i = 0; i < 1000 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            TEST("E3: 5 jobs ended (done, refused, failed, cancelled, done)", q.idle() && fs::exists(out / "E3A.KST") && fs::exists(out / "E3D.KST"));
+            TEST("E3: the queue keeps every spec, but no snapshot bytes are retained after the jobs ended", s2k::retainedSnapshotBytes.load() == baseline);
+        }
+        TEST("E3: nothing retained at all (baseline 0)", baseline == 0);
+
+        // E4: the summary states the dependency result, never an object closure that does not apply
+        const auto dangling = run(setToKst(set, out / "E4A.KST"));   // DEMO.SET: KMP ID 9 dangling, sample 3 unreferenced
+        TEST("E4: decided map: refs, dangling, unreferenced in the summary", dangling.phase == Phase::Done &&
+             has(dangling.verifyText, "KMP -> PCM: 3 reference(s), 1 dangling, 1 unreferenced sample(s)") && !has(dangling.verifyText, "closure 0 dangling"));
+        const fs::path unk = root / "e4unk.SET";
+        Synth noId{0x12020010, 6, 1, 0, "Old", std::string(32, '\x22')};
+        put(unk / "PCM/RAM01.PCM", build({noId}, 1));
+        put(unk / "MULTISMP/RAM.KMP", build({{0x11080018, 5, 0, 0, "RAM", "OC31encoded"}}, 1));
+        const auto u = run(setToKst(unk, out / "E4B.KST"));
+        TEST("E4: undecided map: UNKNOWN with the reason in the summary", u.phase == Phase::Done && has(u.verifyText, "KMP -> PCM: UNKNOWN") &&
+             has(u.verifyText, "OC31") && !has(u.verifyText, "closure 0 dangling"));
+        TEST("E4: no object closure is claimed for a KST with no Style/KBD Set/Pad", has(u.verifyText, "no Style, Keyboard Set or Pad objects are written"));
     }
 
     // ---- C2 (Codex r1): staged bytes and sources are re-checked right before the publishing rename ------------------

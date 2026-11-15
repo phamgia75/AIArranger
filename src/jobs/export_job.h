@@ -67,6 +67,7 @@ struct ExportSpec {
     std::function<WriteResult(int outFd, const fs::path& out, const std::function<bool(double)>& progress)> writeAt;
     std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;   // runs on the STAGED output; L1 Failed = not published
     std::function<std::string(const fs::path& out)> beforePublish;   // right before the publishing renames: "" = publish, else why not
+    std::function<void()> finished;   // once the job has ended, in any terminal state (done, failed, cancelled, exception): release what it held
     // P1 conversion report: what the output carries and how sure it is: {"EXACT"|"MEASURED"|"ESTIMATED"|"MISSING", what}
     std::function<std::vector<std::pair<std::string, std::string>>()> conversion;
 };
@@ -483,6 +484,7 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
 // The exception boundary (D17): anything a validator, writer or filesystem call throws fails this job, nothing else.
 inline void runExport(const ExportSpec& spec, JobState& st, const std::function<bool()>& cancelled, const std::function<void(const JobState&)>& update) {
+    struct Finished { const ExportSpec& s; ~Finished() { if (s.finished) s.finished(); } } finished{spec};   // every exit path, exceptions too
     std::string why;
     try {
         runExportSteps(spec, st, cancelled, update);

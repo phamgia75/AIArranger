@@ -47,7 +47,9 @@ One owner Pa700-family SET folder (142 files) and the KST that a Pa5X itself mad
    special file is refused. The name-based listing must have listed the pinned folder (same device and inode).
 2. **Snapshot.** Each CARRY member is read exactly once into memory, with its SHA-256 and its identity (device, inode,
    size, modification time; the read fails if the identity changes while the file is read). Total bound:
-   2 GiB (`kMaxSnapshotBytes`); a larger SET is refused with that reason. The KORF check, the dependency map, the
+   2 GiB (`kMaxSnapshotBytes`); a larger SET is refused with that reason. The destination is checked before anything
+   is read. When the job ends in any state (done, refused, failed, cancelled), the bytes are released: the job queue keeps
+   the job (and its hashes and identities) for its list, not the bytes. The KORF check, the dependency map, the
    CONVERSION report and the staged write all use these bytes. No source is read again for content (a test counts the
    reads: one per CARRY member).
 3. **Write.** The staged files are created exclusively below the job's pinned output folder. Each file's device and
@@ -56,13 +58,28 @@ One owner Pa700-family SET folder (142 files) and the KST that a Pa5X itself mad
    must equal the snapshot's, and the identities must equal the recorded ones. The W5 closure and validator checks run on it.
 5. **Publish gate**, in this order, right before the no-replace rename:
    1. source identity: the SET pathname still names the pinned folder (device, inode), and every CARRY member still has
-      its snapshot identity (no content re-read);
+      its snapshot identity (no content re-read); then the SET pathname is compared with the pinned folder again;
    2. last: `library::recheckPinned` re-hashes every staged file through the pinned folder and compares hashes and
       device/inode with the verified ones. (This step was extended once in the shared code; Library Manager Execute Plan uses it too.)
 
 **Residual boundary.** After the publish rename, a concurrent process of the same user can still change the published
 files or the SET. The report states what was verified at publish time: the SET was still the folder that was read,
 every carried member was unchanged, and every staged file was re-hashed. It cannot vouch for later changes.
+
+The same boundary covers the last window inside the gate: a staged file that `recheckPinned` has already hashed
+could be replaced by a same-length file before the rename (Codex r3 E1). The verdict on that window (no change made):
+- (a) Who writes into the staging folder `NAME.KST.INCOMPLETE/`? Only the job, which creates it fresh beside the
+  output. No other AIArranger code writes there. Ordinary macOS services read but do not rewrite files there
+  (Spotlight indexing, Time Machine). Finder writes a `.DS_Store` only if someone opens the folder; a sync client in a synced
+  parent may add a conflict copy. Both are new entries, and the re-walk refuses them as unexpected. Replacing a hashed
+  file with other same-length bytes needs a deliberate concurrent process of the same user. That process could just
+  as well change the output one instant after the publish, which is the boundary above. A further
+  check-then-use layer would only move the window.
+- (b) Read-only staging files (0444) plus a folder-identity check: not added. Replacing a file is an unlink/rename in
+  the folder, which the folder's permission governs, not the file's. A same-user process can also restore any mode it
+  likes. A read-only staging folder would also block the job's own publishing rename. The folder identity (device and
+  inode, reached from the pinned parent) is already checked by `recheckPinned` and by the runner right before the rename.
+  So the hardening is not trivial and does not stop the process it would be meant for.
 
 ## Private oracle (counts only)
 `test_set_to_kst --oracle` (CTest `test_set_to_kst_oracle`, label private-corpus; Skipped without

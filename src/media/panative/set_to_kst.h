@@ -146,9 +146,18 @@ inline Identity identityOf(const struct stat& st) {
 #endif
 }
 struct Snap { std::string bytes, sha; Identity id; };
+// Bytes held by every live snapshot, process-wide (observable: a finished job must hold none, Codex r3 E3).
+inline std::atomic<uint64_t> retainedSnapshotBytes{0};
 struct Snapshot {
-    std::map<std::string, Snap> files;   // CARRY member rel -> its bytes as read once
-    uint64_t total = 0;
+    std::map<std::string, Snap> files;   // CARRY member rel -> its bytes as read once (hash and identity stay after release)
+    uint64_t total = 0, held = 0;        // total read; held = bytes still in memory
+    Snapshot() = default;
+    Snapshot(const Snapshot&) = delete;
+    Snapshot& operator=(const Snapshot&) = delete;
+    ~Snapshot() { releaseBytes(); }
+    void add(const std::string& rel, Snap s) { held += s.bytes.size(); retainedSnapshotBytes += s.bytes.size(); files[rel] = std::move(s); }
+    void releaseBytes() { for (auto& [rel, f] : files) std::string().swap(f.bytes); retainedSnapshotBytes -= held; held = 0; }
+    void reset() { releaseBytes(); files.clear(); total = 0; }
 };
 inline constexpr uint64_t kMaxSnapshotBytes = uint64_t(2) << 30;   // shortcut: phase 1 holds the carried bytes in memory; stream them before larger SETs
 
@@ -177,7 +186,7 @@ inline std::string sha(const std::string& b) { media::Sha256 h; h.update(b.data(
 // a valid KORF container, a safe TYPE/FILE destination, no two destinations equal without case.
 // `snap` receives every CARRY member, read once (the only content read of the conversion).
 inline std::string refusal(const Plan& p, Snapshot& snap) {
-    snap = {};
+    snap.reset();
     if (!p.ok) return "cannot list the SET: " + p.error;
     if (!p.links.empty()) return "refusing: " + p.links.front() + " is a link or special file (links are never followed)";
     if (!p.count(Kind::Carry)) return "refusing: the SET holds no resource that the Pa5X carries unchanged (PCM, PCG, KMP, SBL)";
@@ -202,7 +211,7 @@ inline std::string refusal(const Plan& p, Snapshot& snap) {
         const auto c = panative::parse(reinterpret_cast<const uint8_t*>(s.bytes.data()), s.bytes.size());
         if (!c.ok) return "refusing: " + m.rel + " is not a valid KORF container: " + c.error;
         s.sha = sha(s.bytes);
-        snap.files.emplace(m.rel, std::move(s));
+        snap.add(m.rel, std::move(s));
     }
     return "";
 }
@@ -294,6 +303,9 @@ inline std::string sourceChanged(const Plan& p, const std::filesystem::path& set
             return rel + " changed or was replaced since it was read";
         if (sourceCheckHook) sourceCheckHook(rel);
     }
+    // again after the member checks (Codex r3 E2): the members were checked below the pinned root, the publish goes by name
+    if (::lstat(set.c_str(), &now) != 0 || pinned.st_dev != now.st_dev || pinned.st_ino != now.st_ino)
+        return set.string() + " was renamed or replaced while its members were checked";
     return "";
 }
 

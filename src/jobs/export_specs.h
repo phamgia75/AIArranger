@@ -413,6 +413,9 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
     s.sources = {set};
     s.dest = std::move(dest);
     s.validate = [st, set, d = detail::absFolder(s.dest)] {
+        // the destination first (Codex r3 E3): a refused output costs no source read. A leftover NAME.INCOMPLETE alone is
+        // left to the runner, which may move it aside with consent.
+        if (const auto why = media::outputFolderRefusal(d); !why.empty() && why != media::incompleteRefusal(d)) return why;
         if (!detail::isDir(set)) return "refusing: " + set.string() + " is not a folder";
         if (media::samplelab::sameOrBelow(d, set)) return "refusing: the KST may not be inside the SET " + set.string();
         const std::string leaf = d.filename().string();
@@ -480,9 +483,18 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
             const auto it = st->pinned->tree.find(m.dest);
             if (it == st->pinned->tree.end() || it->second != st->snap.files.at(m.rel).sha) return failed(m.dest + " is not byte-identical to its SET member");
         }
-        media::panative::assemble::Result r;
+        media::panative::assemble::Result r;   // the shared W5 gate; its object closure is vacuous here (no .stg/.ksc/.pdc)
         if (const auto why = media::panative::assemble::stagedRefusal(out, r); !why.empty()) return failed(why);
-        v.l1 = {Check::Passed, std::to_string(files) + " carried file(s) byte-identical to the SET as read (KORF-checked), closure 0 dangling, validator 0 errors"};
+        const auto& dp = st->deps;   // Codex r3 E4: state the dependency result exactly, claim nothing that was not checked
+        std::string map = dp.decided ? "KMP -> PCM: " + std::to_string(dp.kmpRefs) + " reference(s), " + std::to_string(dp.dangling.size()) + " dangling, " +
+                                           std::to_string(dp.unreferenced.size()) + " unreferenced sample(s)"
+                                     : "KMP -> PCM: UNKNOWN (";
+        if (!dp.decided) {
+            for (size_t i = 0; i < dp.notes.size(); ++i) map += (i ? "; " : "") + dp.notes[i];
+            map += dp.notes.empty() ? "no KMP or PCM to map)" : ")";
+        }
+        v.l1 = {Check::Passed, std::to_string(files) + " carried file(s) byte-identical to the SET as read (KORF-checked), validator 0 errors; " + map +
+                                   "; no Style, Keyboard Set or Pad objects are written, so no object closure applies"};
         return std::pair<Verification, std::string>{v, std::string(s2k::kLabel) + ". " + v.l1.detail + " (" + std::to_string(r.validatorWarnings) +
                                                            " validator warning(s)). Verified at publish time: the SET still the folder read, every carried "
                                                            "member unchanged (identity), every staged file re-hashed."};
@@ -491,6 +503,7 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
         if (auto e = s2k::sourceChanged(st->plan, set, st->snap); !e.empty()) return "the SET changed after it was read: " + e;   // (1)
         return library::recheckPinned(*st->pinned, out);   // (2) LAST: staged bytes and identities, right before the rename
     };
+    s.finished = [st] { st->snap.releaseBytes(); };   // Codex r3 E3: the queue keeps specs; only hashes and identities stay
     s.conversion = [st] {
         detail::Conversion c;
         for (const auto& m : st->plan.members)
