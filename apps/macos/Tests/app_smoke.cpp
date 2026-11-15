@@ -504,6 +504,15 @@ int main() {
                 TEST("Convert Sound: Preview proposes the zone map", cv.zoneMapField().getText().contains("layer 0 63 Soft") &&
                      cv.zoneMapField().getText().contains("layer 64 127 Hard") && cv.zoneMapField().getText().contains("zone "));
                 const auto z = cv.zoneMapField().getText().replace("layer 0 63 Soft", "layer 0 79 Soft").replace("layer 64 127 Hard", "layer 80 127 Hard");
+                {   // #41: a juce::TextEditor took 0.3 s to show this 6 KB map on the message thread, 3.6 s with no width yet
+                    app::EditView fresh;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    fresh.setText(z, false);
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    std::printf("  info: zone map (%d chars) set in %.1f ms\n", z.length(), ms);
+                    TEST("the zone map editor takes the whole map without a re-layout stall (under 50 ms, no width yet)",
+                         ms < 50 && fresh.getText() == z && !fresh.isEmpty());
+                }
                 cv.zoneMapField().setText(z);
                 pump(50);
                 TEST("Convert Sound: editing the zone map invalidates the preview", !cv.model().built());

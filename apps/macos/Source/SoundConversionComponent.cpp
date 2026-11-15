@@ -54,28 +54,26 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                     juce::dontSendNotification);
     pluginNote_.setText("AU/VST instruments: use the Sample Plugin tab.",
                         juce::dontSendNotification);
-    mapping_.setMultiLine(true);
-    mapping_.setReturnKeyStartsNewLine(true);
     mapping_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
     mapping_.setTitle("Key mapping (proposed; edit and press Preview)");
     mapping_.setTextToShowWhenEmpty("Press Preview: AIArranger measures each sample's pitch and proposes a key map here.", juce::Colour(0xff9090a0));
     addChildComponent(mapping_);
-    zoneMap_.setMultiLine(true);
-    zoneMap_.setReturnKeyStartsNewLine(true);
     zoneMap_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
     zoneMap_.setTitle("Zone map (layers, splits, root, tune, level, loops; edit and press Preview)");
     zoneMap_.setTextToShowWhenEmpty("Press Preview: the zone map of the Sound appears here. Edit split points, roots, tune, level, velocity "
                                     "layers and loops (snap, xfade), then press Preview again.", juce::Colour(0xff9090a0));
-    for (auto* t : {&name_, &order_, &splits_, &mapping_, &zoneMap_}) {
-        addAndMakeVisible(*t);
-        t->onTextChange = [this, t] {   // the preview no longer matches the settings: Generate must not write it
-            if (t == &order_ || t == &splits_ || t == &mapping_) zoneMap_.setText({}, false);   // the source changed: propose the zone map again
-            ++generation_;
-            model_.invalidate();
-            generateBtn_.setEnabled(false);
-            if (model_.instrument().layers.size()) status_.setText("Settings changed: press Preview again.", juce::dontSendNotification);
-        };
-    }
+    const auto changed = [this](bool source) {   // the preview no longer matches the settings: Generate must not write it
+        if (source) zoneMap_.setText({}, false);   // the source changed: propose the zone map again
+        ++generation_;
+        model_.invalidate();
+        generateBtn_.setEnabled(false);
+        if (model_.instrument().layers.size()) status_.setText("Settings changed: press Preview again.", juce::dontSendNotification);
+    };
+    for (auto* t : {&name_, &order_, &splits_}) { addAndMakeVisible(*t); t->onTextChange = [changed, t, this] { changed(t != &name_); }; }
+    addAndMakeVisible(mapping_);
+    addAndMakeVisible(zoneMap_);
+    mapping_.onTextChange = [changed] { changed(true); };
+    zoneMap_.onTextChange = [changed] { changed(false); };
     for (auto* t : {&preview_, &recipe_}) {
         t->setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
         t->setWrap(t == &recipe_);
