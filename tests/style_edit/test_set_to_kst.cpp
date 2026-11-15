@@ -399,7 +399,9 @@ int main(int argc, char** argv) {
             const auto c = q.enqueue(setToKst(e3, out / "E3C.KST"));         // cancelled while queued or running
             q.cancel(c);
             q.enqueue(setToKst(e3, out / "E3D.KST"));                        // done
-            for (int i = 0; i < 1000 && !q.idle(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // D55 N5: idle() can turn true before the runner's Finished guard has released the bytes: wait for both
+            for (int i = 0; i < 1000 && !(q.idle() && s2k::retainedSnapshotBytes.load() == baseline); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             TEST("E3: 5 jobs ended (done, refused, failed, cancelled, done)", q.idle() && fs::exists(out / "E3A.KST") && fs::exists(out / "E3D.KST"));
             TEST("E3: the queue keeps every spec, but no snapshot bytes are retained after the jobs ended", s2k::retainedSnapshotBytes.load() == baseline);
         }
@@ -433,6 +435,30 @@ int main(int argc, char** argv) {
         TEST("C2: a same-length staged change after verify is not published", a.phase == Phase::Failed && !fs::exists(out / "LATE1.KST"));
         const auto b = run(setToKst(set2, out / "LATE2.KST"), Phase::Publish, [&] { flip(set2 / "SOUND/USER01.PCG"); });
         TEST("C2: a same-length source change after verify is not published", b.phase == Phase::Failed && !fs::exists(out / "LATE2.KST"));
+    }
+
+    // ---- N3 (D55): the report's hashes are the verified ones, not the Manifest step's pathname read ------------------
+    {
+        const fs::path set3 = root / "n3.SET";
+        makeSet(set3, {1}, {1});
+        const auto f = out / "N3.KST.INCOMPLETE/N3.KST/SOUND/user01.pcg";
+        const auto inPlace = [&](const char* from, const char* to) {   // same inode, same length
+            auto b = slurp(f);
+            b.replace(b.find(from), 9, to);
+            std::fstream(f, std::ios::in | std::ios::out | std::ios::binary).write(b.data(), std::streamsize(b.size()));
+        };
+        JobState st;
+        st.id = 1;
+        bool edited = false, restored = false;
+        runExport(setToKst(set3, out / "N3.KST"), st, [] { return false; }, [&](const JobState& now) {
+            if (now.phase == Phase::Manifest && !edited) { edited = true; inPlace("OC31sound", "OC31SOUND"); }
+            if (now.phase == Phase::Verify && !restored) { restored = true; inPlace("OC31SOUND", "OC31sound"); }
+        });
+        std::string reported;
+        for (const auto& o : st.files) if (o.rel == "SOUND/user01.pcg") reported = o.sha256;
+        TEST("N3: edited before Manifest, restored before Verify: published, report hash == snapshot hash",
+             edited && restored && st.phase == Phase::Done && reported == s2k::sha(slurp(set3 / "SOUND/USER01.PCG")) &&
+             has(slurp(out / "N3.KST.export.md"), reported));
     }
 
     std::error_code ec;

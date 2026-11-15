@@ -30,8 +30,8 @@
 // (jobs::setToKst beforePublish) then checks, in this order: (1) the SET pathname still names the pinned root and every
 // member still has its snapshot identity; (2) LAST, right before the rename: every staged file re-hashed through the
 // pinned staged folder and its device/inode equal to the one recorded when it was written (library::recheckPinned).
-// Residual boundary: after the publish rename a concurrent process of the same user can still change files; the
-// report states what was verified at publish time. See PA5X_SET_TO_KST_EVIDENCE.md, "Data flow".
+// Residual boundary: these are sequential observations, not one verified instant; each check leaves a window after it
+// (listed in PA5X_SET_TO_KST_EVIDENCE.md, "Residual boundary"), and a same-user process can change files in it or later.
 #ifndef AI_ARRANGER_MEDIA_PANATIVE_SET_TO_KST_H
 #define AI_ARRANGER_MEDIA_PANATIVE_SET_TO_KST_H
 

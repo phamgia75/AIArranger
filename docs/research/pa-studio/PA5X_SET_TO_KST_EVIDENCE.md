@@ -41,7 +41,7 @@ One owner Pa700-family SET folder (142 files) and the KST that a Pa5X itself mad
 | R7 | KMP -> PCM: the KMP item's sample table, read only in this layout: item chunk id `11080018`, raw (not OC31), u16 `0x0103` at +0, u32 sample count at +2, table of fixed 122-byte records from item offset 85, sample ID at record +40; the table must fit in the item | Pa5X KST backup: one KMP file, one item; count 34 339 = the PCM sample count; each of the 34 339 PCM sample IDs occurs once in the table | A (table and IDs), U (version meaning, multisample/zone section) | one KMP file observed; any other version, an OC31 item or a table past the item -> UNKNOWN, and then no sample is reported unreferenced or dangling |
 | R8 | A CARRY file must be a valid KORF container (wrapper, header, directory, index as in `src/media/panative/panative_reader.h`) | 142/142 files of the SET; 281/281 KORF files of a Pa5X KST backup | A | the reader's limits apply (64 MiB per file) |
 
-## Data flow (no check-then-use window, Codex r1 + r2)
+## Data flow (Codex r1 + r2)
 1. **Pin.** The SET folder is opened once without following a link. Every member is then reached below that descriptor,
    folder by folder, without following a link, and the file must be a regular file. A SET that holds any link or
    special file is refused. The name-based listing must have listed the pinned folder (same device and inode).
@@ -56,30 +56,69 @@ One owner Pa700-family SET folder (142 files) and the KST that a Pa5X itself mad
    inode are recorded from the descriptor that wrote it.
 4. **Verify.** The staged folder is pinned (`library::Pinned`): each file hashed through the descriptors. The hashes
    must equal the snapshot's, and the identities must equal the recorded ones. The W5 closure and validator checks run on it.
+   The report's file hashes are these verified ones; the runner's earlier pathname hash is not kept (D55 N3).
 5. **Publish gate**, in this order, right before the no-replace rename:
    1. source identity: the SET pathname still names the pinned folder (device, inode), and every CARRY member still has
       its snapshot identity (no content re-read); then the SET pathname is compared with the pinned folder again;
    2. last: `library::recheckPinned` re-hashes every staged file through the pinned folder and compares hashes and
       device/inode with the verified ones. (This step was extended once in the shared code; Library Manager Execute Plan uses it too.)
 
-**Residual boundary.** After the publish rename, a concurrent process of the same user can still change the published
-files or the SET. The report states what was verified at publish time: the SET was still the folder that was read,
-every carried member was unchanged, and every staged file was re-hashed. It cannot vouch for later changes.
+**Residual boundary (corrected after the D55 review).** The checks above are sequential observations made during
+pre-publication verification. There is no single instant at which the source, the staged output and the destination are
+all known to be as checked. Each check sees only its own moment. A change made after a check, and before the
+next check that covers the same thing, is not seen. Every window:
+- **Staged files.** `recheckPinned` hashes the staged files one after another. A file can change after its own hash
+  while the others are still hashed. After the gate, the runner compares only names and sizes, then renames. A change
+  after that point is not seen at all.
+- **Resource subfolders** (`PCM/`, `SOUND/`, ...). Their paths are recorded, but their identities (device, inode) are not;
+  only the files' identities are. A subfolder is reached by name below the pinned folder at each walk.
+- **New entries.** Each folder is listed when it is walked. An entry created after its folder was listed is seen
+  only by a later walk, if one runs.
+- **Source.** Each CARRY member can change after its own identity check. The SET pathname can change after the
+  second path check. The identity is device, inode, size and modification time. An in-place edit that sets the
+  modification time back (`utimes`, same user) and keeps the size is not seen. Content is never re-read.
+- **Destination.** The destination parent can be renamed or replaced after its last pathname check. The publish
+  renames go through the parent folder descriptor opened for the job, so the output lands in the folder that was
+  checked. The report beside it (`NAME.export.md` / `.json`) is written by pathname, so it can land in a different
+  folder.
+- **After publishing.** The output and the SET can be changed at any time.
 
-The same boundary covers the last window inside the gate: a staged file that `recheckPinned` has already hashed
-could be replaced by a same-length file before the rename (Codex r3 E1). The verdict on that window (no change made):
-- (a) Who writes into the staging folder `NAME.KST.INCOMPLETE/`? Only the job, which creates it fresh beside the
-  output. No other AIArranger code writes there. Ordinary macOS services read but do not rewrite files there
-  (Spotlight indexing, Time Machine). Finder writes a `.DS_Store` only if someone opens the folder; a sync client in a synced
-  parent may add a conflict copy. Both are new entries, and the re-walk refuses them as unexpected. Replacing a hashed
-  file with other same-length bytes needs a deliberate concurrent process of the same user. That process could just
-  as well change the output one instant after the publish, which is the boundary above. A further
-  check-then-use layer would only move the window.
-- (b) Read-only staging files (0444) plus a folder-identity check: not added. Replacing a file is an unlink/rename in
-  the folder, which the folder's permission governs, not the file's. A same-user process can also restore any mode it
-  likes. A read-only staging folder would also block the job's own publishing rename. The folder identity (device and
-  inode, reached from the pinned parent) is already checked by `recheckPinned` and by the runner right before the rename.
-  So the hardening is not trivial and does not stop the process it would be meant for.
+What it takes to use a window:
+- Write access as the same user (UID) to the folders.
+- The staging path, which is predictable: `NAME.KST.INCOMPLETE/NAME.KST` beside the output.
+- Timing.
+
+An in-place edit keeps the device and inode, so it needs no replacement. Only a hash taken after it can see it. A
+changed length is caught by the runner's size check; only a change after that check may have any length. Before it, a
+change must keep the length.
+
+The report states what was checked and in what order. It does not certify the published bytes at any later moment. For
+single-user desktop use the D55 review rated this risk LOW.
+
+Codex r3 E1 asked about the last window inside the gate. The verdict (no code change):
+- **(a) Who writes into the staging folder `NAME.KST.INCOMPLETE/`?** The job creates it fresh beside the output, and no
+  other AIArranger code writes there. Other writers are still possible, and not only deliberate ones:
+  - Finder writes a `.DS_Store` when the folder is opened.
+  - A sync client in a synced parent may add a conflict copy.
+  - A backup or restore tool, or a user editing the folder, can also write there.
+  - What iCloud Drive does to a folder that changes while it is synced: NEEDS_VERIFICATION (not measured).
+
+  Such an entry is refused only if a check observes it: the `recheckPinned` re-walk, or the runner's listing.
+  An entry that appears after those checks can be published:
+  - inside `NAME.KST`, as part of the output;
+  - directly in `NAME.KST.INCOMPLETE`, when its name starts with the output name (for example
+    `NAME.KST.conflict`). The runner moves such entries beside the output as side files. Any other name is refused.
+- **(b) Read-only staging files (0444) plus a folder-identity check: not added.**
+  - Replacing a file is an unlink and a rename in its folder. The folder's permission governs that, not the file's.
+  - A read-only subfolder or file does not block the job's publishing rename.
+  - The top staged folder `NAME.KST` must stay writable. Moving a folder into another parent also needs write
+    permission on the folder itself, to update its `..` entry. Measured on APFS, macOS 27.0.1: moving a 0555 folder into
+    a different parent gave EACCES. The same move with the top folder 0755 and a 0555 subfolder holding a 0444 file
+    succeeded.
+  - So protecting the contents needs every mode changed (files 0444, subfolders 0555), and the same user can restore
+    any of them: friction, not isolation.
+  - The folder identity (device and inode, reached from the pinned parent) is already checked by `recheckPinned` and by
+    the runner right before the rename.
 
 ## Private oracle (counts only)
 `test_set_to_kst --oracle` (CTest `test_set_to_kst_oracle`, label private-corpus; Skipped without

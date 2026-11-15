@@ -496,9 +496,11 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
         v.l1 = {Check::Passed, std::to_string(files) + " carried file(s) byte-identical to the SET as read (KORF-checked), validator 0 errors; " + map +
                                    "; no Style, Keyboard Set or Pad objects are written, so no object closure applies"};
         return std::pair<Verification, std::string>{v, std::string(s2k::kLabel) + ". " + v.l1.detail + " (" + std::to_string(r.validatorWarnings) +
-                                                           " validator warning(s)). Verified at publish time: the SET still the folder read, every carried "
-                                                           "member unchanged (identity), every staged file re-hashed."};
+                                                           " validator warning(s)). Checked in sequence before publishing, not as one instant: the SET path "
+                                                           "and every carried member's identity, then every staged file re-hashed; a change "
+                                                           "after its own check is not seen (see the evidence doc's residual boundary)."};
     };
+    s.verifiedHashes = [st] { return st->pinned ? st->pinned->tree : std::map<std::string, std::string>{}; };   // == the snapshot's (verify)
     s.beforePublish = [st, set](const fs::path& out) {
         if (auto e = s2k::sourceChanged(st->plan, set, st->snap); !e.empty()) return "the SET changed after it was read: " + e;   // (1)
         return library::recheckPinned(*st->pinned, out);   // (2) LAST: staged bytes and identities, right before the rename
