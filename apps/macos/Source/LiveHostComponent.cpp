@@ -1,4 +1,6 @@
 #include "LiveHostComponent.h"
+#include "ResourcesComponent.h"
+#include "StudioComponent.h"
 #include "importers/sff1/sff1_reader.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "engine/arranger/chord_input.h"
@@ -100,10 +102,28 @@ LiveHostComponent::LiveHostComponent() {
     addAndMakeVisible(autoFillBtn_);
     refreshBtn_.onClick = [this] { driver_.retryMidi(); refreshDevices(); };   // #23
     loadBtn_.onClick    = [this] { loadStyleDialog(); };
+    resourcesBtn_.onClick = [this] {
+        if (!resourcesWindow_) {
+            struct Window : juce::DocumentWindow {
+                Window() : DocumentWindow("AI Arranger - Sounds & Resources", juce::Colours::black, DocumentWindow::allButtons) {
+                    setUsingNativeTitleBar(true);
+                    setContentOwned(new ResourcesComponent(), true);
+                    setResizable(true, true);
+                    centreWithSize(getWidth(), getHeight());
+                }
+                void closeButtonPressed() override { setVisible(false); }
+            };
+            resourcesWindow_ = std::make_unique<Window>();
+        }
+        resourcesWindow_->setVisible(true);
+        resourcesWindow_->toFront(true);
+    };
+
+    studioBtn_.onClick = [this] { showStudio(); };
 
     panicBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::darkred);
 
-    for (auto* b : {&refreshBtn_, &loadBtn_, &startBtn_, &stopBtn_, &syncBtn_,
+    for (auto* b : {&refreshBtn_, &loadBtn_, &resourcesBtn_, &studioBtn_, &startBtn_, &stopBtn_, &syncBtn_,
                     &introBtn_, &varA_, &varB_, &varC_, &varD_, &fillBtn_,
                     &breakBtn_, &endingBtn_, &panicBtn_})
         addAndMakeVisible(*b);
@@ -226,7 +246,11 @@ void LiveHostComponent::resized() {
     loadBtn_.setBounds(styleRow.removeFromLeft(120));
     styleRow.removeFromLeft(8);
     refreshBtn_.setBounds(styleRow.removeFromLeft(90));
-    styleRow.removeFromLeft(12);
+    styleRow.removeFromLeft(8);
+    resourcesBtn_.setBounds(styleRow.removeFromRight(110));
+    styleRow.removeFromRight(6);
+    studioBtn_.setBounds(styleRow.removeFromRight(80));
+    styleRow.removeFromLeft(4);
     styleLabel_.setBounds(styleRow);
     area.removeFromTop(10);
 
@@ -266,6 +290,46 @@ void LiveHostComponent::resized() {
     auto bottom = area.removeFromTop(34);
     panicBtn_.setBounds(bottom.removeFromLeft(140));
     statusLabel_.setBounds(bottom);
+}
+
+StudioComponent* LiveHostComponent::showStudio() {
+    if (!studioWindow_) {
+        struct Window : juce::DocumentWindow {
+            explicit Window(std::function<void()> showHost)
+                : DocumentWindow("AI Music Studio", juce::Colours::black, DocumentWindow::allButtons) {
+                setUsingNativeTitleBar(true);
+                setContentOwned(new StudioComponent(std::move(showHost)), true);
+                setResizable(true, true);
+                setResizeLimits(1100, 700, 4096, 4096);
+                centreWithSize(getWidth(), getHeight());
+            }
+            void closeButtonPressed() override { setVisible(false); }
+        };
+        studioWindow_ = std::make_unique<Window>([this] { if (auto* w = getTopLevelComponent()) w->toFront(true); });
+    }
+    studioWindow_->setVisible(true);
+    studioWindow_->toFront(true);
+    return studio();
+}
+
+ResourcesComponent* LiveHostComponent::resources() const {
+    return resourcesWindow_ ? dynamic_cast<ResourcesComponent*>(resourcesWindow_->getContentComponent()) : nullptr;
+}
+StudioComponent* LiveHostComponent::studio() const {
+    return studioWindow_ ? dynamic_cast<StudioComponent*>(studioWindow_->getContentComponent()) : nullptr;
+}
+
+void LiveHostComponent::confirmQuit(std::function<void()> quit) {
+    auto* res = resources();
+    auto* studio = this->studio();
+    if (!studio && res && res->busy()) studio = showStudio();   // the quit guard's Wait / Cancel / Keep Working prompt lives there
+    if (!studio) { quit(); return; }
+    if (res) studio->setOtherWork("work in the Sounds & Resources window (Generate, Backup KST or a render)", [res] { return res->busy(); },
+                                  [res] { res->cancelJobs(); });
+    if (!studio->requestQuit(std::move(quit))) {   // deferred: show where the choice is
+        studioWindow_->setVisible(true);
+        studioWindow_->toFront(true);
+    }
 }
 
 } // namespace ai_arranger::app

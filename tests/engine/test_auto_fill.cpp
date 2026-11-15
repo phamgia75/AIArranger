@@ -18,6 +18,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using uasf::SectionType;
@@ -130,7 +131,9 @@ struct Rig {
 
 using V = std::vector<SectionType>;
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_auto_fill", corpusRun); rc >= 0) return rc;
     std::printf("Test: auto-fill on variation change\n");
 
     {   // OFF (default): A -> B is a plain switch, no fill.
@@ -266,7 +269,7 @@ int main() {
         TEST("demo style (one Main): variation change plays no fill",
              r.visited() == V({SectionType::Main1}));
     }
-    {   // Imported Genos style.
+    if (corpusRun) {   // Imported Genos style.
         std::string sty;
         std::error_code ec;
         for (const auto& e : std::filesystem::directory_iterator(CORPUS_DIR, ec)) {

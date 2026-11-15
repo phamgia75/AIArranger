@@ -65,3 +65,18 @@ Every golden file must have a corresponding `.meta.json`:
 2. Parse success for existing golden files must not decrease
 3. Structural fidelity must not decrease by more than 0.05
 4. New golden files must be added for new importer features
+
+## Private corpus (issue #27, 2026-11-15)
+
+This repository is public. A file is committed only when it may be redistributed, for example the CC0 styles in
+`fixtures/synthetic/` (`license_verified: true`). "User-owned" alone is not enough: the four Genos styles and
+their two `.uasf` conversions are marked "no redistribution", so they live outside the repository.
+
+- Point `AIARR_GENOS_CORPUS_DIR` at the private copy to run them. Each test that uses the corpus is registered as
+  `test_x` (public checks) and `test_x_corpus` (label `private-corpus`), or as `test_x_corpus` alone when it has
+  no public checks. With no corpus, the `_corpus` entries print `CORPUS UNAVAILABLE` and CTest reports them as
+  **Skipped**. They never pass without the data.
+- Public CI runs the public checks; `tests/exporters/test_synthetic_corpus.cpp` mirrors the corpus behaviour on the
+  synthetic styles.
+- An importer change still has to pass the private run (`ctest -L private-corpus` with the corpus configured,
+  0 Skipped) before merge, and the result is recorded with the change.

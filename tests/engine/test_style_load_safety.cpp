@@ -22,6 +22,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using session::EngineError;
@@ -31,6 +32,12 @@ static int failures = 0, passes = 0;
     if (!(expr)) { std::fprintf(stderr, "  FAIL: %s\n", std::string(name).c_str()); failures++; } \
     else { std::printf("  PASS: %s\n", std::string(name).c_str()); passes++; } \
 } while(0)
+
+static uasf::StyleDefinition import(const std::string& path) {
+    importers::sff1::Sff1Reader r;
+    importers::sff1::Sff1ToUasfMapper m;
+    return m.map(r.parseFile(path)).style;
+}
 
 static uasf::StyleDefinition corpus(const char* needle) {
     std::error_code ec;
@@ -66,12 +73,17 @@ static long outstanding(const midi::FakeMidiOutputProvider& out) {
     long n = 0; for (const auto& [k, v] : open) n += v; return n;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_style_load_safety", corpusRun); rc >= 0) return rc;
     std::printf("Test: style load safety (grid while playing, concurrency with tick)\n");
     const auto demo = arranger::buildDemoStyle();        // 480 PPQN, 4/4, 120 BPM
-    const auto pop  = corpus("POP_ACOUSTIC_2");          // 1920 PPQN, 4/4, 100 BPM
-    const auto cls  = corpus("CLASSIC_6_8");             // 1920 PPQN, 6/8, 90 BPM
-    TEST("corpus styles imported", !pop.sections.empty() && !cls.sections.empty());
+    // A 1920 PPQN 4/4 style and a 1920 PPQN 6/8 style: the CC0 synthetic pair publicly, the Genos pair in
+    // the private corpus run (issue #27). Only the tempos differ; each is the file's own.
+    const auto pop  = corpusRun ? corpus("POP_ACOUSTIC_2") : import(genos_corpus::synthetic("SYNTH_FULL_SFF2"));
+    const auto cls  = corpusRun ? corpus("CLASSIC_6_8") : import(genos_corpus::synthetic("SYNTH_WALTZ_68"));
+    const uint32_t popBpm = corpusRun ? 100 : 92, clsBpm = corpusRun ? 90 : 132;
+    TEST("4/4 and 6/8 styles imported", !pop.sections.empty() && !cls.sections.empty());
 
     midi::FakeMidiOutputProvider out; out.setDevices({{0, "synth"}});
     session::LiveEngineFacade f(nullptr, &out);
@@ -80,11 +92,11 @@ int main() {
 
     // ── #4: loads while stopped adopt the new grid at once, every direction ──
     struct Step { const char* name; const uasf::StyleDefinition* s; int64_t beat; int64_t bar; uint32_t bpm; };
-    const Step steps[] = {{"480 4/4 -> 1920 4/4", &pop, 1920, 7680, 100},
-                          {"1920 4/4 -> 1920 6/8", &cls, 960, 5760, 90},
+    const Step steps[] = {{"480 4/4 -> 1920 4/4", &pop, 1920, 7680, popBpm},
+                          {"1920 4/4 -> 1920 6/8", &cls, 960, 5760, clsBpm},
                           {"6/8 1920 -> 4/4 480", &demo, 480, 1920, 120},
-                          {"4/4 480 -> 6/8 1920", &cls, 960, 5760, 90},
-                          {"6/8 1920 -> 4/4 1920", &pop, 1920, 7680, 100}};
+                          {"4/4 480 -> 6/8 1920", &cls, 960, 5760, clsBpm},
+                          {"6/8 1920 -> 4/4 1920", &pop, 1920, 7680, popBpm}};
     for (const auto& st : steps) {
         const EngineError e = f.loadStyle(*st.s);
         const Grid g = grid(f);
@@ -94,7 +106,7 @@ int main() {
     }
 
     // ── #4: a load while playing is rejected and changes nothing ──
-    f.loadStyle(cls);                                    // 1920, 6/8, 90
+    f.loadStyle(cls);                                    // 1920, 6/8
     f.transportStart(); ticks(f, 3000);                  // into the style
     const auto before = f.snapshot();
     const Grid g0 = grid(f);
@@ -126,7 +138,7 @@ int main() {
     for (int i = 0; i < 50; ++i) allOk = allOk && f.loadStyle(i % 2 ? pop : cls) == EngineError::Ok;
     TEST("50 alternating stopped loads all Ok", allOk);
     const Grid g3 = grid(f);
-    TEST("after 50 loads the last style's grid is active (POP: 1920, 7680)", g3.beat == 1920 && g3.bar == 7680);
+    TEST("after 50 loads the last style's grid is active (4/4: 1920, 7680)", g3.beat == 1920 && g3.bar == 7680);
     f.stop();
 
     // ── #5: loadStyle on one thread, tick() on another (TSan reproducer) ──
@@ -176,7 +188,7 @@ int main() {
         TEST("concurrent: transport stopped after the drain", !g.snapshot().playing);
         TEST("concurrent: final stopped load Ok", g.loadStyle(cls) == EngineError::Ok);
         g.transportStart(); ticks(g, 10);
-        TEST("concurrent: lifecycle after swaps: playing CLASSIC_6_8 on 1920 / 5760",
+        TEST("concurrent: lifecycle after swaps: playing the 6/8 style on 1920 / 5760",
              g.snapshot().playing && g.session().clock().ticksPerBar() == 5760);
         g.transportStop(); ticks(g, 10);
         TEST("concurrent: no outstanding notes after Stop", outstanding(o2) == 0);

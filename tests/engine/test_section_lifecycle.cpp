@@ -24,6 +24,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::arranger;
@@ -84,7 +85,9 @@ struct Rig {
 };
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_section_lifecycle", corpusRun); rc >= 0) return rc;
     std::printf("Test: section lifecycle (loop / auto-advance / fill return / ending stop)\n");
     const auto demo = buildDemoStyle();   // 0 Intro(4) 1 Main(4) 2 Fill(1) 3 Ending(2)
 
@@ -168,7 +171,7 @@ int main() {
     // POP_ACOUSTIC_2's MTrk is split at its SMF markers into Intro A, Main A-D,
     // Fill In AA-DD, Fill In BA (= Break) and Ending A. Variation A-D address
     // Main A-D by type; Fill picks the fill of the playing Main.
-    {
+    if (corpusRun) {
         importers::sff1::Sff1Reader reader;
         const auto pr = reader.parseFile(std::string(CORPUS_DIR) +
             "/POP_ACOUSTIC_2_SC_GENOS.S718---7ba40ed3-527f-49ce-a22c-2414d5de2ec5.sty");

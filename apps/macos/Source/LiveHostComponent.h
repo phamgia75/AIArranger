@@ -15,6 +15,9 @@
 
 namespace ai_arranger::app {
 
+class StudioComponent;
+class ResourcesComponent;
+
 class LiveHostComponent : public juce::Component, private juce::Timer {
 public:
     LiveHostComponent();
@@ -22,6 +25,14 @@ public:
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    // The app's quit path: runs `quit` now, or later when the AI Music Studio first asks about unwritten Style edits
+    // (Save / Discard run it, Cancel aborts the quit).
+    // Running work (export jobs, and Generate / Backup KST in the standalone Sounds & Resources window) is asked about
+    // first, in the Studio's Wait / Cancel Jobs and Quit / Keep Working prompt (the Studio window opens for it).
+    void confirmQuit(std::function<void()> quit);
+    StudioComponent* showStudio();             // opens (creating once) the AI Music Studio window
+    ResourcesComponent* resources() const;     // the standalone Sounds & Resources window's page, if it was opened
+    StudioComponent* studio() const;
 
 private:
     void timerCallback() override;     // message thread: poll snapshot -> labels
@@ -40,10 +51,13 @@ private:
                      startBtn_{"Start"}, stopBtn_{"Stop"}, syncBtn_{"Sync Start"},
                      introBtn_{"Intro"}, varA_{"A"}, varB_{"B"}, varC_{"C"},
                      varD_{"D"}, fillBtn_{"Fill"}, breakBtn_{"Break"},
-                     endingBtn_{"Ending"}, panicBtn_{"PANIC"};
+                     endingBtn_{"Ending"}, panicBtn_{"PANIC"},
+                     resourcesBtn_{"Sound Tools..."},   // Sounds & Resources window (reads; writes only new package folders)
+                     studioBtn_{"Studio..."};           // AI Music Studio window (the same tools in one sidebar layout)
     juce::ToggleButton autoFillBtn_{"Auto Fill"};   // spec §5.3
 
     std::unique_ptr<juce::FileChooser> chooser_;
+    std::unique_ptr<juce::DocumentWindow> resourcesWindow_, studioWindow_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LiveHostComponent)
 };

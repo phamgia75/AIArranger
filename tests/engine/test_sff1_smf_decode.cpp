@@ -18,6 +18,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger::importers::sff1;
 
@@ -99,7 +100,9 @@ static std::vector<Ev> referenceEvents(const std::vector<uint8_t>& file) {
     return out;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_sff1_smf_decode", corpusRun); rc >= 0) return rc;
     std::printf("Test: SFF1 SMF event decoding (SysEx / meta / EoT / truncation)\n");
     Sff1Reader reader;
 
@@ -148,7 +151,7 @@ int main() {
     }
 
     // ── 5. Every real corpus style decodes identically to the reference ─
-    {
+    if (corpusRun) {
         const char* files[] = {
             "BALLAD_FOLK_SC_GENOS_.S718---4c7ad352-3441-418f-9ad6-41fd41c38619.sty",
             "CLASSIC_6_8_SC_GENOS.S718---36428220-aac8-423d-9a87-79f1594df699.sty",

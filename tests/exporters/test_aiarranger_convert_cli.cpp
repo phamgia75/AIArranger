@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <iterator>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 namespace fs = std::filesystem;
 
@@ -30,16 +31,27 @@ static void writeBytes(const fs::path& p, const std::vector<uint8_t>& b) {
     std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool corpusRun = false;
+    if (const int rc = genos_corpus::gate(argc, argv, "test_aiarranger_convert_cli", corpusRun); rc >= 0) return rc;
     std::printf("Test: aiarranger-convert CLI exit codes\n");
     const fs::path dir = fs::temp_directory_path() / ("aiarr_cli_" + std::to_string(std::rand()) + std::to_string(::getpid()));
     fs::remove_all(dir);   // never inherit files from an earlier crashed run
     fs::create_directories(dir);
 
-    fs::path pop;
-    for (const auto& f : fs::directory_iterator(CORPUS_DIR))
-        if (f.path().extension() == ".sty" && f.path().filename().string().rfind("POP_ACOUSTIC_2", 0) == 0) pop = f.path();
-    TEST("corpus style present", !pop.empty());
+    // The same exit-code checks run on two different styles: CC0 synthetic ones publicly, and
+    // POP_ACOUSTIC_2 / BALLAD_FOLK in the private corpus run (issue #27).
+    fs::path pop = genos_corpus::synthetic("SYNTH_FULL_SFF2"), other = genos_corpus::synthetic("SYNTH_WALTZ_68");
+    if (corpusRun) {
+        pop.clear(); other.clear();
+        for (const auto& f : fs::directory_iterator(CORPUS_DIR)) {
+            const std::string fn = f.path().filename().string();
+            if (f.path().extension() != ".sty") continue;
+            if (fn.rfind("POP_ACOUSTIC_2", 0) == 0) pop = f.path();
+            if (fn.rfind("BALLAD_FOLK", 0) == 0) other = f.path();
+        }
+    }
+    TEST("input styles present", !pop.empty() && !other.empty() && fs::exists(pop) && fs::exists(other));
 
     // Break-only style (a Genos "Fill In BA" and nothing else): imports, but no
     // section has a Korg marker code -> exit 2 and no output file.
@@ -83,9 +95,6 @@ int main() {
     TEST("--compare across PPQN (1920 vs 480) exits 0",
          run("--compare " + q(dir / "pop.mid") + " --with " + q(dir / "pop480.mid")) == 0);
     {
-        fs::path other;
-        for (const auto& f : fs::directory_iterator(CORPUS_DIR))
-            if (f.path().extension() == ".sty" && f.path().filename().string().rfind("BALLAD_FOLK", 0) == 0) other = f.path();
         run("--input " + q(other) + " --target pa5x --output " + q(dir / "ballad.mid"));
         TEST("--compare different styles exits 2", run("--compare " + q(dir / "pop.mid") + " --with " + q(dir / "ballad.mid")) == 2);
     }

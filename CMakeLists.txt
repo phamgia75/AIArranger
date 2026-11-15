@@ -92,6 +92,40 @@ endif()
 
 # Tests that exercise the Apple platform layer directly (CoreMidiOut /
 # CoreMidiOutputProvider / mach host time). Built and run on Apple only.
+# Genos style corpus for the private acceptance run. The files are user-owned Yamaha
+# content and are not in this repository (issue #27): point this at a private copy
+# outside the repo. Each test below that uses it is registered as `test_x` (public
+# checks, run everywhere) and `test_x_corpus` (the corpus checks): with no corpus the
+# `_corpus` entries print CORPUS UNAVAILABLE and are reported as Skipped, never passed.
+set(AIARR_GENOS_CORPUS_DIR "" CACHE PATH
+    "Directory holding the private Genos .sty acceptance corpus (issue #27)")
+# Public checks plus corpus checks (tests/support/genos_corpus.h).
+set(GENOS_CORPUS_TESTS
+    test_aiarranger_convert_cli test_auto_fill test_genos_facade_runtime test_korg_sound_map
+    test_scheduler_timing test_section_lifecycle test_sff1_mapper_casm_ntr test_sff1_smf_decode
+    test_sff1_tempo test_style_load_safety test_time_signature test_uasf_deterministic_init
+    test_uasf_golden test_uasf_tempo)
+# Corpus checks only: registered as `test_x_corpus` alone (their public mirror is
+# tests/exporters/test_synthetic_corpus.cpp on the CC0 fixtures/synthetic styles).
+set(GENOS_CORPUS_ONLY_TESTS
+    test_corpus_split_validation test_korg_corpus_conversion test_per_channel_split
+    test_sff1_load_and_play_e2e test_sty_to_uasf_roundtrip)
+function(aiarr_add_test name)
+    if(NOT name IN_LIST GENOS_CORPUS_ONLY_TESTS)
+        add_test(NAME ${name} COMMAND ${name})
+    endif()
+    if(name IN_LIST GENOS_CORPUS_TESTS OR name IN_LIST GENOS_CORPUS_ONLY_TESTS)
+        add_test(NAME ${name}_corpus COMMAND ${name} --corpus)
+        set_tests_properties(${name}_corpus PROPERTIES SKIP_RETURN_CODE 77 LABELS private-corpus)
+    endif()
+endfunction()
+file(GLOB _genos_sty "${AIARR_GENOS_CORPUS_DIR}/*.sty")
+if(AIARR_GENOS_CORPUS_DIR AND _genos_sty)
+    message(STATUS "AIArranger: private Genos corpus at ${AIARR_GENOS_CORPUS_DIR}")
+else()
+    message(STATUS "AIArranger: no private Genos corpus; the *_corpus tests will report Skipped (issue #27)")
+endif()
+
 set(APPLE_ONLY_TESTS test_coremidi_out test_latency_stability test_midi_output_provider test_coremidi_reinit test_midi_output_safety)
 
 # ── Importer library (vendor SFF1/SFF2 isolation) ─────────────────────
@@ -112,6 +146,11 @@ add_library(exporter-korg STATIC
 target_include_directories(exporter-korg PUBLIC src)
 target_link_libraries(exporter-korg PUBLIC arranger-engine)
 
+# ── Style Studio editing core (non-real-time UASF edits, undo, SMF import/export) ──
+add_library(style-edit STATIC src/style_edit/style_editor.cpp)
+target_include_directories(style-edit PUBLIC src)
+target_link_libraries(style-edit PUBLIC exporter-korg arranger-engine)
+
 # ── Tests ─────────────────────────────────────────────────────────────
 # Each test file is a standalone program with its own main(). We build
 # one executable per file and register it with CTest, rather than linking
@@ -128,9 +167,9 @@ foreach(test_file ${TEST_SRC})
     add_executable(${test_name} ${test_file})
     target_link_libraries(${test_name} importer-sff1 ${PLATFORM_LIBS} arranger-engine Threads::Threads)
     target_compile_definitions(${test_name} PRIVATE
-        CORPUS_DIR="${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1"
+        CORPUS_DIR="${AIARR_GENOS_CORPUS_DIR}"
         REPO_DIR="${CMAKE_SOURCE_DIR}")
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    aiarr_add_test(${test_name})
 endforeach()
 
 # ── Gate 12 realtime performer-layer tests ────────────────────────────
@@ -166,9 +205,21 @@ foreach(test_file ${EXPORTER_TEST_SRC})
     add_executable(${test_name} ${test_file})
     target_link_libraries(${test_name} exporter-korg importer-sff1 arranger-engine Threads::Threads)
     target_compile_definitions(${test_name} PRIVATE
-        CORPUS_DIR="${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1"
+        CORPUS_DIR="${AIARR_GENOS_CORPUS_DIR}"
+        REPO_DIR="${CMAKE_SOURCE_DIR}"
         CONVERT_BIN="$<TARGET_FILE:aiarranger-convert>")
     add_dependencies(${test_name} aiarranger-convert)   # the CLI exit-code test runs it
+    aiarr_add_test(${test_name})
+endforeach()
+
+# ── Style Studio editing core tests (synthetic styles built in-test) ──
+file(GLOB STYLE_EDIT_TEST_SRC tests/style_edit/*.cpp)
+foreach(test_file ${STYLE_EDIT_TEST_SRC})
+    get_filename_component(test_name ${test_file} NAME_WE)
+    add_executable(${test_name} ${test_file})
+    target_link_libraries(${test_name} style-edit importer-sff1 Threads::Threads)   # importer-sff1: the studio model opens .sty
+    target_compile_definitions(${test_name} PRIVATE STYLE_BIN="$<TARGET_FILE:aiarranger-style>" REPO_DIR="${CMAKE_SOURCE_DIR}")
+    add_dependencies(${test_name} aiarranger-style)   # the CLI test runs it
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 
@@ -226,6 +277,25 @@ target_compile_options(test_bridge_c_consumer PRIVATE
 target_link_libraries(test_bridge_c_consumer arranger-bridge arranger-engine Threads::Threads)
 add_test(NAME test_bridge_c_consumer COMMAND test_bridge_c_consumer)
 
+# KST test-dataset input samples (docs/research/KST_TEST_DATASET_SPEC.md): generator self-test.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_kst_copy
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py --self-test)
+    # The app's backup and kst_copy.py share one manifest format: each verifies the other's copy.
+    add_test(NAME test_kst_backup_manifest_interop
+             COMMAND sh -c "T=$(mktemp -d) && mkdir -p \"$T/src/STYLE\" \"$T/src/PCM/empty\" && printf x > \"$T/src/STYLE/A B.STY\" && head -c 300000 /dev/urandom > \"$T/src/SOUND.PCG\" && $<TARGET_FILE:kst-backup> \"$T/src\" \"$T/app\" && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py --verify \"$T/app\" && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/kst_copy.py \"$T/src\" \"$T/py\" && $<TARGET_FILE:kst-backup> --verify \"$T/py\"; rc=$?; rm -rf \"$T\"; exit $rc")
+    add_test(NAME test_make_kst_test_samples
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_kst_test_samples.py --self-test)
+    add_test(NAME test_make_synthetic_kst_library
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/make_synthetic_kst_library.py --self-test)
+    # E8: the generator follows the observed layout, so `validate` reports only its placeholder bytes (R-10, exit 3)
+    add_test(NAME test_validate_cli
+             COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_validate_cli.sh ${CMAKE_BINARY_DIR} ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR})
+    add_test(NAME test_validate_sound_package
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_sound_package.py --self-test)
+endif()
+
 # The Apple-only tests talk to the system CoreMIDI server. Under a full
 # parallel ctest run, client creation occasionally fails (MIDIClientCreate
 # OSStatus -304) and keeps failing in that process for over a second, while the
@@ -255,6 +325,46 @@ target_link_libraries(sff1-parser importer-sff1 arranger-engine)
 # ── Genos -> Pa5X converter CLI ───────────────────────────────────────
 add_executable(aiarranger-convert tools/aiarranger_convert.cpp)
 target_link_libraries(aiarranger-convert exporter-korg importer-sff1 arranger-engine)
+
+# ── Style Studio CLI: inspect / edit / export-smf ──────────────────────
+add_executable(aiarranger-style tools/aiarranger_style.cpp)
+target_link_libraries(aiarranger-style style-edit)
+
+# ── KST inventory CLI (P1.9, read-only report) ─────────────────────────
+add_executable(kst-inventory tools/kst_inventory.cpp)
+target_include_directories(kst-inventory PRIVATE src)
+add_executable(kst-diff tools/kst_diff.cpp)   # read-only folder comparison (P2)
+target_include_directories(kst-diff PRIVATE src)
+add_executable(kst-merge-plan tools/kst_merge_plan.cpp)   # read-only load/merge prediction (P2)
+target_include_directories(kst-merge-plan PRIVATE src)
+add_executable(kst-backup tools/kst_backup.cpp)   # verified backup copy into a new folder (K1)
+target_include_directories(kst-backup PRIVATE src)
+add_test(NAME test_kst_cli_exit COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_kst_cli_exit.sh ${CMAKE_BINARY_DIR})
+add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
+target_include_directories(sf2-check PRIVATE src)
+add_executable(aiarranger-resources tools/aiarranger_resources.cpp)   # resource graph + memory budget, read-only
+target_include_directories(aiarranger-resources PRIVATE src)
+add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder
+target_include_directories(aiarranger-sound PRIVATE src)
+add_test(NAME test_kmp_cli   # EXPERIMENTAL KMP/KSF writer: demo -> KMP folder -> back through the kronos route; drums refused
+         COMMAND sh -c "rm -rf kmp-demo kmp-back && $<TARGET_FILE:aiarranger-sound> kmp --source demo --out kmp-demo | grep -q 'EXPERIMENTAL. Verification level L1' && $<TARGET_FILE:aiarranger-sound> kronos --in kmp-demo --name 'AIA Demo Organ' --layers 'AIA Organ Soft,AIA Organ Bright' --splits 90 --out kmp-back >/dev/null && ! $<TARGET_FILE:aiarranger-sound> kmp --source drums --out kmp-drums 2>/dev/null && test ! -e kmp-drums"
+         WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_test(NAME test_sound_cli_volumes COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_sound_cli_volumes.sh ${CMAKE_BINARY_DIR})   # mounted volumes refused by every writer
+add_executable(aiarranger-kit tools/aiarranger_kit.cpp)   # Pa5X Import Kit E9: documented imports into a new folder
+target_link_libraries(aiarranger-kit style-edit importer-sff1)
+add_test(NAME test_kit_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_kit_cli.sh ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
+add_executable(aiarranger-samplelab tools/aiarranger_samplelab.cpp)   # Sample Lab E4, offline; writes only to a new folder
+target_include_directories(aiarranger-samplelab PRIVATE src)
+add_test(NAME test_samplelab_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_samplelab_cli.sh ${CMAKE_BINARY_DIR})
+if(Python3_Interpreter_FOUND)   # independent Python check of the demo Drum Kit package (docs/research/TXPERF_DRUMKIT_NOTES.md)
+    add_test(NAME test_drumkit_package_independent
+             COMMAND sh -c "rm -rf drumkit-pkg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-pkg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tools/validate_drumkit_package.py drumkit-pkg"
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME test_validate_drumkit_negative   # every mutation of a valid package must FAIL
+             COMMAND sh -c "rm -rf drumkit-neg && $<TARGET_FILE:aiarranger-sound> drums --out drumkit-neg >/dev/null && ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/tools/test_validate_drumkit.py drumkit-neg"
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    add_test(NAME test_resources_cli COMMAND sh ${CMAKE_SOURCE_DIR}/tests/tools/test_resources_cli.sh ${CMAKE_BINARY_DIR} ${Python3_EXECUTABLE})
+endif()
 
 # ── Korg playback CLI (Gate 9 manual Musical Review driver) ───────────
 if(APPLE)

@@ -39,6 +39,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "../support/genos_corpus.h"
 
 using namespace ai_arranger;
 using namespace ai_arranger::importers::sff1;
@@ -245,14 +246,16 @@ static void runFixture(const std::string& label, const std::string& needle) {
 
     // ── The chord's octave never moves the pattern (Pa5X 2026-11-05) ──
     // A left-hand F2 and an F4 are the same chord: identical output, and the bass
-    // stays in its recorded register instead of dropping ~1.5 octaves.
+    // stays in its recorded register instead of dropping ~1.5 octaves. Since the
+    // CASM High Key applies (2026-11-06) a root above it plays an octave down
+    // (High Key D#: F bass = C bass - 7), so the register bound is +-11.
     const Captured f2 = playAndCapture(mr.style, {arranger::ChordType::Major, 41, 0, 0});
     const Captured f4 = playAndCapture(mr.style, {arranger::ChordType::Major, 65, 0, 0});
     TEST((label + ": F2 and F4 chords give an identical note stream").c_str(),
          f2.noteStreamHash == f4.noteStreamHash && f2.noteOn == f4.noteOn);
     if (c.bassMax >= 0)
-        TEST((label + ": bass over F2 stays within C-chord bass range +0..11").c_str(),
-             f2.bassMin >= c.bassMin - 2 && f2.bassMax <= c.bassMax + 11);
+        TEST((label + ": bass over F2 stays within C-chord bass range +-11").c_str(),
+             f2.bassMin >= c.bassMin - 11 && f2.bassMax <= c.bassMax + 11);
 
     std::printf("  [bass range] C:%d..%d F2:%d..%d F4:%d..%d\n", c.bassMin, c.bassMax,
                 f2.bassMin, f2.bassMax, f4.bassMin, f4.bassMax);
@@ -262,6 +265,7 @@ static void runFixture(const std::string& label, const std::string& needle) {
 }
 
 int main() {
+    if (const int rc = genos_corpus::require("test_sff1_load_and_play_e2e"); rc >= 0) return rc;
     std::printf("Test: SFF1 load-and-play end-to-end (4 Genos fixtures)\n");
 
     struct { const char* label; const char* needle; } fixtures[] = {
@@ -277,13 +281,13 @@ int main() {
         runFixture(f.label, f.needle);
     }
 
-    // The corpus is committed (acceptance golden files), so a missing fixture is
-    // a hard failure — never a silent soft-skip to green. This catches a broken
-    // checkout, a wrong CORPUS_DIR, or an accidentally-deleted/renamed fixture.
+    // The corpus run (genos_corpus::require) has a corpus, so a missing fixture is
+    // a hard failure — never a silent soft-skip to green. This catches an
+    // incomplete private copy or an accidentally-deleted/renamed fixture.
     if (found < 4) {
         std::fprintf(stderr,
             "\n  ❌ FAIL: expected all 4 committed Genos SFF1 fixtures under %s, "
-            "found only %d/4.\n     They are a committed acceptance corpus "
+            "found only %d/4.\n     They are the private acceptance corpus "
             "(docs/governance/IMPORTER_GOLDEN_CORPUS_POLICY.md); a missing fixture "
             "or wrong\n     CORPUS_DIR must fail the build, not pass silently.\n",
             CORPUS_DIR, found);

@@ -142,7 +142,8 @@ private:
                                int64_t noteOffOnlyFrom = INT64_MAX) noexcept;
 
     // Transpose a MIDI event based on chord
-    uint8_t transposeNote(uint8_t note, Chord chord, uasf::TrackRole role) const noexcept;
+    uint8_t transposeNote(uint8_t note, Chord chord, uasf::TrackRole role,
+                          const uasf::ArticulationMetadata& art) const noexcept;
 };
 
 // ── Demo style builder ─────────────────────────────────────────────

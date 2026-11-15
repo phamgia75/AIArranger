@@ -32,12 +32,18 @@ void be32(std::vector<uint8_t>& o, uint32_t v) {
 } // namespace
 
 bool isValidMarker(std::string_view m) noexcept {
-    // "EnCVn", lowercase only: E in {v,i,f,e}; element 1-4 for variations, 1-2
-    // otherwise; "cv"; chord variation 1-6 for variations, 1-2 otherwise.
+    // Pa5X User Manual v1.4 p.1035-1036: "encvn", lowercase only. Element v
+    // (1-4, cv 1-6), i (1-3, cv 1-2), f (1-4, cv 1-2), e (1-3, cv 1-2); the Break
+    // ("br") has no number and no Chord Variations.
+    if (m == "br") return true;
     if (m.size() != 5 || m[2] != 'c' || m[3] != 'v') return false;
-    const bool var = m[0] == 'v';
-    if (!var && m[0] != 'i' && m[0] != 'f' && m[0] != 'e') return false;
-    const char maxEl = var ? '4' : '2', maxCv = var ? '6' : '2';
+    char maxEl = 0, maxCv = '2';
+    switch (m[0]) {
+        case 'v': maxEl = '4'; maxCv = '6'; break;
+        case 'f': maxEl = '4'; break;
+        case 'i': case 'e': maxEl = '3'; break;
+        default: return false;
+    }
     return m[1] >= '1' && m[1] <= maxEl && m[4] >= '1' && m[4] <= maxCv;
 }
 

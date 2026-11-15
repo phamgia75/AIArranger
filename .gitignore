@@ -15,3 +15,8 @@ sff1-parser
 test-*
 *.o
 __pycache__/
+
+# Private Genos corpus (issue #27): never commit vendor styles or their conversions here
+corpus/yamaha/**/*.sty
+corpus/yamaha/**/*.uasf
+corpus/yamaha/**/*.S7*

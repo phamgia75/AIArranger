@@ -80,17 +80,23 @@ struct CasmSectionInfo {
 };
 
 // ── CASM Track Configuration ──────────────────────────────────────
-// One per Ctb2 source-channel block. Field offsets validated against
-// 4 real Genos .S718 files — see docs/importers/casm-structure-notes.md.
+// One per Ctb2 source-channel block (47 bytes). Layout: Wierzba/Bedesem
+// "Style Files" v2.1 Tables 12-16, checked against 4 Genos files (see
+// docs/importers/casm-structure-notes.md). The transposition fields are those
+// of the MIDDLE note zone; see parseCtb2Block.
 struct CasmTrackConfig {
     std::string name;           // Track name (8-byte field, trimmed)
     uint8_t     source_channel; // MIDI source channel (0-15)
     uint8_t     dest_channel;   // MIDI destination channel (0-15)
-    uint8_t     high_key;       // Note limit high
-    uint8_t     low_key;        // Note limit low
-    uint8_t     ntr;            // Note Transposition Rule value
-    uint8_t     ntt;            // Note Transposition Table type (bits 0-6)
+    uint8_t     zone_low = 0;   // middle zone lowest note; 0 = no low zone
+    uint8_t     zone_high = 127;// middle zone highest note; 127 = no high zone
+    uint8_t     ntr;            // Note Transposition Rule (0 Root Trans, 1 Root Fixed, 2 Guitar)
+    uint8_t     ntt;            // Note Transposition Table (bits 0-6; Ctb2 numbering)
     bool        ntt_bass;       // NTT bit 7: bass-note conversion enabled
+    uint8_t     high_key = 11;  // High Key 0-11 (C..B): roots above it play an octave down (Root Trans)
+    uint8_t     note_low = 0;   // Note Limit low (MIDI note): octave-fold below
+    uint8_t     note_high = 127;// Note Limit high (MIDI note): octave-fold above
+    uint8_t     rtr = 0;        // Retrigger Rule
     bool        is_megavoice;   // Megavoice candidate flag
 };
 

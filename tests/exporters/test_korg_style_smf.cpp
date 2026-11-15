@@ -60,9 +60,15 @@ int main() {
     TEST("marker 'intro i1cv2' rejected", !isValidMarker("intro i1cv2"));
     TEST("marker 'v1cv1 chorus' rejected", !isValidMarker("v1cv1 chorus"));
     TEST("marker v5cv1 rejected (variations 1-4)", !isValidMarker("v5cv1"));
-    TEST("marker i3cv1 rejected (others 1-2)", !isValidMarker("i3cv1"));
+    // Pa5X User Manual v1.4 p.1035: intros/endings 1-3, fills 1-4, Break "br".
+    TEST("marker i3cv1 / e3cv2 valid (intros, endings 1-3)", isValidMarker("i3cv1") && isValidMarker("e3cv2"));
+    TEST("marker f4cv2 valid (fills 1-4)", isValidMarker("f4cv2"));
+    TEST("marker i4cv1 / e4cv1 / f5cv1 rejected", !isValidMarker("i4cv1") && !isValidMarker("e4cv1") && !isValidMarker("f5cv1"));
     TEST("marker f1cv3 rejected (others cv 1-2)", !isValidMarker("f1cv3"));
-    TEST("marker b1cv1 rejected (no documented break code)", !isValidMarker("b1cv1"));
+    TEST("marker br valid (Break: no number, no CV)", isValidMarker("br"));
+    TEST("marker b1cv1 / br1 / brcv1 / BR rejected",
+         !isValidMarker("b1cv1") && !isValidMarker("br1") && !isValidMarker("brcv1") && !isValidMarker("BR"));
+    TEST("marker v0cv1 / v1cv0 rejected", !isValidMarker("v0cv1") && !isValidMarker("v1cv0"));
 
     const Style s = sample();
     TEST("sample validates", validate(s).empty());

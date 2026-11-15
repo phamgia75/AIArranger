@@ -85,7 +85,7 @@ int nearestRepresentative(int rel, const PcSet& s) noexcept {
 
 uint8_t transpose(uint8_t note, Chord target,
                   NtrRule ntr, NttMode ntt,
-                  uint8_t srcRootMidi) noexcept {
+                  uint8_t srcRootMidi, RegisterLimits limits) noexcept {
     if (target.type == ChordType::NoChord) return note;
     if (ntr == NtrRule::Bypass || ntt == NttMode::Bypass) return note;
 
@@ -128,9 +128,19 @@ uint8_t transpose(uint8_t note, Chord target,
     if (ntr != NtrRule::RootFixed) {
         rootDelta = (static_cast<int>(target.root) - static_cast<int>(srcRootMidi)) % 12;
         if (rootDelta < 0) rootDelta += 12;
+        // High Key (Yamaha: "chords with a root higher than the limit are played
+        // in the octave immediately below"); 11 = never.
+        if (ntr == NtrRule::RootTransposition && rootDelta > limits.highKey) rootDelta -= 12;
     }
 
     int result = static_cast<int>(note) + rootDelta + (dstRel - rel);
+
+    // Note Limit: nearest octave inside the range. A range under an octave
+    // cannot hold every pitch class, so it is ignored (the importer never sets one).
+    if (limits.noteHigh <= 127 && limits.noteHigh >= limits.noteLow + 11) {
+        while (result < limits.noteLow)  result += 12;
+        while (result > limits.noteHigh) result -= 12;
+    }
 
     // Fold into valid MIDI range without losing pitch class.
     while (result < 0)   result += 12;

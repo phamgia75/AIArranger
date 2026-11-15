@@ -357,7 +357,7 @@ void StylePlayer::dispatchSectionEvents(const uasf::SectionDefinition& section,
             uasf::MidiEvent dispatched = event;
             if (dispatched.type == uasf::MidiEventType::NoteOn ||
                 dispatched.type == uasf::MidiEventType::NoteOff) {
-                dispatched.data1 = transposeNote(dispatched.data1, chord, track.role);
+                dispatched.data1 = transposeNote(dispatched.data1, chord, track.role, track.articulation);
             }
             // Absolute tick = section origin + event's in-section position,
             // with swing applied so off-beat notes slide toward a shuffle feel
@@ -410,7 +410,8 @@ void StylePlayer::dispatchSectionEvents(const uasf::SectionDefinition& section,
     section_rel_cursor_ = rel;
 }
 
-uint8_t StylePlayer::transposeNote(uint8_t note, Chord chord, uasf::TrackRole role) const noexcept {
+uint8_t StylePlayer::transposeNote(uint8_t note, Chord chord, uasf::TrackRole role,
+                                   const uasf::ArticulationMetadata& art) const noexcept {
     // Full NTR/NTT transposition (Gate 10 Task B). The crude root/fifth rule is
     // replaced by the table-driven transform in engine/music/ntt. The rule pair
     // is derived from the track role, which round-trips through the UASF format
@@ -421,7 +422,8 @@ uint8_t StylePlayer::transposeNote(uint8_t note, Chord chord, uasf::TrackRole ro
     music::defaultRuleForRole(role, ntr, ntt);
     if (ntr == music::NtrRule::Bypass || ntt == music::NttMode::Bypass) return note;
     if (chord.type == ChordType::NoChord) return note;
-    return music::transpose(note, chord, ntr, ntt);
+    return music::transpose(note, chord, ntr, ntt, 60,
+                            music::RegisterLimits{art.high_key, art.note_low, art.note_high});
 }
 
 // ── Demo style builder ─────────────────────────────────────────────
