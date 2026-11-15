@@ -386,15 +386,24 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
     return s;
 }
 
-// SET -> KST phase 1 (D54 B1, media/panative/set_to_kst.h): a NEW folder NAME.KST holding the SET's CARRY members
-// byte-identical at their lower-cased paths; nothing for BLOCKED/DROPPED members, which the CONVERSION report (writer
-// report and conversion lines, in NAME.KST.export.md/.json beside it) lists with their reasons. Every CARRY file is
-// hashed at validation; the write re-reads and refuses a source that changed since; verify checks the staged folder
-// holds exactly those bytes, re-parses each as KORF and runs the W5 staged checks (closure, validator). Writes go
-// through the job's pinned output folder (writeAt, E9 identity-checked publish). STRUCTURALLY VALID - NOT VERIFIED ON A PA5X.
+// SET -> KST phase 1 (D54 B1, media/panative/set_to_kst.h; rules: docs/research/pa-studio/PA5X_SET_TO_KST_EVIDENCE.md):
+// a NEW folder NAME.KST holding the SET's CARRY members byte-identical at their lower-cased paths; nothing for
+// BLOCKED/DROPPED members, which the CONVERSION report (writer report and conversion lines, in NAME.KST.export.md/.json
+// beside it) lists with their reasons. Every source read goes below the SET root opened once, by descriptor, no link
+// followed (Codex r1 C1). Each CARRY file is hashed at validation; the write re-reads it and refuses a changed source;
+// verify pins the staged folder (library::Pinned) and requires exactly those bytes, KORF re-parse and the W5 staged
+// checks (closure, validator); right before the publishing rename the pinned staged folder AND every source are
+// re-checked against those hashes (Codex r1 C2). Writes go through the job's pinned output folder (writeAt, E9
+// identity-checked publish). STRUCTURALLY VALID - NOT VERIFIED ON A PA5X.
 inline ExportSpec setToKst(fs::path set, fs::path dest) {
     namespace s2k = media::panative::settokst;
-    struct State { s2k::Plan plan; s2k::Deps deps; std::string report; std::map<std::string, std::string> sha; };   // sha: dest -> SHA-256
+    struct State {
+        s2k::Plan plan;
+        s2k::Deps deps;
+        std::string report;
+        std::map<std::string, std::string> sha;   // dest -> SHA-256 checked at validation
+        std::shared_ptr<library::Pinned> pinned = std::make_shared<library::Pinned>();   // the verified staged output (fresh per verify)
+    };
     const auto st = std::make_shared<State>();
     ExportSpec s;
     s.type = "SET -> KST (resources only)";
@@ -408,16 +417,8 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
         if (leaf.size() <= 4 || leaf.compare(leaf.size() - 4, 4, ".KST") != 0 || !media::panative::assemble::safeName(leaf.substr(0, leaf.size() - 4)))
             return "refusing: the output must be a folder named NAME.KST with a safe NAME: " + leaf;
         st->plan = s2k::inventory(set);
-        if (const auto why = s2k::refusal(st->plan); !why.empty()) return why;
         st->sha.clear();
-        for (const auto& m : st->plan.members) {
-            if (m.kind != s2k::Kind::Carry) continue;
-            bool c = false;
-            std::string err;
-            const auto h = media::detail::sha256File(m.abs, [](size_t) { return true; }, &c, &err);
-            if (h.empty()) return "cannot read " + m.rel + ": " + err;
-            st->sha[m.dest] = h;
-        }
+        if (const auto why = s2k::refusal(st->plan, &st->sha); !why.empty()) return why;
         st->deps = s2k::dependencies(st->plan);
         st->report = s2k::report(st->plan, st->deps);
         return std::string();
@@ -437,6 +438,16 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
         std::sort(r.begin(), r.end(), [](const OutFile& a, const OutFile& b) { return a.rel < b.rel; });
         return r;
     };
+    // The CARRY sources as validated: every one re-read below the pinned SET root with the SHA-256 it had. "" = unchanged.
+    const auto sourcesChanged = [st]() -> std::string {
+        for (const auto& m : st->plan.members) {
+            if (m.kind != s2k::Kind::Carry) continue;
+            std::string bytes, err;
+            if (!s2k::readIn(st->plan.root->v, m.rel, bytes, err)) return err;
+            if (s2k::sha(bytes) != st->sha.at(m.dest)) return m.rel + " changed since it was checked";
+        }
+        return "";
+    };
     s.writeAt = [st](int outFd, const fs::path& out, const std::function<bool(double)>& progress) {
         snd::pkgio::FileSet files;
         files.root = out;
@@ -446,10 +457,8 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
         for (const auto& m : st->plan.members) {
             if (m.kind != s2k::Kind::Carry) continue;
             std::string bytes, err;
-            if (!media::panative::roottree::readBytes(m.abs, bytes, err)) return WriteResult{"cannot read " + m.rel + ": " + err, ""};
-            media::Sha256 h;
-            h.update(bytes.data(), bytes.size());
-            if (h.hex() != st->sha.at(m.dest)) return WriteResult{"refusing: " + m.rel + " changed since it was checked", ""};
+            if (!s2k::readIn(st->plan.root->v, m.rel, bytes, err)) return WriteResult{"refusing: " + err, ""};
+            if (s2k::sha(bytes) != st->sha.at(m.dest)) return WriteResult{"refusing: " + m.rel + " changed since it was checked", ""};
             files.save(m.dest, bytes);
             if (!files.ok) return WriteResult{"cannot write " + m.dest, ""};
             if (!progress(double(++i) / n)) return WriteResult{"cancelled", ""};
@@ -464,21 +473,30 @@ inline ExportSpec setToKst(fs::path set, fs::path dest) {
             v.l1 = {Check::Failed, why};
             return std::pair<Verification, std::string>{v, why};
         };
-        const auto now = listFiles(out);
-        if (now.size() != st->sha.size()) return failed("the staged KST holds " + std::to_string(now.size()) + " files, " + std::to_string(st->sha.size()) + " expected");
-        for (const auto& f : now) {
-            const auto it = st->sha.find(f.rel);
-            if (it == st->sha.end()) return failed("unexpected staged file " + f.rel);
-            bool c = false;
-            std::string err;
-            if (media::detail::sha256File(out / f.rel, [](size_t) { return true; }, &c, &err) != it->second)
-                return failed(f.rel + " is not byte-identical to its SET member");
-            if (!media::panative::readFile(out / f.rel).ok) return failed(f.rel + " does not re-parse as a KORF container");
+        st->pinned = std::make_shared<library::Pinned>();
+        library::detail::pin(out, *st->pinned, false);   // no manifest beside a converted KST
+        if (!st->pinned->error.empty()) return failed(st->pinned->error);
+        size_t files = 0;
+        for (const auto& [rel, h] : st->pinned->tree) {
+            if (rel.back() == '/') continue;   // a folder
+            ++files;
+            const auto it = st->sha.find(rel);
+            if (it == st->sha.end()) return failed("unexpected staged file " + rel);
+            if (h != it->second) return failed(rel + " is not byte-identical to its SET member");
+            std::string bytes, err;
+            if (!s2k::readIn(st->pinned->dir, rel, bytes, err) || !media::panative::parse(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()).ok)
+                return failed(rel + " does not re-parse as a KORF container");
         }
+        if (files != st->sha.size()) return failed("the staged KST holds " + std::to_string(files) + " files, " + std::to_string(st->sha.size()) + " expected");
         media::panative::assemble::Result r;
         if (const auto why = media::panative::assemble::stagedRefusal(out, r); !why.empty()) return failed(why);
-        v.l1 = {Check::Passed, std::to_string(now.size()) + " carried file(s) byte-identical to the SET, KORF re-parsed, closure 0 dangling, validator 0 errors"};
+        v.l1 = {Check::Passed, std::to_string(files) + " carried file(s) byte-identical to the SET, KORF re-parsed, closure 0 dangling, validator 0 errors"};
         return std::pair<Verification, std::string>{v, std::string(s2k::kLabel) + ". " + v.l1.detail + " (" + std::to_string(r.validatorWarnings) + " validator warning(s))."};
+    };
+    s.beforePublish = [st, sourcesChanged](const fs::path& out) {
+        if (auto e = library::recheckPinned(*st->pinned, out); !e.empty()) return e;
+        if (auto e = sourcesChanged(); !e.empty()) return "the SET changed after the KST was verified: " + e;
+        return std::string();
     };
     s.conversion = [st] {
         detail::Conversion c;

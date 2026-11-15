@@ -25,11 +25,23 @@ static int failures = 0, passes = 0;
 static bool has(const std::string& s, const std::string& what) { return s.find(what) != std::string::npos; }
 static std::string slurp(const fs::path& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
 static void put(const fs::path& p, const std::string& s) { fs::create_directories(p.parent_path()); std::ofstream(p, std::ios::binary) << s; }
-static JobState run(const ExportSpec& s) {
+// `at` runs once when the job enters that phase (a real swap between two of the runner's own steps).
+static JobState run(const ExportSpec& s, Phase atPhase = Phase::Queued, std::function<void()> at = {}) {
     JobState st;
     st.id = 1;
-    runExport(s, st, [] { return false; }, [](const JobState&) {});
+    bool fired = false;
+    runExport(s, st, [] { return false; }, [&](const JobState& now) {
+        if (at && !fired && now.phase == atPhase) { fired = true; at(); }
+    });
     return st;
+}
+// Every file below `d` (if it exists), bytes only: used to prove no outside bytes reached an output.
+static bool anyFileEquals(const fs::path& d, const std::string& bytes) {
+    std::error_code ec;
+    if (!fs::exists(fs::symlink_status(d, ec))) return false;
+    for (fs::recursive_directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec) && !it->is_symlink(ec) && slurp(it->path()) == bytes) return true;
+    return false;
 }
 static std::map<std::string, std::string> tree(const fs::path& d) {   // rel -> bytes
     std::map<std::string, std::string> m;
@@ -38,7 +50,7 @@ static std::map<std::string, std::string> tree(const fs::path& d) {   // rel -> 
     return m;
 }
 static std::string id8(int n) { std::string s = "SMPID"; s += char('0' + n / 100); s += char('0' + n / 10 % 10); s += char('0' + n % 10); return s; }
-// A raw KMP item in the observed Pa5X layout (FINDINGS §6): u16 version, u32 sample count, table at +85 of 122-byte
+// A raw KMP item in the observed Pa5X layout (R7, PA5X_SET_TO_KST_EVIDENCE.md): u16 version, u32 sample count, table at +85 of 122-byte
 // records with the sample ID at +40.
 static std::string kmpPayload(const std::vector<int>& ids) {
     std::string p;
@@ -146,7 +158,7 @@ int main(int argc, char** argv) {
     const auto deps = s2k::dependencies(plan);
     TEST("deps: 1 PCM file, 3 samples with IDs, 1 KMP, 3 KMP references", deps.pcmFiles == 1 && deps.samples == 3 && deps.samplesWithoutId == 0 &&
          deps.kmpFiles == 1 && deps.kmpRefs == 3 && deps.decided);
-    TEST("deps: the sample no KMP lists is unreferenced (by name, D10)", deps.unreferenced.size() == 1 && has(deps.unreferenced[0], "Sample 3"));
+    TEST("deps: the sample no KMP lists is unreferenced (by name, R6)", deps.unreferenced.size() == 1 && has(deps.unreferenced[0], "Sample 3"));
     TEST("deps: the KMP sample ID no PCM holds is dangling", deps.dangling.size() == 1 && deps.dangling[0] == s2k::hex(id8(9)));
     {
         const fs::path enc = root / "enc.SET";
@@ -169,6 +181,15 @@ int main(int argc, char** argv) {
         put(bad / "MULTISMP/RAM.KMP", build({{0x11080018, 5, 0, 0, "RAM", p}}, 1));
         const auto b = s2k::dependencies(s2k::inventory(bad));
         TEST("deps: a sample count past the item is not read (references UNKNOWN)", !b.decided && b.kmpOther == 1 && b.kmpRefs == 0);
+        // C3 (Codex r1): only the documented layout is read; another version is UNKNOWN, not "every sample unreferenced"
+        const fs::path ver = root / "ver.SET";
+        auto pv = kmpPayload({1});
+        pv[1] = 0x04;   // version 0x0104
+        put(ver / "PCM/RAM01.PCM", build({pcmItem(1), pcmItem(2)}, 1));
+        put(ver / "MULTISMP/RAM.KMP", build({{0x11080018, 5, 0, 0, "RAM", pv}}, 1));
+        const auto vd = s2k::dependencies(s2k::inventory(ver));
+        TEST("C3 deps: a KMP item with another version (0x0104) is not read: map UNKNOWN, nothing unreferenced",
+             !vd.decided && vd.kmpOther == 1 && vd.kmpRefs == 0 && vd.unreferenced.empty());
     }
 
     // ---- b) the converter as an export job ------------------------------------------------------------------------
@@ -258,6 +279,57 @@ int main(int argc, char** argv) {
         fs::remove(stage / "SONGBOOK/listdb.sbl");
         put(stage / "SONGBOOK/listdb.sbl", b);
         TEST("verify: a staged file that differs from the source (same size, valid KORF) fails L1", spec.verify(stage).first.l1.state == ui::studio::Check::Failed);
+    }
+
+    // ---- C1 (Codex r1): every source read goes through the pinned SET root, no component followed ----------------
+    {
+        const fs::path outside = root / "outside";
+        const std::string outsideBytes = build({pcmItem(7), pcmItem(8)}, 1);   // a valid PCM that must never reach an output
+        put(outside / "RAM01.PCM", outsideBytes);
+        const auto swapPcm = [&](const fs::path& set) {
+            fs::rename(set / "PCM", set / "PCM.real");
+            fs::create_directory_symlink(outside, set / "PCM");
+        };
+        const fs::path before = root / "linkbefore.SET";
+        makeSet(before, {1}, {1});
+        swapPcm(before);
+        const auto a = run(setToKst(before, out / "LINKBEFORE.KST"));
+        TEST("C1: a SET folder that is a symlink (swapped before validation) is refused, nothing published",
+             a.phase == Phase::Failed && !fs::exists(out / "LINKBEFORE.KST"));
+        TEST("C1: no outside bytes in its output or staging folder", !anyFileEquals(out / "LINKBEFORE.KST", outsideBytes) &&
+             !anyFileEquals(out / "LINKBEFORE.KST.INCOMPLETE", outsideBytes));
+        const fs::path during = root / "linkduring.SET";
+        makeSet(during, {1}, {1});
+        const auto b = run(setToKst(during, out / "LINKDURING.KST"), Phase::Run, [&] { swapPcm(during); });
+        const fs::path twin = root / "twin";   // outside, with the SAME bytes as the SET's PCM: only a read through the link could pass
+        const fs::path same = root / "linksame.SET";
+        makeSet(same, {1}, {1});
+        put(twin / "RAM01.PCM", slurp(same / "PCM/RAM01.PCM"));
+        const auto c = run(setToKst(same, out / "LINKSAME.KST"), Phase::Run, [&] {
+            fs::rename(same / "PCM", same / "PCM.real");
+            fs::create_directory_symlink(twin, same / "PCM");
+        });
+        TEST("C1: PCM/ swapped for a link to identical outside bytes between validation and the write is refused (never read through)",
+             c.phase == Phase::Failed && !fs::exists(out / "LINKSAME.KST"));
+        TEST("C1: PCM/ swapped for a symlink between validation and the write is refused, nothing published",
+             b.phase == Phase::Failed && !fs::exists(out / "LINKDURING.KST"));
+        TEST("C1: no outside bytes in its output or staging folder", !anyFileEquals(out / "LINKDURING.KST", outsideBytes) &&
+             !anyFileEquals(out / "LINKDURING.KST.INCOMPLETE", outsideBytes));
+    }
+    // ---- C2 (Codex r1): staged bytes and sources are re-checked right before the publishing rename ------------------
+    {
+        const fs::path set2 = root / "late.SET";
+        makeSet(set2, {1}, {1});
+        const auto flip = [](const fs::path& f) {   // same length, still a valid KORF container
+            auto b = slurp(f);
+            b.replace(b.find("OC31sound"), 9, "OC31SOUND");
+            fs::remove(f);
+            put(f, b);
+        };
+        const auto a = run(setToKst(set2, out / "LATE1.KST"), Phase::Publish, [&] { flip(out / "LATE1.KST.INCOMPLETE/LATE1.KST/SOUND/user01.pcg"); });
+        TEST("C2: a same-length staged change after verify is not published", a.phase == Phase::Failed && !fs::exists(out / "LATE1.KST"));
+        const auto b = run(setToKst(set2, out / "LATE2.KST"), Phase::Publish, [&] { flip(set2 / "SOUND/USER01.PCG"); });
+        TEST("C2: a same-length source change after verify is not published", b.phase == Phase::Failed && !fs::exists(out / "LATE2.KST"));
     }
 
     std::error_code ec;

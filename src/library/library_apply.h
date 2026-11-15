@@ -245,7 +245,9 @@ inline std::string manifestSha(int parent, const std::string& leaf) {
     std::fclose(in);
     return h;
 }
-inline void pin(const fs::path& out, Pinned& p) {
+// manifest = false: an output without NAME.manifest.sha256 beside it (SET -> KST); recheckPinned then requires that
+// no manifest appears there either.
+inline void pin(const fs::path& out, Pinned& p, bool manifest = true) {
     const std::string leaf = out.filename().string();
     p.parent = ::open(out.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     p.dir = p.parent >= 0 ? ::openat(p.parent, leaf.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
@@ -255,7 +257,7 @@ inline void pin(const fs::path& out, Pinned& p) {
     p.ino = st.st_ino;
     p.error = hashTree(p.dir, "", p.tree);
     p.manifest = manifestSha(p.parent, leaf);
-    if (p.error.empty() && p.manifest.empty()) p.error = "cannot read " + leaf + ".manifest.sha256";
+    if (p.error.empty() && manifest && p.manifest.empty()) p.error = "cannot read " + leaf + ".manifest.sha256";
 }
 }  // namespace detail
 

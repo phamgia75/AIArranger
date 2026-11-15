@@ -1,25 +1,31 @@
 // SET -> KST conversion, phase 1 (D54 B1): resources only. STRUCTURALLY VALID - NOT VERIFIED ON A PA5X.
 //
-// Every rule is the measured Pa5X conversion of one owner Pa700 SET into a KST (KST_DEPENDENCY_EVIDENCE.md, "Pa5X's own
-// SET -> KST conversion"; tests/integration/test_set_to_kst.cpp has the private oracle run on that pair):
+// Every rule, its evidence class, counts and limits: docs/research/pa-studio/PA5X_SET_TO_KST_EVIDENCE.md (rules R1-R8),
+// measured on the Pa5X's own conversion of one owner Pa700 SET; tests/style_edit/test_set_to_kst.cpp has the private
+// oracle run on that pair:
 //   CARRY    PCM/*.PCM, SOUND/*.PCG, MULTISMP/*.KMP, SONGBOOK/*.SBL: byte-identical, same type folder, file name lower-cased
-//            ("identical 99/99 (only the name is lower-cased)", 4/4 PCG, KMP, SBL).
+//            (R1, R2).
 //   BLOCKED  STYLE/*.STY, KEYBOARDSET/*.PRF, PAD/*.PAD, SONGBOOK/SONGDB.SBD/*.SBD: the Pa5X re-writes them, and their
-//            item payloads are OC31-encoded, which is not decoded ("Still unknown" 1). Nothing is written for them: no
+//            item payloads are OC31-encoded, which is not decoded (R3). Nothing is written for them: no
 //            partial or guessed .stg/.ksc/.pdc/.SBD.
-//   DROPPED  GLOBAL/, VOICEPRESET/, GUITARPRESET/: "not carried over", consistent with MAN5 p.737.
+//   DROPPED  GLOBAL/, VOICEPRESET/, GUITARPRESET/: not carried over, consistent with MAN5 p.737 (R4).
 //   UNKNOWN  anything else (not in the measured table): not carried, listed.
 // Matching is exact on the observed upper-case names; nothing else is inferred.
 //
 // Dependency map (read-only, on the carried files):
-//   PCM sample = directory record of a PCM file; name = field 2 (D10), sample ID = field 4, 8 bytes (D9; a Pa5X field,
-//   "not present in Pa700 PCM records", FINDINGS §3).
-//   KMP -> PCM = the KMP item's sample table (FINDINGS §6, raw Pa5X item 11080018: u32 count at +2, 122-byte records
-//   from +85, sample ID at record +40). An OC31-encoded KMP item (the Pa700 RAM.KMP) cannot be read: its references
-//   are UNKNOWN, and no sample is called unreferenced or dangling then.
+//   PCM sample = directory record of a PCM file; name = field 2 (R6), sample ID = field 4, 8 bytes (R6; a Pa5X field,
+//   absent from Pa700 PCM records).
+//   KMP -> PCM = the KMP item's sample table, read only in the one documented layout (R7: raw item 11080018, u16 0x0103,
+//   u32 count at +2, 122-byte records from +85, sample ID at record +40). Any other KMP item (OC31-encoded as in the
+//   Pa700 RAM.KMP, another version, a table past the item) is UNKNOWN: then no sample is called unreferenced or dangling.
+//
+// Reads (Codex r1 C1): the SET root is opened once (O_NOFOLLOW) and every member is read below it by descriptor, each
+// folder opened O_NOFOLLOW (library::detail::openDirIn, E8) and the file a regular file (media::detail::openRegular), so
+// a folder swapped for a link fails instead of being read through. A SET holding any link or special file is refused.
 #ifndef AI_ARRANGER_MEDIA_PANATIVE_SET_TO_KST_H
 #define AI_ARRANGER_MEDIA_PANATIVE_SET_TO_KST_H
 
+#include "library/library_apply.h"   // detail::openDirIn: the E8 descriptor-based source reads
 #include "media/panative/kst_assemble.h"
 #include "media/sha256.h"
 #include <map>
@@ -36,7 +42,6 @@ struct Member {
     Kind kind = Kind::Unknown;
     std::string dest;       // CARRY: the path inside the KST
     std::string reason;
-    std::filesystem::path abs;
     uint64_t bytes = 0;
 };
 
@@ -44,6 +49,8 @@ struct Plan {
     bool ok = false;
     std::string error;
     std::vector<Member> members;   // sorted by rel
+    std::shared_ptr<const media::detail::Fd> root;   // the SET folder, opened once (O_NOFOLLOW); every read goes below it
+    std::vector<std::string> links;                  // links and special files found (the plan is refused)
     size_t count(Kind k) const { return size_t(std::count_if(members.begin(), members.end(), [k](const Member& m) { return m.kind == k; })); }
 };
 
@@ -85,25 +92,50 @@ inline void classify(Member& m) {
 // Every entry of the SET folder, classified. Read-only; links and special files are listed as UNKNOWN, never followed.
 inline Plan inventory(const std::filesystem::path& set) {
     Plan p;
+    p.root = std::make_shared<const media::detail::Fd>(::open(set.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    struct stat pinned {}, now {};
+    if (p.root->v < 0 || ::fstat(p.root->v, &pinned) != 0) { p.error = "cannot open " + set.string() + " (a folder, not a link)"; return p; }
     media::detail::Listing ls;
     if (!media::detail::listFiles(set, ls, p.error)) return p;
+    // the listing went by name: it must have listed the pinned folder
+    if (::lstat(set.c_str(), &now) != 0 || now.st_dev != pinned.st_dev || now.st_ino != pinned.st_ino) { p.error = set.string() + " was replaced while it was listed"; return p; }
     for (const auto& [rel, e] : ls.files) {
         Member m{rel};
-        m.abs = e.abs;
         m.bytes = e.size;
         detail::classify(m);
         p.members.push_back(std::move(m));
     }
-    for (const auto& rel : ls.skipped) p.members.push_back({rel, Kind::Unknown, "", "a link or special file: not followed, not carried"});
+    for (const auto& rel : ls.skipped) {
+        p.members.push_back({rel, Kind::Unknown, "", "a link or special file: not followed, not carried"});
+        p.links.push_back(rel);
+    }
     std::sort(p.members.begin(), p.members.end(), [](const Member& a, const Member& b) { return a.rel < b.rel; });
     p.ok = true;
     return p;
 }
 
+// Member `rel` below the open SET root, read by descriptor (no component followed), at most kMaxFileBytes.
+inline bool readIn(int root, const std::string& rel, std::string& bytes, std::string& err) {
+    const auto [dir, leaf] = media::detail::splitRel(rel);
+    const media::detail::Fd d(library::detail::openDirIn(root, dir, false));
+    std::FILE* in = d.v >= 0 ? media::detail::openRegular(d.v, leaf.c_str()) : nullptr;
+    if (!in) { err = "cannot read " + rel + " (missing, not a regular file, or a folder on its path is a link: links are never followed)"; return false; }
+    struct stat st {};
+    const bool sized = ::fstat(::fileno(in), &st) == 0 && uint64_t(st.st_size) <= panative::kMaxFileBytes;
+    bytes.assign(sized ? size_t(st.st_size) : 0, '\0');
+    const bool ok = sized && std::fread(bytes.data(), 1, bytes.size(), in) == bytes.size() && std::fgetc(in) == EOF;
+    std::fclose(in);
+    if (!ok) err = sized ? "cannot read " + rel : rel + " is larger than the reader's limit";
+    return ok;
+}
+inline std::string sha(const std::string& b) { media::Sha256 h; h.update(b.data(), b.size()); return h.hex(); }
+
 // Why the plan cannot be written, or "". The same refusals as the W5 assembler (assemble::build) for carried files:
 // a valid KORF container, a safe TYPE/FILE destination, no two destinations equal without case.
-inline std::string refusal(const Plan& p) {
+// `hashes` (optional) receives dest -> SHA-256 of the bytes that were checked.
+inline std::string refusal(const Plan& p, std::map<std::string, std::string>* hashes = nullptr) {
     if (!p.ok) return "cannot list the SET: " + p.error;
+    if (!p.links.empty()) return "refusing: " + p.links.front() + " is a link or special file (links are never followed)";
     if (!p.count(Kind::Carry)) return "refusing: the SET holds no resource that the Pa5X carries unchanged (PCM, PCG, KMP, SBL)";
     std::set<std::string> seen;
     for (const auto& m : p.members) {
@@ -114,8 +146,11 @@ inline std::string refusal(const Plan& p) {
     }
     for (const auto& m : p.members) {
         if (m.kind != Kind::Carry) continue;
-        const auto c = panative::readFile(m.abs);
+        std::string bytes, err;
+        if (!p.root || !readIn(p.root->v, m.rel, bytes, err)) return "refusing: " + (p.root ? err : "the SET is not open");
+        const auto c = panative::parse(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
         if (!c.ok) return "refusing: " + m.rel + " is not a valid KORF container: " + c.error;
+        if (hashes) (*hashes)[m.dest] = sha(bytes);
     }
     return "";
 }
@@ -136,10 +171,10 @@ inline std::string hex(const std::string& b) {
     return o;
 }
 
-// The sample IDs of one KMP item, or false when the item is not the observed raw layout (FINDINGS §6).
+// The sample IDs of one KMP item, or false when the item is not the observed raw layout (R7, docs/research/pa-studio/PA5X_SET_TO_KST_EVIDENCE.md).
 inline bool kmpSampleIds(const uint8_t* p, size_t n, std::vector<std::string>& ids) {
     constexpr size_t kTable = 85, kRecord = 122, kId = 40;
-    if (n < kTable) return false;
+    if (n < kTable || panative::detail::be16(p) != 0x0103) return false;   // R7: the one observed version
     const uint32_t count = panative::detail::be32(p + 2);
     if (count > (n - kTable) / kRecord) return false;
     for (uint32_t i = 0; i < count; ++i) ids.emplace_back(reinterpret_cast<const char*>(p + kTable + size_t(i) * kRecord + kId), 8);
@@ -156,7 +191,7 @@ inline Deps dependencies(const Plan& p) {
         const bool isPcm = detail::endsWith(m.dest, ".pcm"), isKmp = detail::endsWith(m.dest, ".kmp");
         if (!isPcm && !isKmp) continue;
         std::string bytes, err;
-        if (!roottree::readBytes(m.abs, bytes, err)) { d.notes.push_back(m.rel + ": cannot read: " + err); allKmpRead = false; continue; }
+        if (!p.root || !readIn(p.root->v, m.rel, bytes, err)) { d.notes.push_back(m.rel + ": " + (p.root ? err : "the SET is not open")); allKmpRead = false; continue; }
         const auto* q = reinterpret_cast<const uint8_t*>(bytes.data());
         const auto c = panative::parse(q, bytes.size());
         if (!c.ok) { d.notes.push_back(m.rel + ": " + c.error); allKmpRead = false; continue; }
@@ -203,7 +238,7 @@ inline std::string report(const Plan& p, const Deps& d) {
     for (Kind k : {Kind::Carry, Kind::Blocked, Kind::Dropped, Kind::Unknown})
         for (const auto& m : p.members)
             if (m.kind == k) o += std::string(kindName(k)) + "  " + m.rel + (m.dest.empty() ? "" : " -> " + m.dest) + "  (" + m.reason + ")\n";
-    o += "Dependency map (KMP -> PCM by 8-byte sample ID, D9; names D10): " + std::to_string(d.pcmFiles) + " PCM file(s), " +
+    o += "Dependency map (KMP -> PCM by 8-byte sample ID, R6/R7; names R6): " + std::to_string(d.pcmFiles) + " PCM file(s), " +
          std::to_string(d.samples) + " sample(s), " + std::to_string(d.kmpFiles) + " KMP file(s), " + std::to_string(d.kmpRefs) + " KMP sample reference(s)\n";
     if (d.decided) {
         o += "Unreferenced samples: " + std::to_string(d.unreferenced.size()) + "; dangling KMP references: " + std::to_string(d.dangling.size()) + "\n";

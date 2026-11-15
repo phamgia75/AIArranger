@@ -34,7 +34,7 @@ struct Item {
     uint32_t chunkId = 0, offset = 0, size = 0;   // item chunk: id, file offset of its header, payload bytes
     uint8_t kind = 0, bank = 0, slot = 0;          // directory values; meaning UNKNOWN beyond "slot is 0-based"
     std::string name;                               // raw bytes up to the first NUL (Latin-1 as observed)
-    std::string sampleId;                           // directory field 4 (8 bytes) when present: the Pa5X PCM sample ID (D9)
+    std::string sampleId;                           // directory field 4 (8 bytes) when present: the Pa5X PCM sample ID (R6, docs/research/pa-studio/PA5X_SET_TO_KST_EVIDENCE.md)
 };
 
 struct Container {
@@ -126,7 +126,7 @@ inline Container parse(const uint8_t* p, size_t n) {
                 if (t == 2) { it.name = cstr(v, len); seen2 = true; }
                 else if (t == 0 && len == 3) { it.kind = v[0]; it.bank = v[1]; it.slot = v[2]; seen0 = true; }
                 else if (t == 1 && len == 2) { sub = be16(v); seen1 = true; }
-                else if (t == 4 && len == 8) it.sampleId.assign(reinterpret_cast<const char*>(v), 8);   // FINDINGS §3: Pa5X PCM records
+                else if (t == 4 && len == 8) it.sampleId.assign(reinterpret_cast<const char*>(v), 8);   // R6: Pa5X PCM records
                 f += 4 + size_t(len);
             }
             if (!seen0 || !seen1 || !seen2 || end - f != 4) return fail("directory record " + std::to_string(i) + " lacks the observed fields");
