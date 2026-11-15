@@ -2,6 +2,14 @@
 
 Status: **PROPOSAL. Nothing has been rewritten, force-pushed or deleted.** Every step that changes history, refs or GitHub settings needs explicit owner approval.
 
+**Update 2026-11-15 (owner decision D51), on branch `integ/offline-studio-kst` (PR #40):**
+- Option A of §5 has been done there as a normal commit: the 4 `.sty`, 2 `.uasf` and 4 `.meta.json` files are removed from the tree. A verified private copy is kept outside every Git tree on the owner's Mac (SHA-256 manifest of the 10 files).
+- `AIARR_GENOS_CORPUS_DIR` is empty by default. Each corpus test is now `test_x` (public checks) plus `test_x_corpus`; 5 tests are corpus-only. Without a corpus the 19 `_corpus` entries report **Skipped** with `CORPUS UNAVAILABLE`, never a pass. The `9e770c9` group Disable is gone.
+- With the private copy configured, every `_corpus` entry runs exactly the checks the old test ran (19/19 equal counts).
+- `.gitignore` refuses `corpus/yamaha/**/*.sty|*.uasf|*.S7*`.
+- This takes effect on `main` only when PR #40 is merged. `main` and all published history still contain the files. History (option C) and visibility (option B) are unchanged.
+- Correction to §6: `main` is protected by the active `main-protection` **ruleset**. It blocks deletion and non-fast-forward pushes, requires a pull request, and allows **squash** merges only. Classic branch protection is not set. A history rewrite of `main` therefore needs that ruleset paused, which is an owner settings decision.
+
 Facts were collected on 2026-11-06 with read-only commands (`git log --all`, `git branch -r --contains`, `git tag --contains`, `gh repo view`, `gh pr list`, `gh release list`) after `git fetch --all --tags`.
 
 ## 1. Restricted files
@@ -53,7 +61,7 @@ Every commit that descends from `1766d01` *contains* the files in its tree. A re
 
 ## 4. Replacement fixtures
 
-Since `9e770c9` the corpus is optional: with no `.sty` in `AIARR_GENOS_CORPUS_DIR`, 16 tests are **Disabled** rather than failing. Since `6c3e75f`, `test_synthetic_style_e2e` covers the import → CASM → mapping → playback → Korg-export path on the CC0 fixture.
+(Historical, superseded by the 2026-11-15 update above.) Since `9e770c9` the corpus is optional: with no `.sty` in `AIARR_GENOS_CORPUS_DIR`, 16 tests are **Disabled** rather than failing. Since `6c3e75f`, `test_synthetic_style_e2e` covers the import → CASM → mapping → playback → Korg-export path on the CC0 fixture.
 
 Disabled without the corpus, and the synthetic fixture each one needs:
 
