@@ -188,7 +188,9 @@ inline std::string copyChecked(int src, const std::string& srcName, const std::s
 inline std::function<void(const std::string& rel)> hashWalkHook;   // tests only: runs after each file hashTree() hashes
 // SHA-256 of every file below the open folder `dir`, walked by descriptor only (openat O_NOFOLLOW per component): rel ->
 // hash, folders as "rel/" -> "". Any link or special file is an error, never followed. Bounded by kLibraryLimits.
-inline std::string hashTree(int dir, const std::string& prefix, std::map<std::string, std::string>& m, int depth = 0) {
+// `ids` (optional): rel -> device + inode of each file, from the descriptor that was hashed.
+using FileIds = std::map<std::string, std::pair<dev_t, ino_t>>;
+inline std::string hashTree(int dir, const std::string& prefix, std::map<std::string, std::string>& m, int depth = 0, FileIds* ids = nullptr) {
     if (depth > kLibraryLimits.depth) return "folder deeper than " + std::to_string(kLibraryLimits.depth) + " at " + prefix;
     const int d2 = ::dup(dir);
     DIR* dp = d2 >= 0 ? ::fdopendir(d2) : nullptr;
@@ -206,10 +208,12 @@ inline std::string hashTree(int dir, const std::string& prefix, std::map<std::st
             const Fd sub(::openat(dir, n.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
             if (sub.v < 0) return "cannot open " + rel + " (links are never followed)";
             m[rel + "/"] = "";
-            if (auto e = hashTree(sub.v, rel, m, depth + 1); !e.empty()) return e;
+            if (auto e = hashTree(sub.v, rel, m, depth + 1, ids); !e.empty()) return e;
         } else if (S_ISREG(st.st_mode)) {
             std::FILE* in = media::detail::openRegular(dir, n.c_str());
             if (!in) return "cannot read " + rel + " (no longer a regular file)";
+            struct stat fst {};
+            if (ids && ::fstat(::fileno(in), &fst) == 0) (*ids)[rel] = {fst.st_dev, fst.st_ino};
             bool c = false;
             std::string err;
             m[rel] = media::detail::sha256Stream(in, nullptr, {}, &c, &err, rel);
@@ -229,6 +233,7 @@ struct Pinned {
     dev_t dev = 0;
     ino_t ino = 0;
     std::map<std::string, std::string> tree;   // rel -> SHA-256 ("rel/" -> "" for a folder)
+    detail::FileIds ids;                       // rel -> device + inode of each file as it was hashed
     std::string manifest, error;               // SHA-256 of NAME.manifest.sha256; error = could not be pinned
     Pinned() = default;
     Pinned(const Pinned&) = delete;
@@ -255,7 +260,7 @@ inline void pin(const fs::path& out, Pinned& p, bool manifest = true) {
     if (p.dir < 0 || ::fstat(p.dir, &st) != 0) { p.error = "cannot open the staged output " + out.string() + " (links are never followed)"; return; }
     p.dev = st.st_dev;
     p.ino = st.st_ino;
-    p.error = hashTree(p.dir, "", p.tree);
+    p.error = hashTree(p.dir, "", p.tree, 0, &p.ids);
     p.manifest = manifestSha(p.parent, leaf);
     if (p.error.empty() && manifest && p.manifest.empty()) p.error = "cannot read " + leaf + ".manifest.sha256";
 }
@@ -275,7 +280,9 @@ inline std::string recheckPinned(const Pinned& p, const fs::path& staged) {
     };
     if (!same()) return "the staged output folder was replaced after it was verified";
     std::map<std::string, std::string> now;
-    if (const auto e = detail::hashTree(p.dir, "", now); !e.empty()) return "the staged output changed after it was verified: " + e;
+    detail::FileIds nowIds;
+    if (const auto e = detail::hashTree(p.dir, "", now, 0, &nowIds); !e.empty()) return "the staged output changed after it was verified: " + e;
+    if (nowIds != p.ids) return "the staged output changed after it was verified: a file was replaced (device/inode differ)";
     for (const auto& [rel, h] : p.tree) {
         const auto f = now.find(rel);
         if (f == now.end()) return "the staged output changed after it was verified: " + rel + " is gone";

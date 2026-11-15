@@ -41,6 +41,29 @@ One owner Pa700-family SET folder (142 files) and the KST that a Pa5X itself mad
 | R7 | KMP -> PCM: the KMP item's sample table, read only in this layout: item chunk id `11080018`, raw (not OC31), u16 `0x0103` at +0, u32 sample count at +2, table of fixed 122-byte records from item offset 85, sample ID at record +40; the table must fit in the item | Pa5X KST backup: one KMP file, one item; count 34 339 = the PCM sample count; each of the 34 339 PCM sample IDs occurs once in the table | A (table and IDs), U (version meaning, multisample/zone section) | one KMP file observed; any other version, an OC31 item or a table past the item -> UNKNOWN, and then no sample is reported unreferenced or dangling |
 | R8 | A CARRY file must be a valid KORF container (wrapper, header, directory, index as in `src/media/panative/panative_reader.h`) | 142/142 files of the SET; 281/281 KORF files of a Pa5X KST backup | A | the reader's limits apply (64 MiB per file) |
 
+## Data flow (no check-then-use window, Codex r1 + r2)
+1. **Pin.** The SET folder is opened once without following a link. Every member is then reached below that descriptor,
+   folder by folder, without following a link, and the file must be a regular file. A SET that holds any link or
+   special file is refused. The name-based listing must have listed the pinned folder (same device and inode).
+2. **Snapshot.** Each CARRY member is read exactly once into memory, with its SHA-256 and its identity (device, inode,
+   size, modification time; the read fails if the identity changes while the file is read). Total bound:
+   2 GiB (`kMaxSnapshotBytes`); a larger SET is refused with that reason. The KORF check, the dependency map, the
+   CONVERSION report and the staged write all use these bytes. No source is read again for content (a test counts the
+   reads: one per CARRY member).
+3. **Write.** The staged files are created exclusively below the job's pinned output folder. Each file's device and
+   inode are recorded from the descriptor that wrote it.
+4. **Verify.** The staged folder is pinned (`library::Pinned`): each file hashed through the descriptors. The hashes
+   must equal the snapshot's, and the identities must equal the recorded ones. The W5 closure and validator checks run on it.
+5. **Publish gate**, in this order, right before the no-replace rename:
+   1. source identity: the SET pathname still names the pinned folder (device, inode), and every CARRY member still has
+      its snapshot identity (no content re-read);
+   2. last: `library::recheckPinned` re-hashes every staged file through the pinned folder and compares hashes and
+      device/inode with the verified ones. (This step was extended once in the shared code; Library Manager Execute Plan uses it too.)
+
+**Residual boundary.** After the publish rename, a concurrent process of the same user can still change the published
+files or the SET. The report states what was verified at publish time: the SET was still the folder that was read,
+every carried member was unchanged, and every staged file was re-hashed. It cannot vouch for later changes.
+
 ## Private oracle (counts only)
 `test_set_to_kst --oracle` (CTest `test_set_to_kst_oracle`, label private-corpus; Skipped without
 `AIARR_SET_ORACLE_SET` and `AIARR_SET_ORACLE_KST`) converts a local copy of the SET and compares the result with the
