@@ -93,8 +93,8 @@ endif()
 # Tests that exercise the Apple platform layer directly (CoreMidiOut /
 # CoreMidiOutputProvider / mach host time). Built and run on Apple only.
 # Genos style corpus used by the import/playback acceptance tests. The files are
-# user-owned Yamaha content (issue #27): point this at a private copy, or at an
-# empty directory, and the corpus tests are reported as Disabled, not failed.
+# user-owned Yamaha content (issue #27): this can point at a private copy. Without a
+# corpus the corpus tests fail; they are not disabled (issue #27 decides how it leaves).
 set(AIARR_GENOS_CORPUS_DIR "${CMAKE_SOURCE_DIR}/corpus/yamaha/sff1" CACHE PATH
     "Directory holding the Genos .sty acceptance corpus")
 
@@ -273,20 +273,6 @@ endif()
 # OSStatus -304) and keeps failing in that process for over a second, while the
 # same tests pass every time run alone (Issue #21: 30/30 and 50/50 serial).
 # Run them serially so they never compete with the rest of the suite.
-# Tests that need the Genos corpus (measured: these fail or hang without it).
-# With no .sty in AIARR_GENOS_CORPUS_DIR they are reported as Disabled (#27).
-set(GENOS_CORPUS_TESTS
-    test_aiarranger_convert_cli test_auto_fill test_genos_facade_runtime
-    test_korg_corpus_conversion test_korg_sound_map test_scheduler_timing
-    test_section_lifecycle test_sff1_load_and_play_e2e test_sff1_mapper_casm_ntr
-    test_sff1_smf_decode test_sff1_tempo test_style_load_safety test_time_signature
-    test_uasf_deterministic_init test_uasf_golden test_uasf_tempo)
-file(GLOB _genos_sty "${AIARR_GENOS_CORPUS_DIR}/*.sty")
-if(NOT _genos_sty)
-    message(STATUS "AIArranger: no Genos corpus in ${AIARR_GENOS_CORPUS_DIR}; corpus tests disabled")
-    set_tests_properties(${GENOS_CORPUS_TESTS} PROPERTIES DISABLED TRUE)
-endif()
-
 if(APPLE)
     set_tests_properties(${APPLE_ONLY_TESTS} PROPERTIES RUN_SERIAL TRUE)
     # Re-init test: exit 77 = first CoreMIDI client creation failed (environment,

@@ -68,4 +68,4 @@ Whenever the Pa5X is attached: run P1.2 and the hardware checks of every "HW pen
 2. ~~Factory sound table~~: owner chose independent mapping data; starter map committed (P1.6).
 3. Any work on native KST internals (P1.10) — needs owner-provided files and legal sign-off.
 4. Audio Intelligence source (P3.1): searched 2026-11-06, **not found** anywhere reachable (see execution log). Possibly on a Windows `C:\dev` machine.
-5. Issue #27 remains a legal blocker. Since `9e770c9` the corpus is optional (`AIARR_GENOS_CORPUS_DIR`; corpus tests Disabled when absent), so the files can be moved out once the owner decides; history purge is the owner's call.
+5. Issue #27 remains a legal blocker. The corpus location is configurable (`AIARR_GENOS_CORPUS_DIR`); on the offline integration candidate the corpus tests fail when it is absent (the D47 review dropped the `9e770c9` wholesale Disable, which also hid corpus-independent checks), so moving the files out needs the corpus-dependent cases split first; history purge is the owner's call.
