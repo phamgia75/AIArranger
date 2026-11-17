@@ -185,11 +185,34 @@ int main() {
         auto edit = items(0);
         TEST("menu: with no Studio open, Edit > Undo / Redo are off", edit.size() == 2 && edit[0].first == "Undo" && !edit[0].second.isEnabled &&
              edit[1].first == "Redo" && !edit[1].second.isEnabled);
-        for (auto& [t, i] : items(1)) if (t == "Style Studio") menu.menuItemSelected(i.itemID, 0);
+        for (auto& [t, i] : items(1)) if (t == "Style Studio") menu.perform(juce::ApplicationCommandTarget::InvocationInfo(i.itemID));
         pump(50);
         TEST("menu: View > Style Studio opens the Studio on that domain", host->studio() && host->studio()->domain() == SC::Domain::StyleStudio);
         edit = items(0);
         TEST("menu: on Style Studio with nothing to undo, Undo / Redo stay off", edit.size() == 2 && !edit[0].second.isEnabled && !edit[1].second.isEnabled);
+        {   // owner: the menus show their shortcuts, and a focused text field keeps its own undo
+            using MS = ai_arranger::app::StudioMenu;
+            const auto keys = [&](int id) { return menu.commands().getKeyMappings()->getKeyPressesAssignedToCommand(id); };
+            const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0),
+                cmdShiftZ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+            bool domainKeys = true;
+            for (int i = 0; i < SC::kDomains; ++i)
+                domainKeys &= keys(MS::kDomain + i).size() == 1 && keys(MS::kDomain + i)[0] == juce::KeyPress('1' + i, juce::ModifierKeys::commandModifier, 0);
+            TEST("menu: Undo shows Cmd-Z, Redo Shift-Cmd-Z, the domains Cmd-1...Cmd-5",
+                 keys(MS::kUndo).size() == 1 && keys(MS::kUndo)[0] == cmdZ && keys(MS::kRedo).size() == 1 && keys(MS::kRedo)[0] == cmdShiftZ && domainKeys);
+            auto* sc = host->studio();
+            juce::TextEditor field;
+            field.setMultiLine(false);
+            field.setText("a", false);
+            field.insertTextAtCaret("bc");
+            TEST("menu: with a text field focused, Undo is on even where the page has nothing to undo", MS::canUndo(&field, sc, false));
+            const auto before = sc->styleModel().undoLabel();
+            const bool took = MS::undoFrom(&field, sc, false);
+            TEST("menu: Undo in a text field undoes the field, not the Style", took && field.getText() != "abc" && sc->styleModel().undoLabel() == before);
+            juce::TextEditor readOnly;
+            readOnly.setReadOnly(true);
+            TEST("menu: a read-only pane is not a text field: Undo goes to the page (off here)", !MS::canUndo(&readOnly, sc, false));
+        }
     }
 
     // ── Resources window (read-only): what a musician reaches from "Resources..." ──
@@ -2137,6 +2160,27 @@ int main() {
                 st.resolveUnsavedStyle(U::Cancel);
                 st.styleUndo();
                 TEST("D33 P1 quit: Cancel then undo: clean again", !st.styleModel().dirty() && quits == 7);
+                {   // UX rev 3 / D29: the new Cmd-Z path must not worsen the stale Discard decision (same bytes check as the Undo button)
+                    const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0);
+                    edit("88");
+                    edit("89");
+                    st.requestQuit(quitFn);
+                    const auto d3 = st.manager().enqueueJob(slowJob(root / "d33-slow3"), {});
+                    pump(100);
+                    st.resolveUnsavedStyle(U::Discard);
+                    st.resolveRunningWork(W::Wait);
+                    st.showDomain(D::StyleStudio);
+                    const bool took = st.keyPressed(cmdZ);   // after the Discard, while the quit waits for the job
+                    st.selectJob(d3);
+                    st.cancelJob();
+                    waitIdle(10000);
+                    pump(300);
+                    TEST("D29 keys: Discard, Wait, then Cmd-Z: no quit, the Style page asks again (decision not reused)", took && quits == 7 &&
+                         st.unsavedPromptShown() && st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 88);
+                    st.resolveUnsavedStyle(U::Cancel);
+                    st.styleUndo();
+                    TEST("D29 keys: Cancel then undo: clean again, still no quit", !st.styleModel().dirty() && quits == 7);
+                }
                 {   // Codex F2: a deferred Save-before-open never replaces a Style opened meanwhile
                     const auto a = st.styleModel().path();
                     edit("90");
