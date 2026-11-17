@@ -1338,14 +1338,17 @@ void StudioComponent::refreshJobs(bool land) {
     jobPick_.setSelectedId(picked, juce::dontSendNotification);
     if (all.empty()) t = "No export jobs yet. Each export button queues a job; it runs here while you keep working.";
     jobView_.setList(t);
-    if (reportJob_ != shownReportJob_)   // a report is fixed once its job finished: build and set it once, not per tick
-        for (const auto& j : all)
-            if (j.id == reportJob_) {
-                shownReportJob_ = reportJob_;
-                jobView_.setReport("\n──── REPORT, job #" + juce::String(int(j.id)) + "  (" +
-                                   juce::String(j.reportPath.empty() ? "in memory only: nothing was published" : j.reportPath) + ") ────\n" +
-                                   juce::String::fromUTF8(j.reportMd.c_str()));
-            }
+    // The opened report is rebuilt only when what it shows changes (another job, or its report written), not per tick.
+    const jobs::JobState* rj = nullptr;
+    for (const auto& j : all) if (j.id == reportJob_) rj = &j;
+    const juce::String key = rj ? juce::String(int(rj->id)) + "|" + juce::String(rj->reportPath) + "|" + juce::String(int64_t(rj->reportMd.size())) : juce::String();
+    if (key != shownReportKey_) {
+        shownReportKey_ = key;
+        jobView_.setReport(rj ? "\n──── REPORT, job #" + juce::String(int(rj->id)) + "  (" +
+                                    juce::String(rj->reportPath.empty() ? "in memory only: nothing was published" : rj->reportPath) + ") ────\n" +
+                                    juce::String::fromUTF8(rj->reportMd.c_str())
+                              : juce::String());
+    }
     // Actions show only when they apply to the chosen job (no disabled button without a reason).
     cancelJobBtn_->setVisible(sel && !jobs::finished(sel->phase));
     reportBtn_->setVisible(sel && jobs::finished(sel->phase) && !sel->reportMd.empty());

@@ -1538,6 +1538,9 @@ int main() {
             st.openSource(juce::File((root / "Big.KST").string()));
             waitIdle(5000);
             const auto slow = st.exportJob(EJ::KstBackup, juce::File((root / "big-backup").string()));
+            st.selectJob(slow);
+            st.openJobReport();   // Codex review of #44: a report opened while its job still runs must appear once it is written
+            const bool emptyWhileRunning = !jobs::finished(job(slow).phase) && !st.jobListText().contains("# Export report");
             const auto queued = st.exportJob(EJ::KstBackup, juce::File((root / "kst-cancelled").string()));
             st.selectJob(queued);
             TEST("jobs: a queued job offers Cancel", job(queued).phase == P::Queued && find<juce::Button>(io, "Cancel Job")->isVisible());
@@ -1546,6 +1549,8 @@ int main() {
             TEST("jobs: cancelled while queued: cancelled, nothing written; the job before it finished", job(queued).phase == P::Cancelled &&
                  !fs::exists(root / "kst-cancelled") && !fs::exists(root / "kst-cancelled.INCOMPLETE") && job(slow).phase == P::Done &&
                  st.jobListText().contains("cancelled"));
+            TEST("jobs: a report opened while its job ran is shown once the job has written it", emptyWhileRunning &&
+                 st.jobListText().contains("REPORT, job #" + juce::String(int(slow))) && st.jobListText().contains("# Export report"));
             fs::remove_all(root / "Big.KST");
             fs::remove_all(root / "big-backup");
             st.openSource(juce::File((root / "Mine.KST").string()));

@@ -35,7 +35,10 @@ inline std::string wrapLines(const std::string& text, size_t cols) {
         while (line.size() > cols) {
             const size_t body = std::min(line.find_first_not_of(' '), line.size());
             size_t cut = line.rfind(' ', cols);
-            if (cut == std::string::npos || cut <= body) cut = cols;
+            if (cut == std::string::npos || cut <= body) {
+                cut = cols;   // no space: a hard break, but never inside a UTF-8 character
+                while (cut > body + 1 && (static_cast<unsigned char>(line[cut]) & 0xC0) == 0x80) --cut;
+            }
             out += line.substr(0, cut) + '\n';
             line = pad + line.substr(cut + (line[cut] == ' '));
         }

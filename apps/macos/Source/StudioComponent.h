@@ -311,7 +311,7 @@ private:
     std::map<uint64_t, JobHome> jobHomes_;
     std::map<ExportJob, std::pair<juce::TextButton*, juce::String>> exportButtons_;   // button, where it comes from
     JobsView jobView_;
-    uint64_t shownReportJob_ = 0;   // the report now in jobView_ (re-set only when it changes)
+    juce::String shownReportKey_;   // job id, report path and size of the report now in jobView_ (re-set only when they change)
     juce::ComboBox jobPick_;
     juce::TextButton *cancelJobBtn_ = nullptr, *reportBtn_ = nullptr, *rerunBtn_ = nullptr;
     uint64_t reportJob_ = 0;
