@@ -2360,6 +2360,24 @@ int main() {
             TEST("a11y: every text pane, input, list and popup in the Studio has an accessible name", unnamed.isEmpty());
             TEST("a11y: every disabled button in the Studio says why (tooltip, read by VoiceOver)", noReason.isEmpty());
         }
+        {   // UX a11y audit §3 / BL-A3: every control that takes keyboard focus gets JUCE's focus outline (LookAndFeel_V4 alone
+            // only shifts a focused button's saturation, which cannot be seen on grey). Off-screen nothing can take focus, so the
+            // flag is checked; the drawn outline itself stays a GUI check.
+            juce::StringArray bare;
+            std::function<void(juce::Component&, const juce::String&)> walk = [&](juce::Component& c, const juce::String& path) {
+                const auto where = path + "/" + (dynamic_cast<juce::Button*>(&c) ? static_cast<juce::Button&>(c).getButtonText() : juce::String(typeid(c).name()));
+                if (&c != &st && c.getWantsKeyboardFocus() && !c.hasFocusOutline()) bare.add(where);
+                for (auto* k : c.getChildren()) walk(*k, where);
+                if (auto* t = dynamic_cast<juce::TabbedComponent*>(&c))   // only the current tab's page is a child
+                    for (int i = 0; i < t->getNumTabs(); ++i)
+                        if (auto* pg = t->getTabContentComponent(i); pg && pg->getParentComponent() != t) walk(*pg, where);
+            };
+            for (D d : {D::Library, D::ImportExport, D::SampleLab, D::StyleStudio, D::Validation})
+                for (int i = 0; i < st.segmentNames(d).size(); ++i) { st.showDomain(d, i); pump(20); walk(st, {}); }
+            bare.removeDuplicates(false);
+            for (int i = 0; i < std::min(10, bare.size()); ++i) std::printf("  info: no focus outline: %s\n", bare[i].toRawUTF8());
+            TEST("a11y: every control in the Studio that takes keyboard focus shows a focus outline", bare.isEmpty());
+        }
         {   // Labelling rules §2: EXPERIMENTAL marks Pa5X-bound actions and outputs, not a whole domain (UASF saves and reports are ordinary)
             st.showDomain(D::StyleStudio);
             bool header = false;

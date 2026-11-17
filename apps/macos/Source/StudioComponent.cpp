@@ -549,6 +549,16 @@ void StudioComponent::showDomain(Domain d, int segment) {
                                                                   : res_.converter().recipeText(), false);
     resized();
     refreshInspector();
+    // BL-A3: JUCE's focus outline on every control that takes keyboard focus (LookAndFeel_V4 alone only shifts a focused
+    // button's saturation, invisible on grey). Walked here because a TabbedComponent parents only its current page.
+    std::function<void(juce::Component&)> outline = [&outline](juce::Component& c) {
+        c.setHasFocusOutline(c.getWantsKeyboardFocus());
+        for (auto* k : c.getChildren()) outline(*k);
+        if (auto* t = dynamic_cast<juce::TabbedComponent*>(&c))
+            for (int i = 0; i < t->getNumTabs(); ++i)
+                if (auto* pg = t->getTabContentComponent(i); pg && pg->getParentComponent() != t) outline(*pg);
+    };
+    for (auto* k : getChildren()) outline(*k);   // not the Studio itself: no outline round the whole window
 }
 
 // A hand-off inside the shared ResourcesComponent (a finished package opens in Resource Graph) follows its tab.
