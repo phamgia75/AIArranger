@@ -413,6 +413,29 @@ int main() {
                 tv.setText("first"); tv.setText("second");
                 TEST("text view keeps no undo history of replaced texts", !tv.canUndo() && tv.shownText() == "second");
             }
+            {   // #44: report panes (TextView, no wrap) take a large report without a stall and show exactly its text
+                std::string big;
+                for (int i = 0; big.size() < 440 * 1024; ++i)
+                    big += "STYLE/BANK" + std::to_string(i % 97) + "/style" + std::to_string(i) + ".stg  3f9a0c2e5b7d4a1f8e6c0b9d2a7e5f3c1b8d6a4e2f0c9b7a5d3e1f8c6b4a2d0e  12345\n";
+                const juce::String report(big);
+                const auto since = [](auto t0) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
+                app::TextView pane;
+                pane.setBounds(0, 0, 900, 500);
+                auto t0 = std::chrono::steady_clock::now();
+                pane.setText(report, false);
+                const double setMs = since(t0);
+                app::JobsView jobs;
+                jobs.setBounds(0, 0, 900, 600);
+                jobs.setReport(report);
+                t0 = std::chrono::steady_clock::now();
+                for (int tick = 0; tick < 100; ++tick) { jobs.setList("#1  KST backup  running " + juce::String(tick) + "%\n"); jobs.setReport(report); }
+                const double tickMs = since(t0) / 100;
+                std::printf("  info: 440 KB report set in %.1f ms; job list tick with the report open %.2f ms\n", setMs, tickMs);
+                TEST("report pane: a 440 KB report is set in under 50 ms and shown exactly as given (no wrap)",
+                     setMs < 50 && pane.shownText() == report && pane.getText() == report);
+                TEST("job list: a progress tick re-sets only the list, not the open report (under 2 ms per tick)",
+                     tickMs < 2 && jobs.getText() == "#1  KST backup  running 99%\n" + report);
+            }
             {   // recipe prose wraps to the pane instead of scrolling sideways (GUI validation 2026-11-09)
                 cv.setSize(1000, 700);
                 const auto shown = cv.recipeShownText();

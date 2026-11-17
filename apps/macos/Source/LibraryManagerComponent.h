@@ -12,6 +12,7 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "JobPort.h"
+#include "TextViews.h"
 #include "library/latest_worker.h"
 #include "library/library_apply.h"
 #include "library/library_compat.h"
@@ -96,7 +97,8 @@ private:
     std::vector<std::vector<std::pair<juce::Component*, int>>> rows_;   // fixed rows above the lists
     std::vector<std::vector<std::pair<juce::Component*, int>>> actionRows_;   // rows between the lists and the report
     juce::TextButton *openA_ = nullptr, *openB_ = nullptr, *details_ = nullptr;
-    juce::TextEditor search_, value_, report_;
+    juce::TextEditor search_, value_;
+    TextView report_;   // read-only; a compare can list ~4 000 files (#44)
     juce::Label hint_, progress_;
     juce::ToggleButton wholeFile_{"Whole bank file (SET)"};
     juce::File lastOutput_;

@@ -49,6 +49,12 @@ void StudioComponent::styleText(juce::TextEditor& t) {
     t.setColour(juce::TextEditor::backgroundColourId, kSurface);
 }
 
+// Report panes (#44): no wrap, so selecting and copying gives back exactly the report's text (paths, hashes, tables).
+void StudioComponent::styleText(TextView& t) {
+    t.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
+    t.setColours(kSurface, juce::LookAndFeel::getDefaultLookAndFeel().findColour(juce::TextEditor::textColourId));
+}
+
 juce::TextButton& StudioComponent::button(const juce::String& text, std::function<void()> onClick) {
     auto* b = new juce::TextButton(text);
     owned_.add(b);
@@ -101,6 +107,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     // ── Library Workspace › Sources ──
     styleText(libraryView_);
+    libraryView_.setTitle("Source");
     libraryView_.setText("No source open. Open Source... reads a folder (a Pa5X KST backup, a package, or KMP/KSF/WAV samples) "
                          "and shows what it is. Nothing in it is changed.", false);
     auto& openSrc = button("Open Source...", [this] { chooseFolder("Folder to open as a read-only source", [this](juce::File f) { openSource(f); }); });
@@ -184,8 +191,11 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
         {{&label("Mounted volumes (USB sticks) are refused: write locally, copy by hand in Finder, then Check a USB copy.", kText2), 0}},
     };
     // ── the job list: queued, running (progress), done, failed with the reason, cancelled; Cancel and Open Report ──
-    styleText(jobView_);
-    jobView_.setText("No export jobs yet.", false);
+    styleText(jobView_.list());
+    styleText(jobView_.report());
+    jobView_.list().setTitle("Export jobs");
+    jobView_.report().setTitle("Opened job report");
+    jobView_.setList("No export jobs yet.");
     jobPick_.setTitle("Export job");
     jobPick_.onChange = [this] { refreshJobs(); };
     cancelJobBtn_ = &button("Cancel Job", [this] { cancelJob(); });
@@ -227,11 +237,14 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     // ── Sample Lab › Quality Report (the Convert Sound recipe with its measured QUALITY section) ──
     styleText(quality_);
+    quality_.setTitle("Quality report");
+    quality_.setWrap(true);   // prose (the Sound Recipe), as in Convert Sound
     qualityPage_.fill = &quality_;
     qualityPage_.addAndMakeVisible(quality_);
 
     // ── Sample Lab › KMP / KSF Writer (E1): the Sound previewed in Convert Sound, as KRONOS-format files ──
     styleText(kmpReport_);
+    kmpReport_.setTitle("KMP writer report");
     kmpReport_.setText("Nothing written yet.", false);
     kmpBtn_ = &button("Write KMP/KSF folder (EXPERIMENTAL, L1)...", [this] {
         chooseFolder("Parent folder for the new KMP/KSF folder (local disk)", [this](juce::File parent) {
@@ -250,6 +263,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     // ── Sample Lab › Tools (E4): previews are read-only; every write is a new folder ──
     styleText(labReport_);
+    labReport_.setTitle("Sample Lab report");
     labReport_.setText("Choose a WAV file (Analyze, Time Slice, Loop) or a folder of WAVs (Batch, duplicates).", false);
     labInput_.setColour(juce::Label::textColourId, juce::Colours::white);
     auto field = [this](juce::TextEditor& t, const char* text) { t.setText(text, false); t.setInputRestrictions(9, "0123456789."); };
@@ -302,6 +316,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     // ── Style Studio (E3 editing: EXPERIMENTAL; the source Style is only read) ──
     styleText(styleReport_);
+    styleReport_.setTitle("Style report");
     styleReport_.setText("No Style open. Open Style... reads a Yamaha SFF1 .sty (or an AIArranger .uasf) for the report and for "
                          "editing. The file is only read; edits are written only as NEW files.", false);
     auto& openSty = button("Open Style...", [this] {
@@ -401,6 +416,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     // ── Validation & Reports › Reports (read-only viewer; Export HTML + CSV is an export job) ──
     styleText(reportView_);
+    reportView_.setTitle("Report");
     reportView_.setText("No report open. Open a plan.json or NAME.export.json, or a library folder's inventory or structural validation. "
                         "Everything is only read; Export HTML + CSV writes a NEW folder.", false);
     reportStatus_.setColour(juce::Label::textColourId, juce::Colours::white);
@@ -963,7 +979,7 @@ void StudioComponent::attachL3Record(const juce::File& record) {
     });
 }
 
-void StudioComponent::runOutputJob(const juce::String& name, juce::TextEditor& out, std::function<st::JobResult()> work) {
+void StudioComponent::runOutputJob(const juce::String& name, TextView& out, std::function<st::JobResult()> work) {
     ++jobs_;
     out.setText(name + ": working...", false);
     addJob(juce::Time::getCurrentTime().formatted("%H:%M:%S") + "  " + name + "  running...");
@@ -1259,7 +1275,7 @@ void StudioComponent::showLeftovers(const std::vector<std::pair<std::string, std
     if (show != leftovers_.isVisible()) { leftovers_.setVisible(show); resized(); }
 }
 
-uint64_t StudioComponent::enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done) {
+uint64_t StudioComponent::enqueue(jobs::ExportSpec spec, TextView* out, std::function<void(const jobs::JobState&)> done) {
     const juce::String type(spec.type);
     JobHome home{spec, out, domain_, std::move(done)};
     const auto id = queue_->enqueue(std::move(spec));
@@ -1321,10 +1337,15 @@ void StudioComponent::refreshJobs(bool land) {
     }
     jobPick_.setSelectedId(picked, juce::dontSendNotification);
     if (all.empty()) t = "No export jobs yet. Each export button queues a job; it runs here while you keep working.";
-    for (const auto& j : all)
-        if (j.id == reportJob_) t << "\n──── REPORT, job #" << int(j.id) << "  (" << juce::String(j.reportPath.empty() ? "in memory only: nothing was published" : j.reportPath)
-                                 << ") ────\n" << juce::String::fromUTF8(j.reportMd.c_str());
-    jobView_.setText(t, false);
+    jobView_.setList(t);
+    if (reportJob_ != shownReportJob_)   // a report is fixed once its job finished: build and set it once, not per tick
+        for (const auto& j : all)
+            if (j.id == reportJob_) {
+                shownReportJob_ = reportJob_;
+                jobView_.setReport("\n──── REPORT, job #" + juce::String(int(j.id)) + "  (" +
+                                   juce::String(j.reportPath.empty() ? "in memory only: nothing was published" : j.reportPath) + ") ────\n" +
+                                   juce::String::fromUTF8(j.reportMd.c_str()));
+            }
     // Actions show only when they apply to the chosen job (no disabled button without a reason).
     cancelJobBtn_->setVisible(sel && !jobs::finished(sel->phase));
     reportBtn_->setVisible(sel && jobs::finished(sel->phase) && !sel->reportMd.empty());
