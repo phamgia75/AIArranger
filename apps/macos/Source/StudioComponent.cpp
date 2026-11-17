@@ -580,7 +580,7 @@ bool StudioComponent::keyPressed(const juce::KeyPress& k) {
     const bool redo = k == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
     if (redo || k == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)) {
         const auto* page = segments_.at(domain_)[size_t(segment_)].page;
-        if (page == &stylePage_ || page == &manager_) { undoOnPage(redo); return true; }
+        if (page == &stylePage_ || page == &manager_) return undoOnPage(redo);   // nothing to undo there: not taken
     }
     if (k == juce::KeyPress::escapeKey && k.getModifiers().getRawFlags() == 0) {   // BL-A9: Esc is an inline prompt's safe choice
         if (workPromptShown()) { resolveRunningWork(WorkChoice::KeepWorking); return true; }

@@ -74,6 +74,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
         ++generation_;
         model_.invalidate();
         generateBtn_.setEnabled(false);
+        generateBtn_.setTooltip("Settings changed: available after Preview again");   // a write still running will not bring it back
         if (model_.instrument().layers.size()) status_.setText("Settings changed: press Preview again.", juce::dontSendNotification);
     };
     for (auto* t : {&name_, &order_, &splits_}) { addAndMakeVisible(*t); t->onTextChange = [changed, t, this] { changed(t != &name_); }; }
@@ -119,6 +120,7 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
     ++generation_;   // a preview still reading the previous folder is dropped
     map_.setInstrument(nullptr);
     generateBtn_.setEnabled(false);
+    generateBtn_.setTooltip(kGenerateTip);
     if (!model_.inspect(dir.getFullPathName().toStdString(), &err)) {
         status_.setText("Cannot use this folder: " + juce::String(err), juce::dontSendNotification);
         return false;
@@ -197,6 +199,7 @@ void SoundConversionComponent::showPreview(media::sound::Instrument* in, const s
     preview_.setText(texts[0]);
     recipe_.setText(texts[1]);
     generateBtn_.setEnabled(true);
+    generateBtn_.setTooltip(kGenerateTip);
     status_.setText("Preview ready. Generate writes a new package folder; nothing is sent to the instrument.", juce::dontSendNotification);
 }
 

@@ -522,6 +522,9 @@ int main() {
                 rc.tabs().setCurrentTabIndex(3);
                 cv.generate(juce::File(root.string() + "/out/Older"));
                 cv.inspectFolder(juce::File(root.string() + "/big"));   // the user moves on while it writes
+                if (auto* g = find<juce::Button>(cv, "Generate Package..."))   // Codex r2: it will not come back when this write lands
+                    TEST("a11y: settings changed while writing: Generate asks for Preview, not for the write to finish",
+                         !g->isEnabled() && g->getTooltip().contains("Preview") && !g->getTooltip().contains("when it is written"));
                 for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
                 TEST("an older Generate finishing does not replace newer state or switch tabs",
                      fs::exists(root / "out/Older/RESOURCES.tsv") && !cv.statusText().startsWith("Package written") && rc.tabs().getCurrentTabIndex() == 3);
@@ -1648,6 +1651,8 @@ int main() {
                 st.showDomain(D::StyleStudio);
                 TEST("BL-A7 studio: Cmd-Z on Style Studio undoes the last Style edit", st.keyPressed(cmdZ) && st.styleModel().style().tempo_bpm == tempo);
                 TEST("BL-A7 studio: Shift-Cmd-Z redoes it", st.keyPressed(cmdShiftZ) && st.styleModel().style().tempo_bpm == 97);
+                TEST("BL-A7 studio: Shift-Cmd-Z with nothing to redo is not taken (Codex r2)", !st.keyPressed(cmdShiftZ) &&
+                     st.styleModel().style().tempo_bpm == 97);
             }
             st.styleValue().setText("fast");
             click(pg, "Apply");
