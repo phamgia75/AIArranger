@@ -123,6 +123,8 @@ ResourcesComponent::ResourcesComponent() {
     kstPage_.addAndMakeVisible(verifyBtn_);
     cancelBackupBtn_.onClick = [this] { cancelBackup(); };
     cancelBackupBtn_.setEnabled(false);
+    backupBtn_.setTooltip("Backs up a KST folder into a new local folder; off while a Backup KST or Verify Backup runs");
+    verifyBtn_.setTooltip("Checks a backup against its SHA-256 manifest (read-only); off while a Backup KST or Verify Backup runs");
     cancelBackupBtn_.setTooltip("Stops a running Backup KST or Verify Backup; available only while one runs");
     kstPage_.addAndMakeVisible(backupBtn_);
     kstPage_.addAndMakeVisible(cancelBackupBtn_);

@@ -164,7 +164,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
                   "The KST opened in Library Workspace > Sources: byte copy + SHA-256 manifest (also: Backup KST... in KST Library)"),
         route("Check a USB copy (read-only)", "Validation & Reports: Verify Package against its manifest", D::Validation, 0),
         off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet (docs/PA5X_KST_EXPORT_PLAN.md)."),
-        {{&button("Pa5X Import Kit...", [this] {
+        {{&button("Pa5X Import Kit (EXPERIMENTAL)...", [this] {
               chooseFolder("Folder holding the AIArranger outputs for the kit (only read)", [this](juce::File in) {
                   chooseFolder("Parent folder for the new kit (local disk)", [this, in](juce::File parent) {
                       importKitJob(in, parent.getChildFile(juce::File::createLegalFileName(in.getFileName() + " Pa5X Kit")));
@@ -401,6 +401,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     // ── Validation & Reports › Reports (read-only viewer; Export HTML + CSV is an export job) ──
     styleText(reportView_);
+    reportView_.setTitle("Report");
     reportView_.setText("No report open. Open a plan.json or NAME.export.json, or a library folder's inventory or structural validation. "
                         "Everything is only read; Export HTML + CSV writes a NEW folder.", false);
     reportStatus_.setColour(juce::Label::textColourId, juce::Colours::white);

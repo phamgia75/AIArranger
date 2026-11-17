@@ -81,6 +81,21 @@ static void click(juce::Component& root, const char* text) {
     pump(60);
 }
 
+// Disabled buttons under root that give no reason (tooltip = VoiceOver help); checked while work runs, when buttons go off
+static juce::StringArray silentDisabled(juce::Component& root) {
+    juce::StringArray out;
+    std::function<void(juce::Component&)> walk = [&](juce::Component& c) {
+        if (auto* b = dynamic_cast<juce::Button*>(&c); b && !b->isEnabled() && b->getTooltip().trim().isEmpty()) out.add(b->getButtonText());
+        for (auto* k : c.getChildren()) walk(*k);
+        if (auto* t = dynamic_cast<juce::TabbedComponent*>(&c))   // only the current tab's page is a child
+            for (int i = 0; i < t->getNumTabs(); ++i)
+                if (auto* p = t->getTabContentComponent(i); p && p->getParentComponent() != t) walk(*p);
+    };
+    walk(root);
+    for (const auto& n : out) std::printf("  info: disabled without a reason while busy: %s\n", n.toRawUTF8());
+    return out;
+}
+
 static juce::String section(juce::Component& root) {
     auto* l = find<juce::Label>(root, "Section:");
     return l ? l->getText() : juce::String();
@@ -236,6 +251,7 @@ int main() {
                  b1.getParentDirectory() == juce::File(bdir.string()) && b1.getFileName().startsWith("kst backup 20"));
             rc.startBackup(juce::File(kst.string()), b1);
             TEST("backup runs in the background", rc.backingUp());
+            TEST("a11y: while a backup runs, every disabled button says why", silentDisabled(rc).isEmpty());
             waitBackup(rc);
             const fs::path b1p = b1.getFullPathName().toStdString();
             TEST("Backup KST: complete and verified, manifest beside it, progress full",
@@ -252,6 +268,7 @@ int main() {
                  !fs::exists(kst / "STYLE/inside.INCOMPLETE"));
             rc.startVerify(b1);
             TEST("Verify Backup (the check) runs off the message thread", rc.backingUp());
+            TEST("a11y: while a verify runs, every disabled button says why", silentDisabled(rc).isEmpty());
             waitBackup(rc);
             TEST("Verify Backup: a good backup verifies", rc.kstText().startsWith("Backup verified: all 1 files"));
             std::ofstream(b1p / "STYLE/BANK01.STY") << "tampered";
@@ -353,6 +370,7 @@ int main() {
                 cv.nameField().setText("Kronos EP");
                 pump(50);
                 cv.buildPreview();
+                TEST("a11y: while a preview reads samples, every disabled button says why", silentDisabled(cv).isEmpty());
                 for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
                 TEST("Convert Sound: KRONOS preview shows the stereo zones, root and loop",
                      cv.model().built() && cv.previewText().contains("C-1 -B3    C3") && cv.previewText().contains("C4  -G9    C5") && cv.previewText().contains("24000-48000") &&
@@ -423,6 +441,11 @@ int main() {
             }
             watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
             cv.generate(juce::File(root.string() + "/out/Big Sine"));
+            if (auto* g = find<juce::Button>(cv, "Generate Package..."))
+                TEST("a11y: while the package is written, Generate says so (not 'after Preview')",
+                     !g->isEnabled() && g->getTooltip().containsIgnoreCase("writ") && !g->getTooltip().startsWith("Available after Preview"));
+            else TEST("a11y: Convert Sound has a Generate Package... button", false);
+            TEST("a11y: while the package is written, every disabled button says why", silentDisabled(cv).isEmpty());
             for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
             const double generateGap = watch.worstMs;
             TEST("generate: package written, summary with budget", cv.statusText().startsWith("Package written") && cv.previewText().contains("verdict: fits") &&
@@ -546,6 +569,7 @@ int main() {
             auto form = [&](app::PluginSamplerComponent& c, const juce::File& exe, const juce::String& instrument, const juce::String& name) {
                 c.setSamplerExecutable(exe);
                 c.findInstruments();
+                if (!silentDisabled(c).isEmpty()) TEST("a11y: while instruments are searched, every disabled button says why", false);
                 for (int i = 0; i < 1500 && c.instrumentNames().isEmpty(); ++i) pump(20);
                 const bool found = c.selectInstrument(instrument);
                 for (auto [k, v] : {std::pair<const char*, const char*>{"Lowest note", "C3"}, {"Highest note", "c5"}, {"Every (semitones)", "12"},
@@ -1486,7 +1510,7 @@ int main() {
             {   // E9: the Pa5X Import Kit from a folder of outputs, as an export job
                 fs::create_directories(root / "kit-src");
                 fs::copy(pkgDest, root / "kit-src" / "pkg-job", fs::copy_options::recursive);
-                TEST("kit: the Pa5X Import Kit route is offered", find<juce::Button>(io, "Pa5X Import Kit...") != nullptr &&
+                TEST("kit: the Pa5X Import Kit route is offered", find<juce::Button>(io, "Pa5X Import Kit (EXPERIMENTAL)...") != nullptr &&
                      find<juce::Label>(io, "Sound/Drum Kit packages, KMP folders and Style SMFs in one USB folder") != nullptr);
                 const auto kid = st.importKitJob(juce::File((root / "kit-src").string()), juce::File((root / "kit-job").string()));
                 waitIdle(30000);
@@ -2344,6 +2368,8 @@ int main() {
             TEST("labels: no domain-wide EXPERIMENTAL header on Style Studio; the Pa5X SMF actions keep theirs",
                  !header && find<juce::Button>(st.page(D::StyleStudio), "Export Pa5X SMF (EXPERIMENTAL)...") != nullptr &&
                  find<juce::Button>(st.page(D::ImportExport), "Style as Pa5X SMF (EXPERIMENTAL)") != nullptr);
+            TEST("labels: the Pa5X Import Kit action is labelled EXPERIMENTAL (LABELING_RULES §2)",
+                 find<juce::Button>(st.page(D::ImportExport), "Pa5X Import Kit (EXPERIMENTAL)...") != nullptr);
         }
 
         if (const char* dir = std::getenv("AIARR_SNAPSHOT_DIR"); dir && *dir) {   // offscreen renders for a later look; not a hands-on check

@@ -135,6 +135,7 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
         addAndMakeVisible(*t);
     }
     findBtn_.onClick = [this] { findInstruments(); };
+    findBtn_.setTooltip("Lists the AU/VST3 instruments on this Mac; off while a search runs");
     renderBtn_.onClick = [this] { startRender(); };
     cancelBtn_.onClick = [this] { cancelRender(); };
     generateBtn_.onClick = [this] {

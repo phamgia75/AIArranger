@@ -4,6 +4,8 @@
 
 namespace ai_arranger::app {
 
+static const char* const kGenerateTip = "Available after Preview; writes a new local package folder";
+
 using ui::SoundConversionModel;
 
 void KeyMapView::paint(juce::Graphics& g) {
@@ -105,7 +107,8 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                        });
     };
     for (auto* b : {&folderBtn_, &previewBtn_, &generateBtn_}) addAndMakeVisible(*b);
-    generateBtn_.setTooltip("Available after Preview; writes a new local package folder");
+    previewBtn_.setTooltip("Reads the samples and proposes the key map; off while a preview is being read");
+    generateBtn_.setTooltip(kGenerateTip);
     generateBtn_.setEnabled(false);
 }
 
@@ -201,6 +204,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     if (!model_.built()) return;
     ++jobs_;
     generateBtn_.setEnabled(false);
+    generateBtn_.setTooltip("Writing the package; available again when it is written");
     status_.setText("Writing " + outDir.getFullPathName() + " (export job)...", juce::dontSendNotification);
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
@@ -210,6 +214,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
             if (alive.expired()) return;
             if (genJobs_.land(token)) --jobs_;
             lastJob_ = j;
+            generateBtn_.setTooltip(kGenerateTip);
             if (gen != generation_) return;   // the user moved on (new folder, settings or preview): keep their state
             generateBtn_.setEnabled(true);
             if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }
