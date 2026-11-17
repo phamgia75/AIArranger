@@ -24,7 +24,7 @@ namespace ai_arranger::app {
 class LibraryManagerComponent : public juce::Component, private juce::Timer {
 public:
     enum class View { Details, Compare, Duplicates, Plan, Validation, Compat, WhereUsed };
-    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Undo, Redo, Export, Execute, Reveal, Validate, Compat, WhereUsed };
+    enum class Action { Compare, Duplicates, Copy, Move, Rename, SwapBanks, RemoveStep, ClearPlan, Undo, Redo, Export, Execute, Reveal, Validate, Compat, WhereUsed, ConvertSet };
 
     LibraryManagerComponent();
     ~LibraryManagerComponent() override;
@@ -44,6 +44,9 @@ public:
     void undo() { planEdit([this] { return history_.undo(); }); }   // staged plan edits only: nothing on disk changes
     void redo() { planEdit([this] { return history_.redo(); }); }
     void executePlan(const juce::File& parent);            // E8 export job: a NEW library "<target> edited <time>" in `parent`
+    // D54 B1 export job: the active side's SET as a NEW "<SET name>.KST" in `parent`, resources only (PCM/PCG/KMP/SBL
+    // byte-identical); the CONVERSION report (blocked/dropped members with reasons) is shown. Not verified on a Pa5X.
+    void convertSet(const juce::File& parent);
     juce::File lastOutput() const { return lastOutput_; }  // the last executed library (Reveal)
     juce::ToggleButton& wholeFile() { return wholeFile_; } // SET: Copy / Move / Rename act on the whole bank file
     juce::String progressText() const { return progress_.getText(); }

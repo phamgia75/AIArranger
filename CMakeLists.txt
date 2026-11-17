@@ -222,6 +222,10 @@ foreach(test_file ${STYLE_EDIT_TEST_SRC})
     add_dependencies(${test_name} aiarranger-style)   # the CLI test runs it
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+# SET -> KST phase 1 private oracle: a local copy of an owner SET vs the Pa5X's own conversion of it
+# (AIARR_SET_ORACLE_SET / AIARR_SET_ORACLE_KST); counts only, Skipped (77) without them.
+add_test(NAME test_set_to_kst_oracle COMMAND test_set_to_kst --oracle)
+set_tests_properties(test_set_to_kst_oracle PROPERTIES SKIP_RETURN_CODE 77 LABELS private-corpus)
 
 # ── Gate 3 latency trace harness tests ────────────────────────────────
 # The MPSC ring is a generic container and is exercised in BOTH build modes;
@@ -344,6 +348,7 @@ add_executable(sf2-check tools/sf2_check.cpp)   # P3.5, read-only
 target_include_directories(sf2-check PRIVATE src)
 add_executable(aiarranger-resources tools/aiarranger_resources.cpp)   # resource graph + memory budget, read-only
 target_include_directories(aiarranger-resources PRIVATE src)
+target_link_libraries(aiarranger-resources style-edit importer-sff1)   # kst-native from-set runs the SET -> KST export job
 add_executable(aiarranger-sound tools/aiarranger_sound.cpp)   # Sound conversion S4, writes only to a new folder
 target_include_directories(aiarranger-sound PRIVATE src)
 add_test(NAME test_kmp_cli   # EXPERIMENTAL KMP/KSF writer: demo -> KMP folder -> back through the kronos route; drums refused

@@ -18,6 +18,7 @@
 #include "media/sound/package_writer.h"
 #include "media/sound/wav_writer.h"
 #include "../../../tests/support/korg_fixture.h"
+#include "../../../tests/support/panative_fixture.h"
 #include <chrono>
 #include <csignal>
 #include <mach/mach.h>
@@ -1270,6 +1271,35 @@ int main() {
             TEST("library manager E8: both sources byte-identical after the execution", bytesOf(root / "Mine.KST") == mineBefore &&
                  bytesOf(root / "Other.KST") == otherBefore);
             lm.clearPlan();
+            {   // D54 B1: Convert SET to KST (resources only), an export job; the CONVERSION report is shown
+                TEST("set->kst: the action needs a SET on the active side", lm.unavailable(A::ConvertSet) == "Needs: a SET open on the active side" &&
+                     find<juce::Button>(lm, "Convert SET to KST (resources only)...") != nullptr);
+                const fs::path set = root / "Demo.SET";
+                put(set / "PCM/RAM01.PCM", build({{0x12020010, 6, 1, 0, "Sample", std::string(16, '\x11')}}, 1));
+                put(set / "SOUND/USER01.PCG", build({{0x10000038, 4, 9, 0, "Piano", "OC31sound"}}, 1));
+                put(set / "STYLE/USER01.STY", build({{0x08000030, 1, 0, 0, "Style", "OC31style"}}, 1));
+                put(set / "GLOBAL/GLOBAL.GBL", "g");
+                const auto setBefore = bytesOf(set);
+                lm.openLibrary('A', juce::File(set.string()));
+                waitLm(5000);
+                lm.selectRow('A', 0);
+                TEST("set->kst: available with a SET open", lm.headerText('A').contains("Pa-family SET") && lm.unavailable(A::ConvertSet).isEmpty());
+                fs::create_directories(root / "conv");
+                lm.convertSet(juce::File((root / "conv").string()));
+                TEST("set->kst: queued as an export job", lm.busy() && lm.reportText().contains("export job #"));
+                waitLm(10000);
+                const fs::path kst = root / "conv/Demo.KST";
+                TEST("set->kst: a NEW Demo.KST with the carried files byte-identical at lower-cased paths, nothing for the Style",
+                     slurp(kst / "PCM/ram01.pcm") == slurp(set / "PCM/RAM01.PCM") && slurp(kst / "SOUND/user01.pcg") == slurp(set / "SOUND/USER01.PCG") &&
+                     !fs::exists(kst / "STYLE") && !fs::exists(kst / "GLOBAL") && fs::is_regular_file(kst.string() + ".export.md"));
+                TEST("set->kst: the report lists blocked and dropped members with the label",
+                     lm.reportText().contains("KST written (resources only)") && lm.reportText().contains("BLOCKED  STYLE/USER01.STY") &&
+                     lm.reportText().contains("DROPPED  GLOBAL/GLOBAL.GBL") && lm.reportText().contains("NOT VERIFIED ON A PA5X"));
+                lm.convertSet(juce::File((root / "conv").string()));
+                waitLm(10000);
+                TEST("set->kst: a second conversion to the same path is refused", lm.reportText().contains("KST NOT written") && lm.reportText().contains("already exists"));
+                TEST("set->kst: the SET is byte-identical after the conversion", bytesOf(set) == setBefore);
+            }
         }
         phase("studio: reports viewer");
         {   // Validation & Reports > Reports (P1, C17/C18): read-only viewer, reads off the message thread, HTML + CSV as an export job

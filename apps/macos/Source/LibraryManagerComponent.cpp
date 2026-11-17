@@ -85,6 +85,9 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto& rev = act(Action::Reveal, "Reveal", [this] { lastOutput_.revealToUser(); });
     auto& val = act(Action::Validate, "Validate", [this] { showView(View::Validation); });
     auto& kc = act(Action::Compat, "Compatibility", [this] { showView(View::Compat); });
+    auto& cv = act(Action::ConvertSet, "Convert SET to KST (resources only)...", [this] {
+        chooseFolder("Parent folder for the NEW KST (local disk; the SET is only read)", [this](juce::File parent) { convertSet(parent); });
+    });
     wholeFile_.setTooltip("SET only: Copy, Move and Rename act on the selected item's whole bank file (e.g. STYLE/USER03.STY) as a file. "
                           "Item-level SET edits cannot be executed (payload and record trailer UNKNOWN).");
     wholeFile_.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
@@ -106,6 +109,7 @@ LibraryManagerComponent::LibraryManagerComponent() {
                    {{&rm, 140}, {r(rm), 160}, {&cl, 100}, {r(cl), 160}, {&ex, 220}, {r(ex), 0}},
                    {{&un, 100}, {r(un), 220}, {&re, 100}, {r(re), 220}, {&wu, 110}, {r(wu), 0}},
                    {{&exe, 140}, {r(exe), 300}, {&rev, 80}, {r(rev), 160}, {&progress_, 0}},
+                   {{&cv, 270}, {r(cv), 0}},
                    {{&hint_, 0}}};
     for (auto* rows : {&rows_, &actionRows_})
         for (auto& row : *rows) for (auto& [c, w] : row) addAndMakeVisible(c);
@@ -235,6 +239,7 @@ juce::String LibraryManagerComponent::unavailable(Action a) const {
         case Action::Undo: return history_.canUndo() ? "" : "Needs: a plan edit to undo";
         case Action::Redo: return history_.canRedo() ? "" : "Needs: an undone plan edit";
         case Action::WhereUsed: return act.item() ? "" : "Needs: an item selected in a list";
+        case Action::ConvertSet: return act.lib && act.lib->format == library::Format::PaSet ? "" : "Needs: a SET open on the active side";
     }
     return "";
 }
@@ -346,6 +351,31 @@ void LibraryManagerComponent::executePlan(const juce::File& parent) {
     progress_.setText("Queued as export job #" + juce::String(id), juce::dontSendNotification);
     report_.setText("Plan execution queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + dest.getFullPathName(), false);
     if (jobState) startTimer(200);
+    refresh(false);
+}
+
+void LibraryManagerComponent::convertSet(const juce::File& parent) {
+    if (unavailable(Action::ConvertSet).isNotEmpty()) return;
+    if (!enqueueJob) { report_.setText("KST NOT written: no export job queue.\nNothing was written to the SET.", false); return; }
+    const auto& set = *pane(active_).lib;
+    auto name = juce::File(u8(set.root)).getFileName();
+    if (name.endsWithIgnoreCase(".SET")) name = name.dropLastCharacters(4);
+    const auto dest = parent.getChildFile(name + ".KST");
+    std::weak_ptr<bool> alive = alive_;
+    const auto token = planJobs_.start();
+    const auto id = enqueueJob(jobs::setToKst(set.root, dest.getFullPathName().toStdString()), [this, alive, token](const jobs::JobState& j) {
+        if (alive.expired()) return;
+        planJobs_.land(token);
+        refresh(false);   // keep the result: no view report replaces it
+        report_.setText(j.phase == jobs::Phase::Done
+                            ? "KST written (resources only): " + u8(j.dest) + "\n" + u8(ui::studio::badgeLine(j.level)) + "   " + u8(j.verifyText) +
+                                  "\nExport job #" + juce::String(j.id) + ", report: " + u8(j.reportPath) + "\nThe SET was only read.\n\n" + u8(j.writerText)
+                            : "KST NOT written: " + u8(j.reason) + "\n(export job #" + juce::String(j.id) + " " + jobs::phaseName(j.phase) + " at " +
+                                  jobs::phaseName(j.stoppedAt) + ")\nNothing was written to the SET.",
+                        false);
+    });
+    if (!*token) return;   // already landed
+    report_.setText("SET -> KST conversion queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + dest.getFullPathName(), false);
     refresh(false);
 }
 
