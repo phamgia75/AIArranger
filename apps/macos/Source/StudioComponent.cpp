@@ -576,6 +576,16 @@ bool StudioComponent::keyPressed(const juce::KeyPress& k) {
         showDomain(order[c]);
         return true;
     }
+    // BL-A7: Cmd-Z / Shift-Cmd-Z on the page on screen, as its Undo / Redo buttons (a focused text field takes them first)
+    const bool redo = k == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+    if (redo || k == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)) {
+        const auto* page = segments_.at(domain_)[size_t(segment_)].page;
+        if (page == &stylePage_) {
+            if (auto* b = redo ? redoBtn_ : undoBtn_; b->isEnabled()) redo ? styleRedo() : styleUndo();
+            return true;
+        }
+        if (page == &manager_) { redo ? manager_.redo() : manager_.undo(); return true; }   // guarded there (no edit while a job runs)
+    }
     if (k == juce::KeyPress::escapeKey && k.getModifiers().getRawFlags() == 0) {   // BL-A9: Esc is an inline prompt's safe choice
         if (workPromptShown()) { resolveRunningWork(WorkChoice::KeepWorking); return true; }
         if (unsavedPromptShown()) { resolveUnsavedStyle(UnsavedChoice::Cancel); return true; }

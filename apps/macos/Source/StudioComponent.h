@@ -34,7 +34,7 @@ public:
     ~StudioComponent() override;
     void resized() override;
     void paint(juce::Graphics& g) override;
-    bool keyPressed(const juce::KeyPress& k) override;   // ⌘1…⌘5 jump to a domain; Esc cancels an inline prompt
+    bool keyPressed(const juce::KeyPress& k) override;   // ⌘1…⌘5 jump to a domain; ⌘Z/⇧⌘Z undo/redo the page; Esc cancels an inline prompt
 
     void showDomain(Domain d, int segment = 0);
     Domain domain() const { return domain_; }

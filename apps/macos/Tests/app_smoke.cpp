@@ -1178,6 +1178,19 @@ int main() {
             lm.undo();
             waitLm(5000);
             TEST("library history: multi-step undo", lm.plan().size() == 1 && lm.plan()[0].op == library::Op::Copy && lm.reportText().contains("2 to redo"));
+            {   // BL-A7: on the Library Manager page Cmd-Z / Shift-Cmd-Z step the plan history (staged edits only, nothing on disk)
+                const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0),
+                    cmdShiftZ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+                st.showDomain(D::Library, 4);
+                const bool redone = st.keyPressed(cmdShiftZ);
+                waitLm(5000);
+                TEST("BL-A7 library manager: Shift-Cmd-Z redoes a plan edit", redone && lm.plan().size() == 2);
+                const bool undone = st.keyPressed(cmdZ);
+                waitLm(5000);
+                TEST("BL-A7 library manager: Cmd-Z undoes it", undone && lm.plan().size() == 1 && lm.reportText().contains("2 to redo"));
+                st.showDomain(D::Library, 0);
+                TEST("BL-A7 library manager: Cmd-Z on another page leaves the plan alone", !st.keyPressed(cmdZ) && lm.plan().size() == 1);
+            }
             lm.redo();
             lm.redo();
             waitLm(5000);
@@ -1601,6 +1614,15 @@ int main() {
             TEST("studio: Undo names the op and restores", find<juce::Button>(pg, "Undo Tempo") != nullptr && st.styleUndo() &&
                  st.styleModel().style().tempo_bpm == tempo && find<juce::Button>(pg, "Redo Tempo") != nullptr);
             TEST("studio: Redo re-applies", st.styleRedo() && st.styleModel().style().tempo_bpm == 97);
+            {   // BL-A7: Cmd-Z / Shift-Cmd-Z act on the page on screen (text fields keep their own undo: they take the key first)
+                const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0),
+                    cmdShiftZ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+                st.showDomain(D::Validation);
+                TEST("BL-A7 studio: Cmd-Z on another page leaves the Style alone", !st.keyPressed(cmdZ) && st.styleModel().style().tempo_bpm == 97);
+                st.showDomain(D::StyleStudio);
+                TEST("BL-A7 studio: Cmd-Z on Style Studio undoes the last Style edit", st.keyPressed(cmdZ) && st.styleModel().style().tempo_bpm == tempo);
+                TEST("BL-A7 studio: Shift-Cmd-Z redoes it", st.keyPressed(cmdShiftZ) && st.styleModel().style().tempo_bpm == 97);
+            }
             st.styleValue().setText("fast");
             click(pg, "Apply");
             TEST("studio: a bad value is refused, nothing changed", st.styleStatus().startsWith("Refused, nothing changed") && st.styleModel().style().tempo_bpm == 97);
