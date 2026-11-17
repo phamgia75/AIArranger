@@ -42,6 +42,45 @@ private:
     juce::CodeEditorComponent ed_{doc_, nullptr};
 };
 
+// Editable text on the same document model as TextView, for the key and zone maps. juce::TextEditor::setText
+// (JUCE 8.0.4) costs about 50 us per character: 0.3 s for the 6 KB zone map of a 64-zone Sound, 2.6 s when the
+// editor has no width yet (#41). Offers the TextEditor calls this tab and its smoke test use.
+class EditView : public juce::Component, private juce::CodeDocument::Listener {
+public:
+    EditView() { ed_.setLineNumbersShown(false); doc_.addListener(this); addAndMakeVisible(ed_); }
+    ~EditView() override { doc_.removeListener(this); }
+    std::function<void()> onTextChange;   // user edits, and setText(t) with notify
+    void setText(const juce::String& t, bool notify = true) {
+        if (t == doc_.getAllContent()) return;   // as TextEditor: no change, no notification
+        quiet_ = true; doc_.replaceAllContent(t); quiet_ = false;
+        doc_.clearUndoHistory();
+        ed_.scrollToLine(0);
+        repaint();
+        if (notify && onTextChange) onTextChange();
+    }
+    juce::String getText() const { return doc_.getAllContent(); }
+    bool isEmpty() const { return doc_.getNumCharacters() == 0; }
+    void setFont(const juce::Font& f) { ed_.setFont(f); }
+    void setTitle(const juce::String& t) { Component::setTitle(t); ed_.setTitle(t); }   // the editor is what VoiceOver reads
+    void setTextToShowWhenEmpty(const juce::String& t, juce::Colour c) { empty_ = t; emptyColour_ = c; repaint(); }
+    void resized() override { ed_.setBounds(getLocalBounds()); }
+    void paintOverChildren(juce::Graphics& g) override {
+        if (!isEmpty() || empty_.isEmpty()) return;
+        g.setColour(emptyColour_);
+        g.setFont(ed_.getFont());
+        g.drawFittedText(empty_, getLocalBounds().reduced(8, 4), juce::Justification::topLeft, 8);
+    }
+private:
+    void codeDocumentTextInserted(const juce::String&, int) override { changed(); }
+    void codeDocumentTextDeleted(int, int) override { changed(); }
+    void changed() { repaint(); if (!quiet_ && onTextChange) onTextChange(); }
+    juce::CodeDocument doc_;
+    juce::CodeEditorComponent ed_{doc_, nullptr};
+    juce::String empty_;
+    juce::Colour emptyColour_;
+    bool quiet_ = false;
+};
+
 class KeyMapView : public juce::Component {
 public:
     void setInstrument(const media::sound::Instrument* in) { in_ = in; repaint(); }
@@ -73,8 +112,8 @@ public:
     juce::TextEditor& nameField() { return name_; }
     juce::TextEditor& orderField() { return order_; }
     juce::TextEditor& splitsField() { return splits_; }
-    juce::TextEditor& mappingField() { return mapping_; }   // KSF-only folders: proposed key map, editable
-    juce::TextEditor& zoneMapField() { return zoneMap_; }   // P1, every source: zone map + loops (samplelab/zone_map.h), editable
+    EditView& mappingField() { return mapping_; }   // KSF-only folders: proposed key map, editable
+    EditView& zoneMapField() { return zoneMap_; }   // P1, every source: zone map + loops (samplelab/zone_map.h), editable
     juce::String previewText() const { return preview_.getText(); }
     juce::String recipeText() const { return recipe_.getText(); }
     juce::String recipeShownText() const { return recipe_.shownText(); }
@@ -85,7 +124,8 @@ private:
     std::function<void(const juce::File&)> openInResources_;
     juce::TextButton folderBtn_{"Choose Folder..."}, previewBtn_{"Preview"}, generateBtn_{"Generate Package..."};
     juce::Label folder_, nameLbl_{{}, "Sound name"}, orderLbl_{{}, "Layers, softest first"}, splitsLbl_{{}, "Velocity splits"}, status_, pluginNote_;
-    juce::TextEditor name_, order_, splits_, mapping_, zoneMap_;
+    juce::TextEditor name_, order_, splits_;
+    EditView mapping_, zoneMap_;
     TextView preview_, recipe_;
     KeyMapView map_;
     std::shared_ptr<juce::FileChooser> chooser_;
