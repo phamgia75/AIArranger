@@ -37,6 +37,9 @@ public:
     bool keyPressed(const juce::KeyPress& k) override;   // ⌘1…⌘5 jump to a domain; ⌘Z/⇧⌘Z undo/redo the page; Esc cancels an inline prompt
 
     void showDomain(Domain d, int segment = 0);
+    // BL-A7/A8: undo or redo on the page on screen (Style Studio edits; the Library Manager's staged plan). Other pages: nothing.
+    bool canUndoOnPage(bool redo) const;
+    bool undoOnPage(bool redo);   // false when there was nothing to undo or redo there
     Domain domain() const { return domain_; }
     int segment() const { return segment_; }
     juce::StringArray segmentNames(Domain d) const;

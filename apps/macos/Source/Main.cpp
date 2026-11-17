@@ -5,6 +5,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "JobPort.h"
 #include "LiveHostComponent.h"
+#include "StudioMenu.h"
 
 namespace ai_arranger::app {
 
@@ -17,8 +18,16 @@ public:
     void initialise(const juce::String&) override {
         jobs::setOutputRecord(appOutputRecordFile());   // every job queue records where it writes, for the leftover banner
         mainWindow_ = std::make_unique<MainWindow>("AI Arranger");
+        if (auto* host = dynamic_cast<LiveHostComponent*>(mainWindow_->getContentComponent())) {
+            menu_ = std::make_unique<StudioMenu>(*host);
+            juce::MenuBarModel::setMacMainMenu(menu_.get());
+        }
     }
-    void shutdown() override { mainWindow_ = nullptr; }
+    void shutdown() override {
+        juce::MenuBarModel::setMacMainMenu(nullptr);   // before the host it points at goes
+        menu_ = nullptr;
+        mainWindow_ = nullptr;
+    }
     // Cmd-Q, the app menu Quit and the main window's close button all land here: the live host asks the Studio first
     // when a Style has unwritten edits (Cancel keeps the app running).
     void systemRequestedQuit() override {
@@ -48,6 +57,7 @@ private:
     };
 
     std::unique_ptr<MainWindow> mainWindow_;
+    std::unique_ptr<StudioMenu> menu_;   // declared after the window: destroyed first
 };
 
 } // namespace ai_arranger::app

@@ -580,17 +580,28 @@ bool StudioComponent::keyPressed(const juce::KeyPress& k) {
     const bool redo = k == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
     if (redo || k == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)) {
         const auto* page = segments_.at(domain_)[size_t(segment_)].page;
-        if (page == &stylePage_) {
-            if (auto* b = redo ? redoBtn_ : undoBtn_; b->isEnabled()) redo ? styleRedo() : styleUndo();
-            return true;
-        }
-        if (page == &manager_) { redo ? manager_.redo() : manager_.undo(); return true; }   // guarded there (no edit while a job runs)
+        if (page == &stylePage_ || page == &manager_) { undoOnPage(redo); return true; }
     }
     if (k == juce::KeyPress::escapeKey && k.getModifiers().getRawFlags() == 0) {   // BL-A9: Esc is an inline prompt's safe choice
         if (workPromptShown()) { resolveRunningWork(WorkChoice::KeepWorking); return true; }
         if (unsavedPromptShown()) { resolveUnsavedStyle(UnsavedChoice::Cancel); return true; }
     }
     return false;
+}
+
+bool StudioComponent::canUndoOnPage(bool redo) const {
+    using A = LibraryManagerComponent::Action;
+    const auto* page = segments_.at(domain_)[size_t(segment_)].page;
+    if (page == &stylePage_) return (redo ? redoBtn_ : undoBtn_)->isEnabled();   // as its Undo / Redo button
+    if (page == &manager_) return manager_.unavailable(redo ? A::Redo : A::Undo).isEmpty();
+    return false;
+}
+
+bool StudioComponent::undoOnPage(bool redo) {
+    if (!canUndoOnPage(redo)) return false;
+    if (segments_.at(domain_)[size_t(segment_)].page == &stylePage_) return redo ? styleRedo() : styleUndo();
+    redo ? manager_.redo() : manager_.undo();   // refuses while a job holds the plan; nothing on disk changes
+    return true;
 }
 
 void StudioComponent::chooseFolder(const juce::String& title, std::function<void(juce::File)> then, bool files, const juce::String& pattern) {

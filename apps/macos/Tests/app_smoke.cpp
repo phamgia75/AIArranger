@@ -8,6 +8,7 @@
 #include "../Source/LiveHostComponent.h"
 #include "../Source/ResourcesComponent.h"
 #include "../Source/StudioComponent.h"
+#include "../Source/StudioMenu.h"
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/serializer.h"
 #include "jobs/export_specs.h"
@@ -165,6 +166,31 @@ int main() {
         cycles &= h->getWidth() == 720;
     }
     TEST("5 create/start/destroy cycles", cycles);
+
+    {   // BL-A8: the menu bar mirrors the Studio sidebar (View) and the page's Undo / Redo (Edit)
+        using SC = ai_arranger::app::StudioComponent;
+        auto host = std::make_unique<ai_arranger::app::LiveHostComponent>();
+        ai_arranger::app::StudioMenu menu(*host);
+        auto items = [&](int index) {
+            std::vector<std::pair<juce::String, juce::PopupMenu::Item>> out;
+            const auto m = menu.getMenuForIndex(index, {});
+            for (juce::PopupMenu::MenuItemIterator it(m); it.next();) out.push_back({it.getItem().text, it.getItem()});
+            return out;
+        };
+        TEST("menu: Edit and View in the menu bar", (menu.getMenuBarNames() == juce::StringArray{"Edit", "View"}));
+        juce::StringArray view;
+        for (auto& [t, i] : items(1)) view.add(t);
+        TEST("menu: View lists the Studio domains in sidebar order",
+             (view == juce::StringArray{"Library Workspace", "Sample Lab", "Style Studio", "Import / Export Center", "Validation & Reports"}));
+        auto edit = items(0);
+        TEST("menu: with no Studio open, Edit > Undo / Redo are off", edit.size() == 2 && edit[0].first == "Undo" && !edit[0].second.isEnabled &&
+             edit[1].first == "Redo" && !edit[1].second.isEnabled);
+        for (auto& [t, i] : items(1)) if (t == "Style Studio") menu.menuItemSelected(i.itemID, 0);
+        pump(50);
+        TEST("menu: View > Style Studio opens the Studio on that domain", host->studio() && host->studio()->domain() == SC::Domain::StyleStudio);
+        edit = items(0);
+        TEST("menu: on Style Studio with nothing to undo, Undo / Redo stay off", edit.size() == 2 && !edit[0].second.isEnabled && !edit[1].second.isEnabled);
+    }
 
     // ── Resources window (read-only): what a musician reaches from "Resources..." ──
     phase("resources: open + KST");
