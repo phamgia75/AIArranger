@@ -1802,6 +1802,12 @@ int main() {
             TEST("C2 studio: Cancel keeps the Style, its edits and its undo", !st.unsavedPromptShown() && st.styleModel().style().tempo_bpm == 99 &&
                  st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() && !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
             st.openStyle(juce::File(sty.string()));
+            const bool escHandled = st.unsavedPromptShown() && st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
+            TEST("BL-A9 studio: Esc on the unsaved-Style prompt is Cancel: Style, edits and undo kept", escHandled && !st.unsavedPromptShown() &&
+                 st.styleModel().style().tempo_bpm == 99 && st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() &&
+                 !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
+            TEST("BL-A9 studio: Esc with no prompt shown is not taken (nothing to cancel)", !st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey)));
+            st.openStyle(juce::File(sty.string()));
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "kept.uasf").string()));
             const bool openWaits = st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 99 && !st.jobList().empty() &&   // not reloaded yet
                                    st.jobList().back().type == "Style as UASF";   // the job may be finished, but not landed (message thread)
@@ -1866,7 +1872,8 @@ int main() {
                      !st.requestQuit(wfn) && wq == 0 && st.workPromptShown() && st.domain() == D::ImportExport &&
                      find<juce::Button>(io, "Wait, then Quit")->isVisible() && find<juce::Button>(io, "Cancel Jobs and Quit")->isVisible() &&
                      find<juce::Button>(io, "Keep Working")->isVisible());
-                st.resolveRunningWork(W::KeepWorking);
+                // BL-A9: Esc on the prompt is its safe choice, Keep Working (the same path as the button)
+                TEST("quit: Esc on the running-work prompt is handled", st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey)));
                 waitIdle(5000);
                 pump(200);
                 TEST("quit: Keep Working aborts the quit; the work still finishes", wq == 0 && !st.workPromptShown() && !st.busy() &&
@@ -1975,6 +1982,11 @@ int main() {
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Cancel);
             TEST("quit: Cancel aborts the quit; edits and undo stay", quits == 1 && !st.unsavedPromptShown() && st.styleModel().dirty() &&
                  st.styleModel().style().tempo_bpm == 96 && st.styleModel().undoLabel() == "Tempo");
+            st.requestQuit(quitFn);
+            const bool quitEsc = st.unsavedPromptShown() && st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
+            pump(100);
+            TEST("BL-A9 quit: Esc on the unsaved-Style quit prompt is Cancel: no quit, edits and undo stay", quitEsc && quits == 1 &&
+                 !st.unsavedPromptShown() && st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 96 && st.styleModel().undoLabel() == "Tempo");
             st.requestQuit(quitFn);
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "quit-save.uasf").string()));
             const bool quitWaits = quits == 1 && st.styleModel().dirty() && st.busy();

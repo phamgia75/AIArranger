@@ -576,6 +576,10 @@ bool StudioComponent::keyPressed(const juce::KeyPress& k) {
         showDomain(order[c]);
         return true;
     }
+    if (k == juce::KeyPress::escapeKey && k.getModifiers().getRawFlags() == 0) {   // BL-A9: Esc is an inline prompt's safe choice
+        if (workPromptShown()) { resolveRunningWork(WorkChoice::KeepWorking); return true; }
+        if (unsavedPromptShown()) { resolveUnsavedStyle(UnsavedChoice::Cancel); return true; }
+    }
     return false;
 }
 
