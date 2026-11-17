@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -66,7 +67,9 @@ struct ExportSpec {
     // the writer that folder open (O_DIRECTORY|O_NOFOLLOW); the writer writes through the fd only, never re-resolving `out`.
     std::function<WriteResult(int outFd, const fs::path& out, const std::function<bool(double)>& progress)> writeAt;
     std::function<std::pair<Verification, std::string>(const fs::path& out)> verify;   // runs on the STAGED output; L1 Failed = not published
+    std::function<std::map<std::string, std::string>()> verifiedHashes;   // after verify: rel -> SHA-256 it checked; replaces the Manifest step's (D55 N3)
     std::function<std::string(const fs::path& out)> beforePublish;   // right before the publishing renames: "" = publish, else why not
+    std::function<void()> finished;   // once the job has ended, in any terminal state (done, failed, cancelled, exception): release what it held
     // P1 conversion report: what the output carries and how sure it is: {"EXACT"|"MEASURED"|"ESTIMATED"|"MISSING", what}
     std::function<std::vector<std::pair<std::string, std::string>>()> conversion;
 };
@@ -395,6 +398,14 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     st.level.l3 = {Check::NotRun, "not tested on a Pa5X"};   // only an owner record gives L3 (Validation & Reports)
     if (st.level.l1.state == Check::Failed)
         return stop(Phase::Failed, "the written output failed its check (L1: " + st.level.l1.detail + "); nothing was published" + kept());
+    if (spec.verifiedHashes) {   // the report then names the bytes verify checked, not a pathname read before it
+        const auto h = spec.verifiedHashes();
+        for (auto& f : st.files) {
+            const auto it = h.find(f.rel);
+            if (it == h.end() || it->second.empty()) return stop(Phase::Failed, "no verified hash for " + f.rel + "; nothing was published" + kept());
+            f.sha256 = it->second;
+        }
+    }
 
     if (!enter(Phase::Publish)) return;
     if (spec.beforePublish)
@@ -483,6 +494,7 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
 // The exception boundary (D17): anything a validator, writer or filesystem call throws fails this job, nothing else.
 inline void runExport(const ExportSpec& spec, JobState& st, const std::function<bool()>& cancelled, const std::function<void(const JobState&)>& update) {
+    struct Finished { const ExportSpec& s; ~Finished() { if (s.finished) s.finished(); } } finished{spec};   // every exit path, exceptions too
     std::string why;
     try {
         runExportSteps(spec, st, cancelled, update);

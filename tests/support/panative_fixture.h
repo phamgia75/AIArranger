@@ -8,7 +8,7 @@
 inline void be32(std::string& s, uint32_t v) { for (int i = 3; i >= 0; --i) s += char(v >> (8 * i)); }
 inline void be16(std::string& s, uint16_t v) { s += char(v >> 8); s += char(v); }
 
-struct Synth { uint32_t id; uint8_t kind, bank, slot; std::string name, payload; };
+struct Synth { uint32_t id; uint8_t kind, bank, slot; std::string name, payload; std::string sampleId = {}; };   // sampleId: format 1 field 4
 
 // A file that follows only the observed container rules (see panative_reader.h).
 inline std::string build(const std::vector<Synth>& items, int format) {
@@ -20,11 +20,12 @@ inline std::string build(const std::vector<Synth>& items, int format) {
             dir += n; dir += char(it.kind); dir += char(it.bank); dir += char(it.slot); be16(dir, sub); dir += '\0';
         } else {
             std::string r;
-            be16(r, 3);
+            be16(r, it.sampleId.empty() ? 3 : 4);
             std::string n = it.name; n.resize(28, '\0');
             be16(r, 2); be16(r, 28); r += n;
             be16(r, 0); be16(r, 3); r += char(it.kind); r += char(it.bank); r += char(it.slot);
             be16(r, 1); be16(r, 2); be16(r, sub);
+            if (!it.sampleId.empty()) { be16(r, 4); be16(r, 8); r += it.sampleId; }
             r += "\x12\x34\x56\x78";                 // 4 opaque trailing bytes
             be16(dir, uint16_t(r.size())); dir += r;
         }
