@@ -37,7 +37,9 @@ inline std::string wrapLines(const std::string& text, size_t cols) {
             size_t cut = line.rfind(' ', cols);
             if (cut == std::string::npos || cut <= body) {
                 cut = cols;   // no space: a hard break, but never inside a UTF-8 character
-                while (cut > body + 1 && (static_cast<unsigned char>(line[cut]) & 0xC0) == 0x80) --cut;
+                const auto cont = [&](size_t i) { return i < line.size() && (static_cast<unsigned char>(line[i]) & 0xC0) == 0x80; };
+                while (cut > body && cont(cut)) --cut;
+                if (cut <= body) { cut = body + 1; while (cont(cut)) ++cut; }   // at least one whole character per line
             }
             out += line.substr(0, cut) + '\n';
             line = pad + line.substr(cut + (line[cut] == ' '));
