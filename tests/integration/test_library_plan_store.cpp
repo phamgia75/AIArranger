@@ -37,7 +37,7 @@ int main() {
     TEST("synthetic libraries open", A.ok && B.ok && A.items.size() == 2 && B.items.size() == 1);
 
     std::vector<Step> plan;
-    { Step s; s.op = Op::Copy; s.side = 'A'; s.item = 1; s.bank = "STYLE/USER02"; s.slot = 3; plan.push_back(s); }
+    { Step s; s.op = Op::Copy; s.side = 'A'; s.item = 1; s.bank = "STYLE/USER02"; plan.push_back(s); }
     { Step s; s.op = Op::Rename; s.side = 'B'; s.item = 0; s.text = "Wal\ttz %41\nnew"; s.wholeFile = true; plan.push_back(s); }
     { Step s; s.op = Op::BankSwap; s.side = 'A'; s.bank = "STYLE/USER01"; s.text = "STYLE/USER02"; plan.push_back(s); }
 
@@ -85,6 +85,35 @@ int main() {
     { Step h; h.op = Op::Rename; h.side = 'A'; h.item = 0; h.text = "bad/name";
       std::vector<Step> hs; parsePlan(serializePlan({h}, kA, kB), kA, kB, A, B, hs);
       TEST("a restored rename with a path separator is blocked by evaluate()", evaluate(A, B, hs).blocked()); }
+
+    // Steps the UI cannot make are refused even with a valid checksum (addStep() never sets a slot; Rename has a name and no bank...).
+    auto signedStep = [&](const std::string& line) { return resign(std::string(kPlanFileMagic) + "\nA " + kA + "\nB " + kB + "\n" + line + "\n"); };
+    TEST("a step with a target slot is refused", refused(signedStep("step\t0\tA\t1\tSTYLE/USER02\t3\t\t0"), "no plan step can have"));
+    TEST("a number with trailing junk is refused", refused(signedStep("step\t0\tA\t1x\tSTYLE/USER02\t-1\t\t0"), "malformed number"));
+    TEST("a rename with a bank is refused", refused(signedStep("step\t2\tA\t1\tSTYLE/USER02\t-1\tNew\t0"), "no plan step can have"));
+    TEST("a rename with no name is refused", refused(signedStep("step\t2\tA\t1\t\t-1\t\t0"), "no plan step can have"));
+    TEST("a copy with text is refused", refused(signedStep("step\t0\tA\t1\t\t-1\tx\t0"), "no plan step can have"));
+    TEST("a whole-file bank swap is refused", refused(signedStep("step\t3\tA\t1\tSTYLE/USER01\t-1\tSTYLE/USER02\t1"), "no plan step can have"));
+    TEST("a bank swap with an item outside the library is refused", refused(signedStep("step\t3\tA\t9\tSTYLE/USER01\t-1\tSTYLE/USER02\t0"), "item index"));
+    { std::vector<Step> ok; TEST("the steps addStep() makes are accepted", parsePlan(signedStep("step\t0\tA\t1\tSTYLE/USER02\t-1\t\t0"), kA, kB, A, B, ok).empty() && ok.size() == 1); }
+
+    // A planted temp file (symlink to a source file, or to the previous plan) is never followed.
+    { const fs::path victim = ka / "STYLE/USER01/Ballad.STG", plan2 = data / "plan2.aiaplan";
+      const std::string vb = slurp(victim);
+      savePlan(plan2, text, A, B);
+      std::error_code lec;
+      fs::create_symlink(victim, plan2.string() + ".INCOMPLETE", lec);
+      TEST("save with a symlinked temp name succeeds", savePlan(plan2, serializePlan({}, kA, kB), A, B).empty());
+      TEST("the symlink target (a source file) was not written", slurp(victim) == vb);
+      fs::remove(plan2.string() + ".INCOMPLETE", lec);
+      fs::create_symlink(plan2, plan2.string() + ".INCOMPLETE", lec);
+      const std::string before2 = slurp(plan2);
+      savePlan(plan2, text, A, B);
+      TEST("a temp symlink to the previous plan did not corrupt it", parsePlan(slurp(plan2), kA, kB, A, B, got).empty() && got.size() == 3 && before2 != slurp(plan2));
+      fs::create_symlink(plan2, data / "link.aiaplan", lec);
+      std::string lt; TEST("a symlinked plan file is not read", loadPlanText(data / "link.aiaplan", lt) == "no saved plan");
+      put(data / "huge.aiaplan", std::string((1u << 22) + 1, 'x'));
+      TEST("an oversized plan file is refused before it is read", loadPlanText(data / "huge.aiaplan", lt) == "plan file too large" && lt.empty()); }
 
     // Libraries changed since the save.
     put(kb / "STYLE/USER02/Extra.STG", "AIARRANGER-SYNTHETIC extra");

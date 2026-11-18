@@ -83,15 +83,21 @@ inline std::string parsePlan(const std::string& text, const std::string& keyA, c
         const std::string at = "step " + std::to_string(i - 2) + ": ";
         if (f.size() != 8 || f[0] != "step" || f[2].size() != 1 || (f[2] != "A" && f[2] != "B") || (f[7] != "0" && f[7] != "1")) return at + "malformed";
         Step s;
-        int op = -1, slot = -2;
+        long long op = -1, slot = -2;
         unsigned long long item = 0;
-        try { op = std::stoi(f[1]); item = std::stoull(f[3]); slot = std::stoi(f[5]); } catch (...) { return at + "malformed number"; }
+        auto num = [](const std::string& t, auto& v) { size_t used = 0; try { v = std::is_signed_v<std::remove_reference_t<decltype(v)>> ? std::stoll(t, &used) : std::stoull(t, &used); } catch (...) { return false; } return used == t.size(); };
+        if (!num(f[1], op) || !num(f[3], item) || !num(f[5], slot)) return at + "malformed number";
         if (op < 0 || op > int(Op::BankSwap)) return at + "unknown operation";
-        if (slot < -1) return at + "bad slot";
         const Library& L = f[2] == "A" ? A : B;
-        if (static_cast<Op>(op) != Op::BankSwap && item >= L.items.size()) return at + "item index outside the library";
+        if (item >= L.items.size()) return at + "item index outside the library";   // the UI sets the selected item for every operation
         s.op = static_cast<Op>(op); s.side = f[2][0]; s.item = size_t(item); s.slot = slot; s.wholeFile = f[7] == "1";
         if (!detail::unesc(f[4], s.bank) || !detail::unesc(f[6], s.text)) return at + "bad escape";
+        // Only what addStep() can make: no target slot (-1), Rename has a name and no bank, Copy/Move have no text,
+        // BankSwap has two banks and is never whole-file.
+        const bool shape = slot == -1 && (s.op == Op::Rename ? s.bank.empty() && !s.text.empty()
+                                          : s.op == Op::BankSwap ? !s.bank.empty() && !s.text.empty() && !s.wholeFile
+                                                                 : s.text.empty());
+        if (!shape) return at + "fields no plan step can have";
         steps.push_back(std::move(s));
     }
     out = std::move(steps);
@@ -110,7 +116,8 @@ inline std::string savePlan(const fs::path& file, const std::string& text, const
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
     const fs::path tmp = file.string() + ".INCOMPLETE";
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ::unlink(tmp.c_str());   // a stale or planted leftover (even a symlink) is removed, never followed or truncated
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
     if (fd < 0) return "cannot create " + tmp.string();
     size_t done = 0;
     while (done < text.size()) { const ssize_t n = ::write(fd, text.data() + done, text.size() - done); if (n <= 0) break; done += size_t(n); }
@@ -123,10 +130,14 @@ inline std::string savePlan(const fs::path& file, const std::string& text, const
 }
 
 inline std::string loadPlanText(const fs::path& file, std::string& text) {
+    std::error_code ec;
+    const auto size = fs::is_regular_file(file, ec) ? fs::file_size(file, ec) : 0;   // a symlink or special file is not a plan
+    if (ec || !fs::is_regular_file(fs::symlink_status(file, ec))) return "no saved plan";
+    if (size > (1u << 22)) return "plan file too large";   // checked before reading: a huge file is never loaded
     std::ifstream in(file, std::ios::binary);
     if (!in) return "no saved plan";
     text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return text.size() > (1u << 22) ? "plan file too large" : "";
+    return "";
 }
 
 }  // namespace ai_arranger::library

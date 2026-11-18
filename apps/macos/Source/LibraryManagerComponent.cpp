@@ -276,7 +276,11 @@ void LibraryManagerComponent::persistPlan() {
     if (!a_.lib || !b_.lib) return;
     const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
     std::error_code ec;
-    if (history_.empty()) { std::filesystem::remove(file, ec); return; }   // a cleared plan stays cleared after a restart
+    if (history_.empty()) {   // a cleared plan stays cleared after a restart
+        if (!std::filesystem::remove(file, ec) && ec)
+            progress_.setText("Plan cleared, but its saved copy could not be removed and may come back after a restart: " + u8(ec.message()), juce::dontSendNotification);
+        return;
+    }
     // Message thread: the keys are cached at open, so this is one small file (measured < 1 ms to 500k files).
     if (const auto e = lib::savePlan(file, lib::serializePlan(history_.steps(), a_.key, b_.key), *a_.lib, *b_.lib); !e.empty())
         progress_.setText("Plan not saved for the next start: " + u8(e), juce::dontSendNotification);
