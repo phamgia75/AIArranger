@@ -191,6 +191,8 @@ int main() {
     fs::remove(ka / "STYLE/plan-victim.aiaplan");
     TEST("removePlan removes a plan outside, and a missing one is fine", removePlan(file, A, B).empty() && !fs::exists(file) && removePlan(file, A, B).empty());
 
+    TEST("a whitespace-only rename is refused", refused(signedStep("step\t2\tA\t1\t\t-1\t  \t0"), "no plan step can have"));
+    TEST("a whitespace-only swap partner is refused", refused(signedStep("step\t3\tA\t1\tSTYLE/USER01\t-1\t \t0"), "no plan step can have"));
     // Banks must be what the UI would have taken from the selection.
     { std::vector<Step> ok2;
       TEST("a copy to a bank the other library has is accepted", parsePlan(signedStep("step\t0\tA\t1\tSTYLE/USER02\t-1\t\t0"), kA, kB, A, B, ok2).empty());

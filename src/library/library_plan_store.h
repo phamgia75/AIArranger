@@ -11,6 +11,7 @@
 #include "media/sha256.h"
 #include <algorithm>
 #include <atomic>
+#include <set>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -81,6 +82,9 @@ inline std::string parsePlan(const std::string& text, const std::string& keyA, c
     if (lines.size() < 3 || lines[0] != kPlanFileMagic) return "unknown plan file version (expected \"" + std::string(kPlanFileMagic) + "\")";
     if (lines[1] != "A " + keyA || lines[2] != "B " + keyB) return "the plan was made for different libraries (their files changed)";
     if (lines.size() - 3 > kMaxPlanSteps) return "too many steps";
+    std::set<std::string> banksA, banksB;   // once, so each step is a lookup (a 200k-item library x 5000 steps would be ~1e9 compares)
+    for (const auto& it : A.items) banksA.insert(it.bank);
+    for (const auto& it : B.items) banksB.insert(it.bank);
     std::vector<Step> steps;
     for (size_t i = 3; i < lines.size(); ++i) {
         const auto f = detail::splitTab(lines[i]);
@@ -98,16 +102,15 @@ inline std::string parsePlan(const std::string& text, const std::string& keyA, c
         if (!detail::unesc(f[4], s.bank) || !detail::unesc(f[6], s.text)) return at + "bad escape";
         // Only what addStep() can make: no target slot (-1), Rename has a name and no bank, Copy/Move have no text,
         // BankSwap has two banks and is never whole-file.
-        const bool shape = slot == -1 && (s.op == Op::Rename ? s.bank.empty() && !s.text.empty()
-                                          : s.op == Op::BankSwap ? !s.bank.empty() && !s.text.empty() && !s.wholeFile
+        const bool shape = slot == -1 && (s.op == Op::Rename ? s.bank.empty() && !trimmed(s.text).empty()
+                                          : s.op == Op::BankSwap ? !s.bank.empty() && !trimmed(s.text).empty() && !s.wholeFile
                                                                  : s.text.empty());
         if (!shape) return at + "fields no plan step can have";
         // The banks addStep() takes from the selection: a Copy/Move target is a bank of the OTHER library (or "" = same bank id);
         // a BankSwap starts at the bank of the selected item.
         if (s.op == Op::BankSwap) { if (s.bank != L.items[s.item].bank) return at + "bank differs from the selected item's bank"; }
         else if (s.op != Op::Rename && !s.bank.empty()) {
-            const Library& O = f[2] == "A" ? B : A;
-            if (std::none_of(O.items.begin(), O.items.end(), [&](const Item& it) { return it.bank == s.bank; })) return at + "target bank not in the other library";
+            if (!(f[2] == "A" ? banksB : banksA).count(s.bank)) return at + "target bank not in the other library";
         }
         steps.push_back(std::move(s));
     }

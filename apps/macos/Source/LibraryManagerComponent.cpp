@@ -266,6 +266,10 @@ void LibraryManagerComponent::addStep(Action a) {
         case Action::SwapBanks: s.op = lib::Op::BankSwap; s.bank = p.item()->bank; s.text = value_.getText().trim().toStdString(); break;
         default: return;
     }
+    if (history_.steps().size() >= lib::kMaxPlanSteps) {   // a plan this long could be saved but not restored
+        progress_.setText("The plan is full (" + juce::String(int(lib::kMaxPlanSteps)) + " steps): Execute or export it, or remove steps", juce::dontSendNotification);
+        return;
+    }
     history_.add(s, lib::stepLabel(*p.lib, s));
     ++planRev_;
     persistPlan();
