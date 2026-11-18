@@ -277,8 +277,8 @@ void LibraryManagerComponent::persistPlan() {
     const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
     std::error_code ec;
     if (history_.empty()) {   // a cleared plan stays cleared after a restart
-        if (!std::filesystem::remove(file, ec) && ec)
-            progress_.setText("Plan cleared, but its saved copy could not be removed and may come back after a restart: " + u8(ec.message()), juce::dontSendNotification);
+        if (const auto e = lib::removePlan(file, *a_.lib, *b_.lib); !e.empty())
+            progress_.setText("Plan cleared, but its saved copy could not be removed and may come back after a restart: " + u8(e), juce::dontSendNotification);
         return;
     }
     // Message thread: the keys are cached at open, so this is one small file (measured < 1 ms to 500k files).
@@ -296,9 +296,9 @@ void LibraryManagerComponent::restorePlan() {
         progress_.setText("Saved plan not restored: " + u8(why), juce::dontSendNotification);
         return;
     }
-    for (const auto& s : steps) history_.add(s, lib::stepLabel(s.side == 'A' ? *a_.lib : *b_.lib, s));
+    history_.adopt(std::move(steps));
     ++planRev_;
-    progress_.setText("Restored " + juce::String(int(steps.size())) + " staged step(s) from the saved plan (staged only: nothing is written until Execute Plan)", juce::dontSendNotification);
+    progress_.setText("Restored " + juce::String(int(history_.steps().size())) + " staged step(s) from the saved plan (staged only: nothing is written until Execute Plan)", juce::dontSendNotification);
 }
 
 void LibraryManagerComponent::planEdit(const std::function<bool()>& edit) {

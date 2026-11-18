@@ -9,12 +9,15 @@
 
 #include "library/library_plan.h"
 #include "media/sha256.h"
+#include <algorithm>
+#include <atomic>
 #include <fcntl.h>
 #include <unistd.h>
 
 namespace ai_arranger::library {
 
 inline constexpr const char* kPlanFileMagic = "AIARRANGER-LIBRARY-PLAN 1";   // bump the number on any format change
+inline constexpr size_t kMaxPlanSteps = 5000, kMaxPlanBytes = size_t(1) << 22;   // what one save writes and one load reads
 
 // Same libraries = same format, layout and (path, size, SHA-256) of every file. The folder's own path is not part of it,
 // so a library that moved still matches; a changed, added or removed file does not.
@@ -77,6 +80,7 @@ inline std::string parsePlan(const std::string& text, const std::string& keyA, c
     for (size_t from = 0; from < body.size();) { const size_t n = body.find('\n', from); lines.push_back(body.substr(from, n - from)); from = n + 1; }
     if (lines.size() < 3 || lines[0] != kPlanFileMagic) return "unknown plan file version (expected \"" + std::string(kPlanFileMagic) + "\")";
     if (lines[1] != "A " + keyA || lines[2] != "B " + keyB) return "the plan was made for different libraries (their files changed)";
+    if (lines.size() - 3 > kMaxPlanSteps) return "too many steps";
     std::vector<Step> steps;
     for (size_t i = 3; i < lines.size(); ++i) {
         const auto f = detail::splitTab(lines[i]);
@@ -98,6 +102,13 @@ inline std::string parsePlan(const std::string& text, const std::string& keyA, c
                                           : s.op == Op::BankSwap ? !s.bank.empty() && !s.text.empty() && !s.wholeFile
                                                                  : s.text.empty());
         if (!shape) return at + "fields no plan step can have";
+        // The banks addStep() takes from the selection: a Copy/Move target is a bank of the OTHER library (or "" = same bank id);
+        // a BankSwap starts at the bank of the selected item.
+        if (s.op == Op::BankSwap) { if (s.bank != L.items[s.item].bank) return at + "bank differs from the selected item's bank"; }
+        else if (s.op != Op::Rename && !s.bank.empty()) {
+            const Library& O = f[2] == "A" ? B : A;
+            if (std::none_of(O.items.begin(), O.items.end(), [&](const Item& it) { return it.bank == s.bank; })) return at + "target bank not in the other library";
+        }
         steps.push_back(std::move(s));
     }
     out = std::move(steps);
@@ -109,14 +120,29 @@ inline fs::path planFilePath(const fs::path& dir, const std::string& keyA, const
     return dir / ("plan-" + keyA.substr(0, 16) + "-" + keyB.substr(0, 16) + ".aiaplan");
 }
 
-// Atomic save. Refuses a destination inside either library. "" = written (and read back equal), else the reason.
-inline std::string savePlan(const fs::path& file, const std::string& text, const Library& A, const Library& B) {
+inline bool insideSource(const fs::path& file, const Library& A, const Library& B) {
     for (const Library* L : {&A, &B})
-        if (!L->root.empty() && media::samplelab::sameOrBelow(file.parent_path(), L->root)) return "refused: the plan file would be inside a source library";
+        if (!L->root.empty() && media::samplelab::sameOrBelow(file.parent_path(), L->root)) return true;
+    return false;
+}
+
+// Removes a saved plan (the plan was cleared). Never touches a path inside a source library. "" = gone, else the reason.
+inline std::string removePlan(const fs::path& file, const Library& A, const Library& B) {
+    if (insideSource(file, A, B)) return "refused: the plan file is inside a source library";
+    std::error_code ec;
+    fs::remove(file, ec);
+    return ec ? ec.message() : "";
+}
+
+// Atomic save. Refuses a destination inside either library, and a plan load would refuse. "" = written, else the reason.
+// The temp name is unique per process and save, so two app instances never publish each other's half-written file.
+inline std::string savePlan(const fs::path& file, const std::string& text, const Library& A, const Library& B) {
+    if (insideSource(file, A, B)) return "refused: the plan file would be inside a source library";
+    if (text.size() > kMaxPlanBytes) return "refused: the plan is too large to restore (the previous saved plan is kept)";
+    static std::atomic<unsigned> counter{0};
     std::error_code ec;
     fs::create_directories(file.parent_path(), ec);
-    const fs::path tmp = file.string() + ".INCOMPLETE";
-    ::unlink(tmp.c_str());   // a stale or planted leftover (even a symlink) is removed, never followed or truncated
+    const fs::path tmp = file.string() + "." + std::to_string(::getpid()) + "-" + std::to_string(counter++) + ".INCOMPLETE";
     const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
     if (fd < 0) return "cannot create " + tmp.string();
     size_t done = 0;
@@ -133,7 +159,7 @@ inline std::string loadPlanText(const fs::path& file, std::string& text) {
     std::error_code ec;
     const auto size = fs::is_regular_file(file, ec) ? fs::file_size(file, ec) : 0;   // a symlink or special file is not a plan
     if (ec || !fs::is_regular_file(fs::symlink_status(file, ec))) return "no saved plan";
-    if (size > (1u << 22)) return "plan file too large";   // checked before reading: a huge file is never loaded
+    if (size > kMaxPlanBytes) return "plan file too large";   // checked before reading: a huge file is never loaded
     std::ifstream in(file, std::ios::binary);
     if (!in) return "no saved plan";
     text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());

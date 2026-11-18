@@ -45,7 +45,8 @@ int main() {
     const std::string text = serializePlan(plan, kA, kB);
     const fs::path file = planFilePath(data, kA, kB);
     TEST("save writes the plan file", savePlan(file, text, A, B).empty() && fs::exists(file));
-    TEST("no .INCOMPLETE left behind", !fs::exists(file.string() + ".INCOMPLETE"));
+    auto leftovers = [&] { size_t n = 0; for (const auto& e : fs::directory_iterator(data)) if (e.path().extension() == ".INCOMPLETE") ++n; return n; };
+    TEST("no .INCOMPLETE left behind", leftovers() == 0);
     TEST("sources untouched by save", treeState(ka) + treeState(kb) == before);
 
     std::string back;
@@ -78,10 +79,10 @@ int main() {
 
     // A hand-made file with a valid checksum still cannot get a hostile step past the Execute-time evaluation.
     { Step h; h.op = Op::BankSwap; h.side = 'A'; h.bank = "../escape"; h.text = "STYLE/USER01";
-      const std::string t2 = serializePlan({h}, kA, kB);
-      std::vector<Step> hs; TEST("a signed hostile step parses (the file format is not the gate)", parsePlan(t2, kA, kB, A, B, hs).empty() && hs.size() == 1);
-      const auto ev = evaluate(A, B, hs);
-      TEST("...but evaluate() blocks it, so Execute refuses the plan", ev.blocked() && ev.steps[0].conflicts.size() == 1); }
+      std::vector<Step> hs{Step{}};
+      TEST("a signed bank swap with a hostile bank is refused by the parser", !parsePlan(serializePlan({h}, kA, kB), kA, kB, A, B, hs).empty() && hs.empty());
+      const auto ev = evaluate(A, B, {h});   // defence in depth: Execute evaluates again whatever the file said
+      TEST("...and evaluate() blocks it too, so Execute would refuse", ev.blocked() && ev.steps[0].conflicts.size() == 1); }
     { Step h; h.op = Op::Rename; h.side = 'A'; h.item = 0; h.text = "bad/name";
       std::vector<Step> hs; parsePlan(serializePlan({h}, kA, kB), kA, kB, A, B, hs);
       TEST("a restored rename with a path separator is blocked by evaluate()", evaluate(A, B, hs).blocked()); }
@@ -149,7 +150,7 @@ int main() {
     // mid-save always leaves the previous or the new COMPLETE plan under the real name, never a partial one.
     put(file.string() + ".INCOMPLETE", "AIARRANGER-LIBRARY-PLAN 1\nA garbage");
     TEST("a stale .INCOMPLETE does not disturb loading", loadPlanText(file, back).empty() && back == good);
-    TEST("the next save replaces the stale .INCOMPLETE", savePlan(file, text, A, B).empty() && !fs::exists(file.string() + ".INCOMPLETE") && slurp(file) == text);
+    TEST("the next save publishes its own file, not the stale one", savePlan(file, text, A, B).empty() && slurp(file) == text);
     std::vector<Step> big;
     for (int i = 0; i < 2000; ++i) { Step st; st.op = Op::Rename; st.side = 'A'; st.item = size_t(i % 2); st.text = "Name " + std::to_string(i); big.push_back(st); }
     const std::string bigText = serializePlan(big, kA, kB);
@@ -164,7 +165,42 @@ int main() {
         if (!parsePlan(now, kA, kB, A, B, chk).empty() || (now != text && now != bigText)) ++torn;
     }
     TEST("60 kills mid-save: the plan file was always one complete valid version", kills == 60 && torn == 0);
-    fs::remove(file.string() + ".INCOMPLETE");
+    // Two instances saving the same pair at once, both killed at random moments: still always one complete version.
+    int torn2 = 0;
+    for (int round = 0; round < 40; ++round) {
+        pid_t kids[2];
+        for (int k = 0; k < 2; ++k) { kids[k] = ::fork(); if (kids[k] == 0) { for (;;) savePlan(file, k ? bigText : text, A, B); } }
+        ::usleep(useconds_t(300 + (round * 811) % 4000));
+        for (pid_t k : kids) { ::kill(k, SIGKILL); ::waitpid(k, nullptr, 0); }
+        std::vector<Step> chk; const std::string now = slurp(file);
+        if (!parsePlan(now, kA, kB, A, B, chk).empty() || (now != text && now != bigText)) ++torn2;
+    }
+    TEST("two concurrent writers killed at random: never a partial plan", torn2 == 0);
+    for (const auto& e : fs::directory_iterator(data)) if (e.path().extension() == ".INCOMPLETE") fs::remove(e.path());   // crash leftovers
+
+    // Size limits are enforced at save, so a saved plan is always restorable; the old plan is kept.
+    const std::string before3 = slurp(file);
+    TEST("a plan too large to restore is refused at save, the old file kept", has(savePlan(file, std::string(kMaxPlanBytes + 1, 'x'), A, B), "too large") && slurp(file) == before3);
+    { std::vector<Step> many(kMaxPlanSteps + 1, big[0]);
+      std::vector<Step> o2; TEST("more steps than the cap are refused on load", has(parsePlan(serializePlan(many, kA, kB), kA, kB, A, B, o2), "too many")); }
+    TEST("the capped plan size fits the load limit", serializePlan(std::vector<Step>(kMaxPlanSteps, big[0]), kA, kB).size() < kMaxPlanBytes);
+
+    // Removing a cleared plan never deletes inside a source library.
+    put(ka / "STYLE/plan-victim.aiaplan", "AIARRANGER-SYNTHETIC not a plan");
+    TEST("removePlan refuses a path inside a source library", has(removePlan(ka / "STYLE/plan-victim.aiaplan", A, B), "inside a source library") && fs::exists(ka / "STYLE/plan-victim.aiaplan"));
+    fs::remove(ka / "STYLE/plan-victim.aiaplan");
+    TEST("removePlan removes a plan outside, and a missing one is fine", removePlan(file, A, B).empty() && !fs::exists(file) && removePlan(file, A, B).empty());
+
+    // Banks must be what the UI would have taken from the selection.
+    { std::vector<Step> ok2;
+      TEST("a copy to a bank the other library has is accepted", parsePlan(signedStep("step\t0\tA\t1\tSTYLE/USER02\t-1\t\t0"), kA, kB, A, B, ok2).empty());
+      TEST("a copy to an arbitrary bank is refused", refused(signedStep("step\t0\tA\t1\tSOUND/MADEUP\t-1\t\t0"), "target bank"));
+      TEST("a bank swap that does not start at the selected item's bank is refused", refused(signedStep("step\t3\tA\t1\tSTYLE/USER02\t-1\tSTYLE/USER01\t0"), "selected item's bank"));
+      TEST("a bank swap from the selected item's bank is accepted", parsePlan(signedStep("step\t3\tA\t1\tSTYLE/USER01\t-1\tSTYLE/USER02\t0"), kA, kB, A, B, ok2).empty()); }
+
+    // Restoring N steps is one history entry, not N snapshots.
+    { PlanHistory h; h.adopt(std::vector<Step>(kMaxPlanSteps, big[0]));
+      TEST("adopt restores all steps as one undoable entry", h.steps().size() == kMaxPlanSteps && h.undo() && h.steps().empty() && !h.canUndo()); }
 
     fs::remove_all(root);
     std::printf("%d passed, %d failed\n", passes, failures);
