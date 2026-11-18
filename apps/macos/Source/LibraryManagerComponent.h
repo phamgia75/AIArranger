@@ -71,6 +71,7 @@ private:
         LibraryManagerComponent& owner;
         char side;
         std::shared_ptr<const library::Library> lib;
+        std::string key;            // library::libraryKey(*lib), computed once on the worker thread that read it
         std::vector<size_t> rows;   // item indices shown, after the search filter
         int selected = -1;          // item index, or -1
         juce::ListBox list;

@@ -172,12 +172,14 @@ void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
     std::weak_ptr<bool> alive = alive_;
     std::thread([this, alive, stop = stop_, side, d = dir.getFullPathName().toStdString()] {
         auto L = std::make_shared<const lib::Library>(lib::load(d, [alive, stop] { return !alive.expired() && !*stop; }));
-        juce::MessageManager::callAsync([this, alive, side, L] {
+        const std::string key = L->ok ? lib::libraryKey(*L) : "";   // for the saved plan; here, off the message thread
+        juce::MessageManager::callAsync([this, alive, side, L, key] {
             if (alive.expired()) return;
             --jobs_;
             auto& p = pane(side);
             if (L->ok) {
                 p.lib = L;
+                p.key = key;
                 p.selected = -1;
                 history_.reset();   // and its undo/redo: they name items of the library that was replaced
                 ++planRev_;   // steps name items by index into the libraries they were made for
@@ -272,21 +274,21 @@ void LibraryManagerComponent::addStep(Action a) {
 
 void LibraryManagerComponent::persistPlan() {
     if (!a_.lib || !b_.lib) return;
-    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), *a_.lib, *b_.lib);
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
     std::error_code ec;
     if (history_.empty()) { std::filesystem::remove(file, ec); return; }   // a cleared plan stays cleared after a restart
-    // shortcut: runs on the message thread (one small file plus a hash over the file list), move to a job if libraries reach 100k files
-    if (const auto e = lib::savePlan(file, lib::serializePlan(history_.steps(), *a_.lib, *b_.lib), *a_.lib, *b_.lib); !e.empty())
+    // Message thread: the keys are cached at open, so this is one small file (measured < 1 ms to 500k files).
+    if (const auto e = lib::savePlan(file, lib::serializePlan(history_.steps(), a_.key, b_.key), *a_.lib, *b_.lib); !e.empty())
         progress_.setText("Plan not saved for the next start: " + u8(e), juce::dontSendNotification);
 }
 
 void LibraryManagerComponent::restorePlan() {
     if (!a_.lib || !b_.lib || !history_.empty()) return;
     std::string text;
-    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), *a_.lib, *b_.lib);
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
     if (!lib::loadPlanText(file, text).empty()) return;   // nothing saved for this pair
     std::vector<lib::Step> steps;
-    if (const auto why = lib::parsePlan(text, *a_.lib, *b_.lib, steps); !why.empty()) {
+    if (const auto why = lib::parsePlan(text, a_.key, b_.key, *a_.lib, *b_.lib, steps); !why.empty()) {
         progress_.setText("Saved plan not restored: " + u8(why), juce::dontSendNotification);
         return;
     }

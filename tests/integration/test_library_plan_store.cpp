@@ -2,6 +2,8 @@
 #include "library/library_history.h"
 #include "library/library_plan_store.h"
 #include <cstdio>
+#include <csignal>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -31,6 +33,7 @@ int main() {
     put(ka / "STYLE/USER01/Swing.STG", "AIARRANGER-SYNTHETIC swing");
     put(kb / "STYLE/USER02/Waltz.STG", "AIARRANGER-SYNTHETIC waltz");
     const Library A = load(ka), B = load(kb);
+    const std::string kA = libraryKey(A), kB = libraryKey(B);
     TEST("synthetic libraries open", A.ok && B.ok && A.items.size() == 2 && B.items.size() == 1);
 
     std::vector<Step> plan;
@@ -39,8 +42,8 @@ int main() {
     { Step s; s.op = Op::BankSwap; s.side = 'A'; s.bank = "STYLE/USER01"; s.text = "STYLE/USER02"; plan.push_back(s); }
 
     const std::string before = treeState(ka) + treeState(kb);
-    const std::string text = serializePlan(plan, A, B);
-    const fs::path file = planFilePath(data, A, B);
+    const std::string text = serializePlan(plan, kA, kB);
+    const fs::path file = planFilePath(data, kA, kB);
     TEST("save writes the plan file", savePlan(file, text, A, B).empty() && fs::exists(file));
     TEST("no .INCOMPLETE left behind", !fs::exists(file.string() + ".INCOMPLETE"));
     TEST("sources untouched by save", treeState(ka) + treeState(kb) == before);
@@ -48,7 +51,7 @@ int main() {
     std::string back;
     std::vector<Step> got;
     TEST("load reads it", loadPlanText(file, back).empty() && back == text);
-    TEST("parse accepts it", parsePlan(back, A, B, got).empty() && got.size() == 3);
+    TEST("parse accepts it", parsePlan(back, kA, kB, A, B, got).empty() && got.size() == 3);
     bool same = got.size() == 3;
     for (size_t i = 0; same && i < 3; ++i)
         same = got[i].op == plan[i].op && got[i].side == plan[i].side && got[i].item == plan[i].item && got[i].bank == plan[i].bank &&
@@ -57,7 +60,7 @@ int main() {
     TEST("the restored plan evaluates like the original", evaluate(A, B, got).steps.size() == evaluate(A, B, plan).steps.size());
 
     // Rejections: each returns a reason and leaves no steps.
-    auto refused = [&](const std::string& t, const char* why) { std::vector<Step> o{Step{}}; const std::string r = parsePlan(t, A, B, o); return !r.empty() && o.empty() && has(r, why); };
+    auto refused = [&](const std::string& t, const char* why) { std::vector<Step> o{Step{}}; const std::string r = parsePlan(t, kA, kB, A, B, o); return !r.empty() && o.empty() && has(r, why); };
     std::string flipped = text; flipped[flipped.find("Wal")] = 'X';
     TEST("damaged file refused (checksum)", refused(flipped, "checksum"));
     TEST("truncated file refused", refused(text.substr(0, text.size() / 2), "checksum"));
@@ -73,19 +76,29 @@ int main() {
     std::string badesc = body; badesc.replace(badesc.find("Wal"), 3, "W%Z");
     TEST("bad escape refused", refused(resign(badesc), "escape"));
 
+    // A hand-made file with a valid checksum still cannot get a hostile step past the Execute-time evaluation.
+    { Step h; h.op = Op::BankSwap; h.side = 'A'; h.bank = "../escape"; h.text = "STYLE/USER01";
+      const std::string t2 = serializePlan({h}, kA, kB);
+      std::vector<Step> hs; TEST("a signed hostile step parses (the file format is not the gate)", parsePlan(t2, kA, kB, A, B, hs).empty() && hs.size() == 1);
+      const auto ev = evaluate(A, B, hs);
+      TEST("...but evaluate() blocks it, so Execute refuses the plan", ev.blocked() && ev.steps[0].conflicts.size() == 1); }
+    { Step h; h.op = Op::Rename; h.side = 'A'; h.item = 0; h.text = "bad/name";
+      std::vector<Step> hs; parsePlan(serializePlan({h}, kA, kB), kA, kB, A, B, hs);
+      TEST("a restored rename with a path separator is blocked by evaluate()", evaluate(A, B, hs).blocked()); }
+
     // Libraries changed since the save.
     put(kb / "STYLE/USER02/Extra.STG", "AIARRANGER-SYNTHETIC extra");
     const Library B2 = load(kb);
     std::vector<Step> o;
-    const std::string r = parsePlan(text, A, B2, o);
+    const std::string r = parsePlan(text, kA, libraryKey(B2), A, B2, o);
     TEST("plan refused when a library changed", has(r, "different libraries") && o.empty());
-    TEST("a changed pair gets its own plan file name", planFilePath(data, A, B2) != file);
+    TEST("a changed pair gets its own plan file name", planFilePath(data, kA, libraryKey(B2)) != file);
     fs::remove(kb / "STYLE/USER02/Extra.STG");
     TEST("moving a library keeps the plan valid", [&] {
         fs::copy(ka, root / "A-moved.KST", fs::copy_options::recursive);
         const Library Am = load(root / "A-moved.KST");
         std::vector<Step> x;
-        return parsePlan(text, Am, B, x).empty() && x.size() == 3;
+        return parsePlan(text, libraryKey(Am), kB, Am, B, x).empty() && x.size() == 3;
     }());
 
     // Never inside a source library.
@@ -96,12 +109,33 @@ int main() {
 
     // Atomic replace: a second save replaces the first; a failed save keeps the old file.
     plan.pop_back();
-    TEST("second save replaces the first", savePlan(file, serializePlan(plan, A, B), A, B).empty() && parsePlan(slurp(file), A, B, got).empty() && got.size() == 2);
+    TEST("second save replaces the first", savePlan(file, serializePlan(plan, kA, kB), A, B).empty() && parsePlan(slurp(file), kA, kB, A, B, got).empty() && got.size() == 2);
     const std::string good = slurp(file);
     fs::path blocker = data / "blocked"; put(blocker, "x");
     TEST("a save that cannot be written reports why", !savePlan(blocker / "plan.aiaplan", text, A, B).empty());
     TEST("a failed save keeps the previous file", slurp(file) == good);
     TEST("missing file reports no saved plan", loadPlanText(data / "none.aiaplan", back) == "no saved plan");
+
+    // Interrupted writes: a stale .INCOMPLETE from a crash is ignored and replaced; a child killed (SIGKILL) at random moments
+    // mid-save always leaves the previous or the new COMPLETE plan under the real name, never a partial one.
+    put(file.string() + ".INCOMPLETE", "AIARRANGER-LIBRARY-PLAN 1\nA garbage");
+    TEST("a stale .INCOMPLETE does not disturb loading", loadPlanText(file, back).empty() && back == good);
+    TEST("the next save replaces the stale .INCOMPLETE", savePlan(file, text, A, B).empty() && !fs::exists(file.string() + ".INCOMPLETE") && slurp(file) == text);
+    std::vector<Step> big;
+    for (int i = 0; i < 2000; ++i) { Step st; st.op = Op::Rename; st.side = 'A'; st.item = size_t(i % 2); st.text = "Name " + std::to_string(i); big.push_back(st); }
+    const std::string bigText = serializePlan(big, kA, kB);
+    int torn = 0, kills = 0;
+    for (int round = 0; round < 60; ++round) {
+        const pid_t pid = ::fork();
+        if (pid == 0) { for (;;) { savePlan(file, round % 2 ? bigText : text, A, B); savePlan(file, round % 2 ? text : bigText, A, B); } }
+        ::usleep(useconds_t(200 + (round * 937) % 4000));
+        ::kill(pid, SIGKILL); ::waitpid(pid, nullptr, 0); ++kills;
+        std::vector<Step> chk;
+        const std::string now = slurp(file);
+        if (!parsePlan(now, kA, kB, A, B, chk).empty() || (now != text && now != bigText)) ++torn;
+    }
+    TEST("60 kills mid-save: the plan file was always one complete valid version", kills == 60 && torn == 0);
+    fs::remove(file.string() + ".INCOMPLETE");
 
     fs::remove_all(root);
     std::printf("%d passed, %d failed\n", passes, failures);

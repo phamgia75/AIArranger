@@ -56,8 +56,9 @@ inline std::vector<std::string> splitTab(const std::string& s) {
 inline std::string sha(const std::string& s) { media::Sha256 h; h.update(s.data(), s.size()); return h.hex(); }
 }  // namespace detail
 
-inline std::string serializePlan(const std::vector<Step>& plan, const Library& A, const Library& B) {
-    std::string body = std::string(kPlanFileMagic) + "\nA " + libraryKey(A) + "\nB " + libraryKey(B) + "\n";
+// keyA / keyB: libraryKey() of each library, computed once when it was opened (it costs ~0.6 us per file: 120 ms at 100k files).
+inline std::string serializePlan(const std::vector<Step>& plan, const std::string& keyA, const std::string& keyB) {
+    std::string body = std::string(kPlanFileMagic) + "\nA " + keyA + "\nB " + keyB + "\n";
     for (const auto& s : plan)
         body += "step\t" + std::to_string(int(s.op)) + "\t" + s.side + "\t" + std::to_string(s.item) + "\t" + detail::esc(s.bank) + "\t" +
                 std::to_string(s.slot) + "\t" + detail::esc(s.text) + "\t" + (s.wholeFile ? "1" : "0") + "\n";
@@ -66,7 +67,7 @@ inline std::string serializePlan(const std::vector<Step>& plan, const Library& A
 
 // "" = `out` holds the plan; else why the file was refused (out is left empty). Every field is validated: a hand-edited
 // or damaged file can never produce a step the UI could not have made.
-inline std::string parsePlan(const std::string& text, const Library& A, const Library& B, std::vector<Step>& out) {
+inline std::string parsePlan(const std::string& text, const std::string& keyA, const std::string& keyB, const Library& A, const Library& B, std::vector<Step>& out) {
     out.clear();
     const size_t tail = text.rfind("sha256 ");
     if (tail == std::string::npos || (tail != 0 && text[tail - 1] != '\n')) return "not a plan file (no checksum line)";
@@ -75,7 +76,7 @@ inline std::string parsePlan(const std::string& text, const Library& A, const Li
     std::vector<std::string> lines;
     for (size_t from = 0; from < body.size();) { const size_t n = body.find('\n', from); lines.push_back(body.substr(from, n - from)); from = n + 1; }
     if (lines.size() < 3 || lines[0] != kPlanFileMagic) return "unknown plan file version (expected \"" + std::string(kPlanFileMagic) + "\")";
-    if (lines[1] != "A " + libraryKey(A) || lines[2] != "B " + libraryKey(B)) return "the plan was made for different libraries (their files changed)";
+    if (lines[1] != "A " + keyA || lines[2] != "B " + keyB) return "the plan was made for different libraries (their files changed)";
     std::vector<Step> steps;
     for (size_t i = 3; i < lines.size(); ++i) {
         const auto f = detail::splitTab(lines[i]);
@@ -98,8 +99,8 @@ inline std::string parsePlan(const std::string& text, const Library& A, const Li
 }
 
 // The plan file for this pair of libraries inside `dir` (the app's own data folder).
-inline fs::path planFilePath(const fs::path& dir, const Library& A, const Library& B) {
-    return dir / ("plan-" + libraryKey(A).substr(0, 16) + "-" + libraryKey(B).substr(0, 16) + ".aiaplan");
+inline fs::path planFilePath(const fs::path& dir, const std::string& keyA, const std::string& keyB) {
+    return dir / ("plan-" + keyA.substr(0, 16) + "-" + keyB.substr(0, 16) + ".aiaplan");
 }
 
 // Atomic save. Refuses a destination inside either library. "" = written (and read back equal), else the reason.

@@ -59,6 +59,28 @@ set_tests_properties(test_app_smoke PROPERTIES
     # ~250 s idle, ~290 s beside a ctest -j8 load: a --timeout 300 on the command line killed passing runs (log row 159)
     TIMEOUT 600)
 
+# ── Row 56: the staged Library Manager plan across a REAL restart (separate processes) ──
+juce_add_console_app(aiarranger-app-restart PRODUCT_NAME "aiarranger-app-restart")
+target_sources(aiarranger-app-restart PRIVATE Tests/app_restart.cpp ${MACOS_APP_LIB_SRC})
+target_include_directories(aiarranger-app-restart PRIVATE Source)
+target_compile_definitions(aiarranger-app-restart PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1 AIARR_REPO_TOOLS_DIR="${CMAKE_SOURCE_DIR}/tools")
+target_link_libraries(aiarranger-app-restart PRIVATE
+    platform-apple importer-sff1 style-edit
+    juce::juce_gui_extra juce::juce_audio_basics juce::juce_audio_devices)
+set(RESTART_DIR "${CMAKE_BINARY_DIR}/app-restart-work")
+add_test(NAME test_app_restart_stage COMMAND aiarranger-app-restart stage ${RESTART_DIR})
+add_test(NAME test_app_restart_verify COMMAND aiarranger-app-restart verify ${RESTART_DIR})
+add_test(NAME test_app_restart_verify_moved COMMAND aiarranger-app-restart verify ${RESTART_DIR} moved)
+add_test(NAME test_app_restart_changed COMMAND aiarranger-app-restart changed ${RESTART_DIR})
+set_tests_properties(test_app_restart_stage PROPERTIES FIXTURES_SETUP restart_plan)
+set_tests_properties(test_app_restart_verify test_app_restart_verify_moved test_app_restart_changed PROPERTIES FIXTURES_REQUIRED restart_plan)
+# They share one work folder and the last one changes a library: run in this order, never in parallel.
+set_tests_properties(test_app_restart_verify PROPERTIES DEPENDS test_app_restart_stage)
+set_tests_properties(test_app_restart_verify_moved PROPERTIES DEPENDS test_app_restart_verify)
+set_tests_properties(test_app_restart_changed PROPERTIES DEPENDS test_app_restart_verify_moved)
+set_tests_properties(test_app_restart_stage test_app_restart_verify test_app_restart_verify_moved test_app_restart_changed PROPERTIES RUN_SERIAL TRUE TIMEOUT 120)
+
 # ── Sound conversion S7: offline AU/VST3 instrument sampler (no audio device, no MIDI port) ──
 juce_add_console_app(aiarranger-plugin-sampler PRODUCT_NAME "aiarranger-plugin-sampler")
 target_sources(aiarranger-plugin-sampler PRIVATE Tools/plugin_sampler.cpp)
