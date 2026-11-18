@@ -2176,7 +2176,10 @@ int main() {
                     edit("88");
                     edit("89");
                     st.requestQuit(quitFn);
-                    const auto d3 = st.manager().enqueueJob(slowJob(root / "d33-slow3"), {});
+                    // own folder: its cancelled NAME.INCOMPLETE must not join the shared folder's leftover list, which the banner cuts at
+                    // 4 names and a later check reads (#43 gate D e); CI failed on it when this sat in `root`
+                    fs::create_directories(root / "d29-keys");
+                    const auto d3 = st.manager().enqueueJob(slowJob(root / "d29-keys" / "slow"), {});
                     pump(100);
                     st.resolveUnsavedStyle(U::Discard);
                     st.resolveRunningWork(W::Wait);
