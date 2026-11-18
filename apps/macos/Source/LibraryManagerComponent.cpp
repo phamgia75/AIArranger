@@ -181,6 +181,7 @@ void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
                 p.selected = -1;
                 history_.reset();   // and its undo/redo: they name items of the library that was replaced
                 ++planRev_;   // steps name items by index into the libraries they were made for
+                restorePlan();
             }
             view_ = View::Details;
             p.header.setText(juce::String("Library ") + side + ": " + u8(L->ok ? L->name + "  ·  " + lib::formatName(L->format) + "  ·  " +
@@ -265,12 +266,39 @@ void LibraryManagerComponent::addStep(Action a) {
     }
     history_.add(s, lib::stepLabel(*p.lib, s));
     ++planRev_;
+    persistPlan();
     showView(View::Plan);
+}
+
+void LibraryManagerComponent::persistPlan() {
+    if (!a_.lib || !b_.lib) return;
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), *a_.lib, *b_.lib);
+    std::error_code ec;
+    if (history_.empty()) { std::filesystem::remove(file, ec); return; }   // a cleared plan stays cleared after a restart
+    // shortcut: runs on the message thread (one small file plus a hash over the file list), move to a job if libraries reach 100k files
+    if (const auto e = lib::savePlan(file, lib::serializePlan(history_.steps(), *a_.lib, *b_.lib), *a_.lib, *b_.lib); !e.empty())
+        progress_.setText("Plan not saved for the next start: " + u8(e), juce::dontSendNotification);
+}
+
+void LibraryManagerComponent::restorePlan() {
+    if (!a_.lib || !b_.lib || !history_.empty()) return;
+    std::string text;
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), *a_.lib, *b_.lib);
+    if (!lib::loadPlanText(file, text).empty()) return;   // nothing saved for this pair
+    std::vector<lib::Step> steps;
+    if (const auto why = lib::parsePlan(text, *a_.lib, *b_.lib, steps); !why.empty()) {
+        progress_.setText("Saved plan not restored: " + u8(why), juce::dontSendNotification);
+        return;
+    }
+    for (const auto& s : steps) history_.add(s, lib::stepLabel(s.side == 'A' ? *a_.lib : *b_.lib, s));
+    ++planRev_;
+    progress_.setText("Restored " + juce::String(int(steps.size())) + " staged step(s) from the saved plan (staged only: nothing is written until Execute Plan)", juce::dontSendNotification);
 }
 
 void LibraryManagerComponent::planEdit(const std::function<bool()>& edit) {
     if (working() || !edit()) return;   // a running job holds the plan it was given; no plan change while it runs
     ++planRev_;
+    persistPlan();
     showView(View::Plan);
 }
 
