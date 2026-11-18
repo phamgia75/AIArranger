@@ -27,6 +27,7 @@ public:
         ed_.setColour(juce::CodeEditorComponent::backgroundColourId, background);
         ed_.setColour(juce::CodeEditorComponent::defaultTextColourId, text);
     }
+    juce::CodeEditorComponent& editor() { return ed_; }   // tests: selection, copy command, scrolling, accessibility
     void resized() override { ed_.setBounds(getLocalBounds()); layout(); }
 private:
     void layout() {

@@ -20,6 +20,7 @@
 #include "../../../tests/support/korg_fixture.h"
 #include "../../../tests/support/panative_fixture.h"
 #include <chrono>
+#include <set>
 #include <csignal>
 #include <mach/mach.h>
 #include <fstream>
@@ -436,6 +437,21 @@ int main() {
                      setMs < 50 && pane.shownText() == report && pane.getText() == report);
                 TEST("job list: a progress tick re-sets only the list, not the open report (under 2 ms per tick)",
                      tickMs < 2 && jobs.getText() == "#1  KST backup  running 99%\n" + report);
+                {   // #44 / owner step 4: what a user does with a report pane. No system clipboard is touched.
+                    auto& ed = pane.editor();
+                    ed.selectAll();
+                    juce::ApplicationCommandInfo copyInfo(juce::StandardApplicationCommandIDs::copy);
+                    ed.getCommandInfo(juce::StandardApplicationCommandIDs::copy, copyInfo);
+                    TEST("report pane: select-all selects exactly the report text and Copy is enabled while read-only",
+                         ed.isReadOnly() && ed.getTextInRange(ed.getHighlightedRegion()) == report && (copyInfo.flags & juce::ApplicationCommandInfo::isDisabled) == 0);
+                    ed.scrollToLine(4000);
+                    TEST("report pane: scrolling reaches a line deep in a 5 000-line report", ed.getFirstLineOnScreen() == 4000);
+                    // JUCE gives a handler only to a component on a native window, which the smoke has none; a read-only
+                    // CodeEditorComponent is created as AccessibilityRole::staticText (juce_CodeEditorComponent.cpp).
+                    pane.setTitle("Test report");
+                    TEST("report pane: it is accessible (not ignored), read-only, and its title is the editor's", ed.isAccessible() && ed.isReadOnly() &&
+                         ed.getTitle() == "Test report");
+                }
             }
             {   // recipe prose wraps to the pane instead of scrolling sideways (GUI validation 2026-11-09)
                 cv.setSize(1000, 700);
@@ -1004,6 +1020,19 @@ int main() {
                  st.libraryText().contains("Files: 2") && st.libraryText().contains("INVALID Pa-native container") &&
                  st.libraryText().contains("no Pa-native wrapper"));
             TEST("studio: the SET source is unchanged", fs::last_write_time(root / "Pa700copy/SOUND/USERDK01.PCG") == setStamp);
+        }
+        {   // #44: every converted report pane keeps an accessibility title (VoiceOver reads the editor's title)
+            std::set<juce::String> titles;
+            std::function<void(juce::Component&)> walk = [&](juce::Component& c) {
+                if (auto* ed = dynamic_cast<juce::CodeEditorComponent*>(&c)) titles.insert(ed->getTitle());
+                for (auto* k : c.getChildren()) walk(*k);
+            };
+            walk(st);
+            const std::set<juce::String> expected{"Source", "Export jobs", "Opened job report", "Quality report", "KMP writer report",
+                                                  "Sample Lab report", "Style report", "Report", "Library report", "KST tools report"};
+            bool all = true;
+            for (const auto& t : expected) all &= titles.count(t) == 1;
+            TEST("studio: all ten converted report panes carry their accessibility title", all);
         }
         phase("studio: library manager");
         {   // E7 Library Manager: two read-only libraries, search, compare, duplicates, an EXPORT-ONLY plan
