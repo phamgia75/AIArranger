@@ -4,6 +4,8 @@
 
 namespace ai_arranger::app {
 
+static const char* const kGenerateTip = "Available after Preview; writes a new local package folder";
+
 using ui::SoundConversionModel;
 
 void KeyMapView::paint(juce::Graphics& g) {
@@ -56,6 +58,11 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                         juce::dontSendNotification);
     mapping_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
     mapping_.setTitle("Key mapping (proposed; edit and press Preview)");
+    name_.setTitle("Sound name");
+    order_.setTitle("Layers, softest first");
+    splits_.setTitle("Velocity splits");
+    preview_.setAccessibleTitle("Key map preview and checks");
+    recipe_.setAccessibleTitle("Sound recipe");
     mapping_.setTextToShowWhenEmpty("Press Preview: AIArranger measures each sample's pitch and proposes a key map here.", juce::Colour(0xff9090a0));
     addChildComponent(mapping_);
     zoneMap_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));
@@ -67,6 +74,7 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
         ++generation_;
         model_.invalidate();
         generateBtn_.setEnabled(false);
+        generateBtn_.setTooltip("Settings changed: available after Preview again");   // a write still running will not bring it back
         if (model_.instrument().layers.size()) status_.setText("Settings changed: press Preview again.", juce::dontSendNotification);
     };
     for (auto* t : {&name_, &order_, &splits_}) { addAndMakeVisible(*t); t->onTextChange = [changed, t, this] { changed(t != &name_); }; }
@@ -100,6 +108,8 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
                        });
     };
     for (auto* b : {&folderBtn_, &previewBtn_, &generateBtn_}) addAndMakeVisible(*b);
+    previewBtn_.setTooltip("Reads the samples and proposes the key map; off while a preview is being read");
+    generateBtn_.setTooltip(kGenerateTip);
     generateBtn_.setEnabled(false);
 }
 
@@ -110,6 +120,7 @@ bool SoundConversionComponent::inspectFolder(const juce::File& dir) {
     ++generation_;   // a preview still reading the previous folder is dropped
     map_.setInstrument(nullptr);
     generateBtn_.setEnabled(false);
+    generateBtn_.setTooltip(kGenerateTip);
     if (!model_.inspect(dir.getFullPathName().toStdString(), &err)) {
         status_.setText("Cannot use this folder: " + juce::String(err), juce::dontSendNotification);
         return false;
@@ -188,6 +199,7 @@ void SoundConversionComponent::showPreview(media::sound::Instrument* in, const s
     preview_.setText(texts[0]);
     recipe_.setText(texts[1]);
     generateBtn_.setEnabled(true);
+    generateBtn_.setTooltip(kGenerateTip);
     status_.setText("Preview ready. Generate writes a new package folder; nothing is sent to the instrument.", juce::dontSendNotification);
 }
 
@@ -195,6 +207,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
     if (!model_.built()) return;
     ++jobs_;
     generateBtn_.setEnabled(false);
+    generateBtn_.setTooltip("Writing the package; available again when it is written");
     status_.setText("Writing " + outDir.getFullPathName() + " (export job)...", juce::dontSendNotification);
     std::weak_ptr<bool> alive = alive_;
     const auto gen = generation_;
@@ -204,6 +217,7 @@ void SoundConversionComponent::generate(const juce::File& outDir) {
             if (alive.expired()) return;
             if (genJobs_.land(token)) --jobs_;
             lastJob_ = j;
+            generateBtn_.setTooltip(kGenerateTip);
             if (gen != generation_) return;   // the user moved on (new folder, settings or preview): keep their state
             generateBtn_.setEnabled(true);
             if (j.phase != jobs::Phase::Done) { status_.setText("Not written: " + juce::String(j.reason), juce::dontSendNotification); return; }

@@ -24,6 +24,7 @@ public:
     bool canUndo() { return doc_.getUndoManager().canUndo(); }
     void clear() { setText({}); }
     void setFont(const juce::Font& f) { ed_.setFont(f); }
+    void setAccessibleTitle(const juce::String& t) { ed_.setTitle(t); }   // what VoiceOver reads for this pane
     void setWrap(bool w) { wrap_ = w; }   // prose: wrap to the width instead of scrolling sideways
     void resized() override { ed_.setBounds(getLocalBounds()); layout(); }
 private:
