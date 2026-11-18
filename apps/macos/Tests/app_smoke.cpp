@@ -183,13 +183,14 @@ int main() {
         TEST("menu: View lists the Studio domains in sidebar order",
              (view == juce::StringArray{"Library Workspace", "Sample Lab", "Style Studio", "Import / Export Center", "Validation & Reports"}));
         auto edit = items(0);
-        TEST("menu: with no Studio open, Edit > Undo / Redo are off", edit.size() == 2 && edit[0].first == "Undo" && !edit[0].second.isEnabled &&
-             edit[1].first == "Redo" && !edit[1].second.isEnabled);
+        TEST("menu: Edit has Undo and Redo, enabled (their key equivalents must always fire; the target decides)", edit.size() == 2 &&
+             edit[0].first == "Undo" && edit[0].second.isEnabled && edit[1].first == "Redo" && edit[1].second.isEnabled);
         for (auto& [t, i] : items(1)) if (t == "Style Studio") menu.perform(juce::ApplicationCommandTarget::InvocationInfo(i.itemID));
         pump(50);
         TEST("menu: View > Style Studio opens the Studio on that domain", host->studio() && host->studio()->domain() == SC::Domain::StyleStudio);
         edit = items(0);
-        TEST("menu: on Style Studio with nothing to undo, Undo / Redo stay off", edit.size() == 2 && !edit[0].second.isEnabled && !edit[1].second.isEnabled);
+        TEST("menu: on Style Studio with nothing to undo, Undo stays enabled and does nothing", edit.size() == 2 && edit[0].second.isEnabled &&
+             !host->studio()->undoOnPage(false));
         {   // owner: the menus show their shortcuts, and a focused text field keeps its own undo
             using MS = ai_arranger::app::StudioMenu;
             const auto keys = [&](int id) { return menu.commands().getKeyMappings()->getKeyPressesAssignedToCommand(id); };
@@ -205,13 +206,23 @@ int main() {
             field.setMultiLine(false);
             field.setText("a", false);
             field.insertTextAtCaret("bc");
-            TEST("menu: with a text field focused, Undo is on even where the page has nothing to undo", MS::canUndo(&field, sc, false));
+            // Codex r3: through the command manager (what a native key equivalent or a menu click runs), with the focus injected
+            // because an offscreen window cannot take it. Undo / Redo stay enabled so a stale menu never swallows Cmd-Z in a field.
+            juce::Component* focus = &field;
+            ai_arranger::app::StudioMenu cmdMenu([sc] { return sc; }, [sc] { return sc; }, [&focus] { return focus; });
+            auto cmdInfo = [&](int id) { juce::ApplicationCommandInfo i(id); cmdMenu.getCommandInfo(id, i); return i; };
+            TEST("menu: Undo / Redo are always enabled (a stale disabled item would stop Cocoa firing the key)",
+                 !(cmdInfo(MS::kUndo).flags & juce::ApplicationCommandInfo::isDisabled) && !(cmdInfo(MS::kRedo).flags & juce::ApplicationCommandInfo::isDisabled));
             const auto before = sc->styleModel().undoLabel();
-            const bool took = MS::undoFrom(&field, sc, false);
-            TEST("menu: Undo in a text field undoes the field, not the Style", took && field.getText() != "abc" && sc->styleModel().undoLabel() == before);
+            const bool took = cmdMenu.commands().invokeDirectly(MS::kUndo, false);
+            TEST("menu: Undo command with a text field focused undoes the field, not the Style", took && field.getText() != "abc" &&
+                 sc->styleModel().undoLabel() == before);
             juce::TextEditor readOnly;
             readOnly.setReadOnly(true);
-            TEST("menu: a read-only pane is not a text field: Undo goes to the page (off here)", !MS::canUndo(&readOnly, sc, false));
+            focus = &readOnly;
+            const bool pageTook = cmdMenu.commands().invokeDirectly(MS::kUndo, false);
+            TEST("menu: with a read-only pane focused the Undo command goes to the page (nothing to undo here: not taken, no change)",
+                 !pageTook && sc->styleModel().undoLabel() == before && field.getText() != "abc");
         }
     }
 
@@ -2170,7 +2181,9 @@ int main() {
                     st.resolveUnsavedStyle(U::Discard);
                     st.resolveRunningWork(W::Wait);
                     st.showDomain(D::StyleStudio);
-                    const bool took = st.keyPressed(cmdZ);   // after the Discard, while the quit waits for the job
+                    // the native menu command path (Codex r3 P2): no focused field, so it goes to the Style page
+                    ai_arranger::app::StudioMenu cmdMenu([&st] { return &st; }, [&st] { return &st; }, [] { return nullptr; });
+                    const bool took = cmdMenu.commands().invokeDirectly(ai_arranger::app::StudioMenu::kUndo, false);
                     st.selectJob(d3);
                     st.cancelJob();
                     waitIdle(10000);

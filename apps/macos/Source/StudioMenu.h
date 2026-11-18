@@ -17,7 +17,12 @@ class StudioMenu : public juce::MenuBarModel, public juce::ApplicationCommandTar
 public:
     enum Command { kUndo = 0x7a01, kRedo = 0x7a02, kDomain = 0x7a10 };   // kDomain + sidebar index 0..4
 
-    explicit StudioMenu(LiveHostComponent& host) : host_(host) {
+    explicit StudioMenu(LiveHostComponent& host)
+        : StudioMenu([&host] { return host.studio(); }, [&host] { return host.showStudio(); }) {}
+    // `studio`: the Studio if it exists; `showStudio`: opens it. `focused` overrides the focused component (tests only).
+    StudioMenu(std::function<StudioComponent*()> studio, std::function<StudioComponent*()> showStudio,
+               std::function<juce::Component*()> focused = {})
+        : studio_(std::move(studio)), showStudio_(std::move(showStudio)), focused_(std::move(focused)) {
         cm_.registerAllCommandsForTarget(this);
         cm_.setFirstCommandTarget(this);
     }
@@ -51,7 +56,9 @@ public:
             const bool redo = id == kRedo;
             info.setInfo(redo ? "Redo" : "Undo", redo ? "Redo the last undone change on this page" : "Undo the last change on this page", "Edit", 0);
             info.addDefaultKeypress('z', redo ? cmd | shift : cmd);
-            info.setActive(canUndo(juce::Component::getCurrentlyFocusedComponent(), host_.studio(), redo));
+            // Always enabled: Cocoa only fires a key equivalent of an item that is enabled when the menu was last built, and the menu is
+            // not rebuilt when focus moves into a text field (Codex r3 P1). perform() decides what, if anything, to undo.
+            (void) redo;
         } else if (id >= kDomain && id < kDomain + StudioComponent::kDomains) {
             const int i = id - kDomain;
             const juce::String name = StudioComponent::domainName(sidebarOrder(i));
@@ -61,17 +68,13 @@ public:
     }
     bool perform(const InvocationInfo& info) override {
         if (info.commandID == kUndo || info.commandID == kRedo)
-            return undoFrom(juce::Component::getCurrentlyFocusedComponent(), host_.studio(), info.commandID == kRedo);
+            return undoFrom(focused(), studio_(), info.commandID == kRedo);
         if (info.commandID >= kDomain && info.commandID < kDomain + StudioComponent::kDomains)
-            if (auto* st = host_.showStudio()) { st->showDomain(sidebarOrder(info.commandID - kDomain)); return true; }
+            if (auto* st = showStudio_()) { st->showDomain(sidebarOrder(info.commandID - kDomain)); return true; }
         return false;
     }
 
     // A focused editable text field (TextEditor or CodeEditor) keeps its own undo; otherwise the Studio page on screen.
-    static bool canUndo(juce::Component* focused, StudioComponent* st, bool redo) {
-        if (textField(focused)) return true;   // its own history decides; the menu cannot see it
-        return st && st->canUndoOnPage(redo);
-    }
     static bool undoFrom(juce::Component* focused, StudioComponent* st, bool redo) {
         if (auto* te = dynamic_cast<juce::TextEditor*>(focused); te && !te->isReadOnly()) { redo ? te->redo() : te->undo(); return true; }
         if (auto* ce = dynamic_cast<juce::CodeEditorComponent*>(focused); ce && !ce->isReadOnly()) { redo ? ce->redo() : ce->undo(); return true; }
@@ -85,12 +88,9 @@ public:
     }
 
 private:
-    static bool textField(juce::Component* c) {
-        if (auto* te = dynamic_cast<juce::TextEditor*>(c)) return !te->isReadOnly();
-        if (auto* ce = dynamic_cast<juce::CodeEditorComponent*>(c)) return !ce->isReadOnly();
-        return false;
-    }
-    LiveHostComponent& host_;
+    juce::Component* focused() const { return focused_ ? focused_() : juce::Component::getCurrentlyFocusedComponent(); }
+    std::function<StudioComponent*()> studio_, showStudio_;
+    std::function<juce::Component*()> focused_;
     juce::ApplicationCommandManager cm_;
 };
 
