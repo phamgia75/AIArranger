@@ -647,12 +647,17 @@ inline std::string verifyKit(const fs::path& dir, const std::vector<Item>* expec
 // The candidates in a folder of outputs (the app's "folder holding the outputs"): its visible entries, sorted. Read-only.
 // The export reports the job runner writes beside each output (X.export.md, X.export.json) are not candidates when X is
 // in the same folder: they go to `skipped` and are never copied (E9 Codex r3).
-inline std::vector<fs::path> outputsIn(const fs::path& folder, std::vector<std::string>* skipped = nullptr) {
+inline std::vector<fs::path> outputsIn(const fs::path& folder, std::vector<std::string>* skipped = nullptr, size_t cap = SIZE_MAX,
+                                        bool* truncated = nullptr) {
     std::vector<fs::path> all, r;
     std::set<std::string> names;
     std::error_code ec;
     for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
-        if (it->path().filename().string().rfind('.', 0) != 0) { all.push_back(it->path()); names.insert(it->path().filename().string()); }
+        if (it->path().filename().string().rfind('.', 0) != 0) {
+            if (all.size() >= cap) { if (truncated) *truncated = true; return {}; }   // review only: the job passes no cap
+            all.push_back(it->path());
+            names.insert(it->path().filename().string());
+        }
     std::sort(all.begin(), all.end());
     for (const auto& p : all) {
         const std::string n = p.filename().string();
@@ -665,13 +670,117 @@ inline std::vector<fs::path> outputsIn(const fs::path& folder, std::vector<std::
     return r;
 }
 
+// BL-E1 S2: what the review saw, as one SHA-256: the members and, per planned file, its kit path, size and modification
+// time (read fresh from the source). The job recomputes it in validate and refuses when it differs (a source changed
+// between the review and Export). Read-only.
+inline std::string planFingerprint(const std::vector<Item>& items, const std::vector<Planned>& files) {
+    media::Sha256 h;
+    const auto add = [&h](const std::string& line) { h.update(line.data(), line.size()); h.update("\n", 1); };
+    for (const auto& it : items) add("member|" + it.kitPath());
+    std::error_code ec;
+    for (const auto& f : files) {
+        const auto& it = items[f.item];
+        const fs::path src = it.kind == Kind::Style ? it.source : it.source / f.from;
+        const auto size = fs::file_size(src, ec);
+        const auto mtime = ec ? fs::file_time_type::duration::zero() : fs::last_write_time(src, ec).time_since_epoch();
+        add(f.to + "|" + (ec ? std::string("unreadable") : std::to_string(size) + "|" + std::to_string(static_cast<long long>(mtime.count()))));
+    }
+    return h.hex();
+}
+
+// BL-E1 S1: the read-only review of a folder of outputs. The same classify/pin/layout/reader calls as the job's validate and
+// dependencies, so the review and the job cannot disagree about members, bytes or blocking reasons; the job stays the
+// authority. Writes nothing and follows no link; pins are dropped before it returns.
+struct ReviewPlan {
+    std::vector<Item> items;                // status/detail filled from the readers on the SOURCE
+    std::vector<Planned> files;
+    uint64_t bytes = 0;
+    std::vector<std::string> blocking;      // the kit cannot be made while this is non-empty
+    std::vector<std::string> warnings;      // export reports beside outputs, not copied
+    std::string fingerprint;                // planFingerprint of items+files ("" when nothing was planned)
+};
+inline constexpr size_t kReviewMaxEntries = 10000;
+
+inline ReviewPlan plan(const fs::path& outputsFolder, const std::function<bool()>& keepGoing = {}, size_t maxEntries = kReviewMaxEntries) {
+    ReviewPlan r;
+    const auto cancelled = [&] {
+        if (keepGoing && !keepGoing()) { r = ReviewPlan{}; r.blocking.push_back("review cancelled; nothing planned"); return true; }
+        return false;
+    };
+    std::vector<std::string> reports;
+    bool truncated = false;
+    const auto in = outputsIn(outputsFolder, &reports, maxEntries, &truncated);
+    if (truncated) { r.blocking.push_back("more than " + std::to_string(maxEntries) + " entries in " + outputsFolder.string() + ": not listed, the kit is refused (use a folder with only the outputs)"); return r; }
+    for (const auto& n : reports) r.warnings.push_back("skipped " + n + " (the export report of an output beside it; not copied)");
+    if (in.empty()) { r.blocking.push_back("no outputs in " + outputsFolder.string()); return r; }
+    std::vector<std::shared_ptr<media::detail::Fd>> pins;   // opened to prove each member folder is pinnable; closed on return
+    for (const auto& p : in) {
+        if (cancelled()) return r;
+        auto it = classify(p);
+        std::error_code ec;
+        if (fs::is_symlink(fs::symlink_status(p, ec))) { r.blocking.push_back(p.filename().string() + " is a link; the kit never follows links"); continue; }
+        if (it.kind == Kind::Unknown) { r.blocking.push_back(p.filename().string() + " is not an AIArranger output the kit takes (a Sound or Drum Kit package folder, a KMP/KSF folder, or a Style .mid)"); continue; }
+        std::shared_ptr<media::detail::Fd> fd;
+        if (const auto e = pinRoot(it, &fd); !e.empty()) { r.blocking.push_back(e); continue; }
+        pins.push_back(std::move(fd));
+        r.items.push_back(std::move(it));
+    }
+    if (const auto e = layoutRefusal(r.items, &r.files, &r.bytes); !e.empty()) r.blocking.push_back(e);
+    for (auto& it : r.items) {
+        if (cancelled()) return r;
+        std::string d;
+        const auto e = checkMember(it.kind, it.source, &d);
+        it.status = e.empty() ? kValid : "FAILED";
+        it.detail = e.empty() ? d : e;
+        if (!e.empty()) r.blocking.push_back("FAILED: " + it.kitPath() + " (" + it.detail + ")");
+    }
+    if (!r.items.empty()) r.fingerprint = planFingerprint(r.items, r.files);
+    return r;
+}
+
+// BL-E1 S3: may a kit be made at parent/kitName? Read-only; the job's own Destination and Estimate phases stay the authority
+// and re-check all of it at the execution boundary. Never offers to overwrite: an existing path is a refusal, and a
+// leftover NAME.INCOMPLETE is reported (the consent to move it aside is the job's, not the sheet's).
+struct DestinationCheck {
+    bool ok = false, leftover = false;
+    std::vector<std::string> refusals;
+    uint64_t freeBytes = 0, neededBytes = 0;   // needed = what the runner needs: members + KIT.md/manifest/PACKAGE.sha256 allowance, + 10%
+    fs::path dest;
+};
+inline DestinationCheck checkDestination(const fs::path& parent, const std::string& kitName, uint64_t memberBytes, const std::vector<fs::path>& sources) {
+    DestinationCheck d;
+    d.dest = parent / kitName;
+    const uint64_t planned = memberBytes + 65536;   // the kit's own text files, as the job's preview counts them
+    d.neededBytes = planned + planned / 10;
+    std::error_code ec;
+    if (const auto e = detail::fatName(kitName); !e.empty()) d.refusals.push_back("the kit name '" + kitName + "' has " + e);
+    if (fs::is_symlink(fs::symlink_status(parent, ec))) d.refusals.push_back(parent.string() + " is a link: choose the real folder");
+    else if (!fs::is_directory(parent, ec)) d.refusals.push_back(parent.string() + " is not an existing folder");
+    if (!d.refusals.empty()) return d;
+    for (const auto& src : sources)
+        if (jobs::detail::overlaps(d.dest, src) || jobs::detail::overlaps(media::incompletePath(d.dest), src))
+            d.refusals.push_back("the kit " + d.dest.string() + " would overlap the source " + src.string() + "; choose a folder outside the source");
+    if (const auto why = media::outputFolderRefusal(d.dest); !why.empty()) {
+        d.leftover = why == media::incompleteRefusal(d.dest);
+        d.refusals.push_back(why);
+    }
+    const auto space = fs::space(parent, ec);
+    if (ec) d.refusals.push_back("cannot read the free space of " + parent.string());
+    else {
+        d.freeBytes = space.available;
+        if (space.available < d.neededBytes) d.refusals.push_back("not enough free space: " + fmtBytes(space.available) + " available, " + fmtBytes(planned) + " + 10% needed");
+    }
+    d.ok = d.refusals.empty();
+    return d;
+}
+
 // Test hook (smoke): the thread that last listed a folder of outputs for a kit job; it must be the job's worker.
 inline std::atomic<size_t> lastListingThread{0};
 
 // The kit as an E6 export job. `inputs`: AIArranger outputs (package folders, KMP folders, Style .mid files). With
 // `outputsFolder` set instead, its visible entries are the inputs, listed by the job itself (off the UI thread), and the
 // folder is the job's source.
-inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::path outputsFolder = {}) {
+inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::path outputsFolder = {}, std::string expectFingerprint = {}) {
     ExportSpec s;
     s.type = "Pa5X Import Kit (documented imports)";
     for (const auto& p : inputs) s.source += (s.source.empty() ? "" : ", ") + p.string();
@@ -684,7 +793,7 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
     auto files = std::make_shared<std::vector<Planned>>();
     auto bytes = std::make_shared<uint64_t>(0);
     auto reports = std::make_shared<std::vector<std::string>>();   // export reports in the folder of outputs, not copied
-    s.validate = [in, outputsFolder, items, roots, files, bytes, reports, kitName = media::folderPath(s.dest).filename().string()] {
+    s.validate = [in, outputsFolder, items, roots, files, bytes, reports, expectFingerprint, kitName = media::folderPath(s.dest).filename().string()] {
         if (!outputsFolder.empty()) {
             lastListingThread = thisThread();
             reports->clear();
@@ -705,6 +814,9 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
         files->clear();
         *bytes = 0;
         if (const auto e = layoutRefusal(*items, files.get(), bytes.get()); !e.empty()) return "refusing: " + e;
+        // BL-E1 S2: the sources are what the review saw (size and modification time of every file), or the kit is not made
+        if (!expectFingerprint.empty() && planFingerprint(*items, *files) != expectFingerprint)
+            return std::string("refusing: the sources changed since the review (a file was added, removed, resized or modified); review again");
         return std::string();
     };
     // Per-member status on the SOURCE: the job report lists every one; a FAILED member stops the kit (fail closed).
