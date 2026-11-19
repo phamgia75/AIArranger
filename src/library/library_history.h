@@ -5,6 +5,7 @@
 #define AI_ARRANGER_LIBRARY_LIBRARY_HISTORY_H
 
 #include "library/library_plan.h"
+#include "library/library_plan_store.h"   // kMaxPlanSteps
 #include "style_edit/undo_history.h"
 
 namespace ai_arranger::library {
@@ -24,6 +25,7 @@ class PlanHistory {
 public:
     const std::vector<Step>& steps() const { return steps_; }
     bool empty() const { return steps_.empty(); }
+    bool full() const { return steps_.size() >= kMaxPlanSteps; }   // a longer plan could be saved but not restored
 
     void add(Step s, const std::string& label) { record("add " + label); steps_.push_back(std::move(s)); }
     bool removeLast() {

@@ -200,6 +200,15 @@ int main() {
       TEST("a bank swap that does not start at the selected item's bank is refused", refused(signedStep("step\t3\tA\t1\tSTYLE/USER02\t-1\tSTYLE/USER01\t0"), "selected item's bank"));
       TEST("a bank swap from the selected item's bank is accepted", parsePlan(signedStep("step\t3\tA\t1\tSTYLE/USER01\t-1\tSTYLE/USER02\t0"), kA, kB, A, B, ok2).empty()); }
 
+    // The cap the UI enforces through PlanHistory::full() (addStep refuses at full): no GUI clicks needed.
+    { PlanHistory h; Step st; st.op = Op::Rename; st.side = 'A'; st.text = "n";
+      bool early = false; size_t n = 0;
+      while (!h.full() && n < kMaxPlanSteps + 10) { early |= n < kMaxPlanSteps && h.full(); h.add(st, "x"); ++n; }
+      TEST("a plan is full at exactly the restore cap", n == kMaxPlanSteps && h.full() && !early);
+      std::vector<Step> back2;
+      TEST("a full plan saves and restores completely", parsePlan(serializePlan(h.steps(), kA, kB), kA, kB, A, B, back2).empty() && back2.size() == kMaxPlanSteps);
+      h.undo(); TEST("one step fewer is not full", !h.full()); }
+
     // Restoring N steps is one history entry, not N snapshots.
     { PlanHistory h; h.adopt(std::vector<Step>(kMaxPlanSteps, big[0]));
       TEST("adopt restores all steps as one undoable entry", h.steps().size() == kMaxPlanSteps && h.undo() && h.steps().empty() && !h.canUndo()); }
