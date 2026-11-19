@@ -1591,6 +1591,108 @@ int main() {
                      kitMd.find("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X") != std::string::npos && kj.level.l1.state == ui::studio::Check::Passed &&
                      kj.level.l3.state == ui::studio::Check::NotRun && !fs::exists(root / "kit-job.INCOMPLETE"));
             }
+            {   // BL-E1 S4: the guided sheet over the Import Kit. Review and destination check write nothing; only Create kit does.
+                auto& ks = st.kitSheet();
+                const fs::path src = root / "sheet-src", par = root / "sheet-dest";
+                fs::create_directories(src);
+                fs::create_directories(par);
+                fs::copy(pkgDest, src / "pkg-job", fs::copy_options::recursive);
+                const auto tree = [](const fs::path& d) {   // every file and folder below d: path -> SHA-256 (folders: "dir")
+                    std::map<std::string, std::string> r;
+                    for (const auto& e : fs::recursive_directory_iterator(d)) {
+                        bool c = false;
+                        std::string er;
+                        r[fs::relative(e.path(), d).string()] = e.is_directory() ? "dir" : media::detail::sha256File(e.path(), [](size_t) { return true; }, &c, &er);
+                    }
+                    return r;
+                };
+                const auto sheetWait = [&] { for (int i = 0; i < 1500 && st.busy(); ++i) pump(20); };
+                const auto srcBefore = tree(src);
+                click(io, "Pa5X Import Kit...");
+                TEST("sheet: the Import Kit button opens the sheet page", st.currentPage() == &ks);
+                TEST("sheet: before a review Create kit is off with the reason, and the text is labelled",
+                     !ks.createEnabled() && ks.createReason().startsWith("Step 1") && ks.text().contains("NOT VERIFIED ON A PA5X") &&
+                     !ks.text().containsIgnoreCase("compatible") && !ks.text().contains("KST export") && ks.text().contains("1 Contents") &&
+                     ks.text().contains("7 Create kit") && !ks.text().contains("8 Result"));
+                ks.review(juce::File(src.string()));
+                TEST("sheet: the review is running (busy, no plan yet)", ks.busy() && !ks.plan());
+                sheetWait();
+                TEST("sheet: the review ran on a worker, not the UI thread", jobs::kit::lastListingThread.load() != 0 && ai_arranger::app::KitSheet::lastWorker.load() != 0 &&
+                     ai_arranger::app::KitSheet::lastWorker.load() != jobs::thisThread());
+                TEST("sheet: steps 1-4 show the member, its status, memory not estimated, nothing missing",
+                     ks.plan() && ks.plan()->blocking.empty() && ks.plan()->items.size() == 1 && ks.text().contains("SOUNDS/pkg-job") &&
+                     ks.text().contains("STRUCTURALLY VALID: SOUNDS/pkg-job") && ks.text().contains("not estimated for a kit") && ks.text().contains("4 Missing       none"));
+                TEST("sheet: the review wrote nothing (sources byte-identical, no new entry)", tree(src) == srcBefore && fs::is_empty(par));
+                TEST("sheet: without a destination Create kit is off: step 5", !ks.createEnabled() && ks.createReason().startsWith("Step 5"));
+                ks.chooseDestination(juce::File("/Volumes/AIARR-NO-SUCH"), "K");
+                sheetWait();
+                TEST("sheet: a /Volumes destination is refused at step 5, before any job",
+                     !ks.createEnabled() && ks.destination() && !ks.destination()->ok && ks.text().contains("REFUSED") && !st.busy());
+                fs::create_directories(par / "Existing");
+                ks.chooseDestination(juce::File(par.string()), "Existing");
+                sheetWait();
+                TEST("sheet: an existing destination is refused, never overwritten", !ks.createEnabled() && ks.text().contains("already exists") &&
+                     fs::is_directory(par / "Existing") && fs::is_empty(par / "Existing"));
+                fs::create_directories(par / "Half.INCOMPLETE");
+                ks.chooseDestination(juce::File(par.string()), "Half");
+                sheetWait();
+                TEST("sheet: a leftover NAME.INCOMPLETE is refused and flagged", !ks.createEnabled() && ks.destination() && ks.destination()->leftover &&
+                     ks.text().contains("INCOMPLETE"));
+                ks.chooseDestination(juce::File(par.string()), "bad:name");
+                sheetWait();
+                TEST("sheet: a FAT-unsafe kit name is refused", !ks.createEnabled() && ks.text().contains("FAT"));
+                fs::remove_all(par / "Existing");
+                fs::remove_all(par / "Half.INCOMPLETE");
+                ks.chooseDestination(juce::File(par.string()), "Sheet Kit");
+                sheetWait();
+                TEST("sheet: an explicit, new, local destination with enough space enables Create kit",
+                     ks.createEnabled() && ks.createReason().isEmpty() && ks.destination() && ks.destination()->ok && ks.text().contains("free space") &&
+                     ks.text().contains("6 Review") && ks.text().contains("Will NOT happen") && fs::is_empty(par));
+                // TOCTOU: a source changes after the review; the job's own Validate refuses and nothing is published
+                fs::last_write_time(src / "pkg-job" / "PACKAGE.sha256", fs::file_time_type::clock::now() + std::chrono::hours(1));
+                TEST("sheet: Create kit starts the job", ks.createKit());
+                sheetWait();
+                TEST("sheet: a source changed after the review: refused at Validate, nothing published, the sheet says to review again",
+                     ks.stale() && !ks.createEnabled() && ks.createReason().contains("changed since the review") && ks.text().contains("FAILED at validate") &&
+                     !fs::exists(par / "Sheet Kit") && !fs::exists(par / "Sheet Kit.INCOMPLETE"));
+                ks.review(juce::File(src.string()));
+                sheetWait();
+                TEST("sheet: after a new review the stale state is gone and the destination is re-checked", !ks.stale() && ks.destination() && ks.destination()->ok && ks.createEnabled());
+                TEST("sheet: Create kit again", ks.createKit());
+                sheetWait();
+                std::ifstream sheetMd(par / "Sheet Kit/KIT.md");
+                const std::string sheetKit{std::istreambuf_iterator<char>(sheetMd), {}};
+                TEST("sheet: the kit is made through the job: published, labelled, L1 passed, L3 not recorded, report in the sheet",
+                     fs::is_directory(par / "Sheet Kit/SOUNDS/pkg-job") && !fs::exists(par / "Sheet Kit.INCOMPLETE") &&
+                     sheetKit.find("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X") != std::string::npos && ks.text().contains("DONE:") &&
+                     ks.text().contains("L3 (the Pa5X itself): not recorded") && !ks.text().containsIgnoreCase("compatible"));
+                {   // content of the sources is unchanged (only the mtime test touched PACKAGE.sha256's time)
+                    auto now = tree(src);
+                    TEST("sheet: the sources' content is unchanged after the kit", now == srcBefore);
+                }
+                // a tampered member blocks, named; and a superseded review is dropped
+                const fs::path bad = root / "sheet-bad";
+                fs::create_directories(bad);
+                fs::copy(pkgDest, bad / "pkg-job", fs::copy_options::recursive);
+                for (const auto& e : fs::recursive_directory_iterator(bad))
+                    if (e.path().extension() == ".sf2") {
+                        std::fstream f(e.path(), std::ios::in | std::ios::out | std::ios::binary);
+                        f.seekg(40);
+                        const char c = char(f.get());
+                        f.seekp(40);
+                        f.put(char(c ^ 0x5a));
+                        break;
+                    }
+                ks.review(juce::File(src.string()));   // superseded at once by the next one
+                ks.review(juce::File(bad.string()));
+                sheetWait();
+                TEST("sheet: a superseded review is dropped; the tampered member blocks Create kit, named",
+                     ks.plan() && !ks.plan()->blocking.empty() && !ks.createEnabled() && ks.createReason().startsWith("Step 4") &&
+                     ks.text().contains("BLOCKING") && ks.text().contains("FAILED: SOUNDS/pkg-job"));
+                TEST("sheet: accessible names on the controls and the review pane", ks.createButton().getTitle() == "Step 7: create the kit" &&
+                     ks.view().editor().getTitle() == "Pa5X Import Kit review" && ks.view().editor().isReadOnly());
+                fs::remove_all(bad);
+            }
             TEST("jobs: the job list shows the job, its level and its report path", st.jobListText().contains("#" + juce::String(int(id)) + "  Sound package  done") &&
                  st.jobListText().contains("pkg-job.export.md") && st.jobsText().contains("Sound package  done"));
             st.selectJob(id);
