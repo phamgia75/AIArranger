@@ -200,14 +200,21 @@ int main() {
       TEST("a bank swap that does not start at the selected item's bank is refused", refused(signedStep("step\t3\tA\t1\tSTYLE/USER02\t-1\tSTYLE/USER01\t0"), "selected item's bank"));
       TEST("a bank swap from the selected item's bank is accepted", parsePlan(signedStep("step\t3\tA\t1\tSTYLE/USER01\t-1\tSTYLE/USER02\t0"), kA, kB, A, B, ok2).empty()); }
 
-    // The cap the UI enforces through PlanHistory::full() (addStep refuses at full): no GUI clicks needed.
-    { PlanHistory h; Step st; st.op = Op::Rename; st.side = 'A'; st.text = "n";
-      bool early = false; size_t n = 0;
-      while (!h.full() && n < kMaxPlanSteps + 10) { early |= n < kMaxPlanSteps && h.full(); h.add(st, "x"); ++n; }
-      TEST("a plan is full at exactly the restore cap", n == kMaxPlanSteps && h.full() && !early);
+    // The cap the UI enforces through PlanHistory::tryAdd() (addStep refuses a full plan): no GUI clicks needed.
+    { PlanHistory h; Step st; st.op = Op::Rename; st.side = 'A'; st.item = 0; st.text = "n";
+      size_t accepted = 0; bool earlyFull = false;
+      for (size_t i = 0; i < kMaxPlanSteps; ++i) { earlyFull |= h.full(); accepted += h.tryAdd(st, "x"); }
+      TEST("5000 steps are accepted and the plan is then full", accepted == kMaxPlanSteps && !earlyFull && h.full());
+      const auto stepsBefore = h.steps().size();
+      TEST("step 5001 is rejected and changes nothing", !h.tryAdd(st, "x") && h.steps().size() == stepsBefore && h.steps().size() == kMaxPlanSteps);
       std::vector<Step> back2;
-      TEST("a full plan saves and restores completely", parsePlan(serializePlan(h.steps(), kA, kB), kA, kB, A, B, back2).empty() && back2.size() == kMaxPlanSteps);
-      h.undo(); TEST("one step fewer is not full", !h.full()); }
+      TEST("all 5000 steps survive save and restore, in order", parsePlan(serializePlan(h.steps(), kA, kB), kA, kB, A, B, back2).empty() && back2.size() == kMaxPlanSteps);
+      // Undo/redo: the rejected add left no history entry, so the first undo removes the 5000th step, not a phantom.
+      TEST("undo after a rejected add removes step 5000", h.undo() && h.steps().size() == kMaxPlanSteps - 1 && !h.full());
+      TEST("redo brings it back, and the plan is full again", h.redo() && h.steps().size() == kMaxPlanSteps && h.full());
+      TEST("redo has nothing further (no entry from the rejected add)", !h.canRedo());
+      TEST("a new step is accepted after an undo frees a slot", h.undo() && h.tryAdd(st, "y") && h.steps().size() == kMaxPlanSteps);
+      PlanHistory g; TEST("clear then add works at the cap boundary", [&] { g.adopt(std::vector<Step>(kMaxPlanSteps, st)); return g.full() && !g.tryAdd(st, "x") && g.clear() && g.tryAdd(st, "x"); }()); }
 
     // Restoring N steps is one history entry, not N snapshots.
     { PlanHistory h; h.adopt(std::vector<Step>(kMaxPlanSteps, big[0]));

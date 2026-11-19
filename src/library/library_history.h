@@ -27,6 +27,8 @@ public:
     bool empty() const { return steps_.empty(); }
     bool full() const { return steps_.size() >= kMaxPlanSteps; }   // a longer plan could be saved but not restored
 
+    // The only way the UI stages a step: false (nothing changed, no history entry) when the plan is already full.
+    bool tryAdd(Step s, const std::string& label) { if (full()) return false; add(std::move(s), label); return true; }
     void add(Step s, const std::string& label) { record("add " + label); steps_.push_back(std::move(s)); }
     bool removeLast() {
         if (steps_.empty()) return false;
