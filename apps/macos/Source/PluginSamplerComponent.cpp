@@ -121,8 +121,8 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
     program_.setTextWhenNothingSelected("(the plugin's current sound)");
     program_.setTitle("Program");
     plugin_.setTitle("Instrument");
-    preview_.setAccessibleTitle("Rendered key map preview and checks");
-    report_.setAccessibleTitle("Render report");
+    preview_.setTitle("Rendered key map preview and checks");
+    report_.setTitle("Render report");
     program_.onChange = [this] {
         const int k = program_.getSelectedId();   // 1 = current sound, 2.. = program k-2
         fields_[1]->setText(k >= 2 ? juce::String(k - 2) : juce::String(), juce::sendNotificationSync);

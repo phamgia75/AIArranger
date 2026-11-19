@@ -85,7 +85,7 @@ private:
     std::atomic<bool> cancelBackup_{false};
     std::thread backupThread_;    // Verify Backup: joined in the destructor (cancelled first), never detached
     juce::Label kstNote_;
-    juce::TextEditor kstOut_;
+    TextView kstOut_;   // read-only; KST Diff / Merge Plan list one line per file (#44)
     std::atomic<int> kstJobs_{0};
     int loads_ = 0;   // message thread only
 

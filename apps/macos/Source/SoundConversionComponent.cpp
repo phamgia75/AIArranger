@@ -61,8 +61,8 @@ SoundConversionComponent::SoundConversionComponent(std::function<void(const juce
     name_.setTitle("Sound name");
     order_.setTitle("Layers, softest first");
     splits_.setTitle("Velocity splits");
-    preview_.setAccessibleTitle("Key map preview and checks");
-    recipe_.setAccessibleTitle("Sound recipe");
+    preview_.setTitle("Key map preview and checks");
+    recipe_.setTitle("Sound recipe");
     mapping_.setTextToShowWhenEmpty("Press Preview: AIArranger measures each sample's pitch and proposes a key map here.", juce::Colour(0xff9090a0));
     addChildComponent(mapping_);
     zoneMap_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 12.5f, juce::Font::plain));

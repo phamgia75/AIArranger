@@ -133,7 +133,12 @@ ResourcesComponent::ResourcesComponent() {
     semanticBtn_.setTooltip("Unavailable: needs validated Sound/sample dependency data");
     for (auto* b : {&invBtn_, &diffBtn_, &planBtn_, &semanticBtn_}) kstPage_.addAndMakeVisible(*b);
     kstPage_.addAndMakeVisible(kstNote_);
-    styleText(kstOut_, true);
+    {
+        const auto& lf = juce::LookAndFeel::getDefaultLookAndFeel();
+        kstOut_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
+        kstOut_.setColours(lf.findColour(juce::TextEditor::backgroundColourId), lf.findColour(juce::TextEditor::textColourId));
+        kstOut_.setTitle("KST tools report");
+    }
     kstPage_.addAndMakeVisible(kstOut_);
 
     // ── Memory Check ──

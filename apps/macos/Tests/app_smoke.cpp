@@ -19,7 +19,9 @@
 #include "media/sound/package_writer.h"
 #include "media/sound/wav_writer.h"
 #include "../../../tests/support/korg_fixture.h"
+#include "../../../tests/support/panative_fixture.h"
 #include <chrono>
+#include <set>
 #include <csignal>
 #include <mach/mach.h>
 #include <fstream>
@@ -490,6 +492,44 @@ int main() {
                 app::TextView tv;
                 tv.setText("first"); tv.setText("second");
                 TEST("text view keeps no undo history of replaced texts", !tv.canUndo() && tv.shownText() == "second");
+            }
+            {   // #44: report panes (TextView, no wrap) take a large report without a stall and show exactly its text
+                std::string big;
+                for (int i = 0; big.size() < 440 * 1024; ++i)
+                    big += "STYLE/BANK" + std::to_string(i % 97) + "/style" + std::to_string(i) + ".stg  3f9a0c2e5b7d4a1f8e6c0b9d2a7e5f3c1b8d6a4e2f0c9b7a5d3e1f8c6b4a2d0e  12345\n";
+                const juce::String report(big);
+                const auto since = [](auto t0) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
+                app::TextView pane;
+                pane.setBounds(0, 0, 900, 500);
+                auto t0 = std::chrono::steady_clock::now();
+                pane.setText(report, false);
+                const double setMs = since(t0);
+                app::JobsView jobs;
+                jobs.setBounds(0, 0, 900, 600);
+                jobs.setReport(report);
+                t0 = std::chrono::steady_clock::now();
+                for (int tick = 0; tick < 100; ++tick) { jobs.setList("#1  KST backup  running " + juce::String(tick) + "%\n"); jobs.setReport(report); }
+                const double tickMs = since(t0) / 100;
+                std::printf("  info: 440 KB report set in %.1f ms; job list tick with the report open %.2f ms\n", setMs, tickMs);
+                TEST("report pane: a 440 KB report is set in under 50 ms and shown exactly as given (no wrap)",
+                     setMs < 50 && pane.shownText() == report && pane.getText() == report);
+                TEST("job list: a progress tick re-sets only the list, not the open report (under 2 ms per tick)",
+                     tickMs < 2 && jobs.getText() == "#1  KST backup  running 99%\n" + report);
+                {   // #44 / owner step 4: what a user does with a report pane. No system clipboard is touched.
+                    auto& ed = pane.editor();
+                    ed.selectAll();
+                    juce::ApplicationCommandInfo copyInfo(juce::StandardApplicationCommandIDs::copy);
+                    ed.getCommandInfo(juce::StandardApplicationCommandIDs::copy, copyInfo);
+                    TEST("report pane: select-all selects exactly the report text and Copy is enabled while read-only",
+                         ed.isReadOnly() && ed.getTextInRange(ed.getHighlightedRegion()) == report && (copyInfo.flags & juce::ApplicationCommandInfo::isDisabled) == 0);
+                    ed.scrollToLine(4000);
+                    TEST("report pane: scrolling reaches a line deep in a 5 000-line report", ed.getFirstLineOnScreen() == 4000);
+                    // JUCE gives a handler only to a component on a native window, which the smoke has none; a read-only
+                    // CodeEditorComponent is created as AccessibilityRole::staticText (juce_CodeEditorComponent.cpp).
+                    pane.setTitle("Test report");
+                    TEST("report pane: it is accessible (not ignored), read-only, and its title is the editor's", ed.isAccessible() && ed.isReadOnly() &&
+                         ed.getTitle() == "Test report");
+                }
             }
             {   // recipe prose wraps to the pane instead of scrolling sideways (GUI validation 2026-11-09)
                 cv.setSize(1000, 700);
@@ -1068,11 +1108,25 @@ int main() {
                  st.libraryText().contains("no Pa-native wrapper"));
             TEST("studio: the SET source is unchanged", fs::last_write_time(root / "Pa700copy/SOUND/USERDK01.PCG") == setStamp);
         }
+        {   // #44: every converted report pane keeps an accessibility title (VoiceOver reads the editor's title)
+            std::set<juce::String> titles;
+            std::function<void(juce::Component&)> walk = [&](juce::Component& c) {
+                if (auto* ed = dynamic_cast<juce::CodeEditorComponent*>(&c)) titles.insert(ed->getTitle());
+                for (auto* k : c.getChildren()) walk(*k);
+            };
+            walk(st);
+            const std::set<juce::String> expected{"Source", "Export jobs", "Opened job report", "Quality report", "KMP writer report",
+                                                  "Sample Lab report", "Style report", "Report", "Library report", "KST tools report"};
+            bool all = true;
+            for (const auto& t : expected) all &= titles.count(t) == 1;
+            TEST("studio: all ten converted report panes carry their accessibility title", all);
+        }
         phase("studio: library manager");
         {   // E7 Library Manager: two read-only libraries, search, compare, duplicates, an EXPORT-ONLY plan
             using A = app::LibraryManagerComponent::Action;
             using V = app::LibraryManagerComponent::View;
             auto& lm = st.manager();
+            lm.setPlanStoreDir(juce::File((root / "plan-store").string()));   // row 56: never the user's own application data
             auto waitLm = [&](int ms) { for (int i = 0; i < ms / 20 && (lm.busy() || lm.computing()); ++i) pump(20); };
             st.showDomain(D::Library, 4);
             TEST("library manager: a Library segment, shown", st.currentPage() == &lm && lm.isVisible());
@@ -1183,6 +1237,15 @@ int main() {
             TEST("library manager: Copy is staged in the plan view, nothing written", lm.plan().size() == 1 && lm.reportText().contains("READY TO EXPORT") &&
                  lm.reportText().contains("same bytes: nothing to do") && lm.reportText().contains("EXPORT-ONLY"));
             TEST("D34 F1 library manager: the Copy staged after re-clicking A's row starts from A", lm.plan().size() == 1 && lm.plan()[0].side == 'A');
+            {   // row 56: the staged plan survives reopening the same libraries (a restart), and is read back exactly
+                const auto staged = lm.plan();
+                lm.openLibrary('A', juce::File((root / "Mine.KST").string()));
+                waitLm(5000);
+                TEST("row 56 library manager: the saved plan is restored and says so", lm.plan().size() == 1 && lm.plan()[0].op == staged[0].op &&
+                     lm.plan()[0].item == staged[0].item && lm.plan()[0].bank == staged[0].bank && lm.progressText().startsWith("Restored 1 staged step"));
+                lm.selectRow('A', 0);
+                waitLm(5000);
+            }
             lm.selectRow('A', 0);   // Hit.PDC into B's selected bank: none selected there, so the same bank id
             lm.value().setText("STYLE/USER01", true);
             lm.addStep(A::SwapBanks);
@@ -1347,6 +1410,35 @@ int main() {
             TEST("library manager E8: both sources byte-identical after the execution", bytesOf(root / "Mine.KST") == mineBefore &&
                  bytesOf(root / "Other.KST") == otherBefore);
             lm.clearPlan();
+            {   // D54 B1: Convert SET to KST (resources only), an export job; the CONVERSION report is shown
+                TEST("set->kst: the action needs a SET on the active side", lm.unavailable(A::ConvertSet) == "Needs: a SET open on the active side" &&
+                     find<juce::Button>(lm, "Convert SET to KST (resources only)...") != nullptr);
+                const fs::path set = root / "Demo.SET";
+                put(set / "PCM/RAM01.PCM", build({{0x12020010, 6, 1, 0, "Sample", std::string(16, '\x11')}}, 1));
+                put(set / "SOUND/USER01.PCG", build({{0x10000038, 4, 9, 0, "Piano", "OC31sound"}}, 1));
+                put(set / "STYLE/USER01.STY", build({{0x08000030, 1, 0, 0, "Style", "OC31style"}}, 1));
+                put(set / "GLOBAL/GLOBAL.GBL", "g");
+                const auto setBefore = bytesOf(set);
+                lm.openLibrary('A', juce::File(set.string()));
+                waitLm(5000);
+                lm.selectRow('A', 0);
+                TEST("set->kst: available with a SET open", lm.headerText('A').contains("Pa-family SET") && lm.unavailable(A::ConvertSet).isEmpty());
+                fs::create_directories(root / "conv");
+                lm.convertSet(juce::File((root / "conv").string()));
+                TEST("set->kst: queued as an export job", lm.busy() && lm.reportText().contains("export job #"));
+                waitLm(10000);
+                const fs::path kst = root / "conv/Demo.KST";
+                TEST("set->kst: a NEW Demo.KST with the carried files byte-identical at lower-cased paths, nothing for the Style",
+                     slurp(kst / "PCM/ram01.pcm") == slurp(set / "PCM/RAM01.PCM") && slurp(kst / "SOUND/user01.pcg") == slurp(set / "SOUND/USER01.PCG") &&
+                     !fs::exists(kst / "STYLE") && !fs::exists(kst / "GLOBAL") && fs::is_regular_file(kst.string() + ".export.md"));
+                TEST("set->kst: the report lists blocked and dropped members with the label",
+                     lm.reportText().contains("KST written (resources only)") && lm.reportText().contains("BLOCKED  STYLE/USER01.STY") &&
+                     lm.reportText().contains("DROPPED  GLOBAL/GLOBAL.GBL") && lm.reportText().contains("NOT VERIFIED ON A PA5X"));
+                lm.convertSet(juce::File((root / "conv").string()));
+                waitLm(10000);
+                TEST("set->kst: a second conversion to the same path is refused", lm.reportText().contains("KST NOT written") && lm.reportText().contains("already exists"));
+                TEST("set->kst: the SET is byte-identical after the conversion", bytesOf(set) == setBefore);
+            }
         }
         phase("studio: reports viewer");
         {   // Validation & Reports > Reports (P1, C17/C18): read-only viewer, reads off the message thread, HTML + CSV as an export job
@@ -1615,6 +1707,9 @@ int main() {
             st.openSource(juce::File((root / "Big.KST").string()));
             waitIdle(5000);
             const auto slow = st.exportJob(EJ::KstBackup, juce::File((root / "big-backup").string()));
+            st.selectJob(slow);
+            st.openJobReport();   // Codex review of #44: a report opened while its job still runs must appear once it is written
+            const bool emptyWhileRunning = !jobs::finished(job(slow).phase) && !st.jobListText().contains("# Export report");
             const auto queued = st.exportJob(EJ::KstBackup, juce::File((root / "kst-cancelled").string()));
             st.selectJob(queued);
             TEST("jobs: a queued job offers Cancel", job(queued).phase == P::Queued && find<juce::Button>(io, "Cancel Job")->isVisible());
@@ -1623,6 +1718,8 @@ int main() {
             TEST("jobs: cancelled while queued: cancelled, nothing written; the job before it finished", job(queued).phase == P::Cancelled &&
                  !fs::exists(root / "kst-cancelled") && !fs::exists(root / "kst-cancelled.INCOMPLETE") && job(slow).phase == P::Done &&
                  st.jobListText().contains("cancelled"));
+            TEST("jobs: a report opened while its job ran is shown once the job has written it", emptyWhileRunning &&
+                 st.jobListText().contains("REPORT, job #" + juce::String(int(slow))) && st.jobListText().contains("# Export report"));
             fs::remove_all(root / "Big.KST");
             fs::remove_all(root / "big-backup");
             st.openSource(juce::File((root / "Mine.KST").string()));

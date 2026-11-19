@@ -38,6 +38,8 @@ public:
         steps_.clear();
         return true;
     }
+    // A plan restored from disk: one history entry (not one per step), so restoring N steps costs one snapshot.
+    void adopt(std::vector<Step> s) { record("restore " + std::to_string(s.size()) + " saved step(s)"); steps_ = std::move(s); }
     bool undo() { return h_.undo(steps_); }
     bool redo() { return h_.redo(steps_); }
     // The libraries changed: steps name items by index, so the plan and its history no longer apply.
