@@ -57,7 +57,6 @@ void LibraryManagerComponent::setUnavailable(juce::Button& b, const juce::String
 LibraryManagerComponent::LibraryManagerComponent() {
     report_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
     report_.setColours(kSurface, juce::LookAndFeel::getDefaultLookAndFeel().findColour(juce::TextEditor::textColourId));
-    report_.setTitle("Library report");
     openA_ = &button("Open Library A...", [this] { chooseFolder("Library A: a KST or SET folder (only read)", [this](juce::File f) { openLibrary('A', f); }); });
     openB_ = &button("Open Library B...", [this] { chooseFolder("Library B: a KST or SET folder (only read)", [this](juce::File f) { openLibrary('B', f); }); });
     details_ = &button("Details", [this] { showView(View::Details); });

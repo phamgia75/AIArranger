@@ -1116,7 +1116,7 @@ int main() {
             };
             walk(st);
             const std::set<juce::String> expected{"Source", "Export jobs", "Opened job report", "Quality report", "KMP writer report",
-                                                  "Sample Lab report", "Style report", "Report", "Library report", "KST tools report"};
+                                                  "Sample Lab report", "Style report", "Report", "Library Manager report", "KST tools report"};
             bool all = true;
             for (const auto& t : expected) all &= titles.count(t) == 1;
             TEST("studio: all ten converted report panes carry their accessibility title", all);
