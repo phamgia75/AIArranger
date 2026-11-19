@@ -17,6 +17,7 @@
 #include "library/library_apply.h"
 #include "library/library_compat.h"
 #include "library/library_history.h"
+#include "library/library_plan_store.h"
 #include "library/library_where_used.h"
 
 namespace ai_arranger::app {
@@ -47,6 +48,9 @@ public:
     // D54 B1 export job: the active side's SET as a NEW "<SET name>.KST" in `parent`, resources only (PCM/PCG/KMP/SBL
     // byte-identical); the CONVERSION report (blocked/dropped members with reasons) is shown. Not verified on a Pa5X.
     void convertSet(const juce::File& parent);
+    // Row 56: the staged plan is saved after each edit (atomically, never inside a library) and restored when the same two
+    // libraries are opened again. `dir` is the app's own data folder; the default is under the user's application data.
+    void setPlanStoreDir(const juce::File& dir) { planDir_ = dir; }
     juce::File lastOutput() const { return lastOutput_; }  // the last executed library (Reveal)
     juce::ToggleButton& wholeFile() { return wholeFile_; } // SET: Copy / Move / Rename act on the whole bank file
     juce::String progressText() const { return progress_.getText(); }
@@ -68,6 +72,7 @@ private:
         LibraryManagerComponent& owner;
         char side;
         std::shared_ptr<const library::Library> lib;
+        std::string key;            // library::libraryKey(*lib), computed once on the worker thread that read it
         std::vector<size_t> rows;   // item indices shown, after the search filter
         int selected = -1;          // item index, or -1
         juce::ListBox list;
@@ -84,6 +89,8 @@ private:
     void setUnavailable(juce::Button& b, const juce::String& reason);
     void refresh(bool report = true);   // action states now; the view report on a worker thread (newest wins)
     void refilter();
+    void persistPlan();   // saves the staged plan for this pair of libraries (or removes the file when it is empty)
+    void restorePlan();   // both libraries open and nothing staged: loads the saved plan for them, if it still applies
     void planEdit(const std::function<bool()>& edit);   // a staged plan edit, then the Plan view
     void chooseFolder(const juce::String& title, std::function<void(juce::File)> then);
     Pane& pane(char side) { return side == 'A' ? a_ : b_; }
@@ -93,6 +100,7 @@ private:
     bool quiet_ = false;  // refilter() is rebuilding the lists: selection callbacks are not user clicks
     char active_ = 'A';   // the pane selected last: Copy / Move / Rename / Swap Banks act on its selection
     View view_ = View::Details;
+    juce::File planDir_{juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile("AIArranger/library-plans")};
     library::PlanHistory history_;   // the staged change set: steps plus undo/redo, in memory until Execute Plan
     juce::OwnedArray<juce::Component> owned_;
     std::map<juce::Button*, juce::Label*> reasons_;

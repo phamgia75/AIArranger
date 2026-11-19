@@ -1039,6 +1039,7 @@ int main() {
             using A = app::LibraryManagerComponent::Action;
             using V = app::LibraryManagerComponent::View;
             auto& lm = st.manager();
+            lm.setPlanStoreDir(juce::File((root / "plan-store").string()));   // row 56: never the user's own application data
             auto waitLm = [&](int ms) { for (int i = 0; i < ms / 20 && (lm.busy() || lm.computing()); ++i) pump(20); };
             st.showDomain(D::Library, 4);
             TEST("library manager: a Library segment, shown", st.currentPage() == &lm && lm.isVisible());
@@ -1149,6 +1150,15 @@ int main() {
             TEST("library manager: Copy is staged in the plan view, nothing written", lm.plan().size() == 1 && lm.reportText().contains("READY TO EXPORT") &&
                  lm.reportText().contains("same bytes: nothing to do") && lm.reportText().contains("EXPORT-ONLY"));
             TEST("D34 F1 library manager: the Copy staged after re-clicking A's row starts from A", lm.plan().size() == 1 && lm.plan()[0].side == 'A');
+            {   // row 56: the staged plan survives reopening the same libraries (a restart), and is read back exactly
+                const auto staged = lm.plan();
+                lm.openLibrary('A', juce::File((root / "Mine.KST").string()));
+                waitLm(5000);
+                TEST("row 56 library manager: the saved plan is restored and says so", lm.plan().size() == 1 && lm.plan()[0].op == staged[0].op &&
+                     lm.plan()[0].item == staged[0].item && lm.plan()[0].bank == staged[0].bank && lm.progressText().startsWith("Restored 1 staged step"));
+                lm.selectRow('A', 0);
+                waitLm(5000);
+            }
             lm.selectRow('A', 0);   // Hit.PDC into B's selected bank: none selected there, so the same bank id
             lm.value().setText("STYLE/USER01", true);
             lm.addStep(A::SwapBanks);
