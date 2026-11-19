@@ -172,15 +172,18 @@ void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
     std::weak_ptr<bool> alive = alive_;
     std::thread([this, alive, stop = stop_, side, d = dir.getFullPathName().toStdString()] {
         auto L = std::make_shared<const lib::Library>(lib::load(d, [alive, stop] { return !alive.expired() && !*stop; }));
-        juce::MessageManager::callAsync([this, alive, side, L] {
+        const std::string key = L->ok ? lib::libraryKey(*L) : "";   // for the saved plan; here, off the message thread
+        juce::MessageManager::callAsync([this, alive, side, L, key] {
             if (alive.expired()) return;
             --jobs_;
             auto& p = pane(side);
             if (L->ok) {
                 p.lib = L;
+                p.key = key;
                 p.selected = -1;
                 history_.reset();   // and its undo/redo: they name items of the library that was replaced
                 ++planRev_;   // steps name items by index into the libraries they were made for
+                restorePlan();
             }
             view_ = View::Details;
             p.header.setText(juce::String("Library ") + side + ": " + u8(L->ok ? L->name + "  ·  " + lib::formatName(L->format) + "  ·  " +
@@ -263,14 +266,49 @@ void LibraryManagerComponent::addStep(Action a) {
         case Action::SwapBanks: s.op = lib::Op::BankSwap; s.bank = p.item()->bank; s.text = value_.getText().trim().toStdString(); break;
         default: return;
     }
+    if (history_.steps().size() >= lib::kMaxPlanSteps) {   // a plan this long could be saved but not restored
+        progress_.setText("The plan is full (" + juce::String(int(lib::kMaxPlanSteps)) + " steps): Execute or export it, or remove steps", juce::dontSendNotification);
+        return;
+    }
     history_.add(s, lib::stepLabel(*p.lib, s));
     ++planRev_;
+    persistPlan();
     showView(View::Plan);
+}
+
+void LibraryManagerComponent::persistPlan() {
+    if (!a_.lib || !b_.lib) return;
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
+    std::error_code ec;
+    if (history_.empty()) {   // a cleared plan stays cleared after a restart
+        if (const auto e = lib::removePlan(file, *a_.lib, *b_.lib); !e.empty())
+            progress_.setText("Plan cleared, but its saved copy could not be removed and may come back after a restart: " + u8(e), juce::dontSendNotification);
+        return;
+    }
+    // Message thread: the keys are cached at open, so this is one small file (measured < 1 ms to 500k files).
+    if (const auto e = lib::savePlan(file, lib::serializePlan(history_.steps(), a_.key, b_.key), *a_.lib, *b_.lib); !e.empty())
+        progress_.setText("Plan not saved for the next start: " + u8(e), juce::dontSendNotification);
+}
+
+void LibraryManagerComponent::restorePlan() {
+    if (!a_.lib || !b_.lib || !history_.empty()) return;
+    std::string text;
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
+    if (!lib::loadPlanText(file, text).empty()) return;   // nothing saved for this pair
+    std::vector<lib::Step> steps;
+    if (const auto why = lib::parsePlan(text, a_.key, b_.key, *a_.lib, *b_.lib, steps); !why.empty()) {
+        progress_.setText("Saved plan not restored: " + u8(why), juce::dontSendNotification);
+        return;
+    }
+    history_.adopt(std::move(steps));
+    ++planRev_;
+    progress_.setText("Restored " + juce::String(int(history_.steps().size())) + " staged step(s) from the saved plan (staged only: nothing is written until Execute Plan)", juce::dontSendNotification);
 }
 
 void LibraryManagerComponent::planEdit(const std::function<bool()>& edit) {
     if (working() || !edit()) return;   // a running job holds the plan it was given; no plan change while it runs
     ++planRev_;
+    persistPlan();
     showView(View::Plan);
 }
 
