@@ -14,6 +14,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "LibraryManagerComponent.h"
 #include "ResourcesComponent.h"
+#include "TextViews.h"
 #include "WaveView.h"
 #include "jobs/job_queue.h"
 #include "jobs/report_export.h"
@@ -23,6 +24,30 @@
 #include <optional>
 
 namespace ai_arranger::app {
+
+// The job list with the opened job's report under it (#44): progress ticks re-set only the short list; the report,
+// which can hold one line per written file (a 4 443-file backup: ~440 KB), is set only when another one is opened.
+class JobsView : public juce::Component {
+public:
+    JobsView() { addAndMakeVisible(list_); addChildComponent(report_); }
+    void setList(const juce::String& t) { if (t != list_.getText()) list_.setText(t); }
+    void setReport(const juce::String& t) {
+        if (t == report_.getText()) return;
+        report_.setText(t);
+        report_.setVisible(t.isNotEmpty());
+        resized();
+    }
+    juce::String getText() const { return list_.getText() + report_.getText(); }   // what the one pane used to hold
+    TextView& list() { return list_; }
+    TextView& report() { return report_; }
+    void resized() override {
+        auto r = getLocalBounds();
+        if (report_.isVisible()) { list_.setBounds(r.removeFromTop(r.getHeight() / 3)); r.removeFromTop(4); report_.setBounds(r); }
+        else list_.setBounds(r);
+    }
+private:
+    TextView list_, report_;
+};
 
 class StudioComponent : public juce::Component, private juce::ChangeListener {
 public:
@@ -172,7 +197,7 @@ private:
     void addJob(const juce::String& line);
     void runJob(const juce::String& name, std::function<std::pair<juce::String, std::optional<ui::studio::Verification>>()> work);
     // A write/inspect job: its text goes to `out`; a written output becomes the verification target with its level.
-    void runOutputJob(const juce::String& name, juce::TextEditor& out, std::function<ui::studio::JobResult()> work);
+    void runOutputJob(const juce::String& name, TextView& out, std::function<ui::studio::JobResult()> work);
     void chooseSave(const juce::String& title, const juce::String& pattern, std::function<void(juce::File)> then);
     void refreshStyle();
     void loadStyle(const juce::File& sty, bool discard);
@@ -182,6 +207,7 @@ private:
     juce::Label& reasonFor(juce::Button& b);
     void setUnavailable(juce::Button& b, const juce::String& reason);   // "" = available
     static void styleText(juce::TextEditor& t);
+    static void styleText(TextView& t);
 
     std::function<void()> showLiveHost_;
     ResourcesComponent res_;
@@ -207,7 +233,7 @@ private:
 
     // Library Workspace › Sources
     FlowPage sourcesPage_;
-    juce::TextEditor libraryView_;
+    TextView libraryView_;
     juce::TextButton* toSampleLab_ = nullptr;
     juce::TextButton* paInspectBtn_ = nullptr;
     std::optional<ui::studio::SourceProbe> source_;
@@ -217,7 +243,7 @@ private:
     juce::Label* staged_ = nullptr;
     // Sample Lab › KMP / KSF Writer and Tools
     FlowPage kmpPage_, labPage_;
-    juce::TextEditor kmpReport_, labReport_;
+    TextView kmpReport_, labReport_;
     juce::TextButton* kmpBtn_ = nullptr;
     std::map<LabTool, juce::TextButton*> labButtons_;
     juce::TextEditor labBars_, labBeats_, labStart_, labEnd_, labSnap_, labXfade_;
@@ -228,10 +254,10 @@ private:
     juce::File labIn_;
     // Sample Lab › Quality Report
     FlowPage qualityPage_;
-    juce::TextEditor quality_;
+    TextView quality_;
     // Style Studio
     FlowPage stylePage_;
-    juce::TextEditor styleReport_;
+    TextView styleReport_;
     juce::TextButton* liveFromStyle_ = nullptr;
     ui::studio::StyleStudioModel style_;
     std::string sff1Report_;
@@ -270,7 +296,7 @@ private:
 
     // Validation & Reports › Reports
     FlowPage reportsPage_;
-    juce::TextEditor reportView_;
+    TextView reportView_;
     juce::Label reportStatus_;
     juce::TextButton* reportExportBtn_ = nullptr;
     std::shared_ptr<const jobs::report::Report> report_;   // the report shown (message thread)
@@ -278,13 +304,14 @@ private:
     std::shared_ptr<std::atomic<uint64_t>> reportLatest_ = std::make_shared<std::atomic<uint64_t>>(0);   // reportGen_ for the workers: an older read stops
 
     // Export jobs (E6)
-    uint64_t enqueue(jobs::ExportSpec spec, juce::TextEditor* out, std::function<void(const jobs::JobState&)> done = {});
+    uint64_t enqueue(jobs::ExportSpec spec, TextView* out, std::function<void(const jobs::JobState&)> done = {});
     void refreshJobs(bool land = true);   // message thread: job list; finished jobs land on their page and in the verification target
     juce::String exportReason(ExportJob j, juce::String where);
-    struct JobHome { jobs::ExportSpec spec; juce::TextEditor* out = nullptr; Domain from; std::function<void(const jobs::JobState&)> done; bool landed = false; };
+    struct JobHome { jobs::ExportSpec spec; TextView* out = nullptr; Domain from; std::function<void(const jobs::JobState&)> done; bool landed = false; };
     std::map<uint64_t, JobHome> jobHomes_;
     std::map<ExportJob, std::pair<juce::TextButton*, juce::String>> exportButtons_;   // button, where it comes from
-    juce::TextEditor jobView_;
+    JobsView jobView_;
+    juce::String shownReportKey_;   // job id, report path and size of the report now in jobView_ (re-set only when they change)
     juce::ComboBox jobPick_;
     juce::TextButton *cancelJobBtn_ = nullptr, *reportBtn_ = nullptr, *rerunBtn_ = nullptr;
     uint64_t reportJob_ = 0;

@@ -56,6 +56,25 @@ int main() {
         TEST("wrapLines: every line fits, words kept, indent continued, blank line kept", fits && n >= 7 &&
              w.find("  basis: RMS of the\n    first 200 ms of") == 0 && w.find("\nshort\n\n") != std::string::npos);
     }
+    {   // Codex review of #44: a hard break never splits a UTF-8 character (a long unspaced non-ASCII name)
+        const auto check = [](const std::string& in, size_t cols) {   // every line valid at both ends; the text minus padding is kept
+            const std::string w = ai_arranger::ui::wrapLines(in, cols);
+            bool whole = true; std::istringstream is(w); std::string l; std::string joined;
+            while (std::getline(is, l)) {
+                const auto b = l.find_first_not_of(' ');
+                if (b == std::string::npos) continue;
+                whole &= (static_cast<unsigned char>(l[b]) & 0xC0) != 0x80 && (static_cast<unsigned char>(l.back()) & 0xC0) != 0xC0;
+                joined += l.substr(b);
+            }
+            std::string want = in; want.erase(0, want.find_first_not_of(' '));
+            return whole && joined == want;
+        };
+        std::string name;
+        for (int i = 0; i < 15; ++i) name += "\xC3\xA9";   // 15 x U+00E9, 30 bytes, no space
+        TEST("wrapLines: a hard break keeps UTF-8 characters whole, nothing lost", check(name, 9));
+        TEST("wrapLines: also when the indent leaves room for less than one character (Codex r2)",
+             check(std::string(19, ' ') + "\xC3\xA9\xC3\xA9\xC3\xA9", 20));
+    }
     TEST("order: dynamics ranked, case-insensitive", SoundConversionModel::loudness("FF") > SoundConversionModel::loudness("mf") &&
          SoundConversionModel::loudness("mf") > SoundConversionModel::loudness("pp") && SoundConversionModel::loudness("v10") > SoundConversionModel::loudness("v2") &&
          SoundConversionModel::loudness("Bright") < 0);
