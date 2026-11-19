@@ -79,15 +79,19 @@ int main() {
 
         std::thread rt([&] {
             spinUntil([&] { return ready.load(std::memory_order_acquire) == kReaders + 1; });
-            rtRunning.store(true, std::memory_order_release);
             auto everyoneOverlapped = [&] {
                 for (auto& c : readsDuringRt)
                     if (c.load(std::memory_order_relaxed) == 0) return false;
                 return lifecycleDuringRt.load(std::memory_order_relaxed) > 0;
             };
-            for (uint64_t k = 1;; ++k) {
+            // The cap bounds work (not time): a starved thread fails the overlap
+            // assertion below instead of hanging the test.
+            constexpr uint64_t kMinPublishes = 400000, kMaxPublishes = 100 * kMinPublishes;
+            for (uint64_t k = 1; k <= kMaxPublishes; ++k) {
                 if (!snap.tryStore(make(k * 2))) skipped.fetch_add(1, std::memory_order_relaxed);
-                if (k >= 400000 && everyoneOverlapped()) break;
+                // Operations count as concurrent only if they begin after a publish.
+                if (k == 1) rtRunning.store(true, std::memory_order_release);
+                if (k >= kMinPublishes && everyoneOverlapped()) break;
             }
             done.store(true, std::memory_order_release);
         });
