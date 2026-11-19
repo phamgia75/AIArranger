@@ -41,6 +41,7 @@ public:
                                        [this](juce::File f) { chooseDestination(f, name_.getText()); });
         };
         create_.onClick = [this] { createKit(); };
+        name_.onTextChange = [this] { render(); };
         name_.onReturnKey = name_.onFocusLost = [this] { if (parentSet_ && name_.getText() != checkedName_) chooseDestination(parent_, name_.getText()); };
         for (juce::Component* c : {(juce::Component*)&chooseOutputs_, (juce::Component*)&chooseDest_, (juce::Component*)&name_, (juce::Component*)&create_,
                                    (juce::Component*)&reason_, (juce::Component*)&view_})
@@ -74,7 +75,7 @@ public:
                 reviewing_ = false;
                 plan_ = p;
                 render();
-                if (parentSet_) chooseDestination(parent_, checkedName_);   // the free space depends on the plan's bytes
+                if (parentSet_) chooseDestination(parent_, checkedName_);   // the free space depends on the plan's bytes; an empty name gets its default now
             });
         }).detach();
     }
@@ -83,7 +84,8 @@ public:
     void chooseDestination(const juce::File& parent, const juce::String& kitName = {}) {
         parent_ = parent;
         parentSet_ = true;
-        checkedName_ = kitName.isNotEmpty() ? kitName : juce::File::createLegalFileName(outputs_.getFileName() + " Pa5X Kit");
+        // no name is invented from nothing: the default (outputs folder + " Pa5X Kit") waits for the outputs folder
+        checkedName_ = kitName.isNotEmpty() ? kitName : outputs_ == juce::File() ? juce::String() : juce::File::createLegalFileName(outputs_.getFileName() + " Pa5X Kit");
         if (name_.getText() != checkedName_) name_.setText(checkedName_, juce::dontSendNotification);
         destCheck_.reset();
         if (!plan_) { render(); return; }   // checked as soon as the review lands
@@ -111,7 +113,7 @@ public:
         result_ = "Creating the kit as an export job (progress and Cancel Job are in the job list)...";
         render();
         std::weak_ptr<bool> alive = alive_;
-        const auto dest = (parent_.getChildFile(checkedName_)).getFullPathName().toStdString();
+        const auto dest = destCheck_->dest.string();   // the resolved path that was checked
         enqueueJob(jobs::kit::importKit({}, dest, outputs_.getFullPathName().toStdString(), plan_->fingerprint),
                    [this, alive, dest](const jobs::JobState& st) {
                        if (alive.expired()) return;
@@ -131,6 +133,7 @@ public:
         if (stale_) return "The sources changed since the review: review the folder again.";
         if (!plan_->blocking.empty()) return "Step 4: " + juce::String(int(plan_->blocking.size())) + " blocking problem(s): fix the sources, then review again.";
         if (!parentSet_) return "Step 5: choose the destination folder.";
+        if (name_.getText() != checkedName_) return "Step 5: the kit name changed: press Return to check it.";
         if (checking_ || !destCheck_) return "Step 5: the destination is being checked.";
         if (!destCheck_->ok) return "Step 5: " + juce::String::fromUTF8(destCheck_->refusals.front().c_str());
         return {};
@@ -141,6 +144,16 @@ public:
     std::shared_ptr<const jobs::kit::DestinationCheck> destination() const { return destCheck_; }
     bool stale() const { return stale_; }
     juce::Button& createButton() { return create_; }
+    juce::TextEditor& nameField() { return name_; }
+    juce::String kitName() const { return checkedName_; }
+    void refresh() { render(); }   // the name field is edited by hand: the page re-reads it (the buttons and the field call this themselves)
+    void reset() {   // a fresh page: nothing reviewed, no destination (quit/test)
+        stopWork(); ++reviewGen_; ++destGen_;
+        reviewing_ = checking_ = parentSet_ = stale_ = false;
+        outputs_ = parent_ = juce::File(); checkedName_ = {}; result_.clear(); plan_.reset(); destCheck_.reset();
+        name_.setText({}, juce::dontSendNotification);
+        render();
+    }
     TextView& view() { return view_; }
     static inline std::atomic<size_t> lastWorker{0};   // test hook: the thread that last ran a review or a destination check
 
@@ -199,7 +212,7 @@ private:
         t << "5 Destination   ";
         if (!parentSet_) t << "(no folder chosen: a NEW local folder is made inside the one you choose; nothing is overwritten)\n";
         else {
-            t << parent_.getChildFile(checkedName_).getFullPathName() << (checking_ ? "   [checking...]" : "") << "\n";
+            t << (destCheck_ ? juce::String(destCheck_->dest.string()) : parent_.getChildFile(checkedName_).getFullPathName()) << (checking_ ? "   [checking...]" : "") << "\n";
             if (destCheck_) {
                 t << "   free space " << u(fmtBytes(destCheck_->freeBytes)) << ", the kit needs " << u(fmtBytes(destCheck_->neededBytes)) << " (members + 10%)\n";
                 for (const auto& r : destCheck_->refusals) t << "   REFUSED: " << u(r) << "\n";

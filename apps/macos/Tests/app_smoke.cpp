@@ -1689,6 +1689,31 @@ int main() {
                 TEST("sheet: a superseded review is dropped; the tampered member blocks Create kit, named",
                      ks.plan() && !ks.plan()->blocking.empty() && !ks.createEnabled() && ks.createReason().startsWith("Step 4") &&
                      ks.text().contains("BLOCKING") && ks.text().contains("FAILED: SOUNDS/pkg-job"));
+                {   // the kit name the user sees is the kit name that was checked and is made
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    ks.chooseDestination(juce::File(par.string()), "Other Kit");
+                    sheetWait();
+                    TEST("sheet: (setup) a clean source and an accepted destination", ks.createEnabled());
+                    ks.nameField().setText("Typed But Unchecked", juce::dontSendNotification);
+                    ks.refresh();
+                    TEST("sheet: a kit name edited but not yet checked turns Create kit off, with the reason",
+                         !ks.createEnabled() && ks.createReason().contains("kit name changed"));
+                    ks.nameField().setText("Other Kit", juce::dontSendNotification);
+                    ks.refresh();
+                    TEST("sheet: back to the checked name, Create kit is available again", ks.createEnabled());
+                }
+                {   // destination chosen BEFORE the outputs: the default name comes from the outputs folder once it is known
+                    ks.reset();
+                    ks.chooseDestination(juce::File(par.string()));
+                    sheetWait();
+                    TEST("sheet: a destination chosen first waits for the review (no name invented from nothing)",
+                         !ks.createEnabled() && ks.createReason().startsWith("Step 1") && !ks.text().contains(" Pa5X Kit  ") && ks.kitName().isEmpty());
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    TEST("sheet: after the review the default name is the outputs folder's name + ' Pa5X Kit', checked",
+                         ks.kitName() == "sheet-src Pa5X Kit" && ks.destination() && ks.destination()->ok && ks.createEnabled());
+                }
                 TEST("sheet: accessible names on the controls and the review pane", ks.createButton().getTitle() == "Step 7: create the kit" &&
                      ks.view().editor().getTitle() == "Pa5X Import Kit review" && ks.view().editor().isReadOnly());
                 fs::remove_all(bad);

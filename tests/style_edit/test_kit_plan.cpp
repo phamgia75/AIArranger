@@ -144,6 +144,9 @@ int main() {
         put(sf2, b);
         const auto t = k::plan(o2);
         TEST("S1 tamper: a corrupted member is FAILED and blocks", !t.blocking.empty() && t.items.size() == 1 && t.items[0].status == "FAILED");
+        fs::create_directory_symlink(out, root / "outputs-link");
+        const auto lnk = k::plan(root / "outputs-link");
+        TEST("S1 the chosen outputs folder is itself a link: blocked, nothing listed through it", !lnk.blocking.empty() && lnk.items.empty() && anyHas(lnk.blocking, "link"));
         const auto none = k::plan(root / "nothing-here");
         TEST("S1 blocking: a missing or empty folder says no outputs", !none.blocking.empty() && none.items.empty());
         const auto cap = k::plan(out, {}, 2);
@@ -198,6 +201,16 @@ int main() {
         TEST("S3 not enough free space is refused with both numbers", !big.ok && anyHas(big.refusals, "free space"));
         fs::create_symlink(parent, root / "parent-link");
         TEST("S3 a parent reached through a symlink is refused", !k::checkDestination(root / "parent-link", "K", need, {out}).ok);
+        fs::create_directories(parent / "nested");
+        fs::create_directory_symlink(parent, root / "alias-dir");
+        const auto viaAlias = k::checkDestination(root / "alias-dir" / "nested", "K", need, {out});
+        TEST("S3 a symlinked ancestor is resolved once: the real destination is reported, and that path is what the job gets",
+             viaAlias.ok && viaAlias.dest == fs::weakly_canonical(parent / "nested") / "K" && viaAlias.dest.string().find("alias-dir") == std::string::npos);
+        fs::create_directory_symlink(out, root / "to-source");
+        TEST("S3 a destination that reaches a source through a link is an overlap (D18)", !k::checkDestination(root / "to-source" / "AIA Demo Organ", "K", need, {out}).ok);
+        fs::remove(root / "alias-dir");
+        fs::remove(root / "to-source");
+        fs::remove_all(parent / "nested");
         fs::remove_all(parent / "Existing");
         fs::remove_all(parent / "Half.INCOMPLETE");
         TEST("S3 the check wrote nothing", snapshot(parent) == before);

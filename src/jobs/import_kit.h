@@ -707,6 +707,8 @@ inline ReviewPlan plan(const fs::path& outputsFolder, const std::function<bool()
         if (keepGoing && !keepGoing()) { r = ReviewPlan{}; r.blocking.push_back("review cancelled; nothing planned"); return true; }
         return false;
     };
+    std::error_code lec;
+    if (fs::is_symlink(fs::symlink_status(outputsFolder, lec))) { r.blocking.push_back(outputsFolder.string() + " is a link: choose the real folder (the review lists nothing through a link)"); return r; }
     std::vector<std::string> reports;
     bool truncated = false;
     const auto in = outputsIn(outputsFolder, &reports, maxEntries, &truncated);
@@ -745,11 +747,12 @@ struct DestinationCheck {
     bool ok = false, leftover = false;
     std::vector<std::string> refusals;
     uint64_t freeBytes = 0, neededBytes = 0;   // needed = what the runner needs: members + KIT.md/manifest/PACKAGE.sha256 allowance, + 10%
-    fs::path dest;
+    fs::path dest;   // the resolved destination (no link in it): what the job is given
 };
 inline DestinationCheck checkDestination(const fs::path& parent, const std::string& kitName, uint64_t memberBytes, const std::vector<fs::path>& sources) {
     DestinationCheck d;
     d.dest = parent / kitName;
+    { std::error_code cec; const auto real = fs::weakly_canonical(parent, cec); if (!cec) d.dest = real / kitName; }   // links in the path resolved once: this exact path is checked, shown and written
     const uint64_t planned = memberBytes + 65536;   // the kit's own text files, as the job's preview counts them
     d.neededBytes = planned + planned / 10;
     std::error_code ec;
