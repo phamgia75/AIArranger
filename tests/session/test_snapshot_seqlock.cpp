@@ -64,22 +64,44 @@ int main() {
         snap.store(make(0));
         std::atomic<bool> done{false};
         std::atomic<uint64_t> torn{0}, backwards{0}, reads{0}, skipped{0};
+        // Deterministic overlap (no sleeps/timeouts): the RT writer starts only once
+        // all other threads are running, and pauses at the midpoint until the readers
+        // and the lifecycle writer have each acted *while it is mid-run*. Otherwise,
+        // under CPU contention the RT loop can finish before any other thread is
+        // scheduled and the test never exercises a concurrent read.
+        constexpr int kReaders = 3;
+        std::atomic<int> ready{0};
+        std::atomic<bool> rtRunning{false};
+        std::atomic<uint64_t> readsDuringRt{0}, lifecycleDuringRt{0};
+        auto spinUntil = [](auto&& pred) { while (!pred()) std::this_thread::yield(); };
 
         std::thread rt([&] {
-            for (uint64_t k = 1; k <= 400000; ++k)
+            spinUntil([&] { return ready.load(std::memory_order_acquire) == kReaders + 1; });
+            rtRunning.store(true, std::memory_order_release);
+            for (uint64_t k = 1; k <= 400000; ++k) {
                 if (!snap.tryStore(make(k * 2))) skipped.fetch_add(1, std::memory_order_relaxed);
+                if (k == 200000)
+                    spinUntil([&] {
+                        return readsDuringRt.load(std::memory_order_relaxed) >= kReaders &&
+                               lifecycleDuringRt.load(std::memory_order_relaxed) >= 1;
+                    });
+            }
             done.store(true, std::memory_order_release);
         });
         std::thread lifecycle([&] {
+            ready.fetch_add(1, std::memory_order_release);
             while (!done.load(std::memory_order_acquire)) {
+                if (rtRunning.load(std::memory_order_acquire))
+                    lifecycleDuringRt.fetch_add(1, std::memory_order_relaxed);
                 const auto cur = snap.load();
                 snap.store(cur);   // republish an already-consistent value
             }
         });
         std::vector<std::thread> readers;
-        for (int r = 0; r < 3; ++r) {
+        for (int r = 0; r < kReaders; ++r) {
             readers.emplace_back([&] {
                 int64_t last = -1;
+                ready.fetch_add(1, std::memory_order_release);
                 while (!done.load(std::memory_order_acquire)) {
                     const auto s = snap.load();
                     if (!consistent(s)) torn.fetch_add(1, std::memory_order_relaxed);
@@ -88,6 +110,8 @@ int main() {
                     // read, so only the RT-only phase below asserts monotonicity.
                     last = s.positionTicks;
                     reads.fetch_add(1, std::memory_order_relaxed);
+                    if (rtRunning.load(std::memory_order_acquire))
+                        readsDuringRt.fetch_add(1, std::memory_order_relaxed);
                 }
             });
         }
@@ -95,6 +119,8 @@ int main() {
         for (auto& t : readers) t.join();
         TEST("concurrent: no torn snapshot under 2 writers + 3 readers", torn.load() == 0);
         TEST("concurrent: readers made progress", reads.load() > 0);
+        TEST("concurrent: readers and lifecycle writer overlapped the RT writer",
+             readsDuringRt.load() >= kReaders && lifecycleDuringRt.load() >= 1);
         std::printf("    (reads=%llu, rt publishes skipped while lifecycle wrote=%llu)\n",
                     static_cast<unsigned long long>(reads.load()),
                     static_cast<unsigned long long>(skipped.load()));
