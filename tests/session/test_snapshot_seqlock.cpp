@@ -73,7 +73,7 @@ int main() {
         // thread is scheduled and the test never exercises a concurrent read.
         constexpr int kReaders = 3;
         std::atomic<int> ready{0};
-        std::atomic<bool> rtRunning{false};
+        std::atomic<bool> rtRunning{false}, overlapped{false};
         std::atomic<uint64_t> readsDuringRt[kReaders] = {}, lifecycleDuringRt{0};
         auto spinUntil = [](auto&& pred) { while (!pred()) std::this_thread::yield(); };
 
@@ -88,10 +88,14 @@ int main() {
             // assertion below instead of hanging the test.
             constexpr uint64_t kMinPublishes = 400000, kMaxPublishes = 100 * kMinPublishes;
             for (uint64_t k = 1; k <= kMaxPublishes; ++k) {
-                if (!snap.tryStore(make(k * 2))) skipped.fetch_add(1, std::memory_order_relaxed);
-                // Operations count as concurrent only if they begin after a publish.
-                if (k == 1) rtRunning.store(true, std::memory_order_release);
-                if (k >= kMinPublishes && everyoneOverlapped()) break;
+                if (snap.tryStore(make(k * 2))) {
+                    // Operations count as concurrent only if they begin after a publish.
+                    if (!rtRunning.load(std::memory_order_relaxed)) rtRunning.store(true, std::memory_order_release);
+                } else {
+                    skipped.fetch_add(1, std::memory_order_relaxed);
+                }
+                // Judged by the RT thread, before its loop ends, so late increments never count.
+                if (k >= kMinPublishes && everyoneOverlapped()) { overlapped.store(true, std::memory_order_relaxed); break; }
             }
             done.store(true, std::memory_order_release);
         });
@@ -126,10 +130,7 @@ int main() {
         for (auto& t : readers) t.join();
         TEST("concurrent: no torn snapshot under 2 writers + 3 readers", torn.load() == 0);
         TEST("concurrent: readers made progress", reads.load() > 0);
-        TEST("concurrent: readers and lifecycle writer overlapped the RT writer",
-             std::all_of(std::begin(readsDuringRt), std::end(readsDuringRt),
-                         [](const auto& c) { return c.load() > 0; }) &&
-                 lifecycleDuringRt.load() > 0);
+        TEST("concurrent: readers and lifecycle writer overlapped the RT writer", overlapped.load());
         std::printf("    (reads=%llu, rt publishes skipped while lifecycle wrote=%llu)\n",
                     static_cast<unsigned long long>(reads.load()),
                     static_cast<unsigned long long>(skipped.load()));
