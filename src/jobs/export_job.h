@@ -24,6 +24,7 @@
 #include "media/sound/resource_graph.h"   // jsonEscape
 #include "ui/studio/studio_models.h"      // Verification, badgeLine
 #include <atomic>
+#include <climits>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
@@ -207,31 +208,6 @@ inline std::string utcStamp() {
     std::strftime(b, sizeof b, "%Y%m%dT%H%M%SZ", &tm);
     return b;
 }
-// D17: with consent, the leftover `work` is renamed aside in its own folder, never deleted. "" = moved (*to says where).
-inline std::string moveAside(const fs::path& work, fs::path* to, const std::function<void()>& beforeRename = {}) {
-    if (const auto link = symlinkIn(work); !link.empty())
-        return "refusing to move the leftover " + work.string() + ": " + link + " is a symlink";
-    struct stat w {}, parent {};
-    if (::lstat(work.c_str(), &w) != 0 || !S_ISDIR(w.st_mode)) return "refusing: the leftover " + work.string() + " is not a folder";
-    if (::lstat(work.parent_path().c_str(), &parent) != 0 || parent.st_dev != w.st_dev)
-        return "refusing to move the leftover " + work.string() + ": it is on another device than its folder";
-    *to = work.string() + ".stale-" + utcStamp();
-    std::error_code ec;
-    if (fs::is_symlink(fs::symlink_status(*to, ec)) || fs::exists(*to, ec) || ec) return "refusing: " + to->string() + " already exists";
-    if (beforeRename) beforeRename();   // test hook: a folder swapped in after the checks
-    if (!media::publishNewFolder(work, *to)) return "cannot move " + work.string() + " to " + to->string();   // no-replace rename
-    // shortcut: a parent folder swapped for a symlink, or the leftover swapped for another folder, between the checks
-    // above and this rename is not prevented (same class as D16 C1: the guard stops accidents, not a concurrent hostile
-    // local process). Mitigation (D18 C2): a moved folder that is not the inspected one is renamed back at once.
-    struct stat moved {};
-    if (::lstat(to->c_str(), &moved) != 0 || moved.st_ino != w.st_ino || moved.st_dev != w.st_dev) {
-        const bool back = media::publishNewFolder(*to, work);
-        return "refusing: the folder at " + work.string() + " changed between the check and the move, so it was not moved aside; " +
-               (back ? "it was renamed back to " + work.string() : "it could NOT be renamed back: it is at " + to->string()) + ". Nothing was deleted.";
-    }
-    return "";
-}
-
 // True when `p` is on a case-insensitive volume (macOS default APFS/HFS+): its nearest existing folder decides.
 inline bool caseInsensitive(fs::path p) {
 #ifdef _PC_CASE_SENSITIVE
@@ -256,15 +232,95 @@ inline bool overlaps(const fs::path& a, const fs::path& b) {
     const auto under = [](const std::string& in, const std::string& top) { return in.size() > top.size() && in.compare(0, top.size(), top) == 0 && in[top.size()] == '/'; };
     return x == y || under(x, y) || under(y, x);
 }
-// "" when `work` holds this job's marker (an earlier run of the same export type to the same output), else why not.
-inline std::string notOurLeftover(const fs::path& work, const std::string& type, const fs::path& dest) {
-    std::error_code ec;
-    const auto m = work / kJobMarker;
-    if (!fs::is_regular_file(fs::symlink_status(m, ec)) || fs::file_size(m, ec) > 4096 || ec)
-        return "refusing: " + work.string() + " has no export job marker, so it may hold someone else's files; delete or rename it by hand";
-    std::ifstream f(m);
-    std::string line;
-    std::getline(f, line);
+// The real location of an open directory (no symlink in it), "" when the OS cannot say: callers fail closed.
+inline std::string fdPath(int fd) {
+#ifdef __APPLE__
+    char b[PATH_MAX];
+    return ::fcntl(fd, F_GETPATH, b) == 0 ? std::string(b) : std::string();
+#else
+    char b[PATH_MAX];
+    const std::string l = "/proc/self/fd/" + std::to_string(fd);
+    const ssize_t n = ::readlink(l.c_str(), b, sizeof b - 1);
+    return n > 0 ? std::string(b, size_t(n)) : std::string();
+#endif
+}
+inline bool sameFile(const struct stat& a, const struct stat& b) { return a.st_dev == b.st_dev && a.st_ino == b.st_ino; }
+// Renames `a` (in `from`) to `b` (in `to`) and never replaces an entry.
+inline bool moveNoReplace(int from, const std::string& a, int to, const std::string& b) {
+#ifdef __APPLE__
+    return ::renameatx_np(from, a.c_str(), to, b.c_str(), RENAME_EXCL) == 0;
+#else
+    return ::renameat2(from, a.c_str(), to, b.c_str(), RENAME_NOREPLACE) == 0;
+#endif
+}
+// Path-check-to-open race (HIGH): opens `parent` ONCE and returns that handle; everything after goes through it. The
+// ancestors are resolved by the OS at this single open (a legitimate symlinked ancestor, macOS /var -> /private/var, is
+// followed); the opened folder must then be (1) the folder that was authorized when the guards ran (`want`, its identity,
+// when it existed then) and (2) at a real location that overlaps no source, with the output names below it free of
+// refusals. Anything else, or a location the OS cannot report, refuses.
+inline std::string pinParent(const fs::path& parent, const struct stat* want, const std::vector<fs::path>& sources, const std::string& leaf,
+                             const std::string& workName, media::detail::Fd& out, fs::path* real) {
+    out.v = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (out.v < 0) return "cannot open " + parent.string() + ": " + std::strerror(errno);
+    struct stat now {};
+    if (::fstat(out.v, &now) != 0) return "cannot examine " + parent.string();
+    if (want && !sameFile(*want, now))
+        return "refusing: " + parent.string() + " is not the folder that was checked (it was replaced after the check); nothing was written";
+    const std::string p = fdPath(out.v);
+    if (p.empty()) return "refusing: cannot confirm where " + parent.string() + " really is; nothing was written";
+    for (const auto& src : sources)
+        if (overlaps(fs::path(p) / leaf, src) || overlaps(fs::path(p) / workName, src))
+            return "refusing: the output below " + p + " overlaps the job's source " + src.string() + "; nothing was written";
+    *real = p;
+    return "";
+}
+// Writes `bytes` as a new file `name` below `dirFd`: temp file (O_EXCL|O_NOFOLLOW), then a no-replace rename.
+inline std::string writeNewAt(int dirFd, const std::string& name, const std::string& bytes) {
+    const std::string tmp = name + ".tmp";
+    const int fd = ::openat(dirFd, tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) return "refusing: cannot create " + tmp + " (it may already exist)";
+    const bool ok = ::write(fd, bytes.data(), bytes.size()) == ssize_t(bytes.size());
+    if (::close(fd) != 0 || !ok) { ::unlinkat(dirFd, tmp.c_str(), 0); return "cannot write " + tmp; }
+    if (!moveNoReplace(dirFd, tmp, dirFd, name)) { ::unlinkat(dirFd, tmp.c_str(), 0); return "refusing: " + name + " appeared while writing"; }
+    return "";
+}
+// D17: with consent, the leftover `workName` below the pinned folder `parentFd` is renamed aside in that folder, never
+// deleted. "" = moved (*to says where). Everything is relative to the handle, so a swapped path cannot redirect it.
+inline std::string moveAside(int parentFd, const std::string& workName, const fs::path& work, fs::path* to, const std::function<void()>& beforeRename = {}) {
+    struct stat w {}, parent {};
+    if (::fstatat(parentFd, workName.c_str(), &w, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(w.st_mode))
+        return "refusing: the leftover " + work.string() + " is not a folder (or is a symlink)";
+    if (::fstat(parentFd, &parent) != 0 || parent.st_dev != w.st_dev)
+        return "refusing to move the leftover " + work.string() + ": it is on another device than its folder";
+    const std::string toName = workName + ".stale-" + utcStamp();
+    *to = work.parent_path() / toName;
+    struct stat ex {};
+    if (::fstatat(parentFd, toName.c_str(), &ex, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return "refusing: " + to->string() + " already exists";
+    if (beforeRename) beforeRename();   // test hook: a folder swapped in after the checks
+    if (!moveNoReplace(parentFd, workName, parentFd, toName)) return "cannot move " + work.string() + " to " + to->string();
+    // The rename is relative to the pinned folder, but the entry itself can still be swapped between the lstat above and
+    // the rename (no rename-by-inode); a moved folder that is not the inspected one is renamed back at once.
+    struct stat moved {};
+    if (::fstatat(parentFd, toName.c_str(), &moved, AT_SYMLINK_NOFOLLOW) != 0 || !sameFile(moved, w)) {
+        const bool back = moveNoReplace(parentFd, toName, parentFd, workName);
+        return "refusing: the folder at " + work.string() + " changed between the check and the move, so it was not moved aside; " +
+               (back ? "it was renamed back to " + work.string() : "it could NOT be renamed back: it is at " + to->string()) + ". Nothing was deleted.";
+    }
+    return "";
+}
+
+// "" when the leftover `workName` below the pinned folder `parentFd` holds this job's marker (an earlier run of the same
+// export type to the same output), else why not. Read through the handle, no link followed.
+inline std::string notOurLeftover(int parentFd, const std::string& workName, const fs::path& work, const std::string& type, const fs::path& dest) {
+    const std::string none = "refusing: " + work.string() + " has no export job marker, so it may hold someone else's files; delete or rename it by hand";
+    media::detail::Fd w(::openat(parentFd, workName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (w.v < 0) return none;
+    media::detail::Fd m(::openat(w.v, kJobMarker, O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+    struct stat ms {};
+    if (m.v < 0 || ::fstat(m.v, &ms) != 0 || !S_ISREG(ms.st_mode) || ms.st_size > 4096) return none;
+    std::string text(size_t(ms.st_size), '\0');
+    if (::read(m.v, text.data(), text.size()) != ssize_t(text.size())) return none;
+    const std::string line = text.substr(0, text.find('\n'));
     const std::string want = " " + type + " -> " + dest.string();
     if (line.rfind("export job ", 0) != 0 || line.size() < want.size() || line.compare(line.size() - want.size(), want.size(), want) != 0)
         return "refusing: the export job marker in " + work.string() + " is not for this export (" + type + " -> " + dest.string() +
@@ -310,6 +366,11 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     if (!st.missing.empty()) return stop(Phase::Failed, std::to_string(st.missing.size()) + " missing resource(s): " + st.missing.front());
 
     if (!enter(Phase::Destination)) return;
+    // Path-check-to-open race: the folder the guards below judge is the folder this job may write in. Its identity is taken
+    // first (when it exists) and compared with the folder the runner finally opens (detail::pinParent).
+    struct stat authorized {};
+    const bool haveAuthorized = ::stat(dest.parent_path().c_str(), &authorized) == 0 && S_ISDIR(authorized.st_mode);
+    const std::string workName = work.filename().string(), leaf = dest.filename().string();
     // D18: the output and its NAME.INCOMPLETE may not be, contain or lie inside anything the job reads, before any rename
     for (const auto& src : spec.sources)
         if (detail::overlaps(dest, src) || detail::overlaps(work, src))
@@ -322,9 +383,17 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         if (!spec.moveLeftoverAside)
             return stop(Phase::Failed, "refusing: " + work.string() + " already exists (an earlier write that did not finish). "
                                        "Delete it by hand, or Re-run with consent to move it aside (it is never deleted).");
-        if (const auto e = detail::notOurLeftover(work, spec.type, dest); !e.empty()) return stop(Phase::Failed, e);
+        // A leftover is moved only along a path with no symlink in it (D17, kept as before); the pin below then makes sure the
+        // folder moved is the one that was looked at.
+        if (const auto link = detail::symlinkIn(work); !link.empty())
+            return stop(Phase::Failed, "refusing to move the leftover " + work.string() + ": " + link + " is a symlink");
+        media::detail::Fd leftoverParent;
+        fs::path realParent;
+        if (const auto e = detail::pinParent(dest.parent_path(), haveAuthorized ? &authorized : nullptr, spec.sources, leaf, workName, leftoverParent, &realParent); !e.empty())
+            return stop(Phase::Failed, e);
+        if (const auto e = detail::notOurLeftover(leftoverParent.v, workName, work, spec.type, dest); !e.empty()) return stop(Phase::Failed, e);
         fs::path to;
-        if (const auto e = detail::moveAside(work, &to); !e.empty()) return stop(Phase::Failed, e);
+        if (const auto e = detail::moveAside(leftoverParent.v, workName, work, &to); !e.empty()) return stop(Phase::Failed, e);
         st.warnings.push_back("moved the leftover " + work.string() + " aside to " + to.string() + " (with consent); delete it by hand when you no longer need it");
         if (const auto again = media::outputFolderRefusal(dest); !again.empty()) return stop(Phase::Failed, again);
     }
@@ -346,11 +415,19 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     fs::create_directories(dest.parent_path(), ec);   // as the writers did themselves (the guard has refused mounted volumes)
     // E9 Codex r3: the job folder is made and opened below the pinned output folder, and published from there by fd, so a
     // NAME.INCOMPLETE or a staged output swapped by path is never written through or published.
+    // HIGH (path-check-to-open): the parent is opened once, compared with the authorized folder and checked again at its REAL
+    // location (overlap with a source, output refusals); only then is anything created, always through the handle.
     using media::detail::Fd;
-    const std::string workName = work.filename().string(), leaf = dest.filename().string();
-    const Fd parentFd(::open(dest.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-    if (parentFd.v < 0 || ::mkdirat(parentFd.v, workName.c_str(), 0755) != 0)
+    Fd parentFd;
+    fs::path realParent;
+    if (const auto e = detail::pinParent(dest.parent_path(), haveAuthorized ? &authorized : nullptr, spec.sources, leaf, workName, parentFd, &realParent); !e.empty())
+        return stop(Phase::Failed, e);
+    if (const auto why = media::outputFolderRefusal(realParent / leaf); !why.empty()) return stop(Phase::Failed, why);
+    if (::mkdirat(parentFd.v, workName.c_str(), 0755) != 0)
         return stop(Phase::Failed, "cannot create " + work.string() + ": " + std::strerror(errno));
+    // By-path readers and writers (the legacy `write`, hashing, verify) get the REAL location of the staged output, with no
+    // symlink in it; `byPathIsStaged` then proves that path still names the staged output (see the shortcut at Publish).
+    const fs::path stagedReal = realParent / workName / leaf;
     const Fd workFd(::openat(parentFd.v, workName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     {
         const std::string m = "export job " + std::to_string(st.id) + " " + st.type + " -> " + st.dest + "\n";
@@ -371,30 +448,37 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         if (::mkdirat(workFd.v, leaf.c_str(), 0755) != 0) return stop(Phase::Failed, "cannot create " + staged.string() + kept());
         const Fd out(::openat(workFd.v, leaf.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
         if (out.v < 0 || ::fstat(out.v, &staging) != 0) return stop(Phase::Failed, "cannot open " + staged.string() + kept());
-        wr = spec.writeAt(out.v, staged, progress);
+        wr = spec.writeAt(out.v, stagedReal, progress);
     } else {
-        wr = spec.write(staged, progress);
+        wr = spec.write(stagedReal, progress);
         if (wr.error.empty() && ::fstatat(workFd.v, leaf.c_str(), &staging, AT_SYMLINK_NOFOLLOW) != 0)
             return stop(Phase::Failed, "the writer reported success but wrote nothing" + kept());
     }
     st.writerText = wr.text;
+    const auto byPathIsStaged = [&] {   // the real path still leads to the staged output (no ancestor swapped since the pin)
+        struct stat now {};
+        return ::lstat(stagedReal.c_str(), &now) == 0 && detail::sameFile(now, staging);
+    };
+    if (wr.error.empty() && !byPathIsStaged())
+        return stop(Phase::Failed, "refusing: a folder on the way to " + stagedReal.string() + " was replaced while it was written; nothing was published" + kept());
     if (!wr.error.empty()) return stop(cancelled() ? Phase::Cancelled : Phase::Failed, wr.error + "; nothing was published" + kept());
 
     // Checks on the STAGED output (D17): the files that will be published are the files that were checked.
     if (!enter(Phase::Manifest)) return;
-    const bool folder = fs::is_directory(fs::symlink_status(staged, ec));
-    for (auto f : listFiles(staged)) {
+    const bool folder = fs::is_directory(fs::symlink_status(stagedReal, ec));
+    for (auto f : listFiles(stagedReal)) {
         bool c = false;
         std::string err;
-        f.sha256 = media::detail::sha256File(folder ? staged / f.rel : staged, [](size_t) { return true; }, &c, &err);
+        f.sha256 = media::detail::sha256File(folder ? stagedReal / f.rel : stagedReal, [](size_t) { return true; }, &c, &err);
         if (f.sha256.empty()) return stop(Phase::Failed, "cannot read back " + f.rel + " to hash it: " + err + "; nothing was published" + kept());
         st.files.push_back(std::move(f));
     }
 
     if (!enter(Phase::Verify)) return;
-    if (spec.verify) std::tie(st.level, st.verifyText) = spec.verify(staged);
+    if (spec.verify) std::tie(st.level, st.verifyText) = spec.verify(stagedReal);
     for (auto* t : {&st.verifyText, &st.writerText})   // the texts name the published path, not the job's work folder
-        for (size_t k; (k = t->find(staged.string())) != std::string::npos;) t->replace(k, staged.string().size(), dest.string());
+        for (const auto* name : {&stagedReal, &staged})
+            for (size_t k; (k = t->find(name->string())) != std::string::npos;) t->replace(k, name->string().size(), dest.string());
     st.level.l3 = {Check::NotRun, "not tested on a Pa5X"};   // only an owner record gives L3 (Validation & Reports)
     if (st.level.l1.state == Check::Failed)
         return stop(Phase::Failed, "the written output failed its check (L1: " + st.level.l1.detail + "); nothing was published" + kept());
@@ -409,31 +493,25 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
     if (!enter(Phase::Publish)) return;
     if (spec.beforePublish)
-        if (const auto e = spec.beforePublish(staged); !e.empty()) return stop(Phase::Failed, "refusing to publish: " + e + "; nothing was published" + kept());
+        if (const auto e = spec.beforePublish(stagedReal); !e.empty()) return stop(Phase::Failed, "refusing to publish: " + e + "; nothing was published" + kept());
     // Only what was verified is published: the job folder and the staged output are still the ones made and checked
     // (device + inode, no link followed), and the staged files still have the listed names and sizes.
-    const auto same = [](const struct stat& a, const struct stat& b) { return a.st_dev == b.st_dev && a.st_ino == b.st_ino; };
+    const auto same = detail::sameFile;
     const auto identity = [&] {   // the job folder and the staged output by device + inode, no link followed
         struct stat w {}, wn {}, o {};
         return ::fstat(workFd.v, &w) == 0 && ::fstatat(parentFd.v, workName.c_str(), &wn, AT_SYMLINK_NOFOLLOW) == 0 && same(w, wn) &&
-               ::fstatat(workFd.v, leaf.c_str(), &o, AT_SYMLINK_NOFOLLOW) == 0 && same(o, staging);
+               ::fstatat(workFd.v, leaf.c_str(), &o, AT_SYMLINK_NOFOLLOW) == 0 && same(o, staging) && byPathIsStaged();
     };
     const auto unchanged = [&] {
         if (!identity()) return false;
-        const auto now = listFiles(staged);
+        const auto now = listFiles(stagedReal);
         if (now.size() != st.files.size()) return false;
         for (size_t i = 0; i < now.size(); ++i)
             if (now[i].rel != st.files[i].rel || now[i].bytes != st.files[i].bytes) return false;
         return true;
     };
     if (!unchanged()) return stop(Phase::Failed, "refusing: the staged output changed after it was verified; nothing was published" + kept());
-    const auto move = [](int from, const std::string& a, int to, const std::string& b) {   // never replaces an entry
-#ifdef __APPLE__
-        return ::renameatx_np(from, a.c_str(), to, b.c_str(), RENAME_EXCL) == 0;
-#else
-        return ::renameat2(from, a.c_str(), to, b.c_str(), RENAME_NOREPLACE) == 0;
-#endif
-    };
+    const auto move = detail::moveNoReplace;   // never replaces an entry
     // Side files the writer put next to its output (the KST backup's NAME.manifest.sha256) go first, the output last,
     // as backupKst publishes: until that last rename nothing is under the output's name.
     std::vector<std::string> entries;   // listed first: the folder is not changed while it is being iterated
@@ -472,8 +550,8 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
 
     st.phase = Phase::Report;   // published: from here on the job runs to its end
     {
-        std::error_code ec;
-        st.packageManifest = fs::is_regular_file(dest / media::sound::pkgio::FileSet::kPackageManifest, ec);   // as the studio checked it before
+        struct stat pm {};
+        st.packageManifest = ::fstatat(parentFd.v, (leaf + "/" + media::sound::pkgio::FileSet::kPackageManifest).c_str(), &pm, 0) == 0 && S_ISREG(pm.st_mode);   // as the studio checked it before
     }
     update(st);
     st.phase = Phase::Done;
@@ -481,8 +559,8 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     st.reportMd = reportMd(st);
     st.reportJson = reportJson(st);
     const std::string side = dest.string() + ".export";
-    const auto e1 = media::writeNewFile(side + ".md", {st.reportMd.begin(), st.reportMd.end()});
-    const auto e2 = media::writeNewFile(side + ".json", {st.reportJson.begin(), st.reportJson.end()});
+    const auto e1 = detail::writeNewAt(parentFd.v, leaf + ".export.md", st.reportMd);   // through the pinned folder, like the output
+    const auto e2 = detail::writeNewAt(parentFd.v, leaf + ".export.json", st.reportJson);
     if (e1.empty()) st.reportPath = side + ".md";
     if (!e1.empty() || !e2.empty()) {
         st.warnings.push_back("export report not written beside the output: " + (e1.empty() ? e2 : e1));
