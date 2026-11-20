@@ -24,6 +24,7 @@
 #include "media/sound/package_verify.h"
 #include "ui/studio/style_studio_model.h"
 #include <atomic>
+#include <climits>
 #include <fcntl.h>
 #include <set>
 #include <unordered_set>
@@ -93,6 +94,18 @@ inline std::vector<std::string> txFiles(const fs::path& pkg, const std::string& 
 // The FAT long-name rules (general file-system rules, not Pa5X-specific): at most 255 characters (counted here as UTF-8
 // bytes, which is never fewer), none of \ / : * ? " < > | or control characters, no trailing space or dot, not a
 // reserved device name. Name limits of the Pa5X itself (Sound/Style names, path depth) are UNKNOWN (not in MAN).
+// Where an open folder really is, by its descriptor ("" when the platform cannot say): macOS F_GETPATH, Linux /proc/self/fd.
+inline std::string fdPath(int fd) {
+#ifdef F_GETPATH
+    char buf[PATH_MAX];
+    if (::fcntl(fd, F_GETPATH, buf) == 0) return buf;
+    return "";
+#else
+    char buf[PATH_MAX];
+    const auto n = ::readlink(("/proc/self/fd/" + std::to_string(fd)).c_str(), buf, sizeof buf - 1);
+    return n > 0 ? std::string(buf, size_t(n)) : std::string();
+#endif
+}
 inline std::string fatName(const std::string& c) {
     if (c.empty() || c == "." || c == "..") return "an empty or dot name";
     if (c.size() > 255) return "longer than 255 characters (FAT long file name limit)";
@@ -862,11 +875,12 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
     s.writeAt = [items, roots, files, expected, srcs = s.sources](int outFd, const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
         // The staging folder is pinned by the runner; where it REALLY is must not be inside a source (a destination parent
         // swapped for a link after the runner's by-path check would put it there): refuse before writing anything.
-#ifdef F_GETPATH
-        if (char real[PATH_MAX]; ::fcntl(outFd, F_GETPATH, real) == 0)
+        {
+            const auto real = detail::fdPath(outFd);
+            if (real.empty()) return {"refusing: cannot tell where the staged kit is (no path for the pinned staging folder); nothing was published", ""};   // fail closed
             for (const auto& src : srcs)
                 if (jobs::detail::overlaps(real, src)) return {"refusing: the staged kit is inside a source (the destination changed during the run); nothing was published", ""};
-#endif
+        }
         media::sound::pkgio::FileSet set{out};
         set.pin(outFd);
         // Every file read once, from the pinned member folders without following a link, streamed and hashed as it is read
