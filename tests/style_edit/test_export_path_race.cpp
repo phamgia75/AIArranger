@@ -153,7 +153,7 @@ int main() {
         put(base / "decoy/precious.txt", "precious");
         media::detail::Fd parent(::open(base.c_str(), O_RDONLY | O_DIRECTORY));
         fs::path to;
-        const auto why = detail::moveAside(parent.v, "out.INCOMPLETE", base / "out.INCOMPLETE", &to, [&] {
+        const auto why = detail::moveAside(parent.v, "out.INCOMPLETE", base / "out.INCOMPLETE", &to, nullptr, [&] {
             fs::rename(base / "out.INCOMPLETE", base / "out.INCOMPLETE.gone");
             fs::rename(base / "decoy", base / "out.INCOMPLETE");
         });
@@ -183,6 +183,22 @@ int main() {
         const auto st = run(s, [](Phase) {});
         TEST("R11 parent moved into a source during the job: fails, nothing published, no report", st.phase == Phase::Failed && !fs::exists(base / "src/p/out") &&
              !fs::exists(base / "src/p/out.export.md") && st.reportPath.empty());
+    }
+
+    // R12: the leftover whose marker was checked is swapped for another folder before it is moved: refused, nothing moved
+    {
+        const fs::path base = root / "r12";
+        put(base / "out.INCOMPLETE" / kJobMarker, "export job 1 Race test -> " + (base / "out").string() + "\n");
+        put(base / "decoy/precious.txt", "precious");
+        media::detail::Fd parent(::open(base.c_str(), O_RDONLY | O_DIRECTORY));
+        struct stat id {};
+        const auto ours = detail::notOurLeftover(parent.v, "out.INCOMPLETE", base / "out.INCOMPLETE", "Race test", base / "out", &id);
+        fs::rename(base / "out.INCOMPLETE", base / "out.INCOMPLETE.gone");
+        fs::rename(base / "decoy", base / "out.INCOMPLETE");
+        fs::path to;
+        const auto why = detail::moveAside(parent.v, "out.INCOMPLETE", base / "out.INCOMPLETE", &to, &id);
+        TEST("R12 leftover swapped after its marker was checked: refused, the other folder is not moved", ours.empty() && has(why, "not the folder whose marker") &&
+             fs::is_regular_file(base / "out.INCOMPLETE/precious.txt"));
     }
 
     fs::remove_all(root);

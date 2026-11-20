@@ -202,7 +202,7 @@ int main() {
         put(root / "race.INCOMPLETE" / kJobMarker, "m");
         fs::path to;
         media::detail::Fd raceParent(::open(root.c_str(), O_RDONLY | O_DIRECTORY));
-        const auto re = detail::moveAside(raceParent.v, "race.INCOMPLETE", root / "race.INCOMPLETE", &to, [&] {
+        const auto re = detail::moveAside(raceParent.v, "race.INCOMPLETE", root / "race.INCOMPLETE", &to, nullptr, [&] {
             fs::rename(root / "race.INCOMPLETE", root / "race-original");   // the inspected folder goes away ...
             put(root / "race.INCOMPLETE/other.txt", "another folder");      // ... and another takes its name
         });
