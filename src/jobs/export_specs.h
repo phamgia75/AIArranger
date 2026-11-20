@@ -549,7 +549,13 @@ inline ExportSpec stagedPackage(fs::path staged, fs::path dest) {
     s.validate = [staged] { return detail::isDir(staged) ? "" : "refusing: the rendered package " + staged.string() + " is gone (render again)"; };
     s.preview = [staged] { return listFiles(staged); };
     s.write = [staged](const fs::path& out, auto&) {
-        if (const auto e = detail::copyTree(staged, out); !e.empty()) return WriteResult{"copy failed: " + e, ""};
+        if (media::pinned::active()) {   // run by the job runner: below the pinned job folder, by handle
+            if (const auto e = detail::copyTree(staged, out); !e.empty()) return WriteResult{"copy failed: " + e, ""};
+        } else {                          // called directly: as before
+            std::error_code ec;
+            fs::copy(staged, out, fs::copy_options::recursive, ec);
+            if (ec) return WriteResult{"copy failed: " + ec.message(), ""};
+        }
         if (const auto d = media::diff(staged, out); !d.same())
             return WriteResult{"the copy does not match the rendered package (" + (d.ok ? std::string("files differ") : d.error) + ")", ""};
         return WriteResult{"", ui::SoundConversionModel::writtenSummary(out)};
