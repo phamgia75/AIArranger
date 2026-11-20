@@ -160,6 +160,31 @@ int main() {
         TEST("R8 leftover swapped before the rename: refused and renamed back", has(why, "changed between") && fs::is_regular_file(base / "out.INCOMPLETE/precious.txt") &&
              fs::is_regular_file(base / "out.INCOMPLETE.gone/mine.txt"));
     }
+    // R10: the parent does not exist yet; an ancestor is swapped for a link into a source before the missing folder is made
+    {
+        const fs::path base = root / "r10";
+        put(base / "src/keep.txt", "source");
+        fs::create_directories(base / "a");
+        const auto st = run(spec(base / "a/new/out", true, {base / "src"}), [&](Phase ph) { if (ph == Phase::Preview) swapForLink(base / "a", base / "src"); });
+        TEST("R10 missing parent below a swapped ancestor: job fails, no folder made in the source", st.phase == Phase::Failed && names(base / "src") == std::vector<std::string>{"keep.txt"});
+    }
+    // R11: the pinned parent is renamed INTO a source while the job runs (the handle still points at it)
+    {
+        const fs::path base = root / "r11";
+        put(base / "src/keep.txt", "source");
+        fs::create_directories(base / "p");
+        auto s = spec(base / "p/out", true, {base / "src"});
+        const auto real = s.writeAt;
+        s.writeAt = [&, real](int fd, const fs::path& out, const std::function<bool(double)>& pr) {
+            const auto r = real(fd, out, pr);
+            fs::rename(base / "p", base / "src/p");
+            return r;
+        };
+        const auto st = run(s, [](Phase) {});
+        TEST("R11 parent moved into a source during the job: fails, nothing published, no report", st.phase == Phase::Failed && !fs::exists(base / "src/p/out") &&
+             !fs::exists(base / "src/p/out.export.md") && st.reportPath.empty());
+    }
+
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
