@@ -116,7 +116,7 @@ public:
         render();
         std::weak_ptr<bool> alive = alive_;
         const auto dest = destCheck_->dest.string();   // the resolved path that was checked
-        enqueueJob(jobs::kit::importKit({}, dest, outputs_.getFullPathName().toStdString(), plan_->fingerprint),
+        enqueueJob(jobs::kit::importKit({}, dest, outputs_.getFullPathName().toStdString(), plan_->fingerprint, plan_->sha),
                    [this, alive, dest](const jobs::JobState& st) {
                        if (alive.expired()) return;
                        landed(st, dest);
@@ -217,7 +217,7 @@ private:
                       "\nL1 detail: " + juce::String::fromUTF8(st.level.l1.detail.c_str()) +
                       "\nL3 (the Pa5X itself): not recorded. " + jobs::kit::kLabel + ". Copy the folder to a USB stick by hand (Finder), then follow KIT.md.";
         else {
-            if (st.phase == P::Failed && st.reason.find("changed since") != std::string::npos) stale_ = true;
+            if (st.phase == P::Failed && (st.reason.find("changed since") != std::string::npos || st.reason.find("differs from the review") != std::string::npos)) stale_ = true;
             result_ = juce::String(st.phase == P::Cancelled ? "CANCELLED: " : "FAILED at " + juce::String(jobs::phaseName(st.stoppedAt)) + ": ") +
                       juce::String::fromUTF8(st.reason.c_str()) + "\nNothing was published" +
                       (st.phase == P::Cancelled ? "; a NAME.INCOMPLETE folder may remain (the job list says where)." : ".");

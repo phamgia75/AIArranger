@@ -1915,6 +1915,30 @@ int main() {
                          ks.stale() && !ks.createEnabled() && ks.text().contains("changed since") && !fs::exists(par / "Gone Kit") && !fs::exists(par / "Gone Kit.INCOMPLETE"));
                     put(src / "pkg-job/PACKAGE.sha256", savedSha);
                 }
+                {   // Codex r3 P2: the review carries the content hashes; the sheet treats the job's "differs from the review" refusal as a stale review
+                    ks.reset();
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    TEST("sheet: the review holds a SHA-256 for every planned file", ks.plan() && !ks.plan()->sha.empty() && ks.plan()->sha.size() == ks.plan()->files.size());
+                    ks.chooseDestination(juce::File(par.string()), "Hash Kit");
+                    sheetWait();
+                    const auto realEnqueue = ks.enqueueJob;
+                    ks.enqueueJob = [&](jobs::ExportSpec, std::function<void(const jobs::JobState&)> done) -> uint64_t {   // a queue whose job always refuses the content
+                        juce::MessageManager::callAsync([done] {
+                            jobs::JobState j;
+                            j.phase = jobs::Phase::Failed;
+                            j.stoppedAt = jobs::Phase::Run;
+                            j.reason = "a source file differs from the review (its content changed since): SOUNDS/pkg-job/x; review again; nothing was published";
+                            done(j);
+                        });
+                        return 77;
+                    };
+                    TEST("sheet: Create kit starts (fake queue)", ks.createKit());
+                    sheetWait();
+                    ks.enqueueJob = realEnqueue;
+                    TEST("sheet: a content-changed refusal marks the review stale: Create off, 'review again', nothing created",
+                         ks.stale() && !ks.createEnabled() && ks.createReason().contains("changed since the review") && !fs::exists(par / "Hash Kit"));
+                }
                 TEST("sheet: accessible names on the controls and the review pane", ks.createButton().getTitle() == "Step 7: create the kit" &&
                      ks.view().editor().getTitle() == "Pa5X Import Kit review" && ks.view().editor().isReadOnly());
                 fs::remove_all(bad);

@@ -698,6 +698,7 @@ struct ReviewPlan {
     std::vector<std::string> blocking;      // the kit cannot be made while this is non-empty
     std::vector<std::string> warnings;      // export reports beside outputs, not copied
     std::string fingerprint;                // planFingerprint of items+files ("" when nothing was planned)
+    std::map<std::string, std::string> sha; // kit path -> SHA-256 of the source bytes the review saw (the job refuses a copy that differs)
 };
 inline constexpr size_t kReviewMaxEntries = 10000;
 
@@ -736,6 +737,18 @@ inline ReviewPlan plan(const fs::path& outputsFolder, const std::function<bool()
         it.detail = e.empty() ? d : e;
         if (!e.empty()) r.blocking.push_back("FAILED: " + it.kitPath() + " (" + it.detail + ")");
     }
+    if (r.blocking.empty())   // bind the review to the bytes: size and mtime alone can be restored after a content swap
+        for (const auto& f : r.files) {
+            if (cancelled()) return r;
+            const auto& it = r.items[f.item];
+            bool stopped = false;
+            std::string err;
+            const auto sum = media::detail::sha256File(it.kind == Kind::Style ? it.source : it.source / f.from,
+                                                       [&](size_t) { return !keepGoing || keepGoing(); }, &stopped, &err);
+            if (stopped) { cancelled(); r = ReviewPlan{}; r.blocking.push_back("review cancelled; nothing planned"); return r; }
+            if (sum.empty() || !err.empty()) { r.blocking.push_back("cannot read " + f.to + " to hash it: " + err); break; }
+            r.sha[f.to] = sum;
+        }
     if (!r.items.empty()) r.fingerprint = planFingerprint(r.items, r.files);
     return r;
 }
@@ -783,7 +796,8 @@ inline std::atomic<size_t> lastListingThread{0};
 // The kit as an E6 export job. `inputs`: AIArranger outputs (package folders, KMP folders, Style .mid files). With
 // `outputsFolder` set instead, its visible entries are the inputs, listed by the job itself (off the UI thread), and the
 // folder is the job's source.
-inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::path outputsFolder = {}, std::string expectFingerprint = {}) {
+inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::path outputsFolder = {}, std::string expectFingerprint = {},
+                             std::map<std::string, std::string> expectSha = {}) {
     ExportSpec s;
     s.type = "Pa5X Import Kit (documented imports)";
     for (const auto& p : inputs) s.source += (s.source.empty() ? "" : ", ") + p.string();
@@ -794,6 +808,7 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
     auto items = std::make_shared<std::vector<Item>>();
     auto roots = std::make_shared<std::vector<std::shared_ptr<media::detail::Fd>>>();   // pinned per member, in item order
     auto files = std::make_shared<std::vector<Planned>>();
+    auto expected = std::make_shared<const std::map<std::string, std::string>>(std::move(expectSha));
     auto bytes = std::make_shared<uint64_t>(0);
     auto reports = std::make_shared<std::vector<std::string>>();   // export reports in the folder of outputs, not copied
     s.validate = [in, outputsFolder, items, roots, files, bytes, reports, expectFingerprint, kitName = media::folderPath(s.dest).filename().string()] {
@@ -844,7 +859,14 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
         return r;
     };
     // The runner makes the kit folder below its pinned job folder and hands it over open: no write resolves `out` (r3)
-    s.writeAt = [items, roots, files](int outFd, const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
+    s.writeAt = [items, roots, files, expected, srcs = s.sources](int outFd, const fs::path& out, const std::function<bool(double)>& progress) -> WriteResult {
+        // The staging folder is pinned by the runner; where it REALLY is must not be inside a source (a destination parent
+        // swapped for a link after the runner's by-path check would put it there): refuse before writing anything.
+#ifdef F_GETPATH
+        if (char real[PATH_MAX]; ::fcntl(outFd, F_GETPATH, real) == 0)
+            for (const auto& src : srcs)
+                if (jobs::detail::overlaps(real, src)) return {"refusing: the staged kit is inside a source (the destination changed during the run); nothing was published", ""};
+#endif
         media::sound::pkgio::FileSet set{out};
         set.pin(outFd);
         // Every file read once, from the pinned member folders without following a link, streamed and hashed as it is read
@@ -855,6 +877,11 @@ inline ExportSpec importKit(std::vector<fs::path> inputs, fs::path dest, fs::pat
             std::string sha;
             if (const auto e = copyPinned((*roots)[f.item]->v, f.from, set, f.to, &n, &sha); !e.empty())
                 return {"cannot copy " + (*items)[f.item].kitPath() + ": " + e, ""};
+            if (!expected->empty()) {   // the bytes copied are the bytes the review hashed
+                const auto want = expected->find(f.to);
+                if (want == expected->end() || want->second != sha)
+                    return {"a source file differs from the review (its content changed since): " + f.to + "; review again; nothing was published", ""};
+            }
             set.want[f.to] = {n, sha};
         }
         // The copy against the SHA-256 of the bytes read from the sources (exactly these files, nothing extra) ...

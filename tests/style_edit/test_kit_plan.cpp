@@ -9,6 +9,7 @@
 #include "media/sound/korg_kmp_writer.h"
 #include "media/sound/package_writer.h"
 #include <cstdio>
+#include <fcntl.h>
 #include <numeric>
 #include <unistd.h>
 
@@ -178,6 +179,61 @@ int main() {
         for (const auto& e : fs::directory_iterator(parent)) fs::remove_all(e.path());
     }
 
+    // ── S2b (Codex r3 P2): the review is bound to the bytes, not only to size and mtime ──
+    {
+        const auto base = k::plan(out);
+        bool shaOk = base.sha.size() == base.files.size() && !base.sha.empty();
+        for (const auto& f : base.files) {
+            bool c = false;
+            std::string er;
+            const auto& it = base.items[f.item];
+            const fs::path srcFile = it.kind == k::Kind::Style ? it.source : it.source / f.from;
+            shaOk &= base.sha.count(f.to) == 1 && base.sha.at(f.to) == media::detail::sha256File(srcFile, [](size_t) { return true; }, &c, &er);
+        }
+        TEST("S2b plan records the SHA-256 of every planned source file (matches an independent hash)", shaOk);
+        const auto w = out / "Waltz.mid";
+        const auto orig = slurp(w);
+        const auto mt = fs::last_write_time(w);
+        // a single-bit change the Style reader still accepts (so the swap is only caught by the content check)
+        auto swapped = orig;
+        bool found = false;
+        for (size_t i = 0; i < orig.size() && !found; ++i) {
+            swapped = orig;
+            swapped[i] = char(swapped[i] ^ 0x01);
+            put(w, swapped);
+            std::string d;
+            found = k::checkMember(k::Kind::Style, w, &d).empty() && swapped != orig;
+        }
+        TEST("S2b (setup) a one-bit change exists that the Style reader still accepts", found);
+        put(w, swapped);
+        fs::last_write_time(w, mt);   // same size, same modification time, different bytes
+        const auto st = run(k::importKit({}, parent / "Kit SameSize", out, base.fingerprint, base.sha));
+        TEST("S2b a same-size, same-mtime content swap passes the stat fingerprint but is refused by the content check, nothing published",
+             st.phase == Phase::Failed && has(st.reason, "differs from the review") && !fs::exists(parent / "Kit SameSize"));
+        put(w, orig);
+        fs::last_write_time(w, mt);
+        const auto good = run(k::importKit({}, parent / "Kit SameSizeOk", out, base.fingerprint, base.sha));
+        TEST("S2b the unchanged sources with the content hashes still make the kit", good.phase == Phase::Done);
+        fs::remove_all(parent / "Kit SameSizeOk");
+        for (const auto& e : fs::directory_iterator(parent)) fs::remove_all(e.path());
+        TEST("S2b no hashes given: the job behaves as before", run(k::importKit({}, parent / "Kit NoSha", out, base.fingerprint)).phase == Phase::Done);
+        fs::remove_all(parent / "Kit NoSha");
+        for (const auto& e : fs::directory_iterator(parent)) fs::remove_all(e.path());
+    }
+    // ── Codex r3 P1 mitigation: a staged kit that turns out to be inside a source is refused (the runner is unchanged) ──
+    {
+        auto spec = k::importKit({}, parent / "Kit Inside", out);
+        std::string v = spec.validate ? spec.validate() : "";
+        std::vector<std::string> notes;
+        uint64_t sb = 0;
+        if (spec.dependencies) spec.dependencies(notes, sb);
+        const fs::path insideSource = out / "AIA Demo Organ";
+        const int fd = ::open(insideSource.c_str(), O_RDONLY | O_DIRECTORY);
+        const auto wr = spec.writeAt(fd, insideSource, [](double) { return true; });
+        ::close(fd);
+        TEST("P1 mitigation: writeAt refuses when the pinned staging folder is inside a source", v.empty() && has(wr.error, "inside a source"));
+        TEST("P1 mitigation: nothing was written into the source", snapshot(out) == outBefore);
+    }
     // ── S3: the destination check ──
     {
         const auto before = snapshot(parent);
