@@ -42,6 +42,8 @@ public:
         };
         create_.onClick = [this] { createKit(); };
         name_.onTextChange = [this] { render(); };
+        name_.onEscapeKey = [this] { dismissStep(); };   // the editor would otherwise swallow Esc
+        setWantsKeyboardFocus(true);
         name_.onReturnKey = name_.onFocusLost = [this] { if (parentSet_ && name_.getText() != checkedName_) chooseDestination(parent_, name_.getText()); };
         for (juce::Component* c : {(juce::Component*)&chooseOutputs_, (juce::Component*)&chooseDest_, (juce::Component*)&name_, (juce::Component*)&create_,
                                    (juce::Component*)&reason_, (juce::Component*)&view_})
@@ -123,6 +125,38 @@ public:
     }
 
     void stopWork() { if (stop_) stop_->store(true); }   // quit: a running review stops early
+
+    // Esc dismisses the newest step without writing anything: a running destination check or a chosen destination first,
+    // then a running review or the review itself. It never quits the app and never cancels a running kit job (the job
+    // list's Cancel Job does that, with the runner's own NAME.INCOMPLETE handling). true = something was dismissed.
+    bool dismissStep() {
+        if (creating_) {
+            result_ = "Esc does not stop a running kit job: use Cancel Job in the job list (the runner leaves only NAME.INCOMPLETE).";
+            render();
+            return true;
+        }
+        if (checking_ || parentSet_) {
+            ++destGen_;
+            checking_ = parentSet_ = false;
+            destCheck_.reset();
+            checkedName_ = {};
+            name_.setText({}, juce::dontSendNotification);
+            render();
+            return true;
+        }
+        if (reviewing_ || plan_ || result_.isNotEmpty()) {
+            stopWork();
+            ++reviewGen_;
+            reviewing_ = stale_ = false;
+            plan_.reset();
+            result_.clear();
+            outputs_ = juce::File();
+            render();
+            return true;
+        }
+        return false;
+    }
+    bool keyPressed(const juce::KeyPress& key) override { return key == juce::KeyPress::escapeKey && dismissStep(); }
     bool busy() const { return reviewing_ || checking_ || creating_; }
 
     // "" = Create kit is available; otherwise the reason, shown inline and as the button's tooltip.
@@ -189,6 +223,8 @@ private:
                       (st.phase == P::Cancelled ? "; a NAME.INCOMPLETE folder may remain (the job list says where)." : ".");
         }
         render();
+        // whatever happened to the destination (a kit now stands there, or it changed under us), the old "ok" is stale: check again
+        if (parentSet_ && plan_ && !stale_) chooseDestination(parent_, checkedName_);
     }
 
     void render() {

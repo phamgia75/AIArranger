@@ -1714,6 +1714,207 @@ int main() {
                     TEST("sheet: after the review the default name is the outputs folder's name + ' Pa5X Kit', checked",
                          ks.kitName() == "sheet-src Pa5X Kit" && ks.destination() && ks.destination()->ok && ks.createEnabled());
                 }
+                {   // B: Esc dismisses a review / destination step without writing; it never cancels a running job
+                    const auto esc = juce::KeyPress(juce::KeyPress::escapeKey);
+                    const auto srcNow = tree(src), parNow = tree(par);
+                    ks.reset();
+                    TEST("sheet: Esc with nothing to dismiss is not consumed (it can never quit or do anything)", !ks.keyPressed(esc));
+                    ks.review(juce::File(src.string()));
+                    TEST("sheet: Esc during a running review dismisses it", ks.busy() && ks.keyPressed(esc) && !ks.plan());
+                    sheetWait();
+                    TEST("sheet: the dismissed review never lands (no plan, Create kit off at step 1)", !ks.plan() && !ks.createEnabled() && ks.createReason().startsWith("Step 1"));
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    ks.chooseDestination(juce::File(par.string()), "Esc Kit");
+                    TEST("sheet: Esc during a running destination check dismisses it", ks.busy() && ks.keyPressed(esc) && !ks.destination());
+                    sheetWait();
+                    TEST("sheet: the dismissed check never lands; the review is kept", !ks.destination() && ks.plan() && ks.createReason().startsWith("Step 5"));
+                    ks.chooseDestination(juce::File(par.string()), "Esc Kit");
+                    sheetWait();
+                    TEST("sheet: (setup) review and destination accepted", ks.createEnabled());
+                    TEST("sheet: first Esc dismisses the destination step, keeps the review", ks.keyPressed(esc) && ks.plan() && !ks.destination() && !ks.createEnabled() &&
+                         ks.createReason().startsWith("Step 5") && ks.kitName().isEmpty());
+                    TEST("sheet: second Esc dismisses the review", ks.keyPressed(esc) && !ks.plan() && ks.createReason().startsWith("Step 1"));
+                    TEST("sheet: Esc in the kit name field dismisses too", [&] {
+                        ks.review(juce::File(src.string()));
+                        sheetWait();
+                        ks.chooseDestination(juce::File(par.string()), "Esc Kit");
+                        sheetWait();
+                        ks.nameField().onEscapeKey();
+                        return !ks.destination() && ks.plan();
+                    }());
+                    TEST("sheet: Esc never wrote anything (sources and destination parent unchanged, no kit, no INCOMPLETE)",
+                         tree(src) == srcNow && tree(par) == parNow && !fs::exists(par / "Esc Kit") && !fs::exists(par / "Esc Kit.INCOMPLETE"));
+                    // a running job is NOT cancelled by Esc: it finishes as the runner would have finished it
+                    ks.reset();
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    ks.chooseDestination(juce::File(par.string()), "Esc Job Kit");
+                    sheetWait();
+                    const bool started = ks.createKit();
+                    const bool consumed = ks.keyPressed(esc);
+                    sheetWait();
+                    TEST("sheet: Esc while a kit job runs says so and does not cancel it: the kit is published as usual",
+                         started && consumed && fs::is_directory(par / "Esc Job Kit/SOUNDS/pkg-job") && !fs::exists(par / "Esc Job Kit.INCOMPLETE") &&
+                         ks.text().contains("DONE:"));
+                    fs::remove_all(par / "Esc Job Kit");
+                }
+                if (const char* realOut = std::getenv("AIARR_KIT_REAL_OUTPUTS")) {   // BL-E1 real data: an authorized folder of generated packages, read-only
+                    const fs::path real = realOut, rpar = root / "real-dest";
+                    fs::create_directories(rpar);
+                    const auto realBefore = tree(real);
+                    ks.reset();
+                    ks.review(juce::File(real.string()));
+                    sheetWait();
+                    const auto rp = ks.plan();
+                    std::printf("  info: real data: %zu member(s), %llu bytes, %zu blocking\n", rp ? rp->items.size() : size_t(0),
+                                (unsigned long long)(rp ? rp->bytes : 0), rp ? rp->blocking.size() : size_t(0));
+                    TEST("real: the review reads the authorized folder, every member STRUCTURALLY VALID, nothing blocking",
+                         rp && !rp->items.empty() && rp->blocking.empty() &&
+                         std::all_of(rp->items.begin(), rp->items.end(), [](const jobs::kit::Item& i) { return i.status == jobs::kit::kValid; }));
+                    TEST("real: the review wrote nothing and the inputs are byte-identical", tree(real) == realBefore && fs::is_empty(rpar));
+                    ks.chooseDestination(juce::File(rpar.string()), "Real Kit");
+                    sheetWait();
+                    TEST("real: destination accepted, Create kit available", ks.createEnabled());
+                    TEST("real: Create kit starts the job", ks.createKit());
+                    sheetWait();
+                    const fs::path rk = rpar / "Real Kit";
+                    TEST("real: the kit is published, labelled, L1 passed, L3 not recorded", fs::is_directory(rk) && !fs::exists(rpar / "Real Kit.INCOMPLETE") &&
+                         ks.text().contains("DONE:") && ks.text().contains("L3 (the Pa5X itself): not recorded") && fs::is_regular_file(rk / "KIT.md") &&
+                         fs::is_regular_file(rk / "manifest.json") && fs::is_regular_file(rk / "PACKAGE.sha256"));
+                    // independent re-check of the kit: every PACKAGE.sha256 line against the bytes, and nothing extra
+                    {
+                        std::ifstream f(rk / "PACKAGE.sha256");
+                        std::string line;
+                        size_t lines = 0, bad = 0;
+                        std::set<std::string> listed;
+                        while (std::getline(f, line)) {
+                            if (line.empty() || line[0] == '#') continue;
+                            const auto at = line.find("  ");
+                            if (at == std::string::npos) { ++bad; continue; }
+                            const auto want = line.substr(0, at), rel = line.substr(at + 2);
+                            bool c = false;
+                            std::string er;
+                            listed.insert(rel);
+                            ++lines;
+                            if (media::detail::sha256File(rk / rel, [](size_t) { return true; }, &c, &er) != want) ++bad;
+                        }
+                        size_t onDisk = 0;
+                        for (const auto& e : fs::recursive_directory_iterator(rk)) onDisk += e.is_regular_file() && fs::relative(e.path(), rk) != "PACKAGE.sha256";   // the members' own PACKAGE.sha256 files are listed
+                        std::printf("  info: real data: PACKAGE.sha256 lists %zu files, %zu bad, %zu on disk\n", lines, bad, onDisk);
+                        TEST("real: PACKAGE.sha256 matches every byte of the kit and lists every file", lines > 0 && bad == 0 && lines == onDisk);
+                    }
+                    {   // every member is a byte copy of its source
+                        bool same = true;
+                        for (const auto& it : rp->items) {
+                            bool c = false;
+                            std::string er;
+                            const auto a = rk / it.kitPath(), b = real / it.name;
+                            same &= fs::is_directory(b) ? tree(a) == tree(b)
+                                                        : media::detail::sha256File(a, [](size_t) { return true; }, &c, &er) == media::detail::sha256File(b, [](size_t) { return true; }, &c, &er);
+                        }
+                        TEST("real: every member is a byte copy of its source", same);
+                    }
+                    {   // manifest.json parses and names every member at its kit path
+                        std::ifstream f(rk / "manifest.json");
+                        const std::string text{std::istreambuf_iterator<char>(f), {}};
+                        jobs::kit::Json j;
+                        const auto pe = jobs::kit::parseJson(text, &j);
+                        bool all = pe.empty();
+                        for (const auto& it : rp->items) all &= text.find(it.kitPath()) != std::string::npos;
+                        TEST("real: manifest.json parses and names every member", all);
+                    }
+                    {   // the kit's own verifier, and a tamper test on a scratch copy of the kit
+                        std::string vt;
+                        TEST("real: the kit verifier accepts the kit", jobs::kit::verifyKit(rk, &rp->items, &vt).empty());
+                        const fs::path tk = rpar / "Tampered Kit";
+                        fs::copy(rk, tk, fs::copy_options::recursive);
+                        for (const auto& e : fs::recursive_directory_iterator(tk))
+                            if (e.is_regular_file() && e.path().filename() != "PACKAGE.sha256" && e.path().filename() != "KIT.md" && e.path().filename() != "manifest.json" && fs::file_size(e.path()) > 8) {
+                                std::fstream f(e.path(), std::ios::in | std::ios::out | std::ios::binary);
+                                f.seekg(4);
+                                const char c = char(f.get());
+                                f.seekp(4);
+                                f.put(char(c ^ 0x5a));
+                                break;
+                            }
+                        TEST("real: a flipped byte in a copy of the kit is caught by the verifier", !jobs::kit::verifyKit(tk, &rp->items, &vt).empty());
+                        fs::remove_all(tk);
+                    }
+                    TEST("real: the inputs are byte-identical after the whole workflow", tree(real) == realBefore);
+                    // re-running onto the same name is refused, never overwritten
+                    const auto kitHash = tree(rk);
+                    ks.chooseDestination(juce::File(rpar.string()), "Real Kit");
+                    sheetWait();
+                    TEST("real: a second kit with the same name is refused at step 5 and the first is untouched", !ks.createEnabled() && ks.text().contains("already exists") && tree(rk) == kitHash);
+                    if (const char* neg = std::getenv("AIARR_KIT_REAL_NEG")) {   // real KMP files without their KSF samples: refused, named, nothing written
+                        const fs::path negp = neg;
+                        const auto negBefore = tree(negp);
+                        ks.reset();
+                        ks.review(juce::File(negp.string()));
+                        sheetWait();
+                        std::printf("  info: real KMP negative: %zu blocking line(s)\n", ks.plan() ? ks.plan()->blocking.size() : size_t(0));
+                        TEST("real KMP without KSF: the review blocks Create kit, naming what is wrong", ks.plan() && !ks.plan()->blocking.empty() && !ks.createEnabled() &&
+                             ks.text().contains("BLOCKING"));
+                        TEST("real KMP without KSF: nothing was written and the inputs are byte-identical", tree(negp) == negBefore);
+                    }
+                    fs::remove_all(rpar);
+                }
+                {   // C: reviewed and executed destination are the same path; a destination or source that changes after the check invalidates the run
+                    fs::create_directories(par / "sub");
+                    fs::create_directory_symlink(par, root / "par-link");
+                    ks.reset();
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    ks.chooseDestination(juce::File((root / "par-link").string()), "Link Kit");
+                    sheetWait();
+                    TEST("sheet: a destination folder that is itself a link is refused", !ks.createEnabled() && ks.text().contains("is a link"));
+                    ks.chooseDestination(juce::File((root / "par-link" / "sub").string()), "Link Kit");
+                    sheetWait();
+                    const auto resolved = ks.destination() ? ks.destination()->dest : fs::path();
+                    TEST("sheet: a destination reached through a link is resolved once: the checked, shown and written path is the real one",
+                         ks.createEnabled() && resolved == fs::weakly_canonical(par / "sub") / "Link Kit" && !ks.text().contains("par-link") &&
+                         ks.text().contains(juce::String(resolved.string())));
+                    TEST("sheet: Create kit through the linked ancestor starts", ks.createKit());
+                    sheetWait();
+                    TEST("sheet: the kit is where the review said (the resolved destination), nothing under the link's own name",
+                         fs::is_directory(resolved / "SOUNDS/pkg-job") && ks.text().contains("DONE: " + juce::String(resolved.string())) && fs::is_directory(par / "sub/Link Kit"));
+                    fs::remove_all(par / "sub");
+                    fs::remove(root / "par-link");
+                    // the destination appears after it was checked: the job refuses at its own Destination phase, the newcomer is untouched
+                    ks.reset();
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    ks.chooseDestination(juce::File(par.string()), "Race Kit");
+                    sheetWait();
+                    TEST("sheet: (setup) Race Kit accepted", ks.createEnabled());
+                    put(par / "Race Kit/keep.txt", "someone else's file");
+                    TEST("sheet: Create kit starts (the sheet cannot know)", ks.createKit());
+                    sheetWait();
+                    std::ifstream keep(par / "Race Kit/keep.txt");
+                    const std::string keepText{std::istreambuf_iterator<char>(keep), {}};
+                    TEST("sheet: a destination created after the check is refused by the job; nothing overwritten, no INCOMPLETE, the sheet says FAILED",
+                         keepText == "someone else's file" && !fs::exists(par / "Race Kit/KIT.md") && !fs::exists(par / "Race Kit.INCOMPLETE") &&
+                         ks.text().contains("FAILED at") && !ks.createEnabled());
+                    fs::remove_all(par / "Race Kit");
+                    // a source file removed after the review: refused as changed, and the page asks for a new review
+                    ks.reset();
+                    ks.review(juce::File(src.string()));
+                    sheetWait();
+                    ks.chooseDestination(juce::File(par.string()), "Gone Kit");
+                    sheetWait();
+                    std::string savedSha;
+                    {
+                        std::ifstream f(src / "pkg-job/PACKAGE.sha256");
+                        savedSha.assign(std::istreambuf_iterator<char>(f), {});
+                    }
+                    fs::remove(src / "pkg-job/PACKAGE.sha256");
+                    TEST("sheet: Create kit after a source file was removed starts", ks.createKit());
+                    sheetWait();
+                    TEST("sheet: a removed source file invalidates the review: refused as changed, stale, nothing published",
+                         ks.stale() && !ks.createEnabled() && ks.text().contains("changed since") && !fs::exists(par / "Gone Kit") && !fs::exists(par / "Gone Kit.INCOMPLETE"));
+                    put(src / "pkg-job/PACKAGE.sha256", savedSha);
+                }
                 TEST("sheet: accessible names on the controls and the review pane", ks.createButton().getTitle() == "Step 7: create the kit" &&
                      ks.view().editor().getTitle() == "Pa5X Import Kit review" && ks.view().editor().isReadOnly());
                 fs::remove_all(bad);
