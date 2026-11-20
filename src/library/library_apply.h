@@ -321,10 +321,9 @@ inline ApplyResult applyPlan(const Library& A, const Library& B, const std::vect
     // both source roots are opened once; every source file is read through them, never through a pathname (Codex E8 r2)
     const detail::Fd tr(::open(T.root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)), sr(::open(S.root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if (tr.v < 0 || sr.v < 0) return {"cannot open " + (tr.v < 0 ? T.root : S.root) + " (missing, or a link: links are never followed)", ""};
-    std::error_code ec;
-    if (!fs::create_directory(out, ec)) return {"cannot create " + out.string() + (ec ? ": " + ec.message() : ""), ""};
+    if (!media::makeFolder(out)) return {"cannot create " + out.string(), ""};
     // the staging root is opened once; every write below goes through descriptors from it, never through a pathname
-    const detail::Fd root(::open(out.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const detail::Fd root(media::openFolder(out, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if (root.v < 0) return {"cannot open " + out.string(), ""};
     std::sort(ls.dirs.begin(), ls.dirs.end());   // parents before children
     for (const auto& d : ls.dirs) {

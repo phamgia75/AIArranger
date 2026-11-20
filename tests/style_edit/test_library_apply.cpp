@@ -81,6 +81,23 @@ int main() {
         const fs::path dest = out / library::outputName(*B, "T1");
         TEST("output name keeps the .KST suffix", dest.filename() == "B edited T1.KST");
         const auto st = run(libraryApply(A, B, plan, dest));
+        {   // path race (HIGH): the output's parent is swapped for a link to a trap folder while the writer runs
+            put(out / "trap/keep.txt", "trap");
+            fs::create_directories(out / "rp");
+            auto racy = libraryApply(A, B, plan, out / "rp" / library::outputName(*B, "R"));
+            racy.sources.push_back(out / "trap");
+            const auto realWrite = racy.write;
+            racy.write = [&, realWrite](const fs::path& o, const std::function<bool(double)>& pr) {
+                fs::rename(out / "rp", out / "rp.moved");
+                fs::create_directory_symlink(out / "trap", out / "rp");
+                return realWrite(o, pr);
+            };
+            const auto rs = run(racy);
+            size_t inTrap = 0;
+            for (const auto& e : fs::directory_iterator(out / "trap")) { (void)e; ++inTrap; }
+            TEST("path race: parent swapped during the apply writer: fails, the trap folder gains nothing, sources untouched",
+                 rs.phase == Phase::Failed && inTrap == 1 && untouched());
+        }
         TEST("KST execution: done, published, nothing left over", st.phase == Phase::Done && fs::is_directory(dest) && !fs::exists(media::incompletePath(dest)));
         const auto t = tree(dest);
         TEST("copy: A's Ballad is in B's bank USER03, which the swap moved to USER01",

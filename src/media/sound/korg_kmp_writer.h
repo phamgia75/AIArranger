@@ -182,8 +182,8 @@ inline std::string writeKorgFolder(const Instrument& in, const std::filesystem::
     std::vector<KorgFile> kf;
     std::string lost;
     if (const auto e = korgFiles(in, &kf, &lost); !e.empty()) return fail("refusing: " + e);
-    fs::create_directories(dest.parent_path(), ec);
-    if (!fs::create_directory(out, ec)) return fail("cannot create " + out.string());
+    media::makeFolders(dest.parent_path());
+    if (!media::makeFolder(out)) return fail("cannot create " + out.string());
     pkgio::FileSet files{out};
     for (const auto& f : kf) files.save(f.name, f.bytes);
 
