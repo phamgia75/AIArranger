@@ -99,6 +99,28 @@ inline Conversion drumConversion(const snd::DrumKit& kit, const std::vector<std:
     c.push_back({"MISSING", "Drum Kit filter/envelope/effects edits: set by hand on the Pa5X"});
     return c;
 }
+// Copies the folder `from` to the NEW folder `to`: every folder and regular file is created through media::makeFolder /
+// createNewFile (below the runner's pinned job folder when one is installed, exclusive, no link followed); anything that
+// is not a plain folder or file is refused. "" = copied.
+inline std::string copyTree(const fs::path& from, const fs::path& to) {
+    if (!media::makeFolder(to)) return "cannot create " + to.string();
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(from, ec), end; !ec && it != end; it.increment(ec)) {
+        const auto st = it->symlink_status(ec);
+        const fs::path rel = fs::relative(it->path(), from, ec), dst = to / rel;
+        if (fs::is_directory(st)) { if (!media::makeFolder(dst)) return "cannot create " + dst.string(); continue; }
+        if (!fs::is_regular_file(st)) return "refusing: " + it->path().string() + " is not a plain file or folder";
+        const int in = ::open(it->path().c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        const int out = media::createNewFile(dst);
+        bool ok = in >= 0 && out >= 0;
+        char buf[1 << 16];
+        for (ssize_t n; ok && (n = ::read(in, buf, sizeof buf)) > 0;) ok = ::write(out, buf, size_t(n)) == n;
+        if (in >= 0) ::close(in);
+        if (out >= 0) ok &= ::close(out) == 0;
+        if (!ok) return "cannot copy " + it->path().string() + " to " + dst.string();
+    }
+    return ec ? ec.message() : "";
+}
 }  // namespace detail
 
 // Sound package (SF2 + TXPROG + WAV), the Convert Sound Generate step.
@@ -527,9 +549,7 @@ inline ExportSpec stagedPackage(fs::path staged, fs::path dest) {
     s.validate = [staged] { return detail::isDir(staged) ? "" : "refusing: the rendered package " + staged.string() + " is gone (render again)"; };
     s.preview = [staged] { return listFiles(staged); };
     s.write = [staged](const fs::path& out, auto&) {
-        std::error_code ec;
-        fs::copy(staged, out, fs::copy_options::recursive, ec);
-        if (ec) return WriteResult{"copy failed: " + ec.message(), ""};
+        if (const auto e = detail::copyTree(staged, out); !e.empty()) return WriteResult{"copy failed: " + e, ""};
         if (const auto d = media::diff(staged, out); !d.same())
             return WriteResult{"the copy does not match the rendered package (" + (d.ok ? std::string("files differ") : d.error) + ")", ""};
         return WriteResult{"", ui::SoundConversionModel::writtenSummary(out)};

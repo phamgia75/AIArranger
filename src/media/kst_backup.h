@@ -166,7 +166,7 @@ inline BackupResult backupKst(const std::filesystem::path& source, const std::fi
     const fs::path work = parent / workName, man = parent / manName;
 
     // Pin the destination's parent and check it through the handle.
-    Fd parentFd(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    Fd parentFd(media::openFolder(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC));   // below the job folder when a runner pinned one
     if (parentFd.v < 0) { r.message = "refusing: the folder " + parent.string() + " does not exist"; return r; }
     const std::string realParent = detail::fdPath(parentFd.v);
     if (realParent.empty() || realParent.rfind("/Volumes/", 0) == 0 || realParent == "/Volumes") {

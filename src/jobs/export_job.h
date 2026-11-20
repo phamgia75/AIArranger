@@ -531,6 +531,10 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         if (outDir.v < 0 || ::fstat(outDir.v, &staging) != 0) return stop(Phase::Failed, "cannot open " + staged.string() + kept());
         wr = spec.writeAt(outDir.v, stagedReal, progress);
     } else {
+        // The legacy writer takes a pathname: it gets the pinned job folder (thread-local), so everything it creates, renames or
+        // writes below `stagedReal` goes through the open folder and any path outside it is refused (media::pinned).
+        const media::pinned::Root pinnedWork{workFd.v, (realParent / workName).string()};
+        const media::pinned::Scope scope(&pinnedWork);
         wr = spec.write(stagedReal, progress);
         if (wr.error.empty() && ::fstatat(workFd.v, leaf.c_str(), &staging, AT_SYMLINK_NOFOLLOW) != 0)
             return stop(Phase::Failed, "the writer reported success but wrote nothing" + kept());
