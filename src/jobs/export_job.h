@@ -241,13 +241,10 @@ inline bool overlaps(const fs::path& a, const fs::path& b) {
 }
 inline bool sameFile(const struct stat& a, const struct stat& b) { return a.st_dev == b.st_dev && a.st_ino == b.st_ino; }
 // Renames `a` (in `from`) to `b` (in `to`) and never replaces an entry.
-inline bool moveNoReplace(int from, const std::string& a, int to, const std::string& b) {
-#ifdef __APPLE__
-    return ::renameatx_np(from, a.c_str(), to, b.c_str(), RENAME_EXCL) == 0;
-#else
-    return ::renameat2(from, a.c_str(), to, b.c_str(), RENAME_NOREPLACE) == 0;
-#endif
-}
+inline bool moveNoReplace(int from, const std::string& a, int to, const std::string& b) { return media::renameAtNoReplace(from, a, to, b); }
+// Test seam (never set in production): called at named points of a job so a test can play the hostile process.
+inline std::function<void(const char*)>& testHook() { static std::function<void(const char*)> h; return h; }
+inline void hook(const char* where) { if (testHook()) testHook()(where); }
 // The first source that the open folder `fd` is, or lies inside (device + inode, walking ".."): independent of any path, so a
 // folder that is renamed into a source after it was opened is still found. "" = none.
 inline std::string insideSource(int fd, const std::vector<fs::path>& sources) {
@@ -298,9 +295,9 @@ inline std::string writeNewAt(int dirFd, const std::string& name, const std::str
     struct stat mine {};
     const bool ok = ::fstat(fd, &mine) == 0 && ::write(fd, bytes.data(), bytes.size()) == ssize_t(bytes.size());
     const bool closed = ::close(fd) == 0;
-    const auto dropIfMine = [&] { struct stat n {}; if (::fstatat(dirFd, tmp.c_str(), &n, AT_SYMLINK_NOFOLLOW) == 0 && sameFile(n, mine)) ::unlinkat(dirFd, tmp.c_str(), 0); };
-    if (!closed || !ok) { dropIfMine(); return "cannot write " + tmp; }
-    if (!moveNoReplace(dirFd, tmp, dirFd, name)) { dropIfMine(); return "refusing: " + name + " appeared while writing"; }
+    const auto dropIfMine = [&]() -> std::string { const auto why = media::removeOwned(dirFd, tmp, mine, false); return why.empty() ? "" : " (" + why + ")"; };
+    if (!closed || !ok) return "cannot write " + tmp + dropIfMine();
+    if (!moveNoReplace(dirFd, tmp, dirFd, name)) return "refusing: " + name + " appeared while writing" + dropIfMine();
     return "";
 }
 // Names in the folder `dirFd` (a fresh open of it: the caller's offset is not shared), sorted. Read-only.
@@ -634,6 +631,7 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         if (!move(workFd.v, n, parentFd.v, n)) return failPublish("refusing: " + (dest.parent_path() / n).string() + " appeared while writing");
         moved.push_back(n);
     }
+    detail::hook("afterSideMoves");
     // shortcut: the identity is checked right before the rename, but macOS has no rename-by-fd, so a swap in the window
     // between this check and renameat is caught only after it (the published entry is compared again and moved back).
     if (!identity()) return failPublish("refusing: the staged output changed after it was verified");
@@ -644,11 +642,16 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
         return failPublish("refusing: the output at " + dest.string() + " is not the verified one" + (back ? "; it was moved back" : "; it could NOT be moved back and stays at that name"));
     }
     // The job's own marker file and its now empty folder (rmdir: refused when anything else is in it)
-    {   // only the marker this job wrote: a marker swapped for another entry is left alone (the rmdir below then keeps the folder)
-        struct stat mk {};
-        if (::fstatat(workFd.v, kJobMarker, &mk, AT_SYMLINK_NOFOLLOW) == 0 && detail::sameFile(mk, markerId)) ::unlinkat(workFd.v, kJobMarker, 0);
-    }
-    if (::unlinkat(parentFd.v, workName.c_str(), AT_REMOVEDIR) != 0) st.warnings.push_back("could not remove the empty job folder " + work.string());
+    // Cleanup removes only entries proven to be this job's (media::removeOwned): a substituted marker or folder is never
+    // unlinked; it is kept and reported, and the leftover stays for the user.
+    detail::hook("beforeMarkerCleanup");
+    if (const auto why = media::removeOwned(workFd.v, kJobMarker, markerId, false); !why.empty())
+        st.warnings.push_back("the job marker in " + work.string() + " was not removed: " + why);
+    detail::hook("beforeWorkRemoval");
+    struct stat workId {};
+    if (::fstat(workFd.v, &workId) != 0) st.warnings.push_back("could not identify the job folder " + work.string() + "; it was kept");
+    else if (const auto why = media::removeOwned(parentFd.v, workName, workId, true); !why.empty())
+        st.warnings.push_back("the job folder " + work.string() + " was not removed: " + why);
 
     st.phase = Phase::Report;   // published: from here on the job runs to its end
     {

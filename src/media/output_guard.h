@@ -1,6 +1,7 @@
 #ifndef AI_ARRANGER_MEDIA_OUTPUT_GUARD_H
 #define AI_ARRANGER_MEDIA_OUTPUT_GUARD_H
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
@@ -11,6 +12,40 @@
 #include <vector>
 
 namespace ai_arranger::media {
+
+// Renames `a` (in `from`) to `b` (in `to`); never replaces an entry.
+inline bool renameAtNoReplace(int from, const std::string& a, int to, const std::string& b) {
+#ifdef __APPLE__
+    return ::renameatx_np(from, a.c_str(), to, b.c_str(), RENAME_EXCL) == 0;
+#else
+    return ::renameat2(from, a.c_str(), to, b.c_str(), RENAME_NOREPLACE) == 0;
+#endif
+}
+// Ownership-proven cleanup: removes the entry `name` below `dirFd` ONLY when it is still the exact entry this job created
+// (`mine`: device + inode, taken from its own fd/stat). POSIX has no unlink-by-inode, so the entry is first renamed (no
+// replace) to a private name, re-identified there, and only then removed; if it is not the job's entry, or any step fails,
+// nothing is deleted: the entry is put back (or stays under the private name) and the reason is returned so it can be
+// reported. "" = removed. A folder is removed with rmdir (refused when not empty, then put back). The remaining window
+// is a swap of the private, never-announced name between the re-identification and the unlink.
+inline std::string removeOwned(int dirFd, const std::string& name, const struct stat& mine, bool folder) {
+    static std::atomic<unsigned> counter{0};
+    const auto same = [&](const struct stat& s) { return s.st_dev == mine.st_dev && s.st_ino == mine.st_ino; };
+    struct stat now {};
+    if (::fstatat(dirFd, name.c_str(), &now, AT_SYMLINK_NOFOLLOW) != 0 || !same(now))
+        return "kept " + name + ": it is not the entry this job created (nothing was removed)";
+    const std::string hold = name + ".removing-" + std::to_string(::getpid()) + "-" + std::to_string(counter++);
+    if (!renameAtNoReplace(dirFd, name, dirFd, hold)) return "kept " + name + ": it could not be set aside for removal";
+    struct stat held {};
+    if (::fstatat(dirFd, hold.c_str(), &held, AT_SYMLINK_NOFOLLOW) != 0 || !same(held)) {
+        const bool back = renameAtNoReplace(dirFd, hold, dirFd, name);
+        return "kept " + (back ? name : hold) + ": the entry that was set aside is not the one this job created (nothing was removed)";
+    }
+    if (::unlinkat(dirFd, hold.c_str(), folder ? AT_REMOVEDIR : 0) != 0) {
+        const bool back = renameAtNoReplace(dirFd, hold, dirFd, name);
+        return "kept " + (back ? name : hold) + (folder ? ": it is not empty" : ": it could not be removed");
+    }
+    return "";
+}
 
 // ── Pinned root (export runner, path-race remediation) ───────────────────────────────────────────────────────────────
 // The export runner hands a legacy path-taking writer a pathname below the job's pinned folder and installs that folder
@@ -110,13 +145,14 @@ inline int createFile(const std::filesystem::path& p) {
     ::close(d);
     return fd;
 }
-// Removes the file `p` only (never a folder), below the root.
-inline void unlinkFile(const std::filesystem::path& p) {
+// Removes the file `p` only when it is still the file `mine` (see removeOwned), below the root. "" = removed, else why kept.
+inline std::string removeOwnedFile(const std::filesystem::path& p, const struct stat& mine) {
     int d = -1;
     std::string leaf;
-    if (!parentOf(p, &d, &leaf)) return;
-    ::unlinkat(d, leaf.c_str(), 0);
+    if (!parentOf(p, &d, &leaf)) return "kept " + p.string() + ": outside the job folder";
+    const auto why = removeOwned(d, leaf, mine, false);
     ::close(d);
+    return why;
 }
 }  // namespace pinned
 
@@ -204,8 +240,15 @@ inline std::string writeNewFile(const std::filesystem::path& path, const std::ve
     }
     if (!f) return "refusing: cannot create " + tmp.string() + " (it may already exist)";
     const bool ok = std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
-    if (std::fclose(f) != 0 || !ok) { if (pinned::active()) pinned::unlinkFile(tmp); else std::filesystem::remove(tmp, ec); return "cannot write " + tmp.string(); }
-    if (!publishNewFolder(tmp, path)) { if (pinned::active()) pinned::unlinkFile(tmp); else std::filesystem::remove(tmp, ec); return "refusing: " + path.string() + " appeared while writing"; }
+    struct stat mine {};
+    const bool known = ::fstat(::fileno(f), &mine) == 0;
+    const auto dropTmp = [&]() -> std::string {   // pinned: only the file this call created, else kept and reported
+        if (!pinned::active()) { std::filesystem::remove(tmp, ec); return ""; }
+        const auto why = known ? pinned::removeOwnedFile(tmp, mine) : "kept " + tmp.string() + ": its identity is unknown";
+        return why.empty() ? "" : " (" + why + ")";
+    };
+    if (std::fclose(f) != 0 || !ok) { const auto kept = dropTmp(); return "cannot write " + tmp.string() + kept; }
+    if (!publishNewFolder(tmp, path)) { const auto kept = dropTmp(); return "refusing: " + path.string() + " appeared while writing" + kept; }
     return "";
 }
 

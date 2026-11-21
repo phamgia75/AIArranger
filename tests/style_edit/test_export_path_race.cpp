@@ -201,6 +201,77 @@ int main() {
              fs::is_regular_file(base / "out.INCOMPLETE/precious.txt"));
     }
 
+    // ── Final gate: cleanup removes only what the job created; publication is never reported complete when it is not ──
+    {   // C1: the marker is swapped for another file right before cleanup: the substitute is never removed
+        const fs::path base = root / "c1";
+        fs::create_directories(base);
+        detail::testHook() = [&](const char* w) {
+            if (std::string(w) != "beforeMarkerCleanup") return;
+            fs::rename(base / "out.INCOMPLETE" / kJobMarker, base / "marker.orig");
+            put(base / "out.INCOMPLETE" / kJobMarker, "substitute");
+        };
+        const auto st = run(spec(base / "out", true), [](Phase) {});
+        detail::testHook() = nullptr;
+        TEST("C1 swapped marker: the output is published, the substitute is kept (never unlinked) and reported", st.phase == Phase::Done && fs::is_directory(base / "out") &&
+             fs::is_regular_file(base / "out.INCOMPLETE" / kJobMarker) && fs::exists(base / "marker.orig") && !st.warnings.empty() &&
+             has(st.warnings.front(), "marker") && has(st.warnings.front(), "not the entry this job created"));
+    }
+    {   // C2: the job folder is swapped for another (empty) folder before its removal: kept, reported
+        const fs::path base = root / "c2";
+        fs::create_directories(base);
+        detail::testHook() = [&](const char* w) {
+            if (std::string(w) != "beforeWorkRemoval") return;
+            fs::rename(base / "out.INCOMPLETE", base / "work.orig");
+            fs::create_directory(base / "out.INCOMPLETE");
+        };
+        const auto st = run(spec(base / "out", true), [](Phase) {});
+        detail::testHook() = nullptr;
+        bool warned = false;
+        for (const auto& w : st.warnings) warned |= has(w, "job folder") && has(w, "not removed");
+        TEST("C2 swapped job folder: kept and reported, never removed", fs::is_directory(base / "out.INCOMPLETE") && fs::is_directory(base / "work.orig") && warned);
+    }
+    {   // C3: a side file cannot be moved back: Failed, the side file is named as still published, the evidence is kept
+        const fs::path base = root / "c3";
+        fs::create_directories(base);
+        auto s = spec(base / "out", false);
+        const auto real = s.write;
+        s.write = [&, real](const fs::path& out, const std::function<bool(double)>& pr) {
+            const auto r = real(out, pr);
+            put(out.string() + ".side", "side file");
+            return r;
+        };
+        detail::testHook() = [&](const char* w) {
+            if (std::string(w) != "afterSideMoves") return;
+            put(base / "out.INCOMPLETE/out.side", "taken meanwhile");   // the rollback name is taken
+            fs::create_directory(base / "out");                       // the final rename will be refused
+        };
+        const auto st = run(s, [](Phase) {});
+        detail::testHook() = nullptr;
+        TEST("C3 partial publication: Failed (never success), the side file is named as still published", st.phase == Phase::Failed && has(st.reason, "could NOT be moved back") &&
+             has(st.reason, "out.side") && st.reportPath.empty());
+        TEST("C3 partial publication: recovery evidence is preserved (side file, staged output, marker)", fs::is_regular_file(base / "out.side") &&
+             fs::is_regular_file(base / "out.INCOMPLETE/out.side") && fs::is_directory(base / "out.INCOMPLETE/out") && fs::is_regular_file(base / "out.INCOMPLETE" / kJobMarker));
+    }
+    {   // C4: removeOwned itself
+        const fs::path base = root / "c4";
+        put(base / "f.txt", "mine");
+        media::detail::Fd d(::open(base.c_str(), O_RDONLY | O_DIRECTORY));
+        struct stat mine {};
+        ::stat((base / "f.txt").c_str(), &mine);
+        fs::rename(base / "f.txt", base / "f.orig");
+        put(base / "f.txt", "someone else's");
+        const auto kept = media::removeOwned(d.v, "f.txt", mine, false);
+        TEST("C4 removeOwned: a substituted file is kept, reported", has(kept, "not the entry this job created") && fs::is_regular_file(base / "f.txt"));
+        fs::remove(base / "f.txt");
+        ::stat((base / "f.orig").c_str(), &mine);
+        TEST("C4 removeOwned: the proven file is removed", media::removeOwned(d.v, "f.orig", mine, false).empty() && !fs::exists(base / "f.orig"));
+        fs::create_directories(base / "dir/inner");
+        struct stat dm {};
+        ::stat((base / "dir").c_str(), &dm);
+        const auto full = media::removeOwned(d.v, "dir", dm, true);
+        TEST("C4 removeOwned: a non-empty folder is put back, not removed", has(full, "not empty") && fs::is_directory(base / "dir/inner"));
+    }
+
     fs::remove_all(root);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
