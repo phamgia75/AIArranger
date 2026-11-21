@@ -38,8 +38,8 @@ struct LabFolder {
         work = incompletePath(dest);
         if (const auto why = outputFolderRefusal(dest); !why.empty()) return why;
         std::error_code ec;
-        fs::create_directories(dest.parent_path(), ec);
-        if (!fs::create_directory(work, ec)) return "cannot create " + work.string();
+        media::makeFolders(dest.parent_path());
+        if (!media::makeFolder(work)) return "cannot create " + work.string();
         files.root = work;
         return "";
     }

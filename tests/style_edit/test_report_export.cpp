@@ -183,6 +183,22 @@ int main() {
     {
         const auto shared = std::make_shared<const rp::Report>(inv);
         const auto before = library::load(lib);
+        {   // path race (HIGH): the output's parent is swapped for a link to a trap folder while the writer runs
+            put(root / "trap/keep.txt", "trap");
+            fs::create_directories(root / "rp");
+            auto racy = reportExport(shared, root / "rp/Race Report");
+            racy.sources.push_back(root / "trap");
+            const auto realWrite = racy.write;
+            racy.write = [&, realWrite](const fs::path& o, const std::function<bool(double)>& pr) {
+                fs::rename(root / "rp", root / "rp.moved");
+                fs::create_directory_symlink(root / "trap", root / "rp");
+                return realWrite(o, pr);
+            };
+            const auto rs = run(racy);
+            size_t inTrap = 0;
+            for (const auto& e : fs::directory_iterator(root / "trap")) { (void)e; ++inTrap; }
+            TEST("path race: parent swapped during the report writer: fails, the trap folder gains nothing", rs.phase == Phase::Failed && inTrap == 1);
+        }
         const auto st = run(reportExport(shared, root / "Inventory Report"));
         const fs::path out = root / "Inventory Report";
         TEST("job: done, published, report beside it, nothing staged left", st.phase == Phase::Done && fs::is_regular_file(out / "report.html") &&
