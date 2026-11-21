@@ -38,6 +38,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <random>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -492,19 +493,30 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     if (const auto e = detail::pinParent(anchor, authorized, rest, spec.sources, leaf, workName, parentFd, &realParent); !e.empty())   // also makes missing folders
         return stop(Phase::Failed, e);
     if (const auto why = media::outputFolderRefusal(realParent / leaf); !why.empty()) return stop(Phase::Failed, why);
-    if (::mkdirat(parentFd.v, workName.c_str(), 0755) != 0)
-        return stop(Phase::Failed, "cannot create " + work.string() + ": " + std::strerror(errno));
+    // The job folder is made under a private random name (nobody can swap a name they cannot guess between mkdirat and
+    // openat), opened, and only then renamed (no replace) to NAME.INCOMPLETE: the handle IS the folder this job created, so
+    // its identity is a valid cleanup proof. The marker is written before the rename, so a leftover is never marker-less.
+    Fd workFd;
+    struct stat markerId {};
+    {
+        std::random_device rd;
+        const std::string privateName = workName + ".new-" + std::to_string(rd()) + std::to_string(rd());
+        if (::mkdirat(parentFd.v, privateName.c_str(), 0755) != 0) return stop(Phase::Failed, "cannot create " + work.string() + ": " + std::strerror(errno));
+        workFd.v = ::openat(parentFd.v, privateName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (workFd.v < 0) return stop(Phase::Failed, "cannot open the new job folder (" + privateName + " is kept)");
+        const std::string m = "export job " + std::to_string(st.id) + " " + st.type + " -> " + st.dest + "\n";
+        const int fd = ::openat(workFd.v, kJobMarker, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+        const bool good = fd >= 0 && ::fstat(fd, &markerId) == 0 && ::write(fd, m.data(), m.size()) == ssize_t(m.size());
+        if (fd < 0 || !(good & (::close(fd) == 0))) return stop(Phase::Failed, "cannot write in " + (parentFd.v >= 0 ? realParent / privateName : work).string() + " (kept)");
+        if (!detail::moveNoReplace(parentFd.v, privateName, parentFd.v, workName))
+            return stop(Phase::Failed, "refusing: " + work.string() + " appeared while the job started; the new folder stays at " + (realParent / privateName).string());
+        struct stat a {}, b {};
+        if (::fstat(workFd.v, &a) != 0 || ::fstatat(parentFd.v, workName.c_str(), &b, AT_SYMLINK_NOFOLLOW) != 0 || !detail::sameFile(a, b))
+            return stop(Phase::Failed, "refusing: " + work.string() + " is not the folder this job created" + kept());
+    }
     // By-path readers and writers (the legacy `write`, hashing, verify) get the REAL location of the staged output, with no
     // symlink in it; `byPathIsStaged` then proves that path still names the staged output (see the shortcut at Publish).
     const fs::path stagedReal = realParent / workName / leaf;
-    const Fd workFd(::openat(parentFd.v, workName.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-    struct stat markerId {};
-    {
-        const std::string m = "export job " + std::to_string(st.id) + " " + st.type + " -> " + st.dest + "\n";
-        const int fd = workFd.v < 0 ? -1 : ::openat(workFd.v, kJobMarker, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-        const bool good = fd >= 0 && ::fstat(fd, &markerId) == 0 && ::write(fd, m.data(), m.size()) == ssize_t(m.size());
-        if (fd < 0 || !(good & (::close(fd) == 0))) return stop(Phase::Failed, "cannot write in " + work.string() + kept());
-    }
     const double base = st.progress, share = 1.0 / double(int(Phase::Done) - 1);
     st.writerThread = thisThread();
     const auto progress = [&](double f) {
@@ -618,18 +630,27 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     std::vector<std::string> entries;   // listed first (through the handle): the folder is not changed while it is being iterated
     if (!detail::namesAt(workFd.v, entries)) return stop(Phase::Failed, "cannot list " + work.string() + "; nothing was published" + kept());
     std::vector<std::string> moved;
-    // A side file that cannot be moved back (the name was taken meanwhile) stays published: the failure says so, never "nothing was published".
+    std::map<std::string, struct stat> movedId;   // each side file's identity as it left the job folder
+    // A side file is moved back only while it is still the file this job published; one that cannot be (the name was taken,
+    // or the entry there is not ours) stays where it is and is NAMED: the failure never says "nothing was published" then.
     const auto failPublish = [&](const std::string& why) {
         std::string stuck;
-        for (const auto& n : moved)
-            if (!move(parentFd.v, n, workFd.v, n)) stuck += (stuck.empty() ? "" : ", ") + (dest.parent_path() / n).string();
+        for (const auto& n : moved) {
+            struct stat now {};
+            const bool ours = ::fstatat(parentFd.v, n.c_str(), &now, AT_SYMLINK_NOFOLLOW) == 0 && detail::sameFile(now, movedId[n]);
+            if (!ours) stuck += (stuck.empty() ? "" : ", ") + (dest.parent_path() / n).string() + " (no longer the file this job published: kept, it may now be elsewhere)";
+            else if (!move(parentFd.v, n, workFd.v, n)) stuck += (stuck.empty() ? "" : ", ") + (dest.parent_path() / n).string();
+        }
         return stop(Phase::Failed, why + (stuck.empty() ? "; nothing was published" : "; these files could NOT be moved back and stay published: " + stuck) + kept());
     };
     for (const auto& n : entries) {
         if (n == kJobMarker || n == leaf) continue;
         if (n.rfind(leaf, 0) != 0) return failPublish("unexpected " + (work / n).string() + " in the job folder");
+        struct stat sid {};
+        if (::fstatat(workFd.v, n.c_str(), &sid, AT_SYMLINK_NOFOLLOW) != 0) return failPublish("cannot examine " + (work / n).string());
         if (!move(workFd.v, n, parentFd.v, n)) return failPublish("refusing: " + (dest.parent_path() / n).string() + " appeared while writing");
         moved.push_back(n);
+        movedId[n] = sid;
     }
     detail::hook("afterSideMoves");
     // shortcut: the identity is checked right before the rename, but macOS has no rename-by-fd, so a swap in the window
@@ -640,6 +661,15 @@ inline void runExportSteps(const ExportSpec& spec, JobState& st, const std::func
     if (::fstatat(parentFd.v, leaf.c_str(), &pub, AT_SYMLINK_NOFOLLOW) != 0 || !same(pub, staging)) {   // swapped during the rename
         const bool back = move(parentFd.v, leaf, workFd.v, leaf);
         return failPublish("refusing: the output at " + dest.string() + " is not the verified one" + (back ? "; it was moved back" : "; it could NOT be moved back and stays at that name"));
+    }
+    // Publication is complete only when every side file is still the one this job published: otherwise the job is FAILED
+    // (never Done), says which file is gone or replaced, and deletes nothing (the output stays published, the leftover stays).
+    detail::hook("beforeSideCheck");
+    for (const auto& n : moved) {
+        struct stat now {};
+        if (::fstatat(parentFd.v, n.c_str(), &now, AT_SYMLINK_NOFOLLOW) != 0 || !detail::sameFile(now, movedId[n]))
+            return stop(Phase::Failed, "publication is INCOMPLETE: the side file " + (dest.parent_path() / n).string() + " was removed or replaced after it was published; "
+                                       "the output IS published at " + dest.string() + ". Nothing was deleted" + kept());
     }
     // The job's own marker file and its now empty folder (rmdir: refused when anything else is in it)
     // Cleanup removes only entries proven to be this job's (media::removeOwned): a substituted marker or folder is never

@@ -19,6 +19,7 @@ static int failures = 0, passes = 0;
     else { std::printf("  PASS: %s\n", name); passes++; } } while (0)
 
 static bool has(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
+static std::string slurp(const fs::path& p) { std::ifstream f(p, std::ios::binary); return {std::istreambuf_iterator<char>(f), {}}; }
 static void put(const fs::path& p, const std::string& s) { fs::create_directories(p.parent_path()); std::ofstream(p, std::ios::binary) << s; }
 static std::vector<std::string> names(const fs::path& dir) {
     std::vector<std::string> r;
@@ -270,6 +271,38 @@ int main() {
         ::stat((base / "dir").c_str(), &dm);
         const auto full = media::removeOwned(d.v, "dir", dm, true);
         TEST("C4 removeOwned: a non-empty folder is put back, not removed", has(full, "not empty") && fs::is_directory(base / "dir/inner"));
+    }
+
+    {   // C5: a published side file disappears before success: FAILED as incomplete, nothing deleted, the output stays published
+        const fs::path base = root / "c5";
+        fs::create_directories(base);
+        auto s = spec(base / "out", false);
+        const auto real = s.write;
+        s.write = [&, real](const fs::path& out, const std::function<bool(double)>& pr) { const auto r = real(out, pr); put(out.string() + ".side", "side file"); return r; };
+        detail::testHook() = [&](const char* w) { if (std::string(w) == "beforeSideCheck") fs::rename(base / "out.side", base / "gone.side"); };
+        const auto st = run(s, [](Phase) {});
+        detail::testHook() = nullptr;
+        TEST("C5 side file gone before success: Failed (INCOMPLETE), named, never Done", st.phase == Phase::Failed && has(st.reason, "INCOMPLETE") && has(st.reason, "out.side") &&
+             st.reportPath.empty());
+        TEST("C5 nothing deleted: the output is published, the moved side file and the leftover are kept", fs::is_regular_file(base / "out/a.txt") && fs::exists(base / "gone.side") &&
+             fs::is_directory(base / "out.INCOMPLETE"));
+    }
+    {   // C6: rollback never moves a substitute: the published side file was replaced by someone else's file
+        const fs::path base = root / "c6";
+        fs::create_directories(base);
+        auto s = spec(base / "out", false);
+        const auto real = s.write;
+        s.write = [&, real](const fs::path& out, const std::function<bool(double)>& pr) { const auto r = real(out, pr); put(out.string() + ".side", "side file"); return r; };
+        detail::testHook() = [&](const char* w) {
+            if (std::string(w) != "afterSideMoves") return;
+            fs::rename(base / "out.side", base / "moved-away.side");
+            put(base / "out.side", "someone else's");
+            fs::create_directory(base / "out");   // the final rename is refused
+        };
+        const auto st = run(s, [](Phase) {});
+        detail::testHook() = nullptr;
+        TEST("C6 rollback: the substitute is not moved into the job folder; the failure names it", st.phase == Phase::Failed && has(st.reason, "no longer the file this job published") &&
+             slurp(base / "out.side") == "someone else's" && !fs::exists(base / "out.INCOMPLETE/out.side") && fs::exists(base / "moved-away.side"));
     }
 
     fs::remove_all(root);
