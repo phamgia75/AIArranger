@@ -58,9 +58,8 @@ struct FileSet {
     // never truncated: saving the same rel twice fails. ".", ".." and empty components are refused.
     int createFile(const std::string& rel) {
         if (!rootFd) {
-            std::error_code ec;
-            std::filesystem::create_directories(root, ec);
-            pin(::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), false);
+            media::makeFolders(root);
+            pin(media::openFolder(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), false);
         }
         if (*rootFd < 0) return -1;
         int cur = ::dup(*rootFd);
@@ -165,8 +164,8 @@ inline std::string writePackage(const Instrument& in, const std::filesystem::pat
     std::string ge;
     if (!addInstrument(rg, in, pkg, &ge)) return fail("resource graph: " + ge);
     const std::string manifest = writeManifest(rg, pkg, graph::Kind::Sound);
-    fs::create_directories(dest.parent_path(), ec);   // as before: missing parents are made
-    if (!fs::create_directory(out, ec) || !fs::create_directory(out / "wav", ec)) return fail("cannot create " + out.string());
+    media::makeFolders(dest.parent_path());   // as before: missing parents are made
+    if (!media::makeFolder(out) || !media::makeFolder(out / "wav")) return fail("cannot create " + out.string());
 
     pkgio::FileSet files{out};
     auto under = [](std::string s) { for (char& c : s) if (c == ' ') c = '_'; return s; };
@@ -242,8 +241,8 @@ inline std::string writeDrumPackage(const DrumKit& kit, const std::filesystem::p
     std::string ge;
     if (!addDrumKit(rg, kit, pkg, &ge)) return fail("resource graph: " + ge);
     const std::string manifest = writeManifest(rg, pkg, graph::Kind::DrumKit);
-    fs::create_directories(dest.parent_path(), ec);
-    if (!fs::create_directory(out, ec)) return fail("cannot create " + out.string());
+    media::makeFolders(dest.parent_path());
+    if (!media::makeFolder(out)) return fail("cannot create " + out.string());
     pkgio::FileSet files{out};
     for (const auto& f : tx) files.save("tx/" + f.path, f.bytes);
     uint64_t bytes = 0;
