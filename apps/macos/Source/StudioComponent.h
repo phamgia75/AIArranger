@@ -12,6 +12,7 @@
 // guard). Every unavailable control shows its reason next to it. Never sends MIDI.
 
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "KitSheet.h"
 #include "LibraryManagerComponent.h"
 #include "ResourcesComponent.h"
 #include "TextViews.h"
@@ -80,7 +81,7 @@ public:
     bool busy() const {   // a finished export job counts until it has landed on its page (message thread); also the Library Manager and
                           // all Sounds & Resources work (its own busy() is the one list)
         return jobs_ > 0 || !queue_->idle() || std::any_of(jobHomes_.begin(), jobHomes_.end(), [](const auto& h) { return !h.second.landed; }) ||
-               manager_.busy() || manager_.computing() || res_.busy() || (otherBusy_ && otherBusy_());
+               manager_.busy() || manager_.computing() || kitSheet_.busy() || res_.busy() || (otherBusy_ && otherBusy_());
     }
 
     // Phase 2, also driven by the UI smoke test. Every write is a NEW local folder or file; jobs are asynchronous.
@@ -171,6 +172,7 @@ public:
     juce::String reportStatus() const { return reportStatus_.getText(); }
 
     ResourcesComponent& resources() { return res_; }
+    KitSheet& kitSheet() { return kitSheet_; }   // Import / Export Center > Pa5X Import Kit (BL-E1 guided sheet)
     LibraryManagerComponent& manager() { return manager_; }   // Library Workspace > Library Manager (E7)
     const ui::studio::Verification& verification() const { return verification_; }
     juce::String inspectorText() const { return inspector_.getText(); }
@@ -240,6 +242,7 @@ private:
     juce::TextButton* toSampleLab_ = nullptr;
     juce::TextButton* paInspectBtn_ = nullptr;
     std::optional<ui::studio::SourceProbe> source_;
+    KitSheet kitSheet_;   // Import / Export Center › Pa5X Import Kit: review, destination check, Create kit (BL-E1 S4)
     LibraryManagerComponent manager_;   // Library Workspace › Library Manager (E7): two read-only libraries, compare, plan
     // Import / Export Center
     FlowPage ioPage_;
