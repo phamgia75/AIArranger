@@ -857,7 +857,7 @@ int main() {
         TEST("maxTotalBytes cap refuses oversized reads fail-closed",
              !capRes.ok && !capRes.report.ok() && !capRes.report.containerErrors.empty());
 
-        // 5c: Symlink as KST root refused
+        // 5c: Symlink as KST root refused (both without and with trailing slash; P2-2)
         const fs::path rootLink = tmpRoot / "LINK.KST";
         std::error_code ec;
         fs::create_directory_symlink(kstDir, rootLink, ec);
@@ -865,7 +865,19 @@ int main() {
             const NativeKstResult linkRes = resolveNativeKstFolder(rootLink, ds.opts);
             TEST("symlink as KST root is refused (O_NOFOLLOW)",
                  !linkRes.ok && !linkRes.graph.has_value() && !linkRes.report.containerErrors.empty());
+
+            const NativeKstResult linkSlashRes = resolveNativeKstFolder(fs::path(rootLink.string() + "/"), ds.opts);
+            TEST("symlink as KST root WITH trailing slash is refused fail-closed (P2-2)",
+                 !linkSlashRes.ok && !linkSlashRes.graph.has_value() && !linkSlashRes.report.containerErrors.empty());
+
+            const NativeKstResult linkMultiSlashRes = resolveNativeKstFolder(fs::path(rootLink.string() + "///"), ds.opts);
+            TEST("symlink as KST root WITH multiple trailing slashes is refused fail-closed (P2-2)",
+                 !linkMultiSlashRes.ok && !linkMultiSlashRes.graph.has_value() && !linkMultiSlashRes.report.containerErrors.empty());
         }
+        // Real directory with trailing slash still resolves cleanly
+        const NativeKstResult realSlashRes = resolveNativeKstFolder(fs::path(kstDir.string() + "/"), ds.opts);
+        TEST("real KST directory with trailing slash resolves cleanly",
+             realSlashRes.ok && realSlashRes.report.ok() && realSlashRes.report.coverageComplete());
 
         // 5d: Non-existent path and regular file as KST root refused
         const NativeKstResult missingRes = resolveNativeKstFolder(tmpRoot / "DOES_NOT_EXIST.KST", ds.opts);
@@ -912,6 +924,55 @@ int main() {
         TEST("multiple .kmp files in MULTISMP/ fail closed without guessing",
              !multiRes.ok && !multiRes.graph.has_value() && !multiRes.report.ok() &&
              containsDiag(multiRes.report.diagnostics, "multiple .kmp files"));
+
+        // 5h: Directory entry count cap enforced fail-closed (P2-1)
+        {
+            const fs::path manyKst = tmpRoot / "MANY.KST";
+            writeFileBytes(manyKst / "MULTISMP" / "ram.kmp", ds.input.kmpContainer->bytes);
+            writeFileBytes(manyKst / "PCM" / "ram01.pcm", ds.input.pcmContainers[0].bytes);
+            writeFileBytes(manyKst / "PCM" / "ram02.pcm", ds.input.pcmContainers[1].bytes);
+            writeFileBytes(manyKst / "SOUND" / "user01.pcg", ds.input.soundContainers[0].bytes);
+            for (int i = 0; i < 12; ++i)
+                writeFileBytes(manyKst / "SOUND" / ("extra_" + std::to_string(i) + ".txt"), Bytes{'x'});
+
+            NativeKstOptions rootCap = ds.opts;
+            rootCap.maxDirEntries = 2;   // root has 3 subdirs (MULTISMP, PCM, SOUND)
+            const NativeKstResult rootCapRes = resolveNativeKstFolder(manyKst, rootCap);
+            TEST("root directory exceeding maxDirEntries is rejected fail-closed (P2-1)",
+                 !rootCapRes.ok && !rootCapRes.graph.has_value() && !rootCapRes.report.ok() &&
+                 containsDiag(rootCapRes.report.diagnostics, "entry limit"));
+
+            NativeKstOptions subCap = ds.opts;
+            subCap.maxDirEntries = 10;   // root (3) + MULTISMP (1) + PCM (2) + SOUND (13) > 10
+            const NativeKstResult subCapRes = resolveNativeKstFolder(manyKst, subCap);
+            TEST("subdirectory exceeding maxDirEntries is rejected/diagnosed fail-closed (P2-1)",
+                 !subCapRes.report.ok() && !subCapRes.report.coverageComplete() &&
+                 !subCapRes.report.containerErrors.empty() &&
+                 containsDiag(subCapRes.report.diagnostics, "entry limit"));
+        }
+
+        // 5i: Unexpected nested subdirectories inside MULTISMP/PCM/SOUND recorded and mark coverage incomplete (P2-3)
+        {
+            const fs::path nestedKst = tmpRoot / "NESTED.KST";
+            writeFileBytes(nestedKst / "MULTISMP" / "ram.kmp", ds.input.kmpContainer->bytes);
+            writeFileBytes(nestedKst / "PCM" / "ram01.pcm", ds.input.pcmContainers[0].bytes);
+            writeFileBytes(nestedKst / "PCM" / "ram02.pcm", ds.input.pcmContainers[1].bytes);
+            writeFileBytes(nestedKst / "SOUND" / "user01.pcg", ds.input.soundContainers[0].bytes);
+            writeFileBytes(nestedKst / "SOUND" / "user02.pcg", ds.input.soundContainers[1].bytes);
+            fs::create_directories(nestedKst / "MULTISMP" / "sub_kmp");
+            fs::create_directories(nestedKst / "PCM" / "sub_pcm");
+            fs::create_directories(nestedKst / "SOUND" / "sub_snd");
+
+            const NativeKstResult nestedRes = resolveNativeKstFolder(nestedKst, ds.opts);
+            auto hasSkipped = [&](const std::string& rel) {
+                return std::find(nestedRes.report.skippedPaths.begin(), nestedRes.report.skippedPaths.end(), rel) !=
+                       nestedRes.report.skippedPaths.end();
+            };
+            TEST("unexpected nested subdirectories inside MULTISMP/PCM/SOUND are recorded and fail coverageComplete() (P2-3)",
+                 nestedRes.ok && !nestedRes.report.coverageComplete() &&
+                 hasSkipped("MULTISMP/sub_kmp") && hasSkipped("PCM/sub_pcm") && hasSkipped("SOUND/sub_snd") &&
+                 containsDiag(nestedRes.report.diagnostics, "nested directory"));
+        }
 
         fs::remove_all(tmpRoot, ec);
     }

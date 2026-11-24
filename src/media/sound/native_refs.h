@@ -124,26 +124,43 @@ struct ScopedFd {
     int fd = -1;
     explicit ScopedFd(int f = -1) : fd(f) {}
     ~ScopedFd() { if (fd >= 0) ::close(fd); }
+    int release() { const int r = fd; fd = -1; return r; }
     ScopedFd(const ScopedFd&) = delete;
     ScopedFd& operator=(const ScopedFd&) = delete;
 };
-inline bool listDirEntriesAt(int dirFd, std::vector<std::string>& names, std::string& err) {
+struct ScopedDir {
+    DIR* dir = nullptr;
+    explicit ScopedDir(DIR* d = nullptr) : dir(d) {}
+    ~ScopedDir() { if (dir) ::closedir(dir); }
+    ScopedDir(const ScopedDir&) = delete;
+    ScopedDir& operator=(const ScopedDir&) = delete;
+};
+inline std::string stripTrailingSlashes(const std::filesystem::path& p) {
+    std::string s = p.string();
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+    return s;
+}
+inline bool listDirEntriesAt(int dirFd, std::vector<std::string>& names, size_t maxEntries, std::string& err) {
     names.clear();
-    const int dupFd = ::dup(dirFd);
-    if (dupFd < 0) { err = "cannot duplicate directory descriptor"; return false; }
-    DIR* dir = ::fdopendir(dupFd);
-    if (!dir) { ::close(dupFd); err = "cannot open directory stream"; return false; }
+    ScopedFd dupFd(::fcntl(dirFd, F_DUPFD_CLOEXEC, 0));
+    if (dupFd.fd < 0) { err = "cannot duplicate directory descriptor"; return false; }
+    ScopedDir dir(::fdopendir(dupFd.fd));
+    if (!dir.dir) { err = "cannot open directory stream"; return false; }
+    (void)dupFd.release();   // ownership transferred to DIR* managed by ScopedDir
     for (;;) {
         errno = 0;
-        const struct dirent* ent = ::readdir(dir);
+        const struct dirent* ent = ::readdir(dir.dir);
         if (!ent) {
-            const int saved = errno;
-            ::closedir(dir);
-            if (saved != 0) { names.clear(); err = "directory read failed"; return false; }
+            if (errno != 0) { names.clear(); err = "directory read failed"; return false; }
             break;
         }
         const std::string n(ent->d_name);
         if (n == "." || n == "..") continue;
+        if (names.size() >= maxEntries) {
+            names.clear();
+            err = "directory exceeds maximum entry limit (" + std::to_string(maxEntries) + ")";
+            return false;
+        }
         names.push_back(n);
     }
     std::sort(names.begin(), names.end());
@@ -627,6 +644,7 @@ struct NativeKstOptions {
     size_t fitMinItems = 8;
     SoundPayloadMode soundMode = SoundPayloadMode::AutoDetectOc31;
     size_t maxTotalBytes = 256u << 20;  // 256 MiB total read cap for folder reads
+    size_t maxDirEntries = 1000000;     // entry cap for folder reads (matches kst_inventory.h ListLimits::entries)
 };
 
 struct NativeKstReport {
@@ -790,10 +808,11 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
 }
 
 // Read-only disk folder entry point: opens the KST folder and its MULTISMP/, PCM/, SOUND/ subdirectories with O_NOFOLLOW,
-// refuses symlinks/FIFOs/special files, bounds individual and total read sizes, then runs resolveNativeKst().
+// refuses symlinks/FIFOs/special files, bounds directory entries and individual/total read sizes, then runs resolveNativeKst().
 inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDir, const NativeKstOptions& opts = {}) {
     NativeKstResult earlyFail;
-    const native_detail::ScopedFd rootFd(::open(kstDir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    const std::string rootPath = native_detail::stripTrailingSlashes(kstDir);
+    const native_detail::ScopedFd rootFd(::open(rootPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
     if (rootFd.fd < 0) {
         const std::string msg = "cannot open KST folder (must be a real directory, symlinks are not followed): " + kstDir.string();
         earlyFail.report.containerErrors.push_back(msg);
@@ -801,14 +820,16 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
         return earlyFail;
     }
 
+    size_t remainingEntries = opts.maxDirEntries;
     std::vector<std::string> topEntries;
     std::string lerr;
-    if (!native_detail::listDirEntriesAt(rootFd.fd, topEntries, lerr)) {
+    if (!native_detail::listDirEntriesAt(rootFd.fd, topEntries, remainingEntries, lerr)) {
         const std::string msg = "cannot list KST folder " + kstDir.string() + ": " + lerr;
         earlyFail.report.containerErrors.push_back(msg);
         earlyFail.report.diagnostics.push_back(msg);
         return earlyFail;
     }
+    remainingEntries -= topEntries.size();
 
     NativeKstInput in;
     std::vector<RawNamedBlob> kmpBlobs;
@@ -820,6 +841,7 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
         struct stat st{};
         if (::fstatat(rootFd.fd, top.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
             folderErrors.push_back("cannot stat entry " + top);
+            folderDiags.push_back("cannot stat entry " + top);
             continue;
         }
         const std::string topUpper = native_detail::upperAscii(top);
@@ -834,27 +856,35 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
         }
         if (!wantDir) continue;
 
-        const native_detail::ScopedFd subFd(::openat(rootFd.fd, top.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+        const native_detail::ScopedFd subFd(::openat(rootFd.fd, top.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
         if (subFd.fd < 0) {
-            folderErrors.push_back("cannot open folder " + top + " (symlinks are not followed)");
+            const std::string msg = "cannot open folder " + top + " (symlinks are not followed)";
+            folderErrors.push_back(msg);
+            folderDiags.push_back(msg);
             continue;
         }
         std::vector<std::string> leaves;
         std::string serr;
-        if (!native_detail::listDirEntriesAt(subFd.fd, leaves, serr)) {
-            folderErrors.push_back("cannot list folder " + top + ": " + serr);
+        if (!native_detail::listDirEntriesAt(subFd.fd, leaves, remainingEntries, serr)) {
+            const std::string msg = "cannot list folder " + top + ": " + serr;
+            folderErrors.push_back(msg);
+            folderDiags.push_back(msg);
             continue;
         }
+        remainingEntries -= leaves.size();
         for (const std::string& leaf : leaves) {
             const std::string rel = top + "/" + leaf;
             struct stat lst{};
             if (::fstatat(subFd.fd, leaf.c_str(), &lst, AT_SYMLINK_NOFOLLOW) != 0) {
                 folderErrors.push_back("cannot stat " + rel);
+                folderDiags.push_back("cannot stat " + rel);
                 continue;
             }
             if (!S_ISREG(lst.st_mode)) {
-                if (S_ISLNK(lst.st_mode) || !S_ISDIR(lst.st_mode)) {
-                    skipped.push_back(rel);
+                skipped.push_back(rel);
+                if (S_ISDIR(lst.st_mode)) {
+                    folderDiags.push_back("skipped unexpected nested directory: " + rel);
+                } else {
                     folderErrors.push_back("refusing non-regular file or symlink: " + rel);
                     folderDiags.push_back("skipped non-regular/symlink entry: " + rel);
                 }
