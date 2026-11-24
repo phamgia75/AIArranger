@@ -572,19 +572,22 @@ int main() {
                 }
             }
         }
+        const std::vector<std::string> wantAlphaPcm{"PCM/ram01.pcm", "PCM/ram02.pcm"};
         TEST("Alpha.stg deduplicates Var1+Var2 USER01/0 (x2) separately from embedded KSC (x1) and reaches M0,M1 -> S0,S1,S2 -> ram01,ram02",
              alpha != nullptr && alphaDupOk && alphaEmbKscOk &&
              alpha->userSoundIds.size() == 2 && alpha->hasUnanalysedUserSound &&
              alpha->multisampleIds.size() == 2 && alpha->sampleIds.size() == 3 &&
-             alpha->pcmFiles == (std::vector<std::string>{"PCM/ram01.pcm", "PCM/ram02.pcm"}) &&
+             alpha->pcmFiles == wantAlphaPcm &&
              alpha->storedPcmBytesProxy == (4000u + 6000u + 8000u));
 
+        const ResourceId wantBetaSnd{false, "USER02", Kind::Sound, 1};
+        const ResourceId wantBetaMs{false, "KST", Kind::Multisample, 1};
         TEST("Beta.stg (STAGE v2 r0 .ksa) flags unknownOriginRef and reaches USER02/1 -> M1 -> S1,S2 -> ram01,ram02",
              beta != nullptr && beta->hasUnknownOriginRef && !beta->hasUnanalysedUserSound &&
-             beta->userSoundIds == (std::vector<ResourceId>{{false, "USER02", Kind::Sound, 1}}) &&
-             beta->multisampleIds == (std::vector<ResourceId>{{false, "KST", Kind::Multisample, 1}}) &&
+             beta->userSoundIds.size() == 1 && beta->userSoundIds[0] == wantBetaSnd &&
+             beta->multisampleIds.size() == 1 && beta->multisampleIds[0] == wantBetaMs &&
              beta->sampleIds.size() == 2 &&
-             beta->pcmFiles == (std::vector<std::string>{"PCM/ram01.pcm", "PCM/ram02.pcm"}));
+             beta->pcmFiles == wantAlphaPcm);
 
         TEST("Flat.ksc records both SoundSlotEmpty (USER01/99) and SoundBankAbsent (USERDK05/2)",
              flat != nullptr && flat->hasMissingDependency && flat->missingUserSoundIds.size() == 2 &&
@@ -610,11 +613,14 @@ int main() {
         // Orphans (NOT provably deletable!):
         //   USER01/5 (orphan User Sound), M2 (orphan Multisample from roots), S3 & S4 (orphan Samples from roots),
         //   D0 (orphan DrumSample), PCM/ram03.pcm (orphan PCM file from roots)
+        const ResourceId wantOrphanSnd{false, "USER01", Kind::Sound, 5};
+        const ResourceId wantOrphanMs{false, "KST", Kind::Multisample, 2};
+        const std::vector<std::string> wantOrphanPcm{"PCM/ram03.pcm"};
         TEST("orphan tracking identifies unreferenced User Sound, RAM Multisample, Samples, DrumSample, and PCM file",
-             M.orphanUserSounds == (std::vector<ResourceId>{{false, "USER01", Kind::Sound, 5}}) &&
-             M.orphanMultisamples == (std::vector<ResourceId>{{false, "KST", Kind::Multisample, 2}}) &&
+             M.orphanUserSounds.size() == 1 && M.orphanUserSounds[0] == wantOrphanSnd &&
+             M.orphanMultisamples.size() == 1 && M.orphanMultisamples[0] == wantOrphanMs &&
              M.orphanSamples.size() == 2 && S.orphanDrumSamples == 1 &&
-             M.orphanPcmFiles == (std::vector<std::string>{"PCM/ram03.pcm"}));
+             M.orphanPcmFiles == wantOrphanPcm);
 
         // Delete safety HOLD GATE: ZERO Unreferenced across ALL nodes in unified Graph!
         bool anyUnref = false;
