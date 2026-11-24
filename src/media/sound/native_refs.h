@@ -256,15 +256,17 @@ inline bool readKorfMetadataAt(int dirFd, const char* name, size_t maxFileBytes,
     using panative::detail::Chunk;
 
     if (fsz < 8) return fail("invalid PCM KORF container: file shorter than 8 bytes");
+    if (fsz > 0xFFFFFFFFull) return fail("file larger than the KORF 32-bit offset limit");
+    std::string rerr;
     uint8_t wrap[8]{};
-    if (!preadExact(f.fd, 0, wrap, sizeof wrap, remainingBudget, bytesRead, err)) return false;
+    if (!preadExact(f.fd, 0, wrap, sizeof wrap, remainingBudget, bytesRead, rerr)) return fail(std::move(rerr));
     if (be32(wrap) != 0x01000114u) return fail("invalid PCM KORF container: not a Pa-native wrapper (bytes 0-3 are not 01 00 01 14)");
     out.wrapper = true;
     if (be32(wrap + 4) != fsz - 8) return fail("invalid PCM KORF container: wrapper length does not match the file size (truncated or padded)");
     if (fsz < 36) return fail("invalid PCM KORF container: fewer than 3 level-1 chunks (header, directory, index)");
 
     uint8_t hdrDir[28]{};
-    if (!preadExact(f.fd, 8, hdrDir, sizeof hdrDir, remainingBudget, bytesRead, err)) return false;
+    if (!preadExact(f.fd, 8, hdrDir, sizeof hdrDir, remainingBudget, bytesRead, rerr)) return fail(std::move(rerr));
     const uint32_t hId = be32(hdrDir), hSz = be32(hdrDir + 4);
     if (hId != 0x02000018u || hSz != 12u || std::memcmp(hdrDir + 15, "KORF", 4) != 0)
         return fail("invalid PCM KORF container: header chunk 02000018 with KORF at 0x17 not found");
@@ -273,19 +275,27 @@ inline bool readKorfMetadataAt(int dirFd, const char* name, size_t maxFileBytes,
     if ((dId >> 24) != 0x05u || (dId & 0xFFu) != 0x18u || ((dId >> 16) & 0xFFu) > 1u)
         return fail("invalid PCM KORF container: directory chunk 05 0x xx 18 not found");
     if (dSz > fsz - 36u) return fail("invalid PCM KORF container: directory chunk runs past the end of the file");
+    if (dSz > remainingBudget) return fail("total read size exceeds the reader's limit");
     out.directoryId = dId;
     out.directoryFormat = int((dId >> 16) & 0xFFu);
 
     std::vector<uint8_t> dirBuf(dSz);
-    if (dSz > 0 && !preadExact(f.fd, 36u, dirBuf.data(), dSz, remainingBudget, bytesRead, err)) return false;
+    if (dSz > 0 && !preadExact(f.fd, 36u, dirBuf.data(), dSz, remainingBudget, bytesRead, rerr)) return fail(std::move(rerr));
+
+    // Each directory record consumes at least 24 B (format 0) or 25 B (format 1: 2B size + 2B count + fields 0/1/2 + 4B trailer),
+    // bounding item chunks before walking so crafted 0-byte chunk floods short-circuit immediately.
+    const size_t maxItems = static_cast<size_t>(dSz) / (out.directoryFormat == 0 ? 24u : 25u);
+    const size_t maxL1Chunks = 3u + maxItems;
 
     std::vector<Chunk> l1;
     l1.push_back({hId, 8u, hSz});
     l1.push_back({dId, 28u, dSz});
-    for (uint64_t off = 36u + dSz; off < fsz;) {
+    for (uint64_t off = uint64_t(36u) + static_cast<uint64_t>(dSz); off < fsz;) {
+        if (l1.size() >= maxL1Chunks)
+            return fail("invalid PCM KORF container: directory shorter than its item count");
         if (fsz - off < 8u) return fail("invalid PCM KORF container: trailing bytes shorter than a chunk header at " + std::to_string(off));
         uint8_t ch[8]{};
-        if (!preadExact(f.fd, off, ch, sizeof ch, remainingBudget, bytesRead, err)) return false;
+        if (!preadExact(f.fd, off, ch, sizeof ch, remainingBudget, bytesRead, rerr)) return fail(std::move(rerr));
         const uint32_t cid = be32(ch), csz = be32(ch + 4);
         if (csz > fsz - off - 8u) return fail("invalid PCM KORF container: chunk at " + std::to_string(off) + " runs past the end of the file");
         l1.push_back({cid, static_cast<uint32_t>(off), csz});
@@ -297,9 +307,11 @@ inline bool readKorfMetadataAt(int dirFd, const char* name, size_t maxFileBytes,
     const size_t items = l1.size() - 3;
     if (uint64_t(x.size) != uint64_t(16u) + uint64_t(4u) * items)
         return fail("invalid PCM KORF container: index chunk does not match the chunk list");
+    if (x.size > remainingBudget) return fail("total read size exceeds the reader's limit");
 
     std::vector<uint8_t> idxBuf(x.size);
-    if (!preadExact(f.fd, static_cast<uint64_t>(x.offset) + 8u, idxBuf.data(), x.size, remainingBudget, bytesRead, err)) return false;
+    if (!preadExact(f.fd, static_cast<uint64_t>(x.offset) + 8u, idxBuf.data(), x.size, remainingBudget, bytesRead, rerr))
+        return fail(std::move(rerr));
     const uint8_t* q = idxBuf.data();
     if (std::memcmp(q, "KBEG", 4) != 0 || std::memcmp(q + x.size - 8, "KEND", 4) != 0 || be32(q + x.size - 4) != items + 1)
         return fail("invalid PCM KORF container: index chunk does not match the chunk list");

@@ -1129,6 +1129,117 @@ int main() {
                  convRes.report.soundContainers == 2 && convRes.report.soundsDecodedOc31 == 2 && convRes.report.soundsLoadedRaw == 1 &&
                  convRes.report.bytesRead > 0);
         }
+        {
+            // 6g: Audit hardening regressions (P2-1 budget pre-check & out reset, P2-2 overflow-safe dSz, P3-1 0-byte chunk flood)
+            const fs::path hardDir = tmpRoot / "HARDEN_PCM";
+            fs::create_directories(hardDir);
+            ValidDataset dsH;
+            const Bytes validPcm = dsH.input.pcmContainers[0].bytes;
+            const Bytes emptyValidPcm = buildKorfContainer({}, 1);   // 0 items, dSz == 0: valid empty KORF container
+            writeFileBytes(hardDir / "valid.pcm", validPcm);
+            writeFileBytes(hardDir / "empty_valid.pcm", emptyValidPcm);
+
+            // P2-2 crafted: dSz = 0xFFFFFFE0 (would wrap 36u + dSz in 32-bit)
+            Bytes wrapDirPcm = emptyValidPcm;
+            putBe32(wrapDirPcm, 32, 0xFFFFFFE0u);
+            writeFileBytes(hardDir / "wrap_dsz.pcm", wrapDirPcm);
+
+            // P3-1 crafted: dSz == 0 followed by 50,000 zero-byte chunks (400 KB flood)
+            Bytes flood0;
+            pushBe32(flood0, 0x01000114u);
+            pushBe32(flood0, 0u);   // patched below
+            pushBe32(flood0, 0x02000018u); pushBe32(flood0, 12u);
+            const uint8_t korfHdr[12] = {0x0B, 0, 0, 0, 0, 0, 0, 'K', 'O', 'R', 'F', 0};
+            flood0.insert(flood0.end(), korfHdr, korfHdr + 12);
+            pushBe32(flood0, 0x05010018u); pushBe32(flood0, 0u);   // dSz == 0
+            for (size_t i = 0; i < 50000; ++i) { pushBe32(flood0, 0x12010018u); pushBe32(flood0, 0u); }
+            putBe32(flood0, 4, static_cast<uint32_t>(flood0.size() - 8));
+            writeFileBytes(hardDir / "flood0.pcm", flood0);
+
+            // P3-1 crafted: dSz == 25 (max 1 format-1 item) followed by 10,000 zero-byte chunks
+            Bytes flood1;
+            pushBe32(flood1, 0x01000114u);
+            pushBe32(flood1, 0u);
+            pushBe32(flood1, 0x02000018u); pushBe32(flood1, 12u);
+            flood1.insert(flood1.end(), korfHdr, korfHdr + 12);
+            pushBe32(flood1, 0x05010018u); pushBe32(flood1, 25u);
+            flood1.insert(flood1.end(), 25u, 0x00);
+            for (size_t i = 0; i < 10000; ++i) { pushBe32(flood1, 0x12010018u); pushBe32(flood1, 0u); }
+            putBe32(flood1, 4, static_cast<uint32_t>(flood1.size() - 8));
+            writeFileBytes(hardDir / "flood1.pcm", flood1);
+
+            const native_detail::ScopedFd dirFd(::open(hardDir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            TEST("hardening test directory opened", dirFd.fd >= 0);
+            if (dirFd.fd >= 0) {
+                // P2-1a: tight remainingBudget fails BEFORE dirBuf allocation and resets out
+                {
+                    size_t budget = 40;   // enough for 36B header+dirHdr, smaller than dSz
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "valid.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P2-1: tight remainingBudget before dirBuf fails cleanly and resets out",
+                         !ok && !out.ok && !out.wrapper && out.directoryId == 0 && out.directoryFormat == -1 && out.items.empty() &&
+                         readBytes == 36 && err.find("exceeds the reader's limit") != std::string::npos);
+                }
+                // P2-1b: tight remainingBudget fails BEFORE idxBuf allocation and resets out
+                {
+                    // validPcm has 3 items: 36B header + dirSize + 4*8B chunk headers (3 items + index); index payload is 16 + 4*3 = 28B
+                    const uint32_t dirSz = ai_arranger::media::panative::detail::be32(validPcm.data() + 32);
+                    size_t budget = 36u + dirSz + 4u * 8u + 4u;   // 4 bytes short of 28-byte index payload
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "valid.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P2-1: tight remainingBudget before idxBuf fails cleanly and resets out",
+                         !ok && !out.ok && !out.wrapper && out.directoryId == 0 && out.directoryFormat == -1 && out.items.empty() &&
+                         readBytes == 36u + dirSz + 4u * 8u && err.find("exceeds the reader's limit") != std::string::npos);
+                }
+                // P2-2: 32-bit wrap-prone dSz rejected fail-closed even with large maxFileBytes
+                {
+                    size_t budget = 1u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "wrap_dsz.pcm", size_t(1) << 33, budget, readBytes, out, err);
+                    TEST("P2-2: wrap-prone dSz (0xFFFFFFE0) fails closed and resets out",
+                         !ok && !out.ok && !out.wrapper && out.items.empty() &&
+                         err.find("runs past the end") != std::string::npos);
+                }
+                // P3-1: valid empty 0-item KORF container still succeeds cleanly
+                {
+                    size_t budget = 1u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "empty_valid.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P3-1: valid 0-item KORF container (dSz == 0) still parses cleanly",
+                         ok && out.ok && out.wrapper && out.items.empty());
+                }
+                // P3-1a: 50,000 zero-byte chunk flood with dSz == 0 short-circuits in O(1)
+                {
+                    size_t budget = 10u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "flood0.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P3-1: 50k zero-byte chunk flood (dSz == 0) short-circuits immediately in O(1)",
+                         !ok && !out.ok && !out.wrapper && out.items.empty() &&
+                         readBytes <= 64u && err.find("directory shorter than its item count") != std::string::npos);
+                }
+                // P3-1b: 10,000 zero-byte chunk flood with dSz == 25 short-circuits after at most 2 chunk headers
+                {
+                    size_t budget = 10u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "flood1.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P3-1: 10k zero-byte chunk flood (dSz == 25) short-circuits after bounded chunk headers",
+                         !ok && !out.ok && !out.wrapper && out.items.empty() &&
+                         readBytes <= 36u + 25u + 16u && err.find("directory shorter than its item count") != std::string::npos);
+                }
+            }
+        }
 
         fs::remove_all(tmpRoot, ec);
     }
