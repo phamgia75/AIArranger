@@ -105,7 +105,7 @@ inline Container parse(const uint8_t* p, size_t n) {
     size_t pos = 0;
     for (size_t i = 0; i < items; ++i) {
         const Chunk& ic = l1[2 + i];
-        Item it{ic.id, ic.offset, ic.size};
+        Item it{ic.id, ic.offset, ic.size, 0, 0, 0, {}, {}};
         uint16_t sub = 0;
         if (c.directoryFormat == 0) {
             if (rn - pos < 24) return fail("directory shorter than its item count");

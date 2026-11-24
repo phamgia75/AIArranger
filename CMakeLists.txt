@@ -197,6 +197,10 @@ foreach(test_file ${SHELL_TEST_SRC})
     target_link_libraries(${test_name} ${PLATFORM_LIBS} arranger-engine Threads::Threads)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+if(TARGET test_native_kst_resource_graph_integration)
+    target_compile_options(test_native_kst_resource_graph_integration PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>)
+endif()
 
 # ── Korg exporter tests (format, mapper, Genos corpus conversion) ─────
 file(GLOB EXPORTER_TEST_SRC tests/exporters/*.cpp)
