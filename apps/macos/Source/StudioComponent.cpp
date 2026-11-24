@@ -171,7 +171,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
                   "The KST opened in Library Workspace > Sources: byte copy + SHA-256 manifest (also: Backup KST... in KST Library)"),
         route("Check a USB copy (read-only)", "Validation & Reports: Verify Package against its manifest", D::Validation, 0),
         off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet (docs/PA5X_KST_EXPORT_PLAN.md)."),
-        {{&button("Pa5X Import Kit...", [this] { showDomain(Domain::ImportExport, 1); }), 260},   // the guided sheet (BL-E1)
+        {{&button("Pa5X Import Kit (EXPERIMENTAL)...", [this] { showDomain(Domain::ImportExport, 1); }), 260},   // the guided sheet (BL-E1)
          {&label("Sound/Drum Kit packages, KMP folders and Style SMFs in one USB folder with KIT.md (import steps, manual pages): "
                  "STRUCTURALLY VALID, not verified on a Pa5X", kText2), 0}},
         exportRow("KMP / KSF folder (EXPERIMENTAL)", D::SampleLab, 3, ExportJob::KmpFolder, "KMP job...",
@@ -484,15 +484,20 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
 
     title_.setFont(juce::FontOptions(22.0f, juce::Font::bold));
     title_.setColour(juce::Label::textColourId, juce::Colours::white);
-    experimental_.setText("EXPERIMENTAL", juce::dontSendNotification);
-    experimental_.setColour(juce::Label::textColourId, kExperimental);
     addAndMakeVisible(title_);
-    addChildComponent(experimental_);
     addAndMakeVisible(segmentBar_);
     styleText(inspector_);
     inspector_.setColour(juce::TextEditor::backgroundColourId, kSurface);
     addAndMakeVisible(inspector_);
 
+    // VoiceOver reads a pane or field by its title (UX a11y audit A1); report TextViews are titled at setup above,
+    // and buttons already speak their text and reason.
+    for (auto [c, t] : std::initializer_list<std::pair<juce::Component*, const char*>>{
+             {&inspector_, "Inspector"}, {&labBars_, "Bars"}, {&labBeats_, "Beats"}, {&labStart_, "Loop start"},
+             {&labEnd_, "Loop end"}, {&labSnap_, "Loop snap"}, {&labXfade_, "Loop crossfade"},
+             {&styleElem_, "Style element"}, {&styleTrack_, "Style track"}, {&styleOp_, "Edit operation"},
+             {&styleValue_, "Edit value"}, {&jobsLog_, "Validation results"}})
+        c->setTitle(t);
     setWantsKeyboardFocus(true);
     refreshAvailability();
     setSize(1440, 900);
@@ -530,7 +535,6 @@ void StudioComponent::showDomain(Domain d, int segment) {
     for (int i = 0; i < kDomains; ++i) domainButtons_[size_t(i)]->setToggleState(false, juce::dontSendNotification);
     for (auto* b : domainButtons_) if (b->getButtonText() == domainName(d)) b->setToggleState(true, juce::dontSendNotification);
     title_.setText(domainName(d), juce::dontSendNotification);
-    experimental_.setVisible(d == Domain::StyleStudio);
 
     // segmented control, same place on every screen (spec §2); built once per domain
     for (auto& [dd, bs] : segmentButtons_)
@@ -556,6 +560,16 @@ void StudioComponent::showDomain(Domain d, int segment) {
                                                                   : res_.converter().recipeText(), false);
     resized();
     refreshInspector();
+    // BL-A3: JUCE's focus outline on every control that takes keyboard focus (LookAndFeel_V4 alone only shifts a focused
+    // button's saturation, invisible on grey). Walked here because a TabbedComponent parents only its current page.
+    std::function<void(juce::Component&)> outline = [&outline](juce::Component& c) {
+        c.setHasFocusOutline(c.getWantsKeyboardFocus());
+        for (auto* k : c.getChildren()) outline(*k);
+        if (auto* t = dynamic_cast<juce::TabbedComponent*>(&c))
+            for (int i = 0; i < t->getNumTabs(); ++i)
+                if (auto* pg = t->getTabContentComponent(i); pg && pg->getParentComponent() != t) outline(*pg);
+    };
+    for (auto* k : getChildren()) outline(*k);   // not the Studio itself: no outline round the whole window
 }
 
 // A hand-off inside the shared ResourcesComponent (a finished package opens in Resource Graph) follows its tab.
@@ -567,13 +581,39 @@ void StudioComponent::changeListenerCallback(juce::ChangeBroadcaster*) {
 }
 
 bool StudioComponent::keyPressed(const juce::KeyPress& k) {
+    if (auto* top = getTopLevelComponent(); top && top->isOnDesktop() && !isShowing()) return false;
     const int c = k.getKeyCode() - '1';
     if (k.getModifiers().isCommandDown() && c >= 0 && c < kDomains) {
         static const Domain order[] = {Domain::Library, Domain::SampleLab, Domain::StyleStudio, Domain::ImportExport, Domain::Validation};
         showDomain(order[c]);
         return true;
     }
+    // BL-A7: Cmd-Z / Shift-Cmd-Z on the page on screen, as its Undo / Redo buttons (a focused text field takes them first)
+    const bool redo = k == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+    if (redo || k == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0)) {
+        const auto* page = segments_.at(domain_)[size_t(segment_)].page;
+        if (page == &stylePage_ || page == &manager_) return undoOnPage(redo);   // nothing to undo there: not taken
+    }
+    if (k == juce::KeyPress::escapeKey && k.getModifiers().getRawFlags() == 0) {   // BL-A9: Esc is an inline prompt's safe choice
+        if (workPromptShown()) { resolveRunningWork(WorkChoice::KeepWorking); return true; }
+        if (unsavedPromptShown()) { resolveUnsavedStyle(UnsavedChoice::Cancel); return true; }
+    }
     return false;
+}
+
+bool StudioComponent::canUndoOnPage(bool redo) const {
+    using A = LibraryManagerComponent::Action;
+    const auto* page = segments_.at(domain_)[size_t(segment_)].page;
+    if (page == &stylePage_) return (redo ? redoBtn_ : undoBtn_)->isEnabled();   // as its Undo / Redo button
+    if (page == &manager_) return manager_.unavailable(redo ? A::Redo : A::Undo).isEmpty();
+    return false;
+}
+
+bool StudioComponent::undoOnPage(bool redo) {
+    if (!canUndoOnPage(redo)) return false;
+    if (segments_.at(domain_)[size_t(segment_)].page == &stylePage_) return redo ? styleRedo() : styleUndo();
+    redo ? manager_.redo() : manager_.undo();   // refuses while a job holds the plan; nothing on disk changes
+    return true;
 }
 
 void StudioComponent::chooseFolder(const juce::String& title, std::function<void(juce::File)> then, bool files, const juce::String& pattern) {
@@ -1454,9 +1494,7 @@ void StudioComponent::resized() {
     }
     inspector_.setBounds(r.removeFromRight(300).reduced(8, 12));
     r.reduce(16, 12);
-    auto head = r.removeFromTop(32);
-    experimental_.setBounds(head.removeFromRight(120));
-    title_.setBounds(head);
+    title_.setBounds(r.removeFromTop(32));
     r.removeFromTop(6);
     segmentBar_.setBounds(r.removeFromTop(28));
     {

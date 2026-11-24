@@ -60,9 +60,12 @@ public:
     ~StudioComponent() override;
     void resized() override;
     void paint(juce::Graphics& g) override;
-    bool keyPressed(const juce::KeyPress& k) override;   // ⌘1…⌘5 jump to a domain
+    bool keyPressed(const juce::KeyPress& k) override;   // ⌘1…⌘5 jump to a domain; ⌘Z/⇧⌘Z undo/redo the page; Esc cancels an inline prompt
 
     void showDomain(Domain d, int segment = 0);
+    // BL-A7/A8: undo or redo on the page on screen (Style Studio edits; the Library Manager's staged plan). Other pages: nothing.
+    bool canUndoOnPage(bool redo) const;
+    bool undoOnPage(bool redo);   // false when there was nothing to undo or redo there
     Domain domain() const { return domain_; }
     int segment() const { return segment_; }
     juce::StringArray segmentNames(Domain d) const;
@@ -221,7 +224,7 @@ private:
     std::vector<juce::TextButton*> domainButtons_;
     juce::TextButton* liveBtn_ = nullptr;
     std::map<Domain, std::vector<juce::TextButton*>> segmentButtons_;
-    juce::Label title_, experimental_;
+    juce::Label title_;
     juce::Label leftovers_;   // non-blocking banner: unfinished writes (NAME.INCOMPLETE, .stale-*) in the recorded output folders (jobs::leftoverReport)
     void checkLeftovers();    // read-only listing on a worker thread (newest wins); on launch and whenever a page opens
     void showLeftovers(const std::vector<std::pair<std::string, std::vector<std::string>>>& report);

@@ -19,7 +19,7 @@ Nothing AIArranger writes is HARDWARE-VERIFIED today. Nothing is called "Pa5X-co
 
 ## 2. The pathway that exists: Pa5X Import Kit (documented imports)
 
-`aiarranger-kit build` (and **Pa5X Import Kit...** in Studio > Import / Export) gathers AIArranger outputs into one new
+`aiarranger-kit build` (and **Pa5X Import Kit (EXPERIMENTAL)...** in Studio > Import / Export) gathers AIArranger outputs into one new
 USB folder. The owner imports each member on the Pa5X through its own import pages, then the Pa5X saves the KST itself.
 
 | Member | Kit folder | Pa5X import page | Readers that must pass (source and copy) |
