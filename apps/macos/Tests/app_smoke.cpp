@@ -8,6 +8,7 @@
 #include "../Source/LiveHostComponent.h"
 #include "../Source/ResourcesComponent.h"
 #include "../Source/StudioComponent.h"
+#include "../Source/StudioMenu.h"
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/serializer.h"
 #include "jobs/export_specs.h"
@@ -83,6 +84,21 @@ static void click(juce::Component& root, const char* text) {
     pump(60);
 }
 
+// Disabled buttons under root that give no reason (tooltip = VoiceOver help); checked while work runs, when buttons go off
+static juce::StringArray silentDisabled(juce::Component& root) {
+    juce::StringArray out;
+    std::function<void(juce::Component&)> walk = [&](juce::Component& c) {
+        if (auto* b = dynamic_cast<juce::Button*>(&c); b && !b->isEnabled() && b->getTooltip().trim().isEmpty()) out.add(b->getButtonText());
+        for (auto* k : c.getChildren()) walk(*k);
+        if (auto* t = dynamic_cast<juce::TabbedComponent*>(&c))   // only the current tab's page is a child
+            for (int i = 0; i < t->getNumTabs(); ++i)
+                if (auto* p = t->getTabContentComponent(i); p && p->getParentComponent() != t) walk(*p);
+    };
+    walk(root);
+    for (const auto& n : out) std::printf("  info: disabled without a reason while busy: %s\n", n.toRawUTF8());
+    return out;
+}
+
 static juce::String section(juce::Component& root) {
     auto* l = find<juce::Label>(root, "Section:");
     return l ? l->getText() : juce::String();
@@ -152,6 +168,211 @@ int main() {
         cycles &= h->getWidth() == 720;
     }
     TEST("5 create/start/destroy cycles", cycles);
+
+    {   // BL-A8: the menu bar mirrors the Studio sidebar (View) and the page's Undo / Redo (Edit)
+        using SC = ai_arranger::app::StudioComponent;
+        auto host = std::make_unique<ai_arranger::app::LiveHostComponent>();
+        ai_arranger::app::StudioMenu menu(*host);
+        auto items = [&](int index) {
+            std::vector<std::pair<juce::String, juce::PopupMenu::Item>> out;
+            const auto m = menu.getMenuForIndex(index, {});
+            for (juce::PopupMenu::MenuItemIterator it(m); it.next();) out.push_back({it.getItem().text, it.getItem()});
+            return out;
+        };
+        TEST("menu: Edit and View in the menu bar", (menu.getMenuBarNames() == juce::StringArray{"Edit", "View"}));
+        juce::StringArray view;
+        for (auto& [t, i] : items(1)) view.add(t);
+        TEST("menu: View lists the Studio domains in sidebar order",
+             (view == juce::StringArray{"Library Workspace", "Sample Lab", "Style Studio", "Import / Export Center", "Validation & Reports"}));
+        auto edit = items(0);
+        TEST("menu: Edit has Undo and Redo, disabled when Studio is closed and no text field is focused", edit.size() == 2 &&
+             edit[0].first == "Undo" && !edit[0].second.isEnabled && edit[1].first == "Redo" && !edit[1].second.isEnabled);
+        for (auto& [t, i] : items(1)) if (t == "Style Studio") menu.perform(juce::ApplicationCommandTarget::InvocationInfo(i.itemID));
+        pump(50);
+        TEST("menu: View > Style Studio opens the Studio on that domain", host->studio() && host->studio()->domain() == SC::Domain::StyleStudio);
+        {   // owner: the menus show their shortcuts, and a focused text field keeps its own undo
+            using MS = ai_arranger::app::StudioMenu;
+            const auto keys = [&](int id) { return menu.commands().getKeyMappings()->getKeyPressesAssignedToCommand(id); };
+            const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0),
+                cmdShiftZ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+            bool domainKeys = true;
+            for (int i = 0; i < SC::kDomains; ++i)
+                domainKeys &= keys(MS::kDomain + i).size() == 1 && keys(MS::kDomain + i)[0] == juce::KeyPress('1' + i, juce::ModifierKeys::commandModifier, 0);
+            TEST("menu: Undo shows Cmd-Z, Redo Shift-Cmd-Z, the domains Cmd-1...Cmd-5",
+                 keys(MS::kUndo).size() == 1 && keys(MS::kUndo)[0] == cmdZ && keys(MS::kRedo).size() == 1 && keys(MS::kRedo)[0] == cmdShiftZ && domainKeys);
+            auto* sc = host->studio();
+            auto* sw = dynamic_cast<juce::DocumentWindow*>(sc->getTopLevelComponent());
+            juce::TextEditor field;
+            field.setMultiLine(false);
+            field.setText("a", false);
+            field.insertTextAtCaret("bc");
+            // Codex r3: through the command manager (what a native key equivalent or a menu click runs), with the focus/active window
+            // injected because an offscreen window cannot take OS focus.
+            juce::Component* focus = &field;
+            juce::Component* activeWin = sw;
+            ai_arranger::app::StudioMenu cmdMenu([sc] { return sc; }, [sc] { return sc; }, [&focus] { return focus; },
+                                                 [&activeWin] { return activeWin; });
+            auto cmdInfo = [&](int id) { juce::ApplicationCommandInfo i(id); cmdMenu.getCommandInfo(id, i); return i; };
+            TEST("menu: Undo / Redo are enabled while an editable text field is focused",
+                 !(cmdInfo(MS::kUndo).flags & juce::ApplicationCommandInfo::isDisabled) && !(cmdInfo(MS::kRedo).flags & juce::ApplicationCommandInfo::isDisabled));
+            const auto before = sc->styleModel().undoLabel();
+            const bool took = cmdMenu.commands().invokeDirectly(MS::kUndo, false);
+            TEST("menu: Undo command with a text field focused undoes the field, not the Style", took && field.getText() != "abc" &&
+                 sc->styleModel().undoLabel() == before);
+            focus = nullptr;   // active Studio window, no text field focused, nothing to undo on Style Studio yet
+            const bool pageTook = cmdMenu.commands().invokeDirectly(MS::kUndo, false);
+            TEST("menu: on active Style Studio with nothing to undo, Undo is enabled and does nothing",
+                 !(cmdInfo(MS::kUndo).flags & juce::ApplicationCommandInfo::isDisabled) && !pageTook &&
+                 sc->styleModel().undoLabel() == before && field.getText() != "abc");
+            {   // Window/visibility/focus scoping regression: Undo/Redo must respect all 4 Studio window states
+                namespace fs = std::filesystem;
+                using D = SC::Domain;
+                using A = ai_arranger::app::LibraryManagerComponent::Action;
+                const fs::path mroot = fs::temp_directory_path() / ("aia-smoke-menu-scope-" + std::to_string(::getpid()));
+                fs::remove_all(mroot);
+                auto put = [](const fs::path& p, const std::string& s) {
+                    fs::create_directories(p.parent_path());
+                    std::ofstream(p, std::ios::binary) << s;
+                };
+                // Prepare a real editable Style on Style Studio (tempo edited) AND a staged Library Manager plan step
+                sc->showDomain(D::StyleStudio);
+                sc->openStyle(juce::File(AIARR_REPO_TOOLS_DIR "/../fixtures/synthetic/SYNTH_WALTZ_68.sty"));
+                const auto origTempo = sc->styleModel().style().tempo_bpm;
+                const auto editedTempo = origTempo == 95 ? 97 : 95;
+                sc->styleOp().setSelectedId(6);   // Tempo
+                sc->styleValue().setText(juce::String(int(editedTempo)));
+                click(sc->page(D::StyleStudio), "Apply");
+                auto& lm = sc->manager();
+                auto waitLm = [&] { for (int i = 0; i < 250 && (lm.busy() || lm.computing()); ++i) pump(20); };
+                lm.setPlanStoreDir(juce::File((mroot / "plan-store").string()));
+                put(mroot / "A.KST/STYLE/USER01/Ballad.STG", "s");
+                put(mroot / "B.KST/STYLE/USER01/Other.STG", "o");
+                lm.openLibrary('A', juce::File((mroot / "A.KST").string()));
+                waitLm();
+                lm.openLibrary('B', juce::File((mroot / "B.KST").string()));
+                waitLm();
+                lm.selectRow('A', 0);
+                lm.addStep(A::Copy);
+                waitLm();
+                sc->showDomain(D::StyleStudio);
+
+                click(*host, "Sound Tools...");   // open standalone Sounds & Resources window for unfocused-Studio check
+                pump(50);
+                auto* liveBtn = find<juce::Button>(*host, "Start");
+                auto* resPage = host->resources() ? host->resources()->tabs().getTabContentComponent(0) : nullptr;
+                auto* resBtn = resPage ? find<juce::Button>(*resPage, "Open Package...") : nullptr;
+                auto* resWin = host->resources() ? host->resources()->getTopLevelComponent() : nullptr;
+
+                juce::Component* scopeFocus = sc;
+                juce::Component* scopeActiveWin = sw;
+                ai_arranger::app::StudioMenu scopeMenu([&host] { return host->studio(); }, [&host] { return host->showStudio(); },
+                                                       [&scopeFocus] { return scopeFocus; }, [&scopeActiveWin] { return scopeActiveWin; });
+                auto scopeEdit = [&] {
+                    std::vector<juce::PopupMenu::Item> out;
+                    const auto m = scopeMenu.getMenuForIndex(0, {});
+                    for (juce::PopupMenu::MenuItemIterator it(m); it.next();) out.push_back(it.getItem());
+                    return out;
+                };
+                auto scopeDisabled = [&](int id) {
+                    juce::ApplicationCommandInfo info(id);
+                    scopeMenu.getCommandInfo(id, info);
+                    return (info.flags & juce::ApplicationCommandInfo::isDisabled) != 0;
+                };
+
+                // 1) Studio visible & focused/active: Undo/Redo works on Style Studio and Library Manager
+                TEST("menu scope (visible & focused): Undo/Redo enabled and acts on Style Studio",
+                     sw && sw->isVisible() && !scopeDisabled(MS::kUndo) && !scopeDisabled(MS::kRedo) &&
+                     scopeMenu.commands().invokeDirectly(MS::kUndo, false) && sc->styleModel().style().tempo_bpm == origTempo &&
+                     scopeMenu.commands().invokeDirectly(MS::kRedo, false) && sc->styleModel().style().tempo_bpm == editedTempo);
+                sc->showDomain(D::Library, 4);
+                const bool lmUndone = scopeMenu.commands().invokeDirectly(MS::kUndo, false);
+                waitLm();
+                const bool lmEmptyAfterUndo = lm.plan().empty();
+                const bool lmRedone = scopeMenu.commands().invokeDirectly(MS::kRedo, false);
+                waitLm();
+                TEST("menu scope (visible & focused): Undo/Redo acts on Library Manager plan",
+                     lmUndone && lmEmptyAfterUndo && lmRedone && lm.plan().size() == 1);
+
+                // 2) Studio hidden / closed via closeButtonPressed(): Undo/Redo is disabled & never mutates hidden Studio
+                sw->closeButtonPressed();
+                pump(30);
+                scopeFocus = liveBtn;
+                scopeActiveWin = host.get();
+                auto hiddenItems = scopeEdit();
+                const bool hiddenLmUndo = scopeMenu.commands().invokeDirectly(MS::kUndo, false);
+                const bool hiddenLmPerform = scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo));
+                TEST("menu scope (hidden/closed Studio): Undo/Redo disabled and does not mutate hidden Library Manager plan",
+                     host->studio() == sc && !sw->isVisible() && hiddenItems.size() == 2 &&
+                     !hiddenItems[0].isEnabled && !hiddenItems[1].isEnabled && scopeDisabled(MS::kUndo) && scopeDisabled(MS::kRedo) &&
+                     !hiddenLmUndo && !hiddenLmPerform && lm.plan().size() == 1);
+                sc->showDomain(D::StyleStudio);
+                scopeFocus = nullptr;
+                scopeActiveWin = sw;   // even if active-window were stale, a hidden Studio is never in scope
+                TEST("menu scope (hidden/closed Studio): does not mutate hidden Style Studio even with null focus",
+                     scopeDisabled(MS::kUndo) && !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     !scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo)) &&
+                     !sc->keyPressed(cmdZ) && sc->styleModel().style().tempo_bpm == editedTempo);
+                // While Studio is hidden, a focused editable text field in another window still keeps its own Undo
+                juce::TextEditor otherField;
+                otherField.setText("x", false);
+                otherField.insertTextAtCaret("yz");
+                scopeFocus = &otherField;
+                scopeActiveWin = host.get();
+                TEST("menu scope (hidden Studio, text field focused): Undo undoes only the text field, not hidden Studio",
+                     !scopeDisabled(MS::kUndo) && scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     otherField.getText() != "xyz" && sc->styleModel().style().tempo_bpm == editedTempo);
+
+                // 3) Studio visible but unfocused (focus on Live Host or Sounds & Resources non-text control, or null focus with other window active)
+                host->showStudio();
+                pump(30);
+                scopeFocus = liveBtn;
+                scopeActiveWin = host.get();
+                TEST("menu scope (visible, Live Host focused): Undo/Redo disabled and does not mutate background Style Studio",
+                     sw->isVisible() && liveBtn && scopeDisabled(MS::kUndo) && scopeDisabled(MS::kRedo) &&
+                     !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     !scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo)) &&
+                     sc->styleModel().style().tempo_bpm == editedTempo);
+                scopeFocus = nullptr;
+                scopeActiveWin = resWin;
+                TEST("menu scope (visible, other window active with null focus): Undo/Redo disabled and does not mutate background Style Studio",
+                     sw->isVisible() && resWin && scopeDisabled(MS::kUndo) &&
+                     !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     sc->styleModel().style().tempo_bpm == editedTempo);
+                sc->showDomain(D::Library, 4);
+                scopeFocus = resBtn;
+                scopeActiveWin = resWin;
+                TEST("menu scope (visible, Sounds & Resources focused): Undo/Redo disabled and does not mutate background Library Manager plan",
+                     sw->isVisible() && resBtn && scopeDisabled(MS::kUndo) && scopeDisabled(MS::kRedo) &&
+                     !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     !scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo)) &&
+                     lm.plan().size() == 1);
+
+                // 4) Studio reopened / re-focused: Undo/Redo works cleanly again
+                sw->closeButtonPressed();
+                pump(20);
+                host->showStudio();
+                pump(30);
+                scopeFocus = sc;
+                scopeActiveWin = sw;
+                const bool lmUndone2 = scopeMenu.commands().invokeDirectly(MS::kUndo, false);
+                waitLm();
+                const bool lmEmpty2 = lm.plan().empty();
+                const bool lmRedone2 = scopeMenu.commands().invokeDirectly(MS::kRedo, false);
+                waitLm();
+                TEST("menu scope (reopened & re-focused): Undo/Redo works again on Library Manager plan",
+                     sw->isVisible() && !scopeDisabled(MS::kUndo) && !scopeDisabled(MS::kRedo) &&
+                     lmUndone2 && lmEmpty2 && lmRedone2 && lm.plan().size() == 1);
+                sc->showDomain(D::StyleStudio);
+                scopeFocus = nullptr;
+                scopeActiveWin = sw;
+                TEST("menu scope (reopened & re-focused): Undo/Redo works again on Style Studio",
+                     scopeMenu.commands().invokeDirectly(MS::kUndo, false) && sc->styleModel().style().tempo_bpm == origTempo &&
+                     scopeMenu.commands().invokeDirectly(MS::kRedo, false) && sc->styleModel().style().tempo_bpm == editedTempo);
+
+                fs::remove_all(mroot);
+            }
+        }
+    }
 
     // ── Resources window (read-only): what a musician reaches from "Resources..." ──
     phase("resources: open + KST");
@@ -238,6 +459,7 @@ int main() {
                  b1.getParentDirectory() == juce::File(bdir.string()) && b1.getFileName().startsWith("kst backup 20"));
             rc.startBackup(juce::File(kst.string()), b1);
             TEST("backup runs in the background", rc.backingUp());
+            TEST("a11y: while a backup runs, every disabled button says why", silentDisabled(rc).isEmpty());
             waitBackup(rc);
             const fs::path b1p = b1.getFullPathName().toStdString();
             TEST("Backup KST: complete and verified, manifest beside it, progress full",
@@ -254,6 +476,7 @@ int main() {
                  !fs::exists(kst / "STYLE/inside.INCOMPLETE"));
             rc.startVerify(b1);
             TEST("Verify Backup (the check) runs off the message thread", rc.backingUp());
+            TEST("a11y: while a verify runs, every disabled button says why", silentDisabled(rc).isEmpty());
             waitBackup(rc);
             TEST("Verify Backup: a good backup verifies", rc.kstText().startsWith("Backup verified: all 1 files"));
             std::ofstream(b1p / "STYLE/BANK01.STY") << "tampered";
@@ -355,6 +578,7 @@ int main() {
                 cv.nameField().setText("Kronos EP");
                 pump(50);
                 cv.buildPreview();
+                TEST("a11y: while a preview reads samples, every disabled button says why", silentDisabled(cv).isEmpty());
                 for (int i = 0; i < 1500 && cv.busy(); ++i) pump(20);
                 TEST("Convert Sound: KRONOS preview shows the stereo zones, root and loop",
                      cv.model().built() && cv.previewText().contains("C-1 -B3    C3") && cv.previewText().contains("C4  -G9    C5") && cv.previewText().contains("24000-48000") &&
@@ -463,6 +687,11 @@ int main() {
             }
             watch.last = std::chrono::steady_clock::now(); watch.worstMs = 0;
             cv.generate(juce::File(root.string() + "/out/Big Sine"));
+            if (auto* g = find<juce::Button>(cv, "Generate Package..."))
+                TEST("a11y: while the package is written, Generate says so (not 'after Preview')",
+                     !g->isEnabled() && g->getTooltip().containsIgnoreCase("writ") && !g->getTooltip().startsWith("Available after Preview"));
+            else TEST("a11y: Convert Sound has a Generate Package... button", false);
+            TEST("a11y: while the package is written, every disabled button says why", silentDisabled(cv).isEmpty());
             for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
             const double generateGap = watch.worstMs;
             TEST("generate: package written, summary with budget", cv.statusText().startsWith("Package written") && cv.previewText().contains("verdict: fits") &&
@@ -513,6 +742,9 @@ int main() {
                 rc.tabs().setCurrentTabIndex(3);
                 cv.generate(juce::File(root.string() + "/out/Older"));
                 cv.inspectFolder(juce::File(root.string() + "/big"));   // the user moves on while it writes
+                if (auto* g = find<juce::Button>(cv, "Generate Package..."))   // Codex r2: it will not come back when this write lands
+                    TEST("a11y: settings changed while writing: Generate asks for Preview, not for the write to finish",
+                         !g->isEnabled() && g->getTooltip().contains("Preview") && !g->getTooltip().contains("when it is written"));
                 for (int i = 0; i < 3000 && cv.busy(); ++i) pump(20);
                 TEST("an older Generate finishing does not replace newer state or switch tabs",
                      fs::exists(root / "out/Older/RESOURCES.tsv") && !cv.statusText().startsWith("Package written") && rc.tabs().getCurrentTabIndex() == 3);
@@ -586,6 +818,7 @@ int main() {
             auto form = [&](app::PluginSamplerComponent& c, const juce::File& exe, const juce::String& instrument, const juce::String& name) {
                 c.setSamplerExecutable(exe);
                 c.findInstruments();
+                if (!silentDisabled(c).isEmpty()) TEST("a11y: while instruments are searched, every disabled button says why", false);
                 for (int i = 0; i < 1500 && c.instrumentNames().isEmpty(); ++i) pump(20);
                 const bool found = c.selectInstrument(instrument);
                 for (auto [k, v] : {std::pair<const char*, const char*>{"Lowest note", "C3"}, {"Highest note", "c5"}, {"Every (semitones)", "12"},
@@ -1217,6 +1450,19 @@ int main() {
             lm.undo();
             waitLm(5000);
             TEST("library history: multi-step undo", lm.plan().size() == 1 && lm.plan()[0].op == library::Op::Copy && lm.reportText().contains("2 to redo"));
+            {   // BL-A7: on the Library Manager page Cmd-Z / Shift-Cmd-Z step the plan history (staged edits only, nothing on disk)
+                const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0),
+                    cmdShiftZ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+                st.showDomain(D::Library, 4);
+                const bool redone = st.keyPressed(cmdShiftZ);
+                waitLm(5000);
+                TEST("BL-A7 library manager: Shift-Cmd-Z redoes a plan edit", redone && lm.plan().size() == 2);
+                const bool undone = st.keyPressed(cmdZ);
+                waitLm(5000);
+                TEST("BL-A7 library manager: Cmd-Z undoes it", undone && lm.plan().size() == 1 && lm.reportText().contains("2 to redo"));
+                st.showDomain(D::Library, 0);
+                TEST("BL-A7 library manager: Cmd-Z on another page leaves the plan alone", !st.keyPressed(cmdZ) && lm.plan().size() == 1);
+            }
             lm.redo();
             lm.redo();
             waitLm(5000);
@@ -1578,7 +1824,7 @@ int main() {
             {   // E9: the Pa5X Import Kit from a folder of outputs, as an export job
                 fs::create_directories(root / "kit-src");
                 fs::copy(pkgDest, root / "kit-src" / "pkg-job", fs::copy_options::recursive);
-                TEST("kit: the Pa5X Import Kit route is offered", find<juce::Button>(io, "Pa5X Import Kit...") != nullptr &&
+                TEST("kit: the Pa5X Import Kit route is offered", find<juce::Button>(io, "Pa5X Import Kit (EXPERIMENTAL)...") != nullptr &&
                      find<juce::Label>(io, "Sound/Drum Kit packages, KMP folders and Style SMFs in one USB folder") != nullptr);
                 const auto kid = st.importKitJob(juce::File((root / "kit-src").string()), juce::File((root / "kit-job").string()));
                 waitIdle(30000);
@@ -1608,7 +1854,7 @@ int main() {
                 };
                 const auto sheetWait = [&] { for (int i = 0; i < 1500 && st.busy(); ++i) pump(20); };
                 const auto srcBefore = tree(src);
-                click(io, "Pa5X Import Kit...");
+                click(io, "Pa5X Import Kit (EXPERIMENTAL)...");
                 TEST("sheet: the Import Kit button opens the sheet page", st.currentPage() == &ks);
                 TEST("sheet: before a review Create kit is off with the reason, and the text is labelled",
                      !ks.createEnabled() && ks.createReason().startsWith("Step 1") && ks.text().contains("NOT VERIFIED ON A PA5X") &&
@@ -2026,6 +2272,17 @@ int main() {
             TEST("studio: Undo names the op and restores", find<juce::Button>(pg, "Undo Tempo") != nullptr && st.styleUndo() &&
                  st.styleModel().style().tempo_bpm == tempo && find<juce::Button>(pg, "Redo Tempo") != nullptr);
             TEST("studio: Redo re-applies", st.styleRedo() && st.styleModel().style().tempo_bpm == 97);
+            {   // BL-A7: Cmd-Z / Shift-Cmd-Z act on the page on screen (text fields keep their own undo: they take the key first)
+                const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0),
+                    cmdShiftZ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0);
+                st.showDomain(D::Validation);
+                TEST("BL-A7 studio: Cmd-Z on another page leaves the Style alone", !st.keyPressed(cmdZ) && st.styleModel().style().tempo_bpm == 97);
+                st.showDomain(D::StyleStudio);
+                TEST("BL-A7 studio: Cmd-Z on Style Studio undoes the last Style edit", st.keyPressed(cmdZ) && st.styleModel().style().tempo_bpm == tempo);
+                TEST("BL-A7 studio: Shift-Cmd-Z redoes it", st.keyPressed(cmdShiftZ) && st.styleModel().style().tempo_bpm == 97);
+                TEST("BL-A7 studio: Shift-Cmd-Z with nothing to redo is not taken (Codex r2)", !st.keyPressed(cmdShiftZ) &&
+                     st.styleModel().style().tempo_bpm == 97);
+            }
             st.styleValue().setText("fast");
             click(pg, "Apply");
             TEST("studio: a bad value is refused, nothing changed", st.styleStatus().startsWith("Refused, nothing changed") && st.styleModel().style().tempo_bpm == 97);
@@ -2227,6 +2484,12 @@ int main() {
             TEST("C2 studio: Cancel keeps the Style, its edits and its undo", !st.unsavedPromptShown() && st.styleModel().style().tempo_bpm == 99 &&
                  st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() && !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
             st.openStyle(juce::File(sty.string()));
+            const bool escHandled = st.unsavedPromptShown() && st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
+            TEST("BL-A9 studio: Esc on the unsaved-Style prompt is Cancel: Style, edits and undo kept", escHandled && !st.unsavedPromptShown() &&
+                 st.styleModel().style().tempo_bpm == 99 && st.styleModel().undoLabel() == "Tempo" && st.styleModel().dirty() &&
+                 !find<juce::Button>(pg, "Discard Edits and Open")->isVisible());
+            TEST("BL-A9 studio: Esc with no prompt shown is not taken (nothing to cancel)", !st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey)));
+            st.openStyle(juce::File(sty.string()));
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "kept.uasf").string()));
             const bool openWaits = st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 99 && !st.jobList().empty() &&   // not reloaded yet
                                    st.jobList().back().type == "Style as UASF";   // the job may be finished, but not landed (message thread)
@@ -2291,7 +2554,8 @@ int main() {
                      !st.requestQuit(wfn) && wq == 0 && st.workPromptShown() && st.domain() == D::ImportExport &&
                      find<juce::Button>(io, "Wait, then Quit")->isVisible() && find<juce::Button>(io, "Cancel Jobs and Quit")->isVisible() &&
                      find<juce::Button>(io, "Keep Working")->isVisible());
-                st.resolveRunningWork(W::KeepWorking);
+                // BL-A9: Esc on the prompt is its safe choice, Keep Working (the same path as the button)
+                TEST("quit: Esc on the running-work prompt is handled", st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey)));
                 waitIdle(5000);
                 pump(200);
                 TEST("quit: Keep Working aborts the quit; the work still finishes", wq == 0 && !st.workPromptShown() && !st.busy() &&
@@ -2401,6 +2665,11 @@ int main() {
             TEST("quit: Cancel aborts the quit; edits and undo stay", quits == 1 && !st.unsavedPromptShown() && st.styleModel().dirty() &&
                  st.styleModel().style().tempo_bpm == 96 && st.styleModel().undoLabel() == "Tempo");
             st.requestQuit(quitFn);
+            const bool quitEsc = st.unsavedPromptShown() && st.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
+            pump(100);
+            TEST("BL-A9 quit: Esc on the unsaved-Style quit prompt is Cancel: no quit, edits and undo stay", quitEsc && quits == 1 &&
+                 !st.unsavedPromptShown() && st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 96 && st.styleModel().undoLabel() == "Tempo");
+            st.requestQuit(quitFn);
             st.resolveUnsavedStyle(app::StudioComponent::UnsavedChoice::Save, juce::File((root / "quit-save.uasf").string()));
             const bool quitWaits = quits == 1 && st.styleModel().dirty() && st.busy();
             waitIdle(10000);
@@ -2497,6 +2766,34 @@ int main() {
                 st.resolveUnsavedStyle(U::Cancel);
                 st.styleUndo();
                 TEST("D33 P1 quit: Cancel then undo: clean again", !st.styleModel().dirty() && quits == 7);
+                {   // UX rev 3 / D29: the new Cmd-Z path must not worsen the stale Discard decision (same bytes check as the Undo button)
+                    const juce::KeyPress cmdZ('z', juce::ModifierKeys::commandModifier, 0);
+                    edit("88");
+                    edit("89");
+                    st.requestQuit(quitFn);
+                    // own folder: its cancelled NAME.INCOMPLETE must not join the shared folder's leftover list, which the banner cuts at
+                    // 4 names and a later check reads (#43 gate D e); CI failed on it when this sat in `root`
+                    fs::create_directories(root / "d29-keys");
+                    const auto d3 = st.manager().enqueueJob(slowJob(root / "d29-keys" / "slow"), {});
+                    pump(100);
+                    st.resolveUnsavedStyle(U::Discard);
+                    st.resolveRunningWork(W::Wait);
+                    st.showDomain(D::StyleStudio);
+                    // the native menu command path (Codex r3 P2): active Studio with no focused text field goes to the Style page
+                    st.setVisible(true);
+                    ai_arranger::app::StudioMenu cmdMenu([&st] { return &st; }, [&st] { return &st; }, [] { return nullptr; },
+                                                         [&st] { return &st; });
+                    const bool took = cmdMenu.commands().invokeDirectly(ai_arranger::app::StudioMenu::kUndo, false);
+                    st.selectJob(d3);
+                    st.cancelJob();
+                    waitIdle(10000);
+                    pump(300);
+                    TEST("D29 keys: Discard, Wait, then Cmd-Z: no quit, the Style page asks again (decision not reused)", took && quits == 7 &&
+                         st.unsavedPromptShown() && st.styleModel().dirty() && st.styleModel().style().tempo_bpm == 88);
+                    st.resolveUnsavedStyle(U::Cancel);
+                    st.styleUndo();
+                    TEST("D29 keys: Cancel then undo: clean again, still no quit", !st.styleModel().dirty() && quits == 7);
+                }
                 {   // Codex F2: a deferred Save-before-open never replaces a Style opened meanwhile
                     const auto a = st.styleModel().path();
                     edit("90");
@@ -2760,6 +3057,60 @@ int main() {
         }
         TEST("studio: nothing is labelled Pa5X-compatible", !st.inspectorText().containsIgnoreCase("compatible") &&
              !st.jobsText().containsIgnoreCase("Pa5X-compatible") && !st.libraryText().containsIgnoreCase("compatible"));
+
+        {   // UX a11y audit A1/A2: VoiceOver reads the accessibility title. Every text pane, input, list and popup in the
+            // whole Studio tree (Sounds & Resources tabs included) needs one, and every disabled button its reason (tooltip = AX help).
+            juce::StringArray unnamed, noReason;
+            std::function<void(juce::Component&, const juce::String&)> walk = [&](juce::Component& c, const juce::String& path) {
+                const auto where = path + "/" + (c.getComponentID().isNotEmpty() ? c.getComponentID() : juce::String(typeid(c).name()));
+                const bool field = dynamic_cast<juce::TextEditor*>(&c) || dynamic_cast<juce::ComboBox*>(&c) || dynamic_cast<juce::ListBox*>(&c) ||
+                                   dynamic_cast<juce::TreeView*>(&c) || dynamic_cast<juce::CodeEditorComponent*>(&c);
+                // The handlers of these types return the component title (JUCE 8.0.4 sources); off-screen there is no peer, so
+                // getAccessibilityHandler() is null here and the title is checked directly.
+                if (field && c.isAccessible() && c.getTitle().trim().isEmpty()) unnamed.add(where);
+                if (auto* b = dynamic_cast<juce::Button*>(&c); b && !b->isEnabled() && b->getTooltip().trim().isEmpty())
+                    noReason.add(b->getButtonText().isNotEmpty() ? b->getButtonText() : where);
+                if (dynamic_cast<juce::ComboBox*>(&c) || dynamic_cast<juce::TextEditor*>(&c)) return;   // their own internals
+                for (auto* k : c.getChildren()) walk(*k, where);
+            };
+            for (D d : {D::Library, D::ImportExport, D::SampleLab, D::StyleStudio, D::Validation})   // pages are children only while shown
+                for (int i = 0; i < st.segmentNames(d).size(); ++i) { st.showDomain(d, i); pump(20); walk(st, {}); }
+            unnamed.removeDuplicates(false);
+            noReason.removeDuplicates(false);
+            for (const auto& u : unnamed) std::printf("  info: no accessible name: %s\n", u.toRawUTF8());
+            for (const auto& u : noReason) std::printf("  info: disabled without a reason: %s\n", u.toRawUTF8());
+            TEST("a11y: every text pane, input, list and popup in the Studio has an accessible name", unnamed.isEmpty());
+            TEST("a11y: every disabled button in the Studio says why (tooltip, read by VoiceOver)", noReason.isEmpty());
+        }
+        {   // UX a11y audit §3 / BL-A3: every control that takes keyboard focus gets JUCE's focus outline (LookAndFeel_V4 alone
+            // only shifts a focused button's saturation, which cannot be seen on grey). Off-screen nothing can take focus, so the
+            // flag is checked; the drawn outline itself stays a GUI check.
+            juce::StringArray bare;
+            std::function<void(juce::Component&, const juce::String&)> walk = [&](juce::Component& c, const juce::String& path) {
+                const auto where = path + "/" + (dynamic_cast<juce::Button*>(&c) ? static_cast<juce::Button&>(c).getButtonText() : juce::String(typeid(c).name()));
+                if (&c != &st && c.getWantsKeyboardFocus() && !c.hasFocusOutline()) bare.add(where);
+                for (auto* k : c.getChildren()) walk(*k, where);
+                if (auto* t = dynamic_cast<juce::TabbedComponent*>(&c))   // only the current tab's page is a child
+                    for (int i = 0; i < t->getNumTabs(); ++i)
+                        if (auto* pg = t->getTabContentComponent(i); pg && pg->getParentComponent() != t) walk(*pg, where);
+            };
+            for (D d : {D::Library, D::ImportExport, D::SampleLab, D::StyleStudio, D::Validation})
+                for (int i = 0; i < st.segmentNames(d).size(); ++i) { st.showDomain(d, i); pump(20); walk(st, {}); }
+            bare.removeDuplicates(false);
+            for (int i = 0; i < std::min(10, bare.size()); ++i) std::printf("  info: no focus outline: %s\n", bare[i].toRawUTF8());
+            TEST("a11y: every control in the Studio that takes keyboard focus shows a focus outline", bare.isEmpty());
+        }
+        {   // Labelling rules §2: EXPERIMENTAL marks Pa5X-bound actions and outputs, not a whole domain (UASF saves and reports are ordinary)
+            st.showDomain(D::StyleStudio);
+            bool header = false;
+            for (auto* c : st.getChildren())
+                if (auto* l = dynamic_cast<juce::Label*>(c); l && l->isVisible() && l->getText() == "EXPERIMENTAL") header = true;
+            TEST("labels: no domain-wide EXPERIMENTAL header on Style Studio; the Pa5X SMF actions keep theirs",
+                 !header && find<juce::Button>(st.page(D::StyleStudio), "Export Pa5X SMF (EXPERIMENTAL)...") != nullptr &&
+                 find<juce::Button>(st.page(D::ImportExport), "Style as Pa5X SMF (EXPERIMENTAL)") != nullptr);
+            TEST("labels: the Pa5X Import Kit action is labelled EXPERIMENTAL (LABELING_RULES §2)",
+                 find<juce::Button>(st.page(D::ImportExport), "Pa5X Import Kit (EXPERIMENTAL)...") != nullptr);
+        }
 
         if (const char* dir = std::getenv("AIARR_SNAPSHOT_DIR"); dir && *dir) {   // offscreen renders for a later look; not a hands-on check
             st.setValidationTarget(juce::File(pkg.string()));

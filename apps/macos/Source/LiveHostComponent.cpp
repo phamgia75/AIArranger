@@ -112,6 +112,14 @@ LiveHostComponent::LiveHostComponent() {
                     centreWithSize(getWidth(), getHeight());
                 }
                 void closeButtonPressed() override { setVisible(false); }
+                void visibilityChanged() override {
+                    DocumentWindow::visibilityChanged();
+                    if (auto* m = juce::MenuBarModel::getMacMainMenu()) m->menuItemsChanged();
+                }
+                void activeWindowStatusChanged() override {
+                    DocumentWindow::activeWindowStatusChanged();
+                    if (auto* m = juce::MenuBarModel::getMacMainMenu()) m->menuItemsChanged();
+                }
             };
             resourcesWindow_ = std::make_unique<Window>();
         }
@@ -304,6 +312,14 @@ StudioComponent* LiveHostComponent::showStudio() {
                 centreWithSize(getWidth(), getHeight());
             }
             void closeButtonPressed() override { setVisible(false); }
+            void visibilityChanged() override {
+                DocumentWindow::visibilityChanged();
+                if (auto* m = juce::MenuBarModel::getMacMainMenu()) m->menuItemsChanged();
+            }
+            void activeWindowStatusChanged() override {
+                DocumentWindow::activeWindowStatusChanged();
+                if (auto* m = juce::MenuBarModel::getMacMainMenu()) m->menuItemsChanged();
+            }
         };
         studioWindow_ = std::make_unique<Window>([this] { if (auto* w = getTopLevelComponent()) w->toFront(true); });
     }

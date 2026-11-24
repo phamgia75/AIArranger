@@ -103,6 +103,7 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
         l->setColour(juce::Label::textColourId, juce::Colour(0xffb8b8c0));
         addAndMakeVisible(l);
         auto* t = fields_.add(new juce::TextEditor(label));
+        t->setTitle(label);
         t->setText(value, false);
         t->onTextChange = [this] { settingsChanged(); };
         addAndMakeVisible(t);
@@ -119,6 +120,9 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
     fields_[1]->setVisible(false);
     program_.setTextWhenNothingSelected("(the plugin's current sound)");
     program_.setTitle("Program");
+    plugin_.setTitle("Instrument");
+    preview_.setTitle("Rendered key map preview and checks");
+    report_.setTitle("Render report");
     program_.onChange = [this] {
         const int k = program_.getSelectedId();   // 1 = current sound, 2.. = program k-2
         fields_[1]->setText(k >= 2 ? juce::String(k - 2) : juce::String(), juce::sendNotificationSync);
@@ -131,6 +135,7 @@ PluginSamplerComponent::PluginSamplerComponent(std::function<void(const juce::Fi
         addAndMakeVisible(*t);
     }
     findBtn_.onClick = [this] { findInstruments(); };
+    findBtn_.setTooltip("Lists the AU/VST3 instruments on this Mac; off while a search runs");
     renderBtn_.onClick = [this] { startRender(); };
     cancelBtn_.onClick = [this] { cancelRender(); };
     generateBtn_.onClick = [this] {
@@ -212,10 +217,16 @@ void PluginSamplerComponent::settingsChanged() {
     estimate_.setText(problem.empty() ? juce::String(ui::estimateText(plan)) : "Not ready: " + juce::String(problem), juce::dontSendNotification);
     const bool rendering = proc_ && proc_->running();
     renderBtn_.setEnabled(problem.empty() && !busy() && exe_.existsAsFile());
+    renderBtn_.setTooltip(!exe_.existsAsFile() ? "Needs: the sampler tool aiarranger-plugin-sampler"   // the reason VoiceOver reads
+                          : !problem.empty()   ? "Not ready: " + juce::String(problem)
+                          : busy()             ? "Wait: a render or write is running" : juce::String());
     cancelBtn_.setEnabled(rendering);
+    cancelBtn_.setTooltip("Stops a running render; available only while one runs");
     // Generate writes what was rendered and previewed; after an edit the form no longer describes it.
     const bool same = ui::samplerArgs(s, "") == ui::samplerArgs(renderedWith_, "");
     generateBtn_.setEnabled(in_ != nullptr && !busy() && same);
+    generateBtn_.setTooltip(in_ == nullptr ? "Needs: Render Samples first" : busy() ? "Wait: a render or write is running"
+                            : !same ? "Settings changed since the render: Render Samples again" : juce::String());
     if (in_ && !same && !busy())
         status_.setText("Settings changed since the render: Render Samples again to apply them.", juce::dontSendNotification);
 }
