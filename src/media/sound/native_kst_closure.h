@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
@@ -728,6 +729,20 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
     };
     std::map<MidiSoundAddress, UnknownAddrAgg> unknownAddrMap;
 
+    auto failGraph = [&](const std::string& msg) -> NativeKstClosureResult {
+        extraErrors.push_back(msg);
+        std::set<std::string> errSet(out.downstream.report.containerErrors.begin(), out.downstream.report.containerErrors.end());
+        errSet.insert(extraErrors.begin(), extraErrors.end());
+        M.containerErrors.assign(errSet.begin(), errSet.end());
+        std::set<std::string> diagSet(out.downstream.report.diagnostics.begin(), out.downstream.report.diagnostics.end());
+        diagSet.insert(extraDiags.begin(), extraDiags.end());
+        diagSet.insert(msg);
+        M.diagnostics.assign(diagSet.begin(), diagSet.end());
+        M.coverage.coverageComplete = false;
+        out.ok = false;
+        return out;
+    };
+
     M.roots.reserve(extractedRoots.size());
     for (const ExtractedRoot& er : extractedRoots) {
         uint32_t idx = 0;
@@ -738,8 +753,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         const ResourceId rootId{false, "KST", er.kind, idx};
         std::string gerr;
         if (!g.addNode({rootId, er.relPath, std::nullopt}, &gerr)) {
-            extraErrors.push_back("graph addNode failed for " + er.relPath + ": " + gerr);
-            return out;
+            return failGraph("graph addNode failed for " + er.relPath + ": " + gerr);
         }
 
         RootClosureEntry entry;
@@ -845,8 +859,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         for (const auto& [ekey, es] : graphEdgeSummary) {
             const std::string detail = es.second + " (x" + std::to_string(es.first) + ")";
             if (!g.addRef({rootId, ekey.second, ekey.first, detail, Source::Package, Confidence::Confirmed, "kst-smf"}, &gerr)) {
-                extraErrors.push_back("graph addRef failed for " + er.relPath + " -> " + ekey.second.str() + ": " + gerr);
-                return out;
+                return failGraph("graph addRef failed for " + er.relPath + " -> " + ekey.second.str() + ": " + gerr);
             }
         }
 
@@ -1172,10 +1185,11 @@ inline NativeKstClosureResult resolveNativeKstClosure(const NativeKstClosureInpu
 inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesystem::path& kstDir,
                                                             const NativeKstClosureOptions& opts = {}) {
     NativeKstClosureResult earlyFail;
+    const std::string rawRootPath = kstDir.string();
     const std::string rootPath = native_detail::stripTrailingSlashes(kstDir);
     const native_detail::ScopedFd rootFd(::open(rootPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
     if (rootFd.fd < 0) {
-        const std::string msg = "cannot open KST folder (must be a real directory, symlinks are not followed): " + kstDir.string();
+        const std::string msg = "cannot open KST folder <kst-root> (must be a real directory, symlinks are not followed)";
         earlyFail.manifest.containerErrors.push_back(msg);
         earlyFail.manifest.diagnostics.push_back(msg);
         return earlyFail;
@@ -1185,7 +1199,7 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
     std::vector<std::string> topEntries;
     std::string lerr;
     if (!native_detail::listDirEntriesAt(rootFd.fd, topEntries, remainingEntries, lerr)) {
-        const std::string msg = "cannot list KST folder " + kstDir.string() + ": " + lerr;
+        const std::string msg = "cannot list KST folder <kst-root>: " + lerr;
         earlyFail.manifest.containerErrors.push_back(msg);
         earlyFail.manifest.diagnostics.push_back(msg);
         return earlyFail;
@@ -1196,6 +1210,24 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
     NativeKstOptions downOpts = opts.downstream;
     if (opts.maxDirEntries < downOpts.maxDirEntries) downOpts.maxDirEntries = opts.maxDirEntries;
     NativeKstResult downstream = resolveNativeKstFolder(kstDir, downOpts);
+
+    // Ensure downstream error/diagnostic strings never leak the caller's local filesystem path into manifests.
+    auto scrubLocalRoot = [&](std::vector<std::string>& vec) {
+        auto replaceAll = [](std::string& s, const std::string& needle) {
+            if (needle.empty()) return;
+            size_t pos = 0;
+            while ((pos = s.find(needle, pos)) != std::string::npos) {
+                s.replace(pos, needle.size(), "<kst-root>");
+                pos += 10;
+            }
+        };
+        for (std::string& s : vec) {
+            replaceAll(s, rawRootPath);
+            if (rootPath != rawRootPath) replaceAll(s, rootPath);
+        }
+    };
+    scrubLocalRoot(downstream.report.containerErrors);
+    scrubLocalRoot(downstream.report.diagnostics);
 
     std::vector<closure_detail::ExtractedRoot> extracted;
     std::vector<std::string> extraSkipped, extraErrors, extraDiags;
@@ -1249,6 +1281,15 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
             songBookPresent = true;
             continue;
         }
+        if (topUpper == "GLOBAL") {
+            extraSkipped.push_back(top);
+            if (S_ISDIR(st.st_mode)) {
+                extraDiags.push_back("unsupported: " + top + "/ is not scanned (coverage incomplete)");
+            } else {
+                extraErrors.push_back("refusing non-directory/symlink at " + top);
+            }
+            continue;
+        }
         if (!isBankedRootDir && !isSettingsDir) continue;
 
         if (!S_ISDIR(st.st_mode)) {
@@ -1285,6 +1326,13 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
                 Kind k = Kind::Style;
                 if (closure_detail::kindFromUpstreamExt(e1, k)) {
                     streamRootFile(subFd.fd, e1, rel1, k);
+                } else {
+                    extraSkipped.push_back(rel1);
+                    if (isSettingsDir && native_detail::endsWithUpper(e1, ".GBL")) {
+                        extraDiags.push_back("unsupported unparsed settings file: " + rel1);
+                    } else {
+                        extraDiags.push_back("skipped unexpected regular file: " + rel1);
+                    }
                 }
                 continue;
             }
@@ -1336,6 +1384,9 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
                 Kind k = Kind::Style;
                 if (closure_detail::kindFromUpstreamExt(e2, k)) {
                     streamRootFile(bankFd.fd, e2, rel2, k);
+                } else {
+                    extraSkipped.push_back(rel2);
+                    extraDiags.push_back("skipped unexpected regular file: " + rel2);
                 }
             }
         }

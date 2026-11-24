@@ -918,6 +918,140 @@ int main() {
             }
         }
 
+        // ── 6. Audit hardening regressions (P2-1 no local paths in failure JSON, P2-2 GLOBAL & unexpected files, P3-1 early-return errors) ──
+        {
+            // P2-1: failed root open (missing + symlink) and entry-cap failure manifests never leak caller local paths
+            const fs::path missingDir = tmpRoot / "DOES_NOT_EXIST_ROOT.KST";
+            const auto missRes = resolveNativeKstClosureFolder(missingDir, ds.opts);
+            const std::string missJson = serializeManifestJson(missRes.manifest);
+
+            NativeKstClosureOptions tinyCap = ds.opts;
+            tinyCap.maxDirEntries = 2;
+            const auto capRes = resolveNativeKstClosureFolder(kstFwd, tinyCap);
+            const std::string capJson = serializeManifestJson(capRes.manifest);
+
+            const fs::path symFailRoot = tmpRoot / "SYM_FAIL_P21.KST";
+            std::error_code sec;
+            fs::create_directory_symlink(kstFwd, symFailRoot, sec);
+            std::string symJson;
+            if (!sec) {
+                const auto symRes = resolveNativeKstClosureFolder(symFailRoot, ds.opts);
+                symJson = serializeManifestJson(symRes.manifest);
+            }
+            const std::string tmpStr = tmpRoot.string();
+            TEST("P2-1: failure manifests (missing/symlink/entry-cap) never leak local filesystem paths in serialized JSON",
+                 !missRes.ok && isValidJsonAndClean(missJson) &&
+                 missJson.find(tmpStr) == std::string::npos &&
+                 missJson.find("<kst-root>") != std::string::npos &&
+                 !capRes.ok && isValidJsonAndClean(capJson) &&
+                 capJson.find(tmpStr) == std::string::npos &&
+                 capJson.find("<kst-root>") != std::string::npos &&
+                 (sec || (isValidJsonAndClean(symJson) &&
+                          symJson.find(tmpStr) == std::string::npos &&
+                          symJson.find("<kst-root>") != std::string::npos)));
+
+            // P2-2: GLOBAL/ directory, SETTINGS/SETUP.GBL, and unexpected regular files in STYLE/KEYBOARDSET/PAD/SETTINGS
+            // are recorded in skippedPaths & diagnostics and set coverageComplete() == false (while metadir.json stays valid)
+            auto hasStr = [](const std::vector<std::string>& v, const std::string& needle) {
+                return std::find(v.begin(), v.end(), needle) != v.end();
+            };
+            auto hasDiagSubstr = [](const std::vector<std::string>& v, const std::string& sub) {
+                for (const auto& s : v) if (s.find(sub) != std::string::npos) return true;
+                return false;
+            };
+
+            const fs::path p22Base = tmpRoot / "P22_CLEAN.KST";
+            SynthKmpSpec kmpP22;
+            kmpP22.samples = {{ds.sId[0], "P22S0", 44100}};
+            kmpP22.zones = {{0, 127}};
+            kmpP22.multis = {{ds.mId[0], "P22M0", 0, 1}};
+            const Bytes p22Kmp = buildKorfContainer({{kPa5xKmpChunkId, 0, 0, 0, "RAM.KMP", buildPa5xKmpPayload(kmpP22), ""}}, 1);
+            const Bytes p22Pcm = buildKorfContainer({{0x12020010u, 6, 0, 0, "P22S0", Bytes(2048, 0x11), idAsStr(ds.sId[0])}}, 1);
+            const Bytes p22Body = buildSoundBody(RichSyntheticKst::kLayoutA, {{ds.mId[0], kZeroId}});
+            const Bytes p22Snd = buildKorfContainer({{RichSyntheticKst::kKindA, 4, 9, 0, "P22Snd", makeOcLiteralFrame("OC31", p22Body), ""}}, 1);
+            const Bytes p22Pad = makePadTree({{0, 121, 64, 0}});
+            const Bytes metaBytes{'{', '"', 'f', 'i', 'l', 'e', 's', '"', ':', '[', ']', '}'};
+
+            auto initP22 = [&](const fs::path& dir) {
+                writeFileBytes(dir / "MULTISMP" / "ram.kmp", p22Kmp);
+                writeFileBytes(dir / "PCM" / "ram01.pcm", p22Pcm);
+                writeFileBytes(dir / "SOUND" / "USER01.PCG", p22Snd);
+                writeFileBytes(dir / "PAD" / "B1" / "Valid.pdc", p22Pad);
+                writeFileBytes(dir / "PAD" / "B1" / "metadir.json", metaBytes);
+            };
+            initP22(p22Base);
+            const auto baseRes = resolveNativeKstClosureFolder(p22Base, ds.opts);
+            TEST("P2-2 baseline: clean KST with metadir.json has coverageComplete() == true",
+                 baseRes.ok && baseRes.coverageComplete() && baseRes.manifest.skippedPaths.empty() &&
+                 baseRes.manifest.coverage.metadirJsonFiles == 1);
+
+            const fs::path p22Global = tmpRoot / "P22_GLOBAL.KST";
+            initP22(p22Global);
+            fs::create_directories(p22Global / "GLOBAL", ec);
+            const auto globRes = resolveNativeKstClosureFolder(p22Global, ds.opts);
+            TEST("P2-2: top-level GLOBAL/ directory is recorded in skippedPaths/diagnostics and sets coverageComplete()=false",
+                 globRes.ok && !globRes.coverageComplete() &&
+                 hasStr(globRes.manifest.skippedPaths, "GLOBAL") &&
+                 hasDiagSubstr(globRes.manifest.diagnostics, "GLOBAL/"));
+
+            const fs::path p22Files = tmpRoot / "P22_UNEXPECTED_FILES.KST";
+            initP22(p22Files);
+            const Bytes dummy{'x', 'y', 'z'};
+            writeFileBytes(p22Files / "SETTINGS" / "SETUP.GBL", dummy);
+            writeFileBytes(p22Files / "SETTINGS" / "extra.dat", dummy);
+            writeFileBytes(p22Files / "STYLE" / "Bank1" / "stray.txt", dummy);
+            writeFileBytes(p22Files / "KEYBOARDSET" / "top_stray.bin", dummy);
+            writeFileBytes(p22Files / "PAD" / "B1" / "notes.md", dummy);
+            const auto filesRes = resolveNativeKstClosureFolder(p22Files, ds.opts);
+            TEST("P2-2: SETTINGS/SETUP.GBL and unexpected regular files in STYLE/KEYBOARDSET/PAD/SETTINGS recorded and fail coverageComplete()",
+                 filesRes.ok && !filesRes.coverageComplete() &&
+                 filesRes.manifest.summary.parsedUpstreamRoots == 1 &&
+                 filesRes.manifest.coverage.metadirJsonFiles == 1 &&
+                 hasStr(filesRes.manifest.skippedPaths, "SETTINGS/SETUP.GBL") &&
+                 hasStr(filesRes.manifest.skippedPaths, "SETTINGS/extra.dat") &&
+                 hasStr(filesRes.manifest.skippedPaths, "STYLE/Bank1/stray.txt") &&
+                 hasStr(filesRes.manifest.skippedPaths, "KEYBOARDSET/top_stray.bin") &&
+                 hasStr(filesRes.manifest.skippedPaths, "PAD/B1/notes.md") &&
+                 hasDiagSubstr(filesRes.manifest.diagnostics, "unsupported unparsed settings file: SETTINGS/SETUP.GBL") &&
+                 hasDiagSubstr(filesRes.manifest.diagnostics, "skipped unexpected regular file: STYLE/Bank1/stray.txt"));
+
+            // P3-1: early-return error paths in finalizeClosure() copy extraErrors + graph error into containerErrors/diagnostics
+            {
+                NativeKstResult dupNodeDown;
+                dupNodeDown.ok = true;
+                dupNodeDown.graph = Graph{};
+                std::string ge;
+                const bool preAdded = dupNodeDown.graph->addNode({{false, "KST", Kind::Style, 0}, "existing", std::nullopt}, &ge);
+                closure_detail::ExtractedRoot erNode;
+                erNode.relPath = "STYLE/B/Dup.stg";
+                erNode.kind = Kind::Style;
+                erNode.parseOk = true;
+                const auto nodeFailRes = closure_detail::finalizeClosure(
+                    std::move(dupNodeDown), {erNode}, false, 0, 0, {}, {"prior node error"}, {}, ds.opts);
+
+                NativeKstResult badRefDown;
+                badRefDown.ok = true;
+                badRefDown.graph = Graph{};
+                closure_detail::ExtractedRoot erRef;
+                erRef.relPath = "PAD/B/BadVia.pdc";
+                erRef.kind = Kind::Pad;
+                erRef.parseOk = true;
+                // Via::StyleTrack is disallowed from Kind::Pad -> forces g.addRef() failure!
+                erRef.refs[{Via::StyleTrack, MidiSoundAddress{121, 64, 0}}] = {1, {"Main.mid"}};
+                const auto refFailRes = closure_detail::finalizeClosure(
+                    std::move(badRefDown), {erRef}, false, 0, 0, {}, {"prior ref error"}, {}, ds.opts);
+
+                TEST("P3-1: early-return graph addNode/addRef failure paths surface both prior extraErrors and graph error in containerErrors",
+                     preAdded &&
+                     !nodeFailRes.ok && !nodeFailRes.coverageComplete() &&
+                     hasStr(nodeFailRes.manifest.containerErrors, "prior node error") &&
+                     hasDiagSubstr(nodeFailRes.manifest.containerErrors, "graph addNode failed") &&
+                     !refFailRes.ok && !refFailRes.coverageComplete() &&
+                     hasStr(refFailRes.manifest.containerErrors, "prior ref error") &&
+                     hasDiagSubstr(refFailRes.manifest.containerErrors, "graph addRef failed"));
+            }
+        }
+
         fs::remove_all(tmpRoot, ec);
     }
 
