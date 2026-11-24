@@ -974,6 +974,273 @@ int main() {
                  containsDiag(nestedRes.report.diagnostics, "nested directory"));
         }
 
+        // ── 6. Real-world structural class regressions (100% synthetic fixtures) ──────────────────────────────────────
+        // Structural classes validated offline against cleared Pa5X / Pa700 / Pa4X corpora (zero private data):
+        //   6a: Duplicate Drum Sample ID in Pa5X RAM.KMP (positional DrumSample nodes preserved; duplicate reported)
+        //   6b: Orphan/unmatched PCM sample (present in PCM/*.pcm, absent from RAM.KMP)
+        //   6c: Unresolved slots split between analysed Sounds vs NoKnownReference Sounds
+        //   6d: Metadata-only streaming PCM reading via pread() (multi-MiB PCM file under small maxTotalBytes cap)
+        //   6e: Corrupt on-disk PCM KORF containers rejected fail-closed by metadata-only parser
+        //   6f: Pa700/Pa4X-style converted KST (OC31 KMP + format-0 PCG + mixed OC31/OC32/raw Sounds + PCM without IDs)
+        {
+            // 6a: Duplicate Drum Sample ID in RAM.KMP
+            ValidDataset dsDup;
+            dsDup.kmpSpec.drums.push_back({dsDup.dId[0], "DrumKickDup", 3, kNoIndex});   // index 2 shares dId[0] with index 0
+            dsDup.input.kmpContainer->bytes = buildKorfContainer(
+                {{kPa5xKmpChunkId, 0, 0, 0, "RAM.KMP", buildPa5xKmpPayload(dsDup.kmpSpec), ""}}, 1);
+            const NativeKstResult res = resolveNativeKst(dsDup.input, dsDup.opts);
+            bool anyUnref = false;
+            if (res.graph) {
+                for (const auto& [id, node] : res.graph->nodes()) {
+                    (void)node;
+                    anyUnref |= (res.graph->deleteCheck(id).verdict == DeleteVerdict::Unreferenced);
+                }
+            }
+            TEST("duplicate Drum Sample ID in RAM.KMP preserves all positional DrumSample nodes and reports anomaly",
+                 res.ok && res.graph.has_value() && res.report.ok() && !res.report.coverageComplete() &&
+                 res.report.kmp.drumsTotal == 3 && res.report.kmp.duplicateDrumIds.size() == 1 &&
+                 res.report.kmp.duplicateDrumIds[0].id == dsDup.dId[0] &&
+                 res.report.kmp.duplicateDrumIds[0].indices == (std::vector<uint32_t>{0, 2}) &&
+                 res.graph->find({false, "KST", Kind::DrumSample, 0}) != nullptr &&
+                 res.graph->find({false, "KST", Kind::DrumSample, 2}) != nullptr &&
+                 res.graph->uses({false, "KST", Kind::DrumSample, 2}).size() == 1 &&
+                 containsDiag(res.report.diagnostics, "duplicate drum ID in KMP") && !anyUnref);
+
+            // Duplicate Sample ID in RAM.KMP still fails closed
+            ValidDataset dsDupSmp;
+            dsDupSmp.kmpSpec.samples[1].id = dsDupSmp.kmpSpec.samples[0].id;
+            dsDupSmp.input.kmpContainer->bytes = buildKorfContainer(
+                {{kPa5xKmpChunkId, 0, 0, 0, "RAM.KMP", buildPa5xKmpPayload(dsDupSmp.kmpSpec), ""}}, 1);
+            const NativeKstResult resDupSmp = resolveNativeKst(dsDupSmp.input, dsDupSmp.opts);
+            TEST("duplicate Sample ID in RAM.KMP still fails closed",
+                 !resDupSmp.ok && !resDupSmp.graph.has_value() && !resDupSmp.report.kmpParsed &&
+                 resDupSmp.report.kmpError.find("duplicate sample ID") != std::string::npos);
+        }
+        {
+            // 6b: Orphan/unmatched PCM sample (in PCM/*.pcm, absent from RAM.KMP)
+            ValidDataset dsOrphan;
+            const Id8 orphanId = makeId(0x99, 0x01);
+            dsOrphan.input.pcmContainers.push_back({
+                "PCM/ram03.pcm", "",
+                buildKorfContainer({{0x12010018u, 1, 2, 0, "OrphanAudio", Bytes(1600, 0x55), idAsStr(orphanId)}}, 1)
+            });
+            const NativeKstResult res = resolveNativeKst(dsOrphan.input, dsOrphan.opts);
+            TEST("orphan PCM sample absent from RAM.KMP is reported in unmatchedPcm and fails coverageComplete()",
+                 res.ok && res.report.ok() && !res.report.coverageComplete() &&
+                 res.report.kmp.unmatchedPcm.size() == 1 &&
+                 res.report.kmp.unmatchedPcm[0].id == orphanId &&
+                 res.report.kmp.unmatchedPcm[0].file == "PCM/ram03.pcm" &&
+                 containsDiag(res.report.diagnostics, "orphan pcm:"));
+        }
+        {
+            // 6c: Unresolved slot split between analysed Sounds and NoKnownReference Sounds
+            ValidDataset dsSplit;
+            const Id8 unkA = makeId(0xEE, 0x01);
+            const Id8 unkB = makeId(0xEE, 0x02);
+            const Bytes analysedWithUnk = buildSoundBody(ValidDataset::kLayoutA, {{dsSplit.mId[0], unkA}});
+            const Bytes noRefWithBytes = buildSoundBody(ValidDataset::kLayoutA, {{unkB, unkA}});
+            dsSplit.input.soundContainers = {{
+                "SOUND/user01.pcg", "USER01",
+                buildKorfContainer({
+                    {ValidDataset::kKindA, 0, 0, 0, "AnalysedUnk", makeOcLiteralFrame("OC31", analysedWithUnk), ""},
+                    {ValidDataset::kKindA, 0, 0, 1, "NoRefShape",  makeOcLiteralFrame("OC31", noRefWithBytes),  ""},
+                }, 1)
+            }};
+            const NativeKstResult res = resolveNativeKst(dsSplit.input, dsSplit.opts);
+            size_t inAnalysed = 0, inUnanalysed = 0;
+            for (const auto& u : res.report.refs.unresolved) (u.inUnanalysedSound ? inUnanalysed : inAnalysed)++;
+            TEST("unresolved slots distinguish analysed Sounds from NoKnownReference Sounds",
+                 res.ok && res.report.refs.analysed == 1 && res.report.refs.unanalysed.size() == 1 &&
+                 res.report.refs.unanalysed[0].why == Gap::NoKnownReference &&
+                 inAnalysed == 1 && inUnanalysed == 2 &&
+                 containsDiag(res.report.diagnostics, "(in unanalysed Sound)"));
+        }
+        {
+            // 6d: Streaming metadata-only PCM reading on disk handles multi-MiB PCM under a small maxTotalBytes cap
+            const fs::path bigPcmKst = tmpRoot / "BIGPCM.KST";
+            ValidDataset dsBig;
+            const Bytes bigPayload0(2u << 20, 0x3A);   // 2 MiB synthetic audio
+            const Bytes bigPayload1(2u << 20, 0x4B);   // 2 MiB synthetic audio
+            const Bytes bigPcmFile = buildKorfContainer({
+                {0x12010018u, 1, 0, 0, "BigSample0", bigPayload0, idAsStr(dsBig.sId[0])},
+                {0x12010018u, 1, 0, 1, "BigSample1", bigPayload1, idAsStr(dsBig.sId[1])},
+                {0x12010018u, 1, 0, 2, "SmallS2",    Bytes(6400, 0x33), idAsStr(dsBig.sId[2])},
+            }, 1);
+            const bool wroteBig =
+                writeFileBytes(bigPcmKst / "MULTISMP" / "ram.kmp", dsBig.input.kmpContainer->bytes) &&
+                writeFileBytes(bigPcmKst / "PCM" / "ram01.pcm", bigPcmFile) &&
+                writeFileBytes(bigPcmKst / "PCM" / "ram02.pcm", dsBig.input.pcmContainers[1].bytes) &&
+                writeFileBytes(bigPcmKst / "SOUND" / "user01.pcg", dsBig.input.soundContainers[0].bytes) &&
+                writeFileBytes(bigPcmKst / "SOUND" / "user02.pcg", dsBig.input.soundContainers[1].bytes);
+
+            NativeKstOptions smallCap = dsBig.opts;
+            smallCap.maxTotalBytes = 256u << 10;   // 256 KiB cap vs >4 MiB PCM container on disk
+            const NativeKstResult bigRes = resolveNativeKstFolder(bigPcmKst, smallCap);
+            const Node* s0Node = bigRes.graph ? bigRes.graph->find({false, "KST", Kind::Sample, 0}) : nullptr;
+            TEST("metadata-only PCM reading resolves >4 MiB KST under 256 KiB cap with <64 KiB read",
+                 wroteBig && bigRes.ok && bigRes.report.ok() && bigRes.report.coverageComplete() &&
+                 bigRes.report.pcmContainers == 2 && bigRes.report.pcmSamples == 5 &&
+                 bigRes.report.bytesRead > 0 && bigRes.report.bytesRead < (64u << 10) &&
+                 s0Node && s0Node->sample && s0Node->sample->frames == (bigPayload0.size() / 2u));
+
+            // 6e: Corrupt on-disk PCM containers fail closed identically in metadata-only parser
+            const fs::path badPcmKst = tmpRoot / "BADPCM.KST";
+            writeFileBytes(badPcmKst / "MULTISMP" / "ram.kmp", dsBig.input.kmpContainer->bytes);
+            writeFileBytes(badPcmKst / "PCM" / "ram01.pcm", dsBig.input.pcmContainers[0].bytes);
+            writeFileBytes(badPcmKst / "PCM" / "ram02.pcm", dsBig.input.pcmContainers[1].bytes);
+            // Corrupt index offset in a copy of ram02.pcm
+            Bytes badIdxPcm = dsBig.input.pcmContainers[1].bytes;
+            badIdxPcm[badIdxPcm.size() - 12] ^= 0xFFu;   // corrupt offset inside FE000018 KBEG..KEND table
+            writeFileBytes(badPcmKst / "PCM" / "ram03_badidx.pcm", badIdxPcm);
+            // Duplicate sample ID across on-disk PCM files
+            writeFileBytes(badPcmKst / "PCM" / "ram04_dup.pcm",
+                           buildKorfContainer({{0x12010018u, 1, 9, 0, "DupDisk", Bytes(128, 0x11), idAsStr(dsBig.sId[0])}}, 1));
+            // Format-0 PCM directory (no field 4 -> sample without ID)
+            writeFileBytes(badPcmKst / "PCM" / "ram05_fmt0.pcm",
+                           buildKorfContainer({{0x12010018u, 1, 9, 1, "Fmt0Smp", Bytes(128, 0x22), ""}}, 0));
+            writeFileBytes(badPcmKst / "SOUND" / "user01.pcg", dsBig.input.soundContainers[0].bytes);
+            const NativeKstResult badPcmRes = resolveNativeKstFolder(badPcmKst, dsBig.opts);
+            TEST("on-disk metadata-only PCM parser rejects bad index + duplicate ID and flags format-0 missing ID",
+                 badPcmRes.ok && !badPcmRes.report.ok() && !badPcmRes.report.coverageComplete() &&
+                 badPcmRes.report.containerErrors.size() == 2 && badPcmRes.report.pcmSamplesWithoutId == 1 &&
+                 containsDiag(badPcmRes.report.diagnostics, "index offset") &&
+                 containsDiag(badPcmRes.report.diagnostics, "duplicate PCM sample ID"));
+        }
+        {
+            // 6f: Pa700/Pa4X-style converted KST on disk (OC31 KMP + PCM without IDs + format-0 PCG + OC31/OC32/raw Sounds)
+            const fs::path convKst = tmpRoot / "CONVERTED_LEGACY.KST";
+            ValidDataset dsConv;
+            const Bytes ocKmp = makeOcLiteralFrame("OC31", Bytes(64, 0x42));
+            writeFileBytes(convKst / "MULTISMP" / "ram.kmp",
+                           buildKorfContainer({{0x11050038u, 0, 0, 0, "RAM.KMP", ocKmp, ""}}, 1));
+            writeFileBytes(convKst / "PCM" / "ram01.pcm",
+                           buildKorfContainer({
+                               {0x12000018u, 1, 0, 0, "LegacyS0", Bytes(512, 0x11), ""},
+                               {0x12000018u, 1, 0, 1, "LegacyS1", Bytes(512, 0x22), ""},
+                           }, 1));
+            writeFileBytes(convKst / "SOUND" / "user01.pcg", dsConv.input.soundContainers[0].bytes);   // OC31 + OC32
+            writeFileBytes(convKst / "SOUND" / "userdk01.pcg", dsConv.input.soundContainers[1].bytes); // format-0 + raw
+            const NativeKstResult convRes = resolveNativeKstFolder(convKst, dsConv.opts);
+            TEST("Pa700/Pa4X-style converted KST fails closed on OC31 KMP while reporting Sound/PCM inventories",
+                 !convRes.ok && !convRes.graph.has_value() && !convRes.report.ok() && !convRes.report.coverageComplete() &&
+                 convRes.report.kmpPresent && !convRes.report.kmpParsed &&
+                 convRes.report.kmpError.find("OC31") != std::string::npos &&
+                 convRes.report.pcmContainers == 1 && convRes.report.pcmSamples == 2 && convRes.report.pcmSamplesWithoutId == 2 &&
+                 convRes.report.soundContainers == 2 && convRes.report.soundsDecodedOc31 == 2 && convRes.report.soundsLoadedRaw == 1 &&
+                 convRes.report.bytesRead > 0);
+        }
+        {
+            // 6g: Audit hardening regressions (P2-1 budget pre-check & out reset, P2-2 overflow-safe dSz, P3-1 0-byte chunk flood)
+            const fs::path hardDir = tmpRoot / "HARDEN_PCM";
+            fs::create_directories(hardDir);
+            ValidDataset dsH;
+            const Bytes validPcm = dsH.input.pcmContainers[0].bytes;
+            const Bytes emptyValidPcm = buildKorfContainer({}, 1);   // 0 items, dSz == 0: valid empty KORF container
+            writeFileBytes(hardDir / "valid.pcm", validPcm);
+            writeFileBytes(hardDir / "empty_valid.pcm", emptyValidPcm);
+
+            // P2-2 crafted: dSz = 0xFFFFFFE0 (would wrap 36u + dSz in 32-bit)
+            Bytes wrapDirPcm = emptyValidPcm;
+            putBe32(wrapDirPcm, 32, 0xFFFFFFE0u);
+            writeFileBytes(hardDir / "wrap_dsz.pcm", wrapDirPcm);
+
+            // P3-1 crafted: dSz == 0 followed by 50,000 zero-byte chunks (400 KB flood)
+            Bytes flood0;
+            pushBe32(flood0, 0x01000114u);
+            pushBe32(flood0, 0u);   // patched below
+            pushBe32(flood0, 0x02000018u); pushBe32(flood0, 12u);
+            const uint8_t korfHdr[12] = {0x0B, 0, 0, 0, 0, 0, 0, 'K', 'O', 'R', 'F', 0};
+            flood0.insert(flood0.end(), korfHdr, korfHdr + 12);
+            pushBe32(flood0, 0x05010018u); pushBe32(flood0, 0u);   // dSz == 0
+            for (size_t i = 0; i < 50000; ++i) { pushBe32(flood0, 0x12010018u); pushBe32(flood0, 0u); }
+            putBe32(flood0, 4, static_cast<uint32_t>(flood0.size() - 8));
+            writeFileBytes(hardDir / "flood0.pcm", flood0);
+
+            // P3-1 crafted: dSz == 25 (max 1 format-1 item) followed by 10,000 zero-byte chunks
+            Bytes flood1;
+            pushBe32(flood1, 0x01000114u);
+            pushBe32(flood1, 0u);
+            pushBe32(flood1, 0x02000018u); pushBe32(flood1, 12u);
+            flood1.insert(flood1.end(), korfHdr, korfHdr + 12);
+            pushBe32(flood1, 0x05010018u); pushBe32(flood1, 25u);
+            flood1.insert(flood1.end(), 25u, 0x00);
+            for (size_t i = 0; i < 10000; ++i) { pushBe32(flood1, 0x12010018u); pushBe32(flood1, 0u); }
+            putBe32(flood1, 4, static_cast<uint32_t>(flood1.size() - 8));
+            writeFileBytes(hardDir / "flood1.pcm", flood1);
+
+            const native_detail::ScopedFd dirFd(::open(hardDir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+            TEST("hardening test directory opened", dirFd.fd >= 0);
+            if (dirFd.fd >= 0) {
+                // P2-1a: tight remainingBudget fails BEFORE dirBuf allocation and resets out
+                {
+                    size_t budget = 40;   // enough for 36B header+dirHdr, smaller than dSz
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "valid.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P2-1: tight remainingBudget before dirBuf fails cleanly and resets out",
+                         !ok && !out.ok && !out.wrapper && out.directoryId == 0 && out.directoryFormat == -1 && out.items.empty() &&
+                         readBytes == 36 && err.find("exceeds the reader's limit") != std::string::npos);
+                }
+                // P2-1b: tight remainingBudget fails BEFORE idxBuf allocation and resets out
+                {
+                    // validPcm has 3 items: 36B header + dirSize + 4*8B chunk headers (3 items + index); index payload is 16 + 4*3 = 28B
+                    const uint32_t dirSz = ai_arranger::media::panative::detail::be32(validPcm.data() + 32);
+                    size_t budget = 36u + dirSz + 4u * 8u + 4u;   // 4 bytes short of 28-byte index payload
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "valid.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P2-1: tight remainingBudget before idxBuf fails cleanly and resets out",
+                         !ok && !out.ok && !out.wrapper && out.directoryId == 0 && out.directoryFormat == -1 && out.items.empty() &&
+                         readBytes == 36u + dirSz + 4u * 8u && err.find("exceeds the reader's limit") != std::string::npos);
+                }
+                // P2-2: 32-bit wrap-prone dSz rejected fail-closed even with large maxFileBytes
+                {
+                    size_t budget = 1u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "wrap_dsz.pcm", size_t(1) << 33, budget, readBytes, out, err);
+                    TEST("P2-2: wrap-prone dSz (0xFFFFFFE0) fails closed and resets out",
+                         !ok && !out.ok && !out.wrapper && out.items.empty() &&
+                         err.find("runs past the end") != std::string::npos);
+                }
+                // P3-1: valid empty 0-item KORF container still succeeds cleanly
+                {
+                    size_t budget = 1u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "empty_valid.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P3-1: valid 0-item KORF container (dSz == 0) still parses cleanly",
+                         ok && out.ok && out.wrapper && out.items.empty());
+                }
+                // P3-1a: 50,000 zero-byte chunk flood with dSz == 0 short-circuits in O(1)
+                {
+                    size_t budget = 10u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "flood0.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P3-1: 50k zero-byte chunk flood (dSz == 0) short-circuits immediately in O(1)",
+                         !ok && !out.ok && !out.wrapper && out.items.empty() &&
+                         readBytes <= 64u && err.find("directory shorter than its item count") != std::string::npos);
+                }
+                // P3-1b: 10,000 zero-byte chunk flood with dSz == 25 short-circuits after at most 2 chunk headers
+                {
+                    size_t budget = 10u << 20;
+                    size_t readBytes = 0;
+                    Container out;
+                    std::string err;
+                    const bool ok = native_detail::readKorfMetadataAt(dirFd.fd, "flood1.pcm", kMaxFileBytes, budget, readBytes, out, err);
+                    TEST("P3-1: 10k zero-byte chunk flood (dSz == 25) short-circuits after bounded chunk headers",
+                         !ok && !out.ok && !out.wrapper && out.items.empty() &&
+                         readBytes <= 36u + 25u + 16u && err.find("directory shorter than its item count") != std::string::npos);
+                }
+            }
+        }
+
         fs::remove_all(tmpRoot, ec);
     }
 
