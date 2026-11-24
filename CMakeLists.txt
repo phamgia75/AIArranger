@@ -198,8 +198,11 @@ foreach(test_file ${SHELL_TEST_SRC})
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
 if(TARGET test_native_kst_resource_graph_integration)
+    # GCC 15 libstdc++ emits a known false-positive -Wfree-nonheap-object when inlining
+    # std::vector<Edge> destructors from resource_graph.h under -O2 (GCC PR 104336 / 114329).
     target_compile_options(test_native_kst_resource_graph_integration PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>)
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
 endif()
 
 # ── Korg exporter tests (format, mapper, Genos corpus conversion) ─────
