@@ -207,8 +207,12 @@ int main() {
 
         // Tiny malformed payload claiming 64 MiB must fail quickly without allocating 64 MiB.
         const std::string fakeMax = frame("OC31", uint32_t(kMaxOc31DecodedBytes), std::string("\x01\x00\x00", 3), 0x00);
-        TEST("tiny malformed payload claiming 64 MiB fails closed",
-             !decodeStr(fakeMax, dec, &err) && err.find("size") != std::string::npos);
+        std::vector<uint8_t> capOut = {0xAA, 0xBB};
+        err.clear();
+        const bool okFakeMax = decodeOc31(reinterpret_cast<const uint8_t*>(fakeMax.data()), fakeMax.size(), capOut, &err);
+        TEST("tiny malformed payload claiming 64 MiB fails closed within 1 MiB reserve cap",
+             !okFakeMax && capOut.empty() && capOut.capacity() <= (1u << 20) &&
+             err.find("size") != std::string::npos);
     }
 
     // 9. Null pointer, short, and foreign inputs.
@@ -224,6 +228,32 @@ int main() {
              !decodeStr(std::string("RIFF\x10\0\0\0abcd\x01\0\0\0", 16), dec, &err) &&
              !decodeStr(std::string("OC30\0\0\0\0\x01\0\0\0", 12), dec, &err) &&
              !decodeStr(std::string("OC33\0\0\0\0\x01\0\0\0", 12), dec, &err));
+    }
+
+    // 9b. Caller-aliasing guard: self-aliasing and slice-aliasing fail closed without mutating out.
+    {
+        std::vector<uint8_t> selfBuf(b2Round1.begin(), b2Round1.end());
+        const std::vector<uint8_t> selfOrig = selfBuf;
+        err.clear();
+        const bool okSelf = decodeOc31(selfBuf.data(), selfBuf.size(), selfBuf, &err);
+        TEST("self-aliasing decodeOc31(buf.data(), buf.size(), buf) rejected without mutating buf",
+             !okSelf && selfBuf == selfOrig && err.find("alias") != std::string::npos);
+
+        // Slice-aliasing: valid payload placed at offset 1 inside out's backing storage.
+        std::vector<uint8_t> sliceBuf;
+        sliceBuf.reserve(b2Round1.size() + 16);
+        sliceBuf.push_back(0x7F);
+        sliceBuf.insert(sliceBuf.end(), b2Round1.begin(), b2Round1.end());
+        const std::vector<uint8_t> sliceOrig = sliceBuf;
+        err.clear();
+        const bool okSlice = decodeOc31(sliceBuf.data() + 1, b2Round1.size(), sliceBuf, &err);
+        TEST("slice-aliasing decodeOc31(buf.data() + 1, ..., buf) rejected without mutating buf",
+             !okSlice && sliceBuf == sliceOrig && err.find("alias") != std::string::npos);
+
+        // Aliasing with err == nullptr must also fail closed without mutating buf.
+        const bool okNullErr = decodeOc31(selfBuf.data(), selfBuf.size(), selfBuf, nullptr);
+        TEST("aliasing with err == nullptr fails closed without mutating buf",
+             !okNullErr && selfBuf == selfOrig);
     }
 
     // 10. Every truncated prefix of a valid stream fails cleanly.

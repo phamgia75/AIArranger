@@ -17,12 +17,14 @@
 //   - Initial output reservation is capped so a tiny malformed payload cannot trigger a huge allocation.
 //   - Unverified ops (t < 16 after literals), zero-length 16-bit matches, trailing bytes after 01 00 00,
 //     decoded-size mismatches, and XOR mismatches all fail closed with out.empty() and a non-empty *err.
-//   - Caller must not alias `out` with `[p, p + n)`.
+//   - Input aliasing `out`'s backing buffer `[out.data(), out.data() + out.capacity())` is rejected up front
+//     with a non-empty *err and leaves `out` untouched (never invalidating or mutating `[p, p + n)`).
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -31,8 +33,17 @@ namespace ai_arranger::media::panative {
 constexpr size_t kMaxOc31DecodedBytes = 64u << 20;   // 64 MiB; matches panative::kMaxFileBytes
 
 inline bool decodeOc31(const uint8_t* p, size_t n, std::vector<uint8_t>& out, std::string* err = nullptr) {
-    out.clear();
     if (err) err->clear();
+    if (p && n > 0 && out.data() && out.capacity() > 0) {
+        const std::less<const uint8_t*> ptrLess{};
+        const uint8_t* const outBegin = out.data();
+        const uint8_t* const outEnd = outBegin + out.capacity();
+        if (ptrLess(p, outEnd) && ptrLess(outBegin, p + n)) {
+            if (err) *err = "input buffer aliases output buffer";
+            return false;
+        }
+    }
+    out.clear();
     auto fail = [&](const char* e) {
         out.clear();
         if (err) *err = e;
