@@ -3,7 +3,8 @@
 // Korg publishes no layout for Pa-native files (.STY .PRF .PAD .PCG .KMP .PCM .SBD .SBL .GBL ...).
 // Everything below is OBSERVED in one owner Pa700-family SET (142 files, 2026-11-13; research notes:
 // pa-studio-research/interop/PA_NATIVE_CONTAINER_NOTES.md). Only rules that held in 142/142 files are checked;
-// any other input is rejected, never guessed at. Item payloads are opaque (most start "OC31", meaning unknown).
+// any other input is rejected, never guessed at. Item payloads are not decoded by inspect(); read-only OC31/OC32
+// payload decoding lives in media/panative/oc31.h (decodeOc31).
 //
 //   file   = chunk 01 00 01 14, size = file size - 8, holding level-1 chunks back to back
 //   chunk  = u32 id (BE) + u32 size (BE) + size bytes
@@ -18,6 +19,7 @@
 #define AI_ARRANGER_MEDIA_PANATIVE_READER_H
 
 #include "media/kst_inventory.h"   // detail::listFiles (regular files, symlinks not followed)
+#include "media/panative/oc31.h"   // read-only decodeOc31()
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +31,7 @@
 namespace ai_arranger::media::panative {
 
 constexpr size_t kMaxFileBytes = 64u << 20;   // largest observed file 2.4 MB; anything far larger is not read
+static_assert(kMaxOc31DecodedBytes == kMaxFileBytes);
 
 struct Item {
     uint32_t chunkId = 0, offset = 0, size = 0;   // item chunk: id, file offset of its header, payload bytes
