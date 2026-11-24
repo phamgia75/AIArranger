@@ -80,7 +80,12 @@ inline const char* gapName(Gap g) {
     return "Unknown";
 }
 struct Unanalysed { ResourceId sound; Gap why; };
-struct UnresolvedSlot { ResourceId sound; uint32_t record = 0, slot = 0; bool wrongKind = false; };   // not a multisample ID
+struct UnresolvedSlot {
+    ResourceId sound;
+    uint32_t record = 0, slot = 0;
+    bool wrongKind = false;           // ID belongs to another KMP object kind (drum/sample), not a multisample ID
+    bool inUnanalysedSound = false;   // true when the Sound had Gap::NoKnownReference (layout may not apply)
+};
 
 struct NativeRefReport {
     size_t sounds = 0, analysed = 0, emptySlots = 0;
@@ -208,6 +213,150 @@ inline bool readRegularAt(int dirFd, const char* name, size_t maxFileBytes, size
     }
     return true;
 }
+inline bool preadExact(int fd, uint64_t offset, uint8_t* dst, size_t len, size_t& remainingBudget, size_t& bytesRead, std::string& err) {
+    if (len > remainingBudget) { err = "total read size exceeds the reader's limit"; return false; }
+    size_t got = 0;
+    while (got < len) {
+        const ssize_t r = ::pread(fd, dst + got, len - got, static_cast<off_t>(offset + got));
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            err = "read failed";
+            return false;
+        }
+        if (r == 0) { err = "file shrank while being read"; return false; }
+        got += static_cast<size_t>(r);
+        remainingBudget -= static_cast<size_t>(r);
+        bytesRead += static_cast<size_t>(r);
+    }
+    return true;
+}
+// Reads KORF container metadata (wrapper, header, directory, item chunk headers, and EOF index) via pread() without
+// loading item audio payloads into memory. Verifies every structural rule checked by panative::parse().
+inline bool readKorfMetadataAt(int dirFd, const char* name, size_t maxFileBytes, size_t& remainingBudget,
+                               size_t& bytesRead, panative::Container& out, std::string& err) {
+    out = panative::Container{};
+    err.clear();
+    auto fail = [&](std::string m) { out = panative::Container{}; err = std::move(m); return false; };
+
+    struct stat lst{};
+    if (::fstatat(dirFd, name, &lst, AT_SYMLINK_NOFOLLOW) != 0) return fail("cannot stat entry");
+    if (!S_ISREG(lst.st_mode)) return fail("not a regular file (symlinks and special files are refused)");
+    const ScopedFd f(::openat(dirFd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+    if (f.fd < 0) return fail("cannot open regular file (symlinks are not followed)");
+    struct stat st{};
+    if (::fstat(f.fd, &st) != 0 || !S_ISREG(st.st_mode)) return fail("not a regular file");
+    if (st.st_size < 0) return fail("invalid file size");
+    const uint64_t fsz = static_cast<uint64_t>(st.st_size);
+    if (fsz == 0) return fail("empty PCM container");
+    if (fsz > maxFileBytes) return fail("file larger than the reader's limit");
+
+    using panative::detail::be16;
+    using panative::detail::be32;
+    using panative::detail::cstr;
+    using panative::detail::Chunk;
+
+    if (fsz < 8) return fail("invalid PCM KORF container: file shorter than 8 bytes");
+    uint8_t wrap[8]{};
+    if (!preadExact(f.fd, 0, wrap, sizeof wrap, remainingBudget, bytesRead, err)) return false;
+    if (be32(wrap) != 0x01000114u) return fail("invalid PCM KORF container: not a Pa-native wrapper (bytes 0-3 are not 01 00 01 14)");
+    out.wrapper = true;
+    if (be32(wrap + 4) != fsz - 8) return fail("invalid PCM KORF container: wrapper length does not match the file size (truncated or padded)");
+    if (fsz < 36) return fail("invalid PCM KORF container: fewer than 3 level-1 chunks (header, directory, index)");
+
+    uint8_t hdrDir[28]{};
+    if (!preadExact(f.fd, 8, hdrDir, sizeof hdrDir, remainingBudget, bytesRead, err)) return false;
+    const uint32_t hId = be32(hdrDir), hSz = be32(hdrDir + 4);
+    if (hId != 0x02000018u || hSz != 12u || std::memcmp(hdrDir + 15, "KORF", 4) != 0)
+        return fail("invalid PCM KORF container: header chunk 02000018 with KORF at 0x17 not found");
+
+    const uint32_t dId = be32(hdrDir + 20), dSz = be32(hdrDir + 24);
+    if ((dId >> 24) != 0x05u || (dId & 0xFFu) != 0x18u || ((dId >> 16) & 0xFFu) > 1u)
+        return fail("invalid PCM KORF container: directory chunk 05 0x xx 18 not found");
+    if (dSz > fsz - 36u) return fail("invalid PCM KORF container: directory chunk runs past the end of the file");
+    out.directoryId = dId;
+    out.directoryFormat = int((dId >> 16) & 0xFFu);
+
+    std::vector<uint8_t> dirBuf(dSz);
+    if (dSz > 0 && !preadExact(f.fd, 36u, dirBuf.data(), dSz, remainingBudget, bytesRead, err)) return false;
+
+    std::vector<Chunk> l1;
+    l1.push_back({hId, 8u, hSz});
+    l1.push_back({dId, 28u, dSz});
+    for (uint64_t off = 36u + dSz; off < fsz;) {
+        if (fsz - off < 8u) return fail("invalid PCM KORF container: trailing bytes shorter than a chunk header at " + std::to_string(off));
+        uint8_t ch[8]{};
+        if (!preadExact(f.fd, off, ch, sizeof ch, remainingBudget, bytesRead, err)) return false;
+        const uint32_t cid = be32(ch), csz = be32(ch + 4);
+        if (csz > fsz - off - 8u) return fail("invalid PCM KORF container: chunk at " + std::to_string(off) + " runs past the end of the file");
+        l1.push_back({cid, static_cast<uint32_t>(off), csz});
+        off += 8u + static_cast<uint64_t>(csz);
+    }
+    if (l1.size() < 3) return fail("invalid PCM KORF container: fewer than 3 level-1 chunks (header, directory, index)");
+    const Chunk& x = l1.back();
+    if (x.id != 0xFE000018u) return fail("invalid PCM KORF container: index chunk FE000018 is not last");
+    const size_t items = l1.size() - 3;
+    if (uint64_t(x.size) != uint64_t(16u) + uint64_t(4u) * items)
+        return fail("invalid PCM KORF container: index chunk does not match the chunk list");
+
+    std::vector<uint8_t> idxBuf(x.size);
+    if (!preadExact(f.fd, static_cast<uint64_t>(x.offset) + 8u, idxBuf.data(), x.size, remainingBudget, bytesRead, err)) return false;
+    const uint8_t* q = idxBuf.data();
+    if (std::memcmp(q, "KBEG", 4) != 0 || std::memcmp(q + x.size - 8, "KEND", 4) != 0 || be32(q + x.size - 4) != items + 1)
+        return fail("invalid PCM KORF container: index chunk does not match the chunk list");
+    for (size_t i = 0; i <= items; ++i)
+        if (be32(q + 4 + 4 * i) != l1[1 + i].offset)
+            return fail("invalid PCM KORF container: index offset " + std::to_string(i) + " does not match the chunk list");
+
+    const uint8_t* r = dirBuf.data();
+    const size_t rn = dirBuf.size();
+    size_t pos = 0;
+    out.items.reserve(items);
+    for (size_t i = 0; i < items; ++i) {
+        const Chunk& ic = l1[2 + i];
+        panative::Item it{ic.id, ic.offset, ic.size, 0, 0, 0, {}, {}};
+        uint16_t sub = 0;
+        if (out.directoryFormat == 0) {
+            if (rn - pos < 24) return fail("invalid PCM KORF container: directory shorter than its item count");
+            const uint8_t* e = r + pos;
+            it.name = cstr(e, 18);
+            it.kind = e[18]; it.bank = e[19]; it.slot = e[20];
+            sub = be16(e + 21);
+            pos += 24;
+        } else {
+            if (rn - pos < 4) return fail("invalid PCM KORF container: directory shorter than its item count");
+            const size_t end = pos + 2 + be16(r + pos);
+            if (be16(r + pos) < 6 || end > rn) return fail("invalid PCM KORF container: directory record " + std::to_string(i) + " runs past the directory");
+            const unsigned nf = be16(r + pos + 2);
+            size_t fpos = pos + 4;
+            bool seen0 = false, seen1 = false, seen2 = false;
+            for (unsigned k = 0; k < nf; ++k) {
+                if (end - fpos < 4) return fail("invalid PCM KORF container: directory record " + std::to_string(i) + ": field header past the record");
+                const uint16_t t = be16(r + fpos), len = be16(r + fpos + 2);
+                if (len > end - fpos - 4) return fail("invalid PCM KORF container: directory record " + std::to_string(i) + ": field past the record");
+                const uint8_t* v = r + fpos + 4;
+                if (t == 2) { it.name = cstr(v, len); seen2 = true; }
+                else if (t == 0 && len == 3) { it.kind = v[0]; it.bank = v[1]; it.slot = v[2]; seen0 = true; }
+                else if (t == 1 && len == 2) { sub = be16(v); seen1 = true; }
+                else if (t == 4 && len == 8) it.sampleId.assign(reinterpret_cast<const char*>(v), 8);
+                fpos += 4 + size_t(len);
+            }
+            if (!seen0 || !seen1 || !seen2 || end - fpos != 4)
+                return fail("invalid PCM KORF container: directory record " + std::to_string(i) + " lacks the observed fields");
+            pos = end;
+        }
+        if (sub != ((ic.id >> 8) & 0xFFFFu))
+            return fail("invalid PCM KORF container: directory record " + std::to_string(i) + " does not match its item chunk id");
+        out.items.push_back(std::move(it));
+    }
+    if (pos != rn) return fail("invalid PCM KORF container: directory has bytes after its last record");
+
+    struct stat stAfter{};
+    if (::fstat(f.fd, &stAfter) != 0 || !S_ISREG(stAfter.st_mode) || stAfter.st_size < 0 || static_cast<uint64_t>(stAfter.st_size) != fsz)
+        return fail("file size changed while being read");
+
+    out.ok = true;
+    return true;
+}
 }  // namespace native_detail
 
 // Derive a layout for one Sound kind from the data (the research method): items holding only multisample IDs; base = modal
@@ -267,11 +416,12 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
         if (err) *err = "KMP index too large";
         return std::nullopt;
     }
-    std::map<Id8, size_t> msIndex, drum, smp;
+    std::map<Id8, size_t> msIndex;
+    std::set<Id8> drum, smp;
     for (size_t i = 0; i < k.multisamples.size(); ++i) if (!msIndex.emplace(k.multisamples[i].id, i).second) { if (err) *err = "duplicate multisample ID in KMP index"; return std::nullopt; }
-    for (size_t i = 0; i < k.samples.size(); ++i) smp.emplace(k.samples[i].id, i);
-    for (size_t i = 0; i < k.drums.size(); ++i) if (!drum.emplace(k.drums[i].id, i).second) { if (err) *err = "duplicate drum ID in KMP index"; return std::nullopt; }
-    for (const Id8& d : k.drumIds) drum.emplace(d, 0);
+    for (size_t i = 0; i < k.samples.size(); ++i) smp.insert(k.samples[i].id);
+    for (size_t i = 0; i < k.drums.size(); ++i) drum.insert(k.drums[i].id);
+    for (const Id8& d : k.drumIds) drum.insert(d);
     auto sid = [&](size_t i) { return ResourceId{false, kScope, Kind::Sample, static_cast<uint32_t>(i)}; };
     for (size_t i = 0; i < k.samples.size(); ++i)
         if (k.samples[i].info && !t.addNode({sid(i), k.samples[i].name, k.samples[i].info}, err)) return std::nullopt;
@@ -314,8 +464,13 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                 else if (native_detail::allSame(v, 0) || native_detail::allSame(v, 0xFF)) ++empty;
                 else bad.push_back({sid_, static_cast<uint32_t>(q), slot, drum.count(v) > 0 || smp.count(v) > 0});
             }
-        r.unresolved.insert(r.unresolved.end(), bad.begin(), bad.end());   // kept even when the Sound turns out unanalysed
-        if (hits.empty()) { r.unanalysed.push_back({sid_, Gap::NoKnownReference}); continue; }
+        if (hits.empty()) {
+            for (UnresolvedSlot& u : bad) u.inUnanalysedSound = true;
+            r.unresolved.insert(r.unresolved.end(), bad.begin(), bad.end());   // kept even when the Sound turns out unanalysed
+            r.unanalysed.push_back({sid_, Gap::NoKnownReference});
+            continue;
+        }
+        r.unresolved.insert(r.unresolved.end(), bad.begin(), bad.end());
         ++r.analysed; r.emptySlots += empty;
         std::set<size_t> made;
         for (const auto& [q, sm] : hits) {
@@ -373,19 +528,14 @@ struct PcmInventory {
     std::vector<std::string> anomalies;
 };
 
-// Parses one KORF .pcm container in memory and stages its sample IDs into `inv` (all-or-nothing per container).
-inline bool addPcmContainerBytes(const uint8_t* data, size_t size, const std::string& label,
-                                 PcmInventory& inv, std::string* err = nullptr) {
+// Stages parsed KORF .pcm items into `inv` (all-or-nothing per container).
+inline bool stagePcmContainerItems(const std::vector<panative::Item>& items, const std::string& label,
+                                   PcmInventory& inv, std::string* err = nullptr) {
     if (err) err->clear();
-    if (!data || size == 0) { if (err) *err = label + ": empty PCM container"; return false; }
-    if (size > panative::kMaxFileBytes) { if (err) *err = label + ": PCM container larger than the reader's limit"; return false; }
-    const panative::Container c = panative::parse(data, size);
-    if (!c.ok) { if (err) *err = label + ": invalid PCM KORF container: " + c.error; return false; }
-
     std::map<Id8, PcmEntry> staged;
     std::vector<std::string> stagedAnomalies;
     size_t withoutId = 0;
-    for (const panative::Item& it : c.items) {
+    for (const panative::Item& it : items) {
         if (it.sampleId.empty()) {
             ++withoutId;
             stagedAnomalies.push_back(label + ": sample '" + panative::printable(it.name) + "' lacks 8-byte PCM sample ID");
@@ -405,9 +555,35 @@ inline bool addPcmContainerBytes(const uint8_t* data, size_t size, const std::st
     inv.byId.insert(staged.begin(), staged.end());
     inv.anomalies.insert(inv.anomalies.end(), stagedAnomalies.begin(), stagedAnomalies.end());
     ++inv.containersParsed;
-    inv.samplesTotal += c.items.size();
+    inv.samplesTotal += items.size();
     inv.samplesWithoutId += withoutId;
     return true;
+}
+
+// Parses one KORF .pcm container in memory and stages its sample IDs into `inv` (all-or-nothing per container).
+inline bool addPcmContainerBytes(const uint8_t* data, size_t size, const std::string& label,
+                                 PcmInventory& inv, std::string* err = nullptr) {
+    if (err) err->clear();
+    if (!data || size == 0) { if (err) *err = label + ": empty PCM container"; return false; }
+    if (size > panative::kMaxFileBytes) { if (err) *err = label + ": PCM container larger than the reader's limit"; return false; }
+    const panative::Container c = panative::parse(data, size);
+    if (!c.ok) { if (err) *err = label + ": invalid PCM KORF container: " + c.error; return false; }
+    return stagePcmContainerItems(c.items, label, inv, err);
+}
+
+// Reads only KORF metadata (header, directory, chunk headers, index) of a regular .pcm file below `dirFd` via pread()
+// and stages its sample IDs into `inv` without loading raw audio payloads into RAM (all-or-nothing per container).
+inline bool addPcmContainerFdAt(int dirFd, const char* name, const std::string& label,
+                                size_t maxFileBytes, size_t& remainingBudget, size_t& bytesRead,
+                                PcmInventory& inv, std::string* err = nullptr) {
+    if (err) err->clear();
+    panative::Container c;
+    std::string rerr;
+    if (!native_detail::readKorfMetadataAt(dirFd, name, maxFileBytes, remainingBudget, bytesRead, c, rerr)) {
+        if (err) *err = label + ": " + rerr;
+        return false;
+    }
+    return stagePcmContainerItems(c.items, label, inv, err);
 }
 
 struct MissingPcmSample {
@@ -415,6 +591,11 @@ struct MissingPcmSample {
     Id8 id{};
     std::string name;
     std::string reason;
+};
+
+struct DuplicateKmpId {
+    Id8 id{};
+    std::vector<uint32_t> indices;
 };
 
 struct KmpBuildDiagnostics {
@@ -425,6 +606,8 @@ struct KmpBuildDiagnostics {
     size_t zonesTotal = 0;
     size_t multisamplesTotal = 0;
     std::vector<MissingPcmSample> missingPcm;
+    std::vector<DuplicateKmpId> duplicateDrumIds;   // real Pa5X backups can have duplicate drum IDs; nodes remain positional
+    std::vector<PcmEntry> unmatchedPcm;             // PCM sample IDs absent from RAM.KMP (orphan PCM entries)
 };
 
 // Extracts and parses the Pa5X raw RAM.KMP item (chunk 0x11080018, version 0x0103) from a KORF container. Fail-closed.
@@ -471,13 +654,14 @@ inline bool kmpIndexFromPa5x(const panative::Pa5xKmp& kmp, const PcmInventory& p
         kmp.drums.size() > kMaxObjects || kmp.zones.size() > kMaxObjects)
         return fail("Pa5X KMP index too large");
 
-    std::set<Id8> sampleIds, multiIds, drumIds;
+    std::set<Id8> sampleIds, multiIds;
+    std::map<Id8, std::vector<uint32_t>> drumIdIndices;
     for (size_t i = 0; i < kmp.samples.size(); ++i)
         if (!sampleIds.insert(kmp.samples[i].id).second) return fail("duplicate sample ID in Pa5X KMP");
     for (size_t i = 0; i < kmp.multisamples.size(); ++i)
         if (!multiIds.insert(kmp.multisamples[i].id).second) return fail("duplicate multisample ID in Pa5X KMP");
     for (size_t i = 0; i < kmp.drums.size(); ++i)
-        if (!drumIds.insert(kmp.drums[i].id).second) return fail("duplicate drum ID in Pa5X KMP");
+        drumIdIndices[kmp.drums[i].id].push_back(static_cast<uint32_t>(i));
 
     for (size_t i = 0; i < kmp.zones.size(); ++i)
         if (kmp.zones[i].sample != panative::kNoIndex && kmp.zones[i].sample >= kmp.samples.size())
@@ -542,6 +726,11 @@ inline bool kmpIndexFromPa5x(const panative::Pa5xKmp& kmp, const PcmInventory& p
         tmp.drumIds.insert(dr.id);
         tmp.drums.push_back({dr.id, dr.name, dr.left, dr.right});
     }
+
+    for (const auto& [id, idxs] : drumIdIndices)
+        if (idxs.size() > 1) d.duplicateDrumIds.push_back({id, idxs});
+    for (const auto& [id, pe] : pcm.byId)
+        if (!sampleIds.count(id)) d.unmatchedPcm.push_back(pe);
 
     out = std::move(tmp);
     if (diag) *diag = std::move(d);
@@ -658,6 +847,7 @@ struct NativeKstReport {
     size_t soundContainers = 0;
     size_t soundsDecodedOc31 = 0;
     size_t soundsLoadedRaw = 0;
+    size_t bytesRead = 0;               // total disk bytes read by resolveNativeKstFolder()
     LayoutTable usedLayouts;
     NativeRefReport refs;
     std::vector<SoundDecodeFailure> decodeFailures;
@@ -667,7 +857,8 @@ struct NativeKstReport {
 
     bool ok() const { return kmpPresent && kmpParsed && containerErrors.empty() && decodeFailures.empty(); }
     bool coverageComplete() const {
-        return ok() && skippedPaths.empty() && pcmSamplesWithoutId == 0 && kmp.missingPcm.empty() && refs.coverageComplete();
+        return ok() && skippedPaths.empty() && pcmSamplesWithoutId == 0 && kmp.missingPcm.empty() &&
+               kmp.duplicateDrumIds.empty() && kmp.unmatchedPcm.empty() && refs.coverageComplete();
     }
 };
 
@@ -757,6 +948,18 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
         res.report.diagnostics.push_back("missing pcm: KMP sample " + std::to_string(mp.sampleIndex) +
                                          " (" + panative::printable(mp.name) + ", id " + native_detail::hexId(mp.id) + "): " + mp.reason);
     }
+    for (const DuplicateKmpId& dup : res.report.kmp.duplicateDrumIds) {
+        std::string idxs;
+        for (size_t j = 0; j < dup.indices.size(); ++j) {
+            if (j) idxs += ",";
+            idxs += std::to_string(dup.indices[j]);
+        }
+        res.report.diagnostics.push_back("duplicate drum ID in KMP: " + native_detail::hexId(dup.id) + " (records " + idxs + ")");
+    }
+    for (const PcmEntry& pe : res.report.kmp.unmatchedPcm) {
+        res.report.diagnostics.push_back("orphan pcm: " + pe.file + " (" + panative::printable(pe.name) +
+                                         ", id " + native_detail::hexId(pe.id) + ") not referenced by RAM.KMP");
+    }
 
     // 4. Layout resolution (caller-supplied + optional data-fitted layouts)
     res.report.usedLayouts = opts.layouts;
@@ -798,7 +1001,9 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
     }
     for (const UnresolvedSlot& u : res.report.refs.unresolved) {
         res.report.diagnostics.push_back("unresolved slot: " + u.sound.str() + " record " + std::to_string(u.record) +
-                                         " slot " + std::to_string(u.slot) + (u.wrongKind ? " (wrong object kind)" : " (unknown ID)"));
+                                         " slot " + std::to_string(u.slot) +
+                                         (u.wrongKind ? " (wrong object kind)" : " (unknown ID)") +
+                                         (u.inUnanalysedSound ? " (in unanalysed Sound)" : ""));
     }
     for (const std::string& iss : g->issues()) res.report.diagnostics.push_back("graph issue: " + iss);
 
@@ -832,10 +1037,12 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
     remainingEntries -= topEntries.size();
 
     NativeKstInput in;
+    PcmInventory folderPcm;
     std::vector<RawNamedBlob> kmpBlobs;
     std::set<std::string> seenSoundBanks;
     std::vector<std::string> folderErrors, skipped, folderDiags;
     size_t remainingBudget = opts.maxTotalBytes;
+    size_t bytesRead = 0;
 
     for (const std::string& top : topEntries) {
         struct stat st{};
@@ -895,6 +1102,15 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
             const bool isPcg = topUpper == "SOUND" && native_detail::endsWithUpper(leaf, ".PCG");
             if (!isKmp && !isPcm && !isPcg) continue;
 
+            if (isPcm) {
+                std::string perr;
+                if (!addPcmContainerFdAt(subFd.fd, leaf.c_str(), rel, panative::kMaxFileBytes, remainingBudget, bytesRead, folderPcm, &perr)) {
+                    folderErrors.push_back(perr);
+                    folderDiags.push_back("pcm error: " + perr);
+                }
+                continue;
+            }
+
             std::vector<uint8_t> bytes;
             std::string rerr;
             if (!native_detail::readRegularAt(subFd.fd, leaf.c_str(), panative::kMaxFileBytes, remainingBudget, bytes, rerr)) {
@@ -903,10 +1119,9 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
                 continue;
             }
             remainingBudget -= bytes.size();
+            bytesRead += bytes.size();
             if (isKmp) {
                 kmpBlobs.push_back({rel, "", std::move(bytes)});
-            } else if (isPcm) {
-                in.pcmContainers.push_back({rel, "", std::move(bytes)});
             } else {
                 const std::string bank = native_detail::bankFromLabel(rel);
                 if (!seenSoundBanks.insert(bank).second) {
@@ -919,6 +1134,7 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
         }
     }
 
+    in.extraPcm = std::move(folderPcm);
     if (kmpBlobs.size() == 1) {
         in.kmpContainer = std::move(kmpBlobs[0]);
     } else if (kmpBlobs.size() > 1) {
@@ -927,6 +1143,7 @@ inline NativeKstResult resolveNativeKstFolder(const std::filesystem::path& kstDi
     }
 
     NativeKstResult res = resolveNativeKst(in, opts);
+    res.report.bytesRead = bytesRead;
     res.report.skippedPaths.insert(res.report.skippedPaths.begin(), skipped.begin(), skipped.end());
     res.report.containerErrors.insert(res.report.containerErrors.begin(), folderErrors.begin(), folderErrors.end());
     res.report.diagnostics.insert(res.report.diagnostics.begin(), folderDiags.begin(), folderDiags.end());
