@@ -171,13 +171,7 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
                   "The KST opened in Library Workspace > Sources: byte copy + SHA-256 manifest (also: Backup KST... in KST Library)"),
         route("Check a USB copy (read-only)", "Validation & Reports: Verify Package against its manifest", D::Validation, 0),
         off("Pa5X KST export", "Not available: needs a KST writer and a KST L1 validator; neither exists yet (docs/PA5X_KST_EXPORT_PLAN.md)."),
-        {{&button("Pa5X Import Kit...", [this] {
-              chooseFolder("Folder holding the AIArranger outputs for the kit (only read)", [this](juce::File in) {
-                  chooseFolder("Parent folder for the new kit (local disk)", [this, in](juce::File parent) {
-                      importKitJob(in, parent.getChildFile(juce::File::createLegalFileName(in.getFileName() + " Pa5X Kit")));
-                  });
-              });
-          }), 260},
+        {{&button("Pa5X Import Kit...", [this] { showDomain(Domain::ImportExport, 1); }), 260},   // the guided sheet (BL-E1)
          {&label("Sound/Drum Kit packages, KMP folders and Style SMFs in one USB folder with KIT.md (import steps, manual pages): "
                  "STRUCTURALLY VALID, not verified on a Pa5X", kText2), 0}},
         exportRow("KMP / KSF folder (EXPERIMENTAL)", D::SampleLab, 3, ExportJob::KmpFolder, "KMP job...",
@@ -222,6 +216,8 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     for (juce::Component* b : {(juce::Component*)workStatus_, (juce::Component*)waitQuitBtn_, (juce::Component*)cancelQuitBtn_, (juce::Component*)keepWorkingBtn_})
         b->setVisible(false);
     ioPage_.collapse = {workStatus_, waitQuitBtn_};   // the quit prompt's rows take no space while it is hidden
+    kitSheet_.pickFolder = [this](const juce::String& title, std::function<void(juce::File)> then) { chooseFolder(title, std::move(then)); };
+    kitSheet_.enqueueJob = [this](jobs::ExportSpec spec, std::function<void(const jobs::JobState&)> done) { return enqueue(std::move(spec), nullptr, std::move(done)); };
     manager_.enqueueJob = [this](jobs::ExportSpec spec, std::function<void(const jobs::JobState&)> done) { return enqueue(std::move(spec), nullptr, std::move(done)); };
     // Backup KST, Convert Sound Generate and Sample Plugin Generate run in this window's one queue too (job list, busy(), Cancel Job)
     manager_.jobState = [this](uint64_t id) -> std::optional<jobs::JobState> {
@@ -444,14 +440,14 @@ StudioComponent::StudioComponent(std::function<void()> showLiveHost) : showLiveH
     reportsPage_.addAndMakeVisible(reportView_);
 
     segments_[D::Library] = {{"Sources", -1, &sourcesPage_}, {"Resource Graph", 0}, {"KST Library", 1}, {"Memory Check", 2}, {"Library Manager", -1, &manager_}};
-    segments_[D::ImportExport] = {{"Routes", -1, &ioPage_}};
+    segments_[D::ImportExport] = {{"Routes", -1, &ioPage_}, {"Pa5X Import Kit", -1, &kitSheet_}};
     segments_[D::SampleLab] = {{"Convert Sound", 3}, {"Sample Plugin", 4}, {"Quality Report", -1, &qualityPage_},
                                {"KMP / KSF Writer", -1, &kmpPage_}, {"Tools", -1, &labPage_}};
     segments_[D::StyleStudio] = {{"Style Editor", -1, &stylePage_}};
     segments_[D::Validation] = {{"Checks", -1, &validationPage_}, {"Reports", -1, &reportsPage_}};
     for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
                     (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_, (juce::Component*)&reportsPage_,
-                    (juce::Component*)&manager_})
+                    (juce::Component*)&manager_, (juce::Component*)&kitSheet_})
         addChildComponent(p);
     for (auto& [d, segs] : segments_)
         for (size_t i = 0; i < segs.size(); ++i) {
@@ -547,7 +543,7 @@ void StudioComponent::showDomain(Domain d, int segment) {
     const auto& seg = segs[size_t(segment)];
     for (auto* p : {(juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_, (juce::Component*)&kmpPage_,
                     (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_, (juce::Component*)&reportsPage_,
-                    (juce::Component*)&manager_})
+                    (juce::Component*)&manager_, (juce::Component*)&kitSheet_})
         p->setVisible(p == seg.page);
     res_.setVisible(seg.resTab >= 0);
     if (seg.resTab >= 0) {
@@ -633,6 +629,7 @@ void StudioComponent::askRunningWork(std::function<void()> quit) {
     juce::StringArray what;
     if (n) what.add(juce::String(n) + " export job(s) running or queued");
     if (manager_.busy() || manager_.computing()) what.add("a Library Manager scan, report or plan");
+    if (kitSheet_.busy()) what.add("a Pa5X Import Kit review or check");
     if (res_.backingUp()) what.add("a KST backup or backup check");
     if (res_.loading()) what.add("a package or evidence load");
     if (res_.converter().busy()) what.add("Convert Sound work");
@@ -664,6 +661,7 @@ void StudioComponent::resolveRunningWork(WorkChoice c) {
         const auto all = queue_->snapshot();   // newest first: a queued job is cancelled before the running one can end and free the worker
         for (auto j = all.rbegin(); j != all.rend(); ++j) if (!jobs::finished(j->phase)) queue_->cancel(j->id);
         manager_.stopWork();
+        kitSheet_.stopWork();
         res_.cancelJobs();   // all Sounds & Resources work: a backup or check, a render, Convert Sound / Sample Plugin jobs (never published)
         if (otherCancel_) otherCancel_();
         workStatus_->setText("Cancelling: a cancelled job stops at its next check and leaves only NAME.INCOMPLETE (never deleted); nothing is "
@@ -1471,7 +1469,7 @@ void StudioComponent::resized() {
     if (leftovers_.isVisible()) { leftovers_.setBounds(r.removeFromTop(40)); r.removeFromTop(8); }
     for (auto* p : {(juce::Component*)&res_, (juce::Component*)&sourcesPage_, (juce::Component*)&ioPage_, (juce::Component*)&qualityPage_,
                     (juce::Component*)&kmpPage_, (juce::Component*)&labPage_, (juce::Component*)&stylePage_, (juce::Component*)&validationPage_, (juce::Component*)&reportsPage_,
-                    (juce::Component*)&manager_})
+                    (juce::Component*)&manager_, (juce::Component*)&kitSheet_})
         p->setBounds(r);
 }
 
