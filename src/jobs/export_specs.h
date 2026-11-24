@@ -9,6 +9,7 @@
 
 #include "jobs/export_job.h"
 #include "library/library_apply.h"
+#include "media/panative/set_to_kst.h"
 #include "media/samplelab/drum_builder.h"
 #include "media/sound/package_graph.h"
 #include "ui/sound/sound_conversion_model.h"
@@ -97,6 +98,28 @@ inline Conversion drumConversion(const snd::DrumKit& kit, const std::vector<std:
     for (const auto& l : lost) c.push_back({"MISSING", l});
     c.push_back({"MISSING", "Drum Kit filter/envelope/effects edits: set by hand on the Pa5X"});
     return c;
+}
+// Copies the folder `from` to the NEW folder `to`: every folder and regular file is created through media::makeFolder /
+// createNewFile (below the runner's pinned job folder when one is installed, exclusive, no link followed); anything that
+// is not a plain folder or file is refused. "" = copied.
+inline std::string copyTree(const fs::path& from, const fs::path& to) {
+    if (!media::makeFolder(to)) return "cannot create " + to.string();
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(from, ec), end; !ec && it != end; it.increment(ec)) {
+        const auto st = it->symlink_status(ec);
+        const fs::path rel = fs::relative(it->path(), from, ec), dst = to / rel;
+        if (fs::is_directory(st)) { if (!media::makeFolder(dst)) return "cannot create " + dst.string(); continue; }
+        if (!fs::is_regular_file(st)) return "refusing: " + it->path().string() + " is not a plain file or folder";
+        const int in = ::open(it->path().c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        const int out = media::createNewFile(dst);
+        bool ok = in >= 0 && out >= 0;
+        char buf[1 << 16];
+        for (ssize_t n; ok && (n = ::read(in, buf, sizeof buf)) > 0;) ok = ::write(out, buf, size_t(n)) == n;
+        if (in >= 0) ::close(in);
+        if (out >= 0) ok &= ::close(out) == 0;
+        if (!ok) return "cannot copy " + it->path().string() + " to " + dst.string();
+    }
+    return ec ? ec.message() : "";
 }
 }  // namespace detail
 
@@ -385,6 +408,136 @@ inline ExportSpec kstBackup(fs::path source, fs::path dest) {
     return s;
 }
 
+// SET -> KST phase 1 (D54 B1, media/panative/set_to_kst.h; rules and data flow: docs/research/pa-studio/PA5X_SET_TO_KST_EVIDENCE.md):
+// a NEW folder NAME.KST holding the SET's CARRY members byte-identical at their lower-cased paths; nothing for
+// BLOCKED/DROPPED members, which the CONVERSION report (writer report and conversion lines, in NAME.KST.export.md/.json
+// beside it) lists with their reasons. STRUCTURALLY VALID - NOT VERIFIED ON A PA5X.
+// Data flow (Codex r2): validate reads every CARRY member ONCE through the pinned SET root into a bounded snapshot;
+// the dependency map, the report and the staged write use only that snapshot. The write records each staged file's
+// device/inode from the descriptor it wrote. verify pins the staged folder (library::Pinned) and requires exactly the
+// snapshot's hashes and the recorded identities. beforePublish = the gate: (1) the SET path and every member still have
+// their snapshot identity (no content re-read), then (2) LAST, library::recheckPinned re-hashes every staged file through
+// the pinned folder and compares hashes and device/inode. Writes go through the job's pinned output folder (writeAt, E9).
+inline ExportSpec setToKst(fs::path set, fs::path dest) {
+    namespace s2k = media::panative::settokst;
+    struct State {
+        s2k::Plan plan;
+        s2k::Snapshot snap;   // the only content read of the sources
+        s2k::Deps deps;
+        std::string report;
+        library::detail::FileIds written;                                                // dest -> device/inode as written
+        std::shared_ptr<library::Pinned> pinned = std::make_shared<library::Pinned>();   // the verified staged output (fresh per verify)
+    };
+    const auto st = std::make_shared<State>();
+    ExportSpec s;
+    s.type = "SET -> KST (resources only)";
+    s.source = set.string();
+    s.sources = {set};
+    s.dest = std::move(dest);
+    s.validate = [st, set, d = detail::absFolder(s.dest)] {
+        // the destination first (Codex r3 E3): a refused output costs no source read. A leftover NAME.INCOMPLETE alone is
+        // left to the runner, which may move it aside with consent.
+        if (const auto why = media::outputFolderRefusal(d); !why.empty() && why != media::incompleteRefusal(d)) return why;
+        if (!detail::isDir(set)) return "refusing: " + set.string() + " is not a folder";
+        if (media::samplelab::sameOrBelow(d, set)) return "refusing: the KST may not be inside the SET " + set.string();
+        const std::string leaf = d.filename().string();
+        if (leaf.size() <= 4 || leaf.compare(leaf.size() - 4, 4, ".KST") != 0 || !media::panative::assemble::safeName(leaf.substr(0, leaf.size() - 4)))
+            return "refusing: the output must be a folder named NAME.KST with a safe NAME: " + leaf;
+        st->plan = s2k::inventory(set);
+        if (const auto why = s2k::refusal(st->plan, st->snap); !why.empty()) return why;
+        st->deps = s2k::dependencies(st->plan, st->snap);
+        st->report = s2k::report(st->plan, st->deps);
+        return std::string();
+    };
+    s.dependencies = [st](std::vector<std::string>& notes, uint64_t& sampleBytes) {
+        const auto& p = st->plan;
+        notes.push_back(std::to_string(p.count(s2k::Kind::Carry)) + " member(s) carried byte-identical; " + std::to_string(p.count(s2k::Kind::Blocked)) +
+                        " BLOCKED (Styles, Keyboard Sets, Pads, SongBook: OC31 not decoded), " + std::to_string(p.count(s2k::Kind::Dropped)) +
+                        " DROPPED (MAN5 p.737), " + std::to_string(p.count(s2k::Kind::Unknown)) + " UNKNOWN (not carried)");
+        for (const auto& n : st->deps.notes) notes.push_back(n);
+        for (const auto& m : p.members) if (m.kind == s2k::Kind::Carry && m.dest.rfind("PCM/", 0) == 0) sampleBytes += st->snap.files.at(m.rel).bytes.size();
+        return std::vector<std::string>{};   // BLOCKED members are reported, not blocking: this conversion is resources only
+    };
+    s.preview = [st] {
+        std::vector<OutFile> r;
+        for (const auto& m : st->plan.members) if (m.kind == s2k::Kind::Carry) r.push_back({m.dest, st->snap.files.at(m.rel).bytes.size()});
+        std::sort(r.begin(), r.end(), [](const OutFile& a, const OutFile& b) { return a.rel < b.rel; });
+        return r;
+    };
+    s.writeAt = [st](int outFd, const fs::path&, const std::function<bool(double)>& progress) {
+        st->written.clear();
+        const double n = double(st->snap.files.size());
+        size_t i = 0;
+        for (const auto& m : st->plan.members) {
+            if (m.kind != s2k::Kind::Carry) continue;
+            const auto& bytes = st->snap.files.at(m.rel).bytes;
+            const auto [dir, leaf] = media::detail::splitRel(m.dest);
+            const media::detail::Fd d(library::detail::openDirIn(outFd, dir, true));
+            const media::detail::Fd f(d.v < 0 ? -1 : ::openat(d.v, leaf.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644));
+            if (f.v < 0) return WriteResult{"cannot create " + m.dest + " (it may already exist; links are never followed)", ""};
+            for (size_t w = 0; w < bytes.size();) {
+                const ssize_t k = ::write(f.v, bytes.data() + w, bytes.size() - w);
+                if (k <= 0) return WriteResult{"cannot write " + m.dest + " (disk full?)", ""};
+                w += size_t(k);
+            }
+            struct stat fst {};
+            if (::fsync(f.v) != 0 || ::fstat(f.v, &fst) != 0) return WriteResult{"cannot write " + m.dest, ""};
+            st->written[m.dest] = {fst.st_dev, fst.st_ino};
+            if (!progress(double(++i) / n)) return WriteResult{"cancelled", ""};
+        }
+        return WriteResult{"", st->report};
+    };
+    s.verify = [st](const fs::path& out) {
+        Verification v;
+        v.l2 = {Check::NotRun, "not verified on a Pa5X"};
+        const auto failed = [&](const std::string& why) {
+            v.l1 = {Check::Failed, why};
+            return std::pair<Verification, std::string>{v, why};
+        };
+        st->pinned = std::make_shared<library::Pinned>();
+        library::detail::pin(out, *st->pinned, false);   // no manifest beside a converted KST
+        if (!st->pinned->error.empty()) return failed(st->pinned->error);
+        if (st->pinned->ids != st->written) return failed("the staged files are not the files that were written (device/inode differ, or a file is missing or extra)");
+        size_t files = 0;
+        for (const auto& m : st->plan.members) {
+            if (m.kind != s2k::Kind::Carry) continue;
+            ++files;
+            const auto it = st->pinned->tree.find(m.dest);
+            if (it == st->pinned->tree.end() || it->second != st->snap.files.at(m.rel).sha) return failed(m.dest + " is not byte-identical to its SET member");
+        }
+        media::panative::assemble::Result r;   // the shared W5 gate; its object closure is vacuous here (no .stg/.ksc/.pdc)
+        if (const auto why = media::panative::assemble::stagedRefusal(out, r); !why.empty()) return failed(why);
+        const auto& dp = st->deps;   // Codex r3 E4: state the dependency result exactly, claim nothing that was not checked
+        std::string map = dp.decided ? "KMP -> PCM: " + std::to_string(dp.kmpRefs) + " reference(s), " + std::to_string(dp.dangling.size()) + " dangling, " +
+                                           std::to_string(dp.unreferenced.size()) + " unreferenced sample(s)"
+                                     : "KMP -> PCM: UNKNOWN (";
+        if (!dp.decided) {
+            for (size_t i = 0; i < dp.notes.size(); ++i) map += (i ? "; " : "") + dp.notes[i];
+            map += dp.notes.empty() ? "no KMP or PCM to map)" : ")";
+        }
+        v.l1 = {Check::Passed, std::to_string(files) + " carried file(s) byte-identical to the SET as read (KORF-checked), validator 0 errors; " + map +
+                                   "; no Style, Keyboard Set or Pad objects are written, so no object closure applies"};
+        return std::pair<Verification, std::string>{v, std::string(s2k::kLabel) + ". " + v.l1.detail + " (" + std::to_string(r.validatorWarnings) +
+                                                           " validator warning(s)). Checked in sequence before publishing, not as one instant: the SET path "
+                                                           "and every carried member's identity, then every staged file re-hashed; a change "
+                                                           "after its own check is not seen (see the evidence doc's residual boundary)."};
+    };
+    s.verifiedHashes = [st] { return st->pinned ? st->pinned->tree : std::map<std::string, std::string>{}; };   // == the snapshot's (verify)
+    s.beforePublish = [st, set](const fs::path& out) {
+        if (auto e = s2k::sourceChanged(st->plan, set, st->snap); !e.empty()) return "the SET changed after it was read: " + e;   // (1)
+        return library::recheckPinned(*st->pinned, out);   // (2) LAST: staged bytes and identities, right before the rename
+    };
+    s.finished = [st] { st->snap.releaseBytes(); };   // Codex r3 E3: the queue keeps specs; only hashes and identities stay
+    s.conversion = [st] {
+        detail::Conversion c;
+        for (const auto& m : st->plan.members)
+            c.push_back(m.kind == s2k::Kind::Carry ? std::pair<std::string, std::string>{"EXACT", m.rel + " -> " + m.dest + " (byte-identical)"}
+                                                   : std::pair<std::string, std::string>{"MISSING", std::string(s2k::kindName(m.kind)) + " " + m.rel + ": " + m.reason});
+        return c;
+    };
+    return s;
+}
+
 // A package already written and checked in a private staging folder (the plugin sampler's render), copied as a new
 // output. The copy must equal the staged files before the job verifies it (L1 + L2 with the shared verifier).
 inline ExportSpec stagedPackage(fs::path staged, fs::path dest) {
@@ -396,9 +549,13 @@ inline ExportSpec stagedPackage(fs::path staged, fs::path dest) {
     s.validate = [staged] { return detail::isDir(staged) ? "" : "refusing: the rendered package " + staged.string() + " is gone (render again)"; };
     s.preview = [staged] { return listFiles(staged); };
     s.write = [staged](const fs::path& out, auto&) {
-        std::error_code ec;
-        fs::copy(staged, out, fs::copy_options::recursive, ec);
-        if (ec) return WriteResult{"copy failed: " + ec.message(), ""};
+        if (media::pinned::active()) {   // run by the job runner: below the pinned job folder, by handle
+            if (const auto e = detail::copyTree(staged, out); !e.empty()) return WriteResult{"copy failed: " + e, ""};
+        } else {                          // called directly: as before
+            std::error_code ec;
+            fs::copy(staged, out, fs::copy_options::recursive, ec);
+            if (ec) return WriteResult{"copy failed: " + ec.message(), ""};
+        }
         if (const auto d = media::diff(staged, out); !d.same())
             return WriteResult{"the copy does not match the rendered package (" + (d.ok ? std::string("files differ") : d.error) + ")", ""};
         return WriteResult{"", ui::SoundConversionModel::writtenSummary(out)};

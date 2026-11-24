@@ -133,7 +133,12 @@ ResourcesComponent::ResourcesComponent() {
     semanticBtn_.setTooltip("Unavailable: needs validated Sound/sample dependency data");
     for (auto* b : {&invBtn_, &diffBtn_, &planBtn_, &semanticBtn_}) kstPage_.addAndMakeVisible(*b);
     kstPage_.addAndMakeVisible(kstNote_);
-    styleText(kstOut_, true);
+    {
+        const auto& lf = juce::LookAndFeel::getDefaultLookAndFeel();
+        kstOut_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
+        kstOut_.setColours(lf.findColour(juce::TextEditor::backgroundColourId), lf.findColour(juce::TextEditor::textColourId));
+        kstOut_.setTitle("KST tools report");
+    }
     kstPage_.addAndMakeVisible(kstOut_);
 
     // ── Memory Check ──
@@ -151,7 +156,7 @@ ResourcesComponent::ResourcesComponent() {
     const auto bg = juce::Colour(0xff1e1e1e);
     for (auto [c, t] : std::initializer_list<std::pair<juce::Component*, const char*>>{
              {&tree_, "Resource Graph"}, {&details_, "Resource details"}, {&summary_, "Summary and memory budget"},
-             {&kstOut_, "KST Library results"}, {&memBefore_, "Memory Info before import"}, {&memAfter_, "Memory Info after import"},
+             {&memBefore_, "Memory Info before import"}, {&memAfter_, "Memory Info after import"},
              {&memOut_, "Memory comparison"}})
         c->setTitle(t);   // VoiceOver names (UX a11y audit A1)
     tabs_.addTab("Resource Graph", bg, &graphPage_, false);

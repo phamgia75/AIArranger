@@ -5,6 +5,7 @@
 #define AI_ARRANGER_LIBRARY_LIBRARY_HISTORY_H
 
 #include "library/library_plan.h"
+#include "library/library_plan_store.h"   // kMaxPlanSteps
 #include "style_edit/undo_history.h"
 
 namespace ai_arranger::library {
@@ -24,7 +25,10 @@ class PlanHistory {
 public:
     const std::vector<Step>& steps() const { return steps_; }
     bool empty() const { return steps_.empty(); }
+    bool full() const { return steps_.size() >= kMaxPlanSteps; }   // a longer plan could be saved but not restored
 
+    // The only way the UI stages a step: false (nothing changed, no history entry) when the plan is already full.
+    bool tryAdd(Step s, const std::string& label) { if (full()) return false; add(std::move(s), label); return true; }
     void add(Step s, const std::string& label) { record("add " + label); steps_.push_back(std::move(s)); }
     bool removeLast() {
         if (steps_.empty()) return false;
@@ -38,6 +42,8 @@ public:
         steps_.clear();
         return true;
     }
+    // A plan restored from disk: one history entry (not one per step), so restoring N steps costs one snapshot.
+    void adopt(std::vector<Step> s) { record("restore " + std::to_string(s.size()) + " saved step(s)"); steps_ = std::move(s); }
     bool undo() { return h_.undo(steps_); }
     bool redo() { return h_.redo(steps_); }
     // The libraries changed: steps name items by index, so the plan and its history no longer apply.

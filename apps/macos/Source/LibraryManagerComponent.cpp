@@ -55,14 +55,9 @@ void LibraryManagerComponent::setUnavailable(juce::Button& b, const juce::String
 }
 
 LibraryManagerComponent::LibraryManagerComponent() {
-    auto styleText = [](juce::TextEditor& t) {
-        t.setMultiLine(true);
-        t.setReadOnly(true);
-        t.setScrollbarsShown(true);
-        t.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
-        t.setColour(juce::TextEditor::backgroundColourId, kSurface);
-    };
-    styleText(report_);
+    report_.setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
+    report_.setColours(kSurface, juce::LookAndFeel::getDefaultLookAndFeel().findColour(juce::TextEditor::textColourId));
+    report_.setTitle("Library report");
     openA_ = &button("Open Library A...", [this] { chooseFolder("Library A: a KST or SET folder (only read)", [this](juce::File f) { openLibrary('A', f); }); });
     openB_ = &button("Open Library B...", [this] { chooseFolder("Library B: a KST or SET folder (only read)", [this](juce::File f) { openLibrary('B', f); }); });
     details_ = &button("Details", [this] { showView(View::Details); });
@@ -90,6 +85,9 @@ LibraryManagerComponent::LibraryManagerComponent() {
     auto& rev = act(Action::Reveal, "Reveal", [this] { lastOutput_.revealToUser(); });
     auto& val = act(Action::Validate, "Validate", [this] { showView(View::Validation); });
     auto& kc = act(Action::Compat, "Compatibility", [this] { showView(View::Compat); });
+    auto& cv = act(Action::ConvertSet, "Convert SET to KST (resources only)...", [this] {
+        chooseFolder("Parent folder for the NEW KST (local disk; the SET is only read)", [this](juce::File parent) { convertSet(parent); });
+    });
     wholeFile_.setTooltip("SET only: Copy, Move and Rename act on the selected item's whole bank file (e.g. STYLE/USER03.STY) as a file. "
                           "Item-level SET edits cannot be executed (payload and record trailer UNKNOWN).");
     wholeFile_.setColour(juce::ToggleButton::textColourId, juce::Colours::white);
@@ -100,7 +98,6 @@ LibraryManagerComponent::LibraryManagerComponent() {
     value_.onTextChange = [this] { refresh(); };
     search_.setTitle("Search both libraries");
     value_.setTitle("New name or other bank");
-    report_.setTitle("Library Manager report");
     a_.list.setTitle("Library A items");
     b_.list.setTitle("Library B items");
     hint_.setColour(juce::Label::textColourId, kText2);
@@ -116,6 +113,7 @@ LibraryManagerComponent::LibraryManagerComponent() {
                    {{&rm, 140}, {r(rm), 160}, {&cl, 100}, {r(cl), 160}, {&ex, 220}, {r(ex), 0}},
                    {{&un, 100}, {r(un), 220}, {&re, 100}, {r(re), 220}, {&wu, 110}, {r(wu), 0}},
                    {{&exe, 140}, {r(exe), 300}, {&rev, 80}, {r(rev), 160}, {&progress_, 0}},
+                   {{&cv, 270}, {r(cv), 0}},
                    {{&hint_, 0}}};
     for (auto* rows : {&rows_, &actionRows_})
         for (auto& row : *rows) for (auto& [c, w] : row) addAndMakeVisible(c);
@@ -173,15 +171,18 @@ void LibraryManagerComponent::openLibrary(char side, const juce::File& dir) {
     std::weak_ptr<bool> alive = alive_;
     std::thread([this, alive, stop = stop_, side, d = dir.getFullPathName().toStdString()] {
         auto L = std::make_shared<const lib::Library>(lib::load(d, [alive, stop] { return !alive.expired() && !*stop; }));
-        juce::MessageManager::callAsync([this, alive, side, L] {
+        const std::string key = L->ok ? lib::libraryKey(*L) : "";   // for the saved plan; here, off the message thread
+        juce::MessageManager::callAsync([this, alive, side, L, key] {
             if (alive.expired()) return;
             --jobs_;
             auto& p = pane(side);
             if (L->ok) {
                 p.lib = L;
+                p.key = key;
                 p.selected = -1;
                 history_.reset();   // and its undo/redo: they name items of the library that was replaced
                 ++planRev_;   // steps name items by index into the libraries they were made for
+                restorePlan();
             }
             view_ = View::Details;
             p.header.setText(juce::String("Library ") + side + ": " + u8(L->ok ? L->name + "  ·  " + lib::formatName(L->format) + "  ·  " +
@@ -245,6 +246,7 @@ juce::String LibraryManagerComponent::unavailable(Action a) const {
         case Action::Undo: return history_.canUndo() ? "" : "Needs: a plan edit to undo";
         case Action::Redo: return history_.canRedo() ? "" : "Needs: an undone plan edit";
         case Action::WhereUsed: return act.item() ? "" : "Needs: an item selected in a list";
+        case Action::ConvertSet: return act.lib && act.lib->format == library::Format::PaSet ? "" : "Needs: a SET open on the active side";
     }
     return "";
 }
@@ -263,14 +265,48 @@ void LibraryManagerComponent::addStep(Action a) {
         case Action::SwapBanks: s.op = lib::Op::BankSwap; s.bank = p.item()->bank; s.text = value_.getText().trim().toStdString(); break;
         default: return;
     }
-    history_.add(s, lib::stepLabel(*p.lib, s));
+    if (!history_.tryAdd(s, lib::stepLabel(*p.lib, s))) {   // a plan this long could be saved but not restored
+        progress_.setText("The plan is full (" + juce::String(int(lib::kMaxPlanSteps)) + " steps): Execute or export it, or remove steps", juce::dontSendNotification);
+        return;
+    }
     ++planRev_;
+    persistPlan();
     showView(View::Plan);
+}
+
+void LibraryManagerComponent::persistPlan() {
+    if (!a_.lib || !b_.lib) return;
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
+    std::error_code ec;
+    if (history_.empty()) {   // a cleared plan stays cleared after a restart
+        if (const auto e = lib::removePlan(file, *a_.lib, *b_.lib); !e.empty())
+            progress_.setText("Plan cleared, but its saved copy could not be removed and may come back after a restart: " + u8(e), juce::dontSendNotification);
+        return;
+    }
+    // Message thread: the keys are cached at open, so this is one small file (measured < 1 ms to 500k files).
+    if (const auto e = lib::savePlan(file, lib::serializePlan(history_.steps(), a_.key, b_.key), *a_.lib, *b_.lib); !e.empty())
+        progress_.setText("Plan not saved for the next start: " + u8(e), juce::dontSendNotification);
+}
+
+void LibraryManagerComponent::restorePlan() {
+    if (!a_.lib || !b_.lib || !history_.empty()) return;
+    std::string text;
+    const auto file = lib::planFilePath(planDir_.getFullPathName().toStdString(), a_.key, b_.key);
+    if (!lib::loadPlanText(file, text).empty()) return;   // nothing saved for this pair
+    std::vector<lib::Step> steps;
+    if (const auto why = lib::parsePlan(text, a_.key, b_.key, *a_.lib, *b_.lib, steps); !why.empty()) {
+        progress_.setText("Saved plan not restored: " + u8(why), juce::dontSendNotification);
+        return;
+    }
+    history_.adopt(std::move(steps));
+    ++planRev_;
+    progress_.setText("Restored " + juce::String(int(history_.steps().size())) + " staged step(s) from the saved plan (staged only: nothing is written until Execute Plan)", juce::dontSendNotification);
 }
 
 void LibraryManagerComponent::planEdit(const std::function<bool()>& edit) {
     if (working() || !edit()) return;   // a running job holds the plan it was given; no plan change while it runs
     ++planRev_;
+    persistPlan();
     showView(View::Plan);
 }
 
@@ -356,6 +392,31 @@ void LibraryManagerComponent::executePlan(const juce::File& parent) {
     progress_.setText("Queued as export job #" + juce::String(id), juce::dontSendNotification);
     report_.setText("Plan execution queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + dest.getFullPathName(), false);
     if (jobState) startTimer(200);
+    refresh(false);
+}
+
+void LibraryManagerComponent::convertSet(const juce::File& parent) {
+    if (unavailable(Action::ConvertSet).isNotEmpty()) return;
+    if (!enqueueJob) { report_.setText("KST NOT written: no export job queue.\nNothing was written to the SET.", false); return; }
+    const auto& set = *pane(active_).lib;
+    auto name = juce::File(u8(set.root)).getFileName();
+    if (name.endsWithIgnoreCase(".SET")) name = name.dropLastCharacters(4);
+    const auto dest = parent.getChildFile(name + ".KST");
+    std::weak_ptr<bool> alive = alive_;
+    const auto token = planJobs_.start();
+    const auto id = enqueueJob(jobs::setToKst(set.root, dest.getFullPathName().toStdString()), [this, alive, token](const jobs::JobState& j) {
+        if (alive.expired()) return;
+        planJobs_.land(token);
+        refresh(false);   // keep the result: no view report replaces it
+        report_.setText(j.phase == jobs::Phase::Done
+                            ? "KST written (resources only): " + u8(j.dest) + "\n" + u8(ui::studio::badgeLine(j.level)) + "   " + u8(j.verifyText) +
+                                  "\nExport job #" + juce::String(j.id) + ", report: " + u8(j.reportPath) + "\nThe SET was only read.\n\n" + u8(j.writerText)
+                            : "KST NOT written: " + u8(j.reason) + "\n(export job #" + juce::String(j.id) + " " + jobs::phaseName(j.phase) + " at " +
+                                  jobs::phaseName(j.stoppedAt) + ")\nNothing was written to the SET.",
+                        false);
+    });
+    if (!*token) return;   // already landed
+    report_.setText("SET -> KST conversion queued as export job #" + juce::String(id) + " (Import / Export Center lists every job): " + dest.getFullPathName(), false);
     refresh(false);
 }
 
