@@ -13,18 +13,27 @@
 
 namespace ai_arranger::app {
 
-class StudioMenu : public juce::MenuBarModel, public juce::ApplicationCommandTarget {
+class StudioMenu : public juce::MenuBarModel,
+                   public juce::ApplicationCommandTarget,
+                   private juce::FocusChangeListener {
 public:
     enum Command { kUndo = 0x7a01, kRedo = 0x7a02, kDomain = 0x7a10 };   // kDomain + sidebar index 0..4
 
     explicit StudioMenu(LiveHostComponent& host)
         : StudioMenu([&host] { return host.studio(); }, [&host] { return host.showStudio(); }) {}
-    // `studio`: the Studio if it exists; `showStudio`: opens it. `focused` overrides the focused component (tests only).
+    // `studio`: the Studio if it exists; `showStudio`: opens it.
+    // `focused` and `activeWindow` override OS focus/active-window state (tests only, where offscreen windows cannot take focus).
     StudioMenu(std::function<StudioComponent*()> studio, std::function<StudioComponent*()> showStudio,
-               std::function<juce::Component*()> focused = {})
-        : studio_(std::move(studio)), showStudio_(std::move(showStudio)), focused_(std::move(focused)) {
+               std::function<juce::Component*()> focused = {},
+               std::function<juce::Component*()> activeWindow = {})
+        : studio_(std::move(studio)), showStudio_(std::move(showStudio)),
+          focused_(std::move(focused)), activeWindow_(std::move(activeWindow)) {
         cm_.registerAllCommandsForTarget(this);
         cm_.setFirstCommandTarget(this);
+        juce::Desktop::getInstance().addFocusChangeListener(this);
+    }
+    ~StudioMenu() override {
+        juce::Desktop::getInstance().removeFocusChangeListener(this);
     }
 
     juce::ApplicationCommandManager& commands() { return cm_; }
@@ -56,9 +65,10 @@ public:
             const bool redo = id == kRedo;
             info.setInfo(redo ? "Redo" : "Undo", redo ? "Redo the last undone change on this page" : "Undo the last change on this page", "Edit", 0);
             info.addDefaultKeypress('z', redo ? cmd | shift : cmd);
-            // Always enabled: Cocoa only fires a key equivalent of an item that is enabled when the menu was last built, and the menu is
-            // not rebuilt when focus moves into a text field (Codex r3 P1). perform() decides what, if anything, to undo.
-            (void) redo;
+            // Enabled only when an editable text field has focus (any window) OR the Studio window is visible and active/focused.
+            // Refreshed via FocusChangeListener + window visibility/active-status hooks so hidden/background Studio stays disabled.
+            auto* f = focused();
+            info.setActive(editableFocused(f) || activeStudio(studio_(), f, activeWindow()) != nullptr);
         } else if (id >= kDomain && id < kDomain + StudioComponent::kDomains) {
             const int i = id - kDomain;
             const juce::String name = StudioComponent::domainName(sidebarOrder(i));
@@ -67,14 +77,37 @@ public:
         }
     }
     bool perform(const InvocationInfo& info) override {
-        if (info.commandID == kUndo || info.commandID == kRedo)
-            return undoFrom(focused(), studio_(), info.commandID == kRedo);
+        if (info.commandID == kUndo || info.commandID == kRedo) {
+            auto* f = focused();
+            return undoFrom(f, activeStudio(studio_(), f, activeWindow()), info.commandID == kRedo);
+        }
         if (info.commandID >= kDomain && info.commandID < kDomain + StudioComponent::kDomains)
-            if (auto* st = showStudio_()) { st->showDomain(sidebarOrder(info.commandID - kDomain)); return true; }
+            if (auto* st = showStudio_()) {
+                st->showDomain(sidebarOrder(info.commandID - kDomain));
+                menuItemsChanged();
+                return true;
+            }
         return false;
     }
 
-    // A focused editable text field (TextEditor or CodeEditor) keeps its own undo; otherwise the Studio page on screen.
+    static bool editableFocused(juce::Component* focused) {
+        if (auto* te = dynamic_cast<juce::TextEditor*>(focused); te && !te->isReadOnly()) return true;
+        if (auto* ce = dynamic_cast<juce::CodeEditorComponent*>(focused); ce && !ce->isReadOnly()) return true;
+        return false;
+    }
+
+    // Studio is in Undo/Redo scope ONLY when it is visible (not closed/hidden or minimised) AND active/focused.
+    static StudioComponent* activeStudio(StudioComponent* st, juce::Component* focused, juce::Component* activeWindow) {
+        if (!st) return nullptr;
+        auto* top = st->getTopLevelComponent();
+        if (!top || !st->isVisible() || !top->isVisible()) return nullptr;
+        if (top->isOnDesktop() && !st->isShowing()) return nullptr;
+        if (activeWindow != nullptr && activeWindow != top) return nullptr;
+        if (focused != nullptr) return focused->getTopLevelComponent() == top ? st : nullptr;
+        return activeWindow == top ? st : nullptr;
+    }
+
+    // A focused editable text field (TextEditor or CodeEditor) keeps its own undo; otherwise the active, visible Studio page.
     static bool undoFrom(juce::Component* focused, StudioComponent* st, bool redo) {
         if (auto* te = dynamic_cast<juce::TextEditor*>(focused); te && !te->isReadOnly()) { redo ? te->redo() : te->undo(); return true; }
         if (auto* ce = dynamic_cast<juce::CodeEditorComponent*>(focused); ce && !ce->isReadOnly()) { redo ? ce->redo() : ce->undo(); return true; }
@@ -88,9 +121,11 @@ public:
     }
 
 private:
+    void globalFocusChanged(juce::Component*) override { menuItemsChanged(); }
     juce::Component* focused() const { return focused_ ? focused_() : juce::Component::getCurrentlyFocusedComponent(); }
+    juce::Component* activeWindow() const { return activeWindow_ ? activeWindow_() : juce::TopLevelWindow::getActiveTopLevelWindow(); }
     std::function<StudioComponent*()> studio_, showStudio_;
-    std::function<juce::Component*()> focused_;
+    std::function<juce::Component*()> focused_, activeWindow_;
     juce::ApplicationCommandManager cm_;
 };
 

@@ -581,6 +581,7 @@ void StudioComponent::changeListenerCallback(juce::ChangeBroadcaster*) {
 }
 
 bool StudioComponent::keyPressed(const juce::KeyPress& k) {
+    if (auto* top = getTopLevelComponent(); top && top->isOnDesktop() && !isShowing()) return false;
     const int c = k.getKeyCode() - '1';
     if (k.getModifiers().isCommandDown() && c >= 0 && c < kDomains) {
         static const Domain order[] = {Domain::Library, Domain::SampleLab, Domain::StyleStudio, Domain::ImportExport, Domain::Validation};

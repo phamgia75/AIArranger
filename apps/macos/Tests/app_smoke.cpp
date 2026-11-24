@@ -185,14 +185,11 @@ int main() {
         TEST("menu: View lists the Studio domains in sidebar order",
              (view == juce::StringArray{"Library Workspace", "Sample Lab", "Style Studio", "Import / Export Center", "Validation & Reports"}));
         auto edit = items(0);
-        TEST("menu: Edit has Undo and Redo, enabled (their key equivalents must always fire; the target decides)", edit.size() == 2 &&
-             edit[0].first == "Undo" && edit[0].second.isEnabled && edit[1].first == "Redo" && edit[1].second.isEnabled);
+        TEST("menu: Edit has Undo and Redo, disabled when Studio is closed and no text field is focused", edit.size() == 2 &&
+             edit[0].first == "Undo" && !edit[0].second.isEnabled && edit[1].first == "Redo" && !edit[1].second.isEnabled);
         for (auto& [t, i] : items(1)) if (t == "Style Studio") menu.perform(juce::ApplicationCommandTarget::InvocationInfo(i.itemID));
         pump(50);
         TEST("menu: View > Style Studio opens the Studio on that domain", host->studio() && host->studio()->domain() == SC::Domain::StyleStudio);
-        edit = items(0);
-        TEST("menu: on Style Studio with nothing to undo, Undo stays enabled and does nothing", edit.size() == 2 && edit[0].second.isEnabled &&
-             !host->studio()->undoOnPage(false));
         {   // owner: the menus show their shortcuts, and a focused text field keeps its own undo
             using MS = ai_arranger::app::StudioMenu;
             const auto keys = [&](int id) { return menu.commands().getKeyMappings()->getKeyPressesAssignedToCommand(id); };
@@ -204,27 +201,176 @@ int main() {
             TEST("menu: Undo shows Cmd-Z, Redo Shift-Cmd-Z, the domains Cmd-1...Cmd-5",
                  keys(MS::kUndo).size() == 1 && keys(MS::kUndo)[0] == cmdZ && keys(MS::kRedo).size() == 1 && keys(MS::kRedo)[0] == cmdShiftZ && domainKeys);
             auto* sc = host->studio();
+            auto* sw = dynamic_cast<juce::DocumentWindow*>(sc->getTopLevelComponent());
             juce::TextEditor field;
             field.setMultiLine(false);
             field.setText("a", false);
             field.insertTextAtCaret("bc");
-            // Codex r3: through the command manager (what a native key equivalent or a menu click runs), with the focus injected
-            // because an offscreen window cannot take it. Undo / Redo stay enabled so a stale menu never swallows Cmd-Z in a field.
+            // Codex r3: through the command manager (what a native key equivalent or a menu click runs), with the focus/active window
+            // injected because an offscreen window cannot take OS focus.
             juce::Component* focus = &field;
-            ai_arranger::app::StudioMenu cmdMenu([sc] { return sc; }, [sc] { return sc; }, [&focus] { return focus; });
+            juce::Component* activeWin = sw;
+            ai_arranger::app::StudioMenu cmdMenu([sc] { return sc; }, [sc] { return sc; }, [&focus] { return focus; },
+                                                 [&activeWin] { return activeWin; });
             auto cmdInfo = [&](int id) { juce::ApplicationCommandInfo i(id); cmdMenu.getCommandInfo(id, i); return i; };
-            TEST("menu: Undo / Redo are always enabled (a stale disabled item would stop Cocoa firing the key)",
+            TEST("menu: Undo / Redo are enabled while an editable text field is focused",
                  !(cmdInfo(MS::kUndo).flags & juce::ApplicationCommandInfo::isDisabled) && !(cmdInfo(MS::kRedo).flags & juce::ApplicationCommandInfo::isDisabled));
             const auto before = sc->styleModel().undoLabel();
             const bool took = cmdMenu.commands().invokeDirectly(MS::kUndo, false);
             TEST("menu: Undo command with a text field focused undoes the field, not the Style", took && field.getText() != "abc" &&
                  sc->styleModel().undoLabel() == before);
-            juce::TextEditor readOnly;
-            readOnly.setReadOnly(true);
-            focus = &readOnly;
+            focus = nullptr;   // active Studio window, no text field focused, nothing to undo on Style Studio yet
             const bool pageTook = cmdMenu.commands().invokeDirectly(MS::kUndo, false);
-            TEST("menu: with a read-only pane focused the Undo command goes to the page (nothing to undo here: not taken, no change)",
-                 !pageTook && sc->styleModel().undoLabel() == before && field.getText() != "abc");
+            TEST("menu: on active Style Studio with nothing to undo, Undo is enabled and does nothing",
+                 !(cmdInfo(MS::kUndo).flags & juce::ApplicationCommandInfo::isDisabled) && !pageTook &&
+                 sc->styleModel().undoLabel() == before && field.getText() != "abc");
+            {   // Window/visibility/focus scoping regression: Undo/Redo must respect all 4 Studio window states
+                namespace fs = std::filesystem;
+                using D = SC::Domain;
+                using A = ai_arranger::app::LibraryManagerComponent::Action;
+                const fs::path mroot = fs::temp_directory_path() / ("aia-smoke-menu-scope-" + std::to_string(::getpid()));
+                fs::remove_all(mroot);
+                auto put = [](const fs::path& p, const std::string& s) {
+                    fs::create_directories(p.parent_path());
+                    std::ofstream(p, std::ios::binary) << s;
+                };
+                // Prepare a real editable Style on Style Studio (tempo edited) AND a staged Library Manager plan step
+                sc->showDomain(D::StyleStudio);
+                sc->openStyle(juce::File(AIARR_REPO_TOOLS_DIR "/../fixtures/synthetic/SYNTH_WALTZ_68.sty"));
+                const auto origTempo = sc->styleModel().style().tempo_bpm;
+                const auto editedTempo = origTempo == 95 ? 97 : 95;
+                sc->styleOp().setSelectedId(6);   // Tempo
+                sc->styleValue().setText(juce::String(int(editedTempo)));
+                click(sc->page(D::StyleStudio), "Apply");
+                auto& lm = sc->manager();
+                auto waitLm = [&] { for (int i = 0; i < 250 && (lm.busy() || lm.computing()); ++i) pump(20); };
+                lm.setPlanStoreDir(juce::File((mroot / "plan-store").string()));
+                put(mroot / "A.KST/STYLE/USER01/Ballad.STG", "s");
+                put(mroot / "B.KST/STYLE/USER01/Other.STG", "o");
+                lm.openLibrary('A', juce::File((mroot / "A.KST").string()));
+                waitLm();
+                lm.openLibrary('B', juce::File((mroot / "B.KST").string()));
+                waitLm();
+                lm.selectRow('A', 0);
+                lm.addStep(A::Copy);
+                waitLm();
+                sc->showDomain(D::StyleStudio);
+
+                click(*host, "Sound Tools...");   // open standalone Sounds & Resources window for unfocused-Studio check
+                pump(50);
+                auto* liveBtn = find<juce::Button>(*host, "Start");
+                auto* resPage = host->resources() ? host->resources()->tabs().getTabContentComponent(0) : nullptr;
+                auto* resBtn = resPage ? find<juce::Button>(*resPage, "Open Package...") : nullptr;
+                auto* resWin = host->resources() ? host->resources()->getTopLevelComponent() : nullptr;
+
+                juce::Component* scopeFocus = sc;
+                juce::Component* scopeActiveWin = sw;
+                ai_arranger::app::StudioMenu scopeMenu([&host] { return host->studio(); }, [&host] { return host->showStudio(); },
+                                                       [&scopeFocus] { return scopeFocus; }, [&scopeActiveWin] { return scopeActiveWin; });
+                auto scopeEdit = [&] {
+                    std::vector<juce::PopupMenu::Item> out;
+                    const auto m = scopeMenu.getMenuForIndex(0, {});
+                    for (juce::PopupMenu::MenuItemIterator it(m); it.next();) out.push_back(it.getItem());
+                    return out;
+                };
+                auto scopeDisabled = [&](int id) {
+                    juce::ApplicationCommandInfo info(id);
+                    scopeMenu.getCommandInfo(id, info);
+                    return (info.flags & juce::ApplicationCommandInfo::isDisabled) != 0;
+                };
+
+                // 1) Studio visible & focused/active: Undo/Redo works on Style Studio and Library Manager
+                TEST("menu scope (visible & focused): Undo/Redo enabled and acts on Style Studio",
+                     sw && sw->isVisible() && !scopeDisabled(MS::kUndo) && !scopeDisabled(MS::kRedo) &&
+                     scopeMenu.commands().invokeDirectly(MS::kUndo, false) && sc->styleModel().style().tempo_bpm == origTempo &&
+                     scopeMenu.commands().invokeDirectly(MS::kRedo, false) && sc->styleModel().style().tempo_bpm == editedTempo);
+                sc->showDomain(D::Library, 4);
+                const bool lmUndone = scopeMenu.commands().invokeDirectly(MS::kUndo, false);
+                waitLm();
+                const bool lmEmptyAfterUndo = lm.plan().empty();
+                const bool lmRedone = scopeMenu.commands().invokeDirectly(MS::kRedo, false);
+                waitLm();
+                TEST("menu scope (visible & focused): Undo/Redo acts on Library Manager plan",
+                     lmUndone && lmEmptyAfterUndo && lmRedone && lm.plan().size() == 1);
+
+                // 2) Studio hidden / closed via closeButtonPressed(): Undo/Redo is disabled & never mutates hidden Studio
+                sw->closeButtonPressed();
+                pump(30);
+                scopeFocus = liveBtn;
+                scopeActiveWin = host.get();
+                auto hiddenItems = scopeEdit();
+                const bool hiddenLmUndo = scopeMenu.commands().invokeDirectly(MS::kUndo, false);
+                const bool hiddenLmPerform = scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo));
+                TEST("menu scope (hidden/closed Studio): Undo/Redo disabled and does not mutate hidden Library Manager plan",
+                     host->studio() == sc && !sw->isVisible() && hiddenItems.size() == 2 &&
+                     !hiddenItems[0].isEnabled && !hiddenItems[1].isEnabled && scopeDisabled(MS::kUndo) && scopeDisabled(MS::kRedo) &&
+                     !hiddenLmUndo && !hiddenLmPerform && lm.plan().size() == 1);
+                sc->showDomain(D::StyleStudio);
+                scopeFocus = nullptr;
+                scopeActiveWin = sw;   // even if active-window were stale, a hidden Studio is never in scope
+                TEST("menu scope (hidden/closed Studio): does not mutate hidden Style Studio even with null focus",
+                     scopeDisabled(MS::kUndo) && !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     !scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo)) &&
+                     !sc->keyPressed(cmdZ) && sc->styleModel().style().tempo_bpm == editedTempo);
+                // While Studio is hidden, a focused editable text field in another window still keeps its own Undo
+                juce::TextEditor otherField;
+                otherField.setText("x", false);
+                otherField.insertTextAtCaret("yz");
+                scopeFocus = &otherField;
+                scopeActiveWin = host.get();
+                TEST("menu scope (hidden Studio, text field focused): Undo undoes only the text field, not hidden Studio",
+                     !scopeDisabled(MS::kUndo) && scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     otherField.getText() != "xyz" && sc->styleModel().style().tempo_bpm == editedTempo);
+
+                // 3) Studio visible but unfocused (focus on Live Host or Sounds & Resources non-text control, or null focus with other window active)
+                host->showStudio();
+                pump(30);
+                scopeFocus = liveBtn;
+                scopeActiveWin = host.get();
+                TEST("menu scope (visible, Live Host focused): Undo/Redo disabled and does not mutate background Style Studio",
+                     sw->isVisible() && liveBtn && scopeDisabled(MS::kUndo) && scopeDisabled(MS::kRedo) &&
+                     !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     !scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo)) &&
+                     sc->styleModel().style().tempo_bpm == editedTempo);
+                scopeFocus = nullptr;
+                scopeActiveWin = resWin;
+                TEST("menu scope (visible, other window active with null focus): Undo/Redo disabled and does not mutate background Style Studio",
+                     sw->isVisible() && resWin && scopeDisabled(MS::kUndo) &&
+                     !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     sc->styleModel().style().tempo_bpm == editedTempo);
+                sc->showDomain(D::Library, 4);
+                scopeFocus = resBtn;
+                scopeActiveWin = resWin;
+                TEST("menu scope (visible, Sounds & Resources focused): Undo/Redo disabled and does not mutate background Library Manager plan",
+                     sw->isVisible() && resBtn && scopeDisabled(MS::kUndo) && scopeDisabled(MS::kRedo) &&
+                     !scopeMenu.commands().invokeDirectly(MS::kUndo, false) &&
+                     !scopeMenu.perform(juce::ApplicationCommandTarget::InvocationInfo(MS::kUndo)) &&
+                     lm.plan().size() == 1);
+
+                // 4) Studio reopened / re-focused: Undo/Redo works cleanly again
+                sw->closeButtonPressed();
+                pump(20);
+                host->showStudio();
+                pump(30);
+                scopeFocus = sc;
+                scopeActiveWin = sw;
+                const bool lmUndone2 = scopeMenu.commands().invokeDirectly(MS::kUndo, false);
+                waitLm();
+                const bool lmEmpty2 = lm.plan().empty();
+                const bool lmRedone2 = scopeMenu.commands().invokeDirectly(MS::kRedo, false);
+                waitLm();
+                TEST("menu scope (reopened & re-focused): Undo/Redo works again on Library Manager plan",
+                     sw->isVisible() && !scopeDisabled(MS::kUndo) && !scopeDisabled(MS::kRedo) &&
+                     lmUndone2 && lmEmpty2 && lmRedone2 && lm.plan().size() == 1);
+                sc->showDomain(D::StyleStudio);
+                scopeFocus = nullptr;
+                scopeActiveWin = sw;
+                TEST("menu scope (reopened & re-focused): Undo/Redo works again on Style Studio",
+                     scopeMenu.commands().invokeDirectly(MS::kUndo, false) && sc->styleModel().style().tempo_bpm == origTempo &&
+                     scopeMenu.commands().invokeDirectly(MS::kRedo, false) && sc->styleModel().style().tempo_bpm == editedTempo);
+
+                fs::remove_all(mroot);
+            }
         }
     }
 
@@ -2633,8 +2779,10 @@ int main() {
                     st.resolveUnsavedStyle(U::Discard);
                     st.resolveRunningWork(W::Wait);
                     st.showDomain(D::StyleStudio);
-                    // the native menu command path (Codex r3 P2): no focused field, so it goes to the Style page
-                    ai_arranger::app::StudioMenu cmdMenu([&st] { return &st; }, [&st] { return &st; }, [] { return nullptr; });
+                    // the native menu command path (Codex r3 P2): active Studio with no focused text field goes to the Style page
+                    st.setVisible(true);
+                    ai_arranger::app::StudioMenu cmdMenu([&st] { return &st; }, [&st] { return &st; }, [] { return nullptr; },
+                                                         [&st] { return &st; });
                     const bool took = cmdMenu.commands().invokeDirectly(ai_arranger::app::StudioMenu::kUndo, false);
                     st.selectJob(d3);
                     st.cancelJob();
