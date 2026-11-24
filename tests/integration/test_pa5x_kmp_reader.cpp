@@ -94,13 +94,36 @@ int main() {
         s = good(); s.m[1].first = 3;            TEST("multisample zones running past the table refused", !parses(build(s)));
         s = good(); s.m[0].count = 255;          TEST("zone count 255 past the table refused", !parses(build(s)));
         s = good(); s.m[1].first = 0xFFFFFFFF;   TEST("first zone 0xFFFFFFFF refused (no 32-bit wrap)", !parses(build(s)));
-        Pa5xKmp o; std::string e; Spec bad = good(); bad.d[0].l = 9;
-        TEST("failure leaves the output empty and says why", !parses(build(bad), &o, &e) && o.samples.empty() && e.find("drum record 0") != std::string::npos);
+        const Bytes okBytes = build(good());
+        Pa5xKmp o; std::string e;
+        TEST("populate output before fail-closed test",
+             parsePa5xKmp(okBytes.data(), okBytes.size(), o, &e) && !o.samples.empty() && !o.drums.empty() &&
+             !o.zones.empty() && !o.multisamples.empty() && o.zonesContiguous);
+        Spec bad = good(); bad.d[0].l = 9;
+        const Bytes badBytes = build(bad);
+        TEST("failure clears an already-populated output and says why",
+             !parsePa5xKmp(badBytes.data(), badBytes.size(), o, &e) && o.samples.empty() && o.drums.empty() &&
+             o.zones.empty() && o.multisamples.empty() && !o.zonesContiguous &&
+             e.find("drum record 0") != std::string::npos);
         Spec empty; TEST("an item with all-zero counts is a valid empty KMP", parses(build(empty), &o) && o.multisamples.empty());
         Bytes n = build(good()); for (int i = 0; i < 32; ++i) n[18 + 75 + i] = 'x';
         TEST("a 32-byte name with no NUL is bounded to 32", parses(n, &o) && o.samples[0].name.size() == 32);
     }
-    if (const char* path = std::getenv("AIARR_PA5X_RAM_KMP")) {   // private Pa5X backup file; read only
+    {
+        Pa5xKmp hand;
+        hand.zones = {{0, 60}, {1, 127}};
+        hand.multisamples = {
+            {{}, "firstPastEnd", 5, 1},
+            {{}, "atEndNonEmpty", 2, 1},
+            {{}, "spanPastEnd", 1, 2},
+            {{}, "wrapFirstZone", 0xFFFFFFFFu, 2},
+            {{}, "validBoundaryEmpty", 2, 0},
+        };
+        TEST("zoneSamples fails closed on hand-constructed out-of-range multisamples",
+             hand.zoneSamples(0).empty() && hand.zoneSamples(1).empty() && hand.zoneSamples(2).empty() &&
+             hand.zoneSamples(3).empty() && hand.zoneSamples(4).empty());
+    }
+    if (const char* path = std::getenv("AIARR_PA5X_RAM_KMP"); path && *path) {   // private Pa5X backup file; read only
         std::ifstream f(path, std::ios::binary); Bytes raw((std::istreambuf_iterator<char>(f)), {});
         const auto c = parse(raw.data(), raw.size());
         const Item* it = nullptr; if (c.ok) for (const Item& x : c.items) if (x.chunkId == kPa5xKmpChunkId) it = &x;

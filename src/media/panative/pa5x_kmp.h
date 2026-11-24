@@ -14,6 +14,7 @@
 // Input is untrusted: all size arithmetic is done in 64 bit and checked before any read.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -35,23 +36,26 @@ struct Pa5xKmp {
     std::vector<Pa5xMultisample> multisamples;
     bool zonesContiguous = false;   // multisample i's zones start where i-1's end (true on the observed file); reported, not required
 
-    // Sample-table indices of one multisample's zones (kNoIndex = empty zone). Empty vector for an out-of-range index.
+    // Sample-table indices of one multisample's zones (kNoIndex = empty zone). Empty vector if out of range.
     std::vector<uint32_t> zoneSamples(size_t multisample) const {
         std::vector<uint32_t> r;
         if (multisample >= multisamples.size()) return r;
         const auto& m = multisamples[multisample];
-        for (uint32_t z = 0; z < m.zoneCount; ++z) r.push_back(zones[m.firstZone + z].sample);
+        if (m.firstZone > zones.size() || m.zoneCount > zones.size() - m.firstZone) return r;
+        r.reserve(m.zoneCount);
+        for (size_t z = 0; z < m.zoneCount; ++z) r.push_back(zones[size_t(m.firstZone) + z].sample);
         return r;
     }
 };
 
 namespace pa5x_detail {
-inline uint32_t be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
+inline uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>(uint32_t(p[0]) << 8 | uint32_t(p[1])); }
+inline uint32_t be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]); }
 inline std::string name32(const uint8_t* p) {   // NUL-terminated within 32 bytes; bytes after the NUL are ignored
     size_t n = 0; while (n < 32 && p[n]) ++n;
     return std::string(reinterpret_cast<const char*>(p), n);
 }
-inline std::array<uint8_t, 8> id8(const uint8_t* p) { std::array<uint8_t, 8> r; for (int i = 0; i < 8; ++i) r[i] = p[i]; return r; }
+inline std::array<uint8_t, 8> id8(const uint8_t* p) { std::array<uint8_t, 8> r; for (size_t i = 0; i < 8; ++i) r[i] = p[i]; return r; }
 }
 
 // `p`/`n` = the item payload (after the 8-byte chunk header). Returns false and sets *err on any inconsistency; `out` is then empty.
@@ -61,7 +65,7 @@ inline bool parsePa5xKmp(const uint8_t* p, size_t n, Pa5xKmp& out, std::string* 
     auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
     constexpr uint64_t kHeader = 18, kSample = 122, kDrum = 126, kZone = 16, kMulti = 176;
     if (!p || n < kHeader) return fail("shorter than the 18-byte header");
-    if (static_cast<uint16_t>(p[0] << 8 | p[1]) != 0x0103) return fail("version is not 0x0103 (the one observed layout)");
+    if (be16(p) != 0x0103) return fail("version is not 0x0103 (the one observed layout)");
     const uint64_t ns = be32(p + 2), nd = be32(p + 6), nz = be32(p + 10), nm = be32(p + 14);
     const uint64_t total = kHeader + kSample * ns + kDrum * nd + kZone * nz + kMulti * nm;   // <= 18 + 4.3e9 * 440: fits in 64 bit
     if (total != n) return fail("sections do not fill the item exactly (header counts vs size)");
@@ -71,10 +75,11 @@ inline bool parsePa5xKmp(const uint8_t* p, size_t n, Pa5xKmp& out, std::string* 
     const uint8_t* Z = D + kDrum * nd;
     const uint8_t* M = Z + kZone * nz;
     Pa5xKmp r;
-    r.samples.reserve(ns); r.drums.reserve(nd); r.zones.reserve(nz); r.multisamples.reserve(nm);
+    r.samples.reserve(static_cast<size_t>(ns)); r.drums.reserve(static_cast<size_t>(nd));
+    r.zones.reserve(static_cast<size_t>(nz)); r.multisamples.reserve(static_cast<size_t>(nm));
     for (uint64_t i = 0; i < ns; ++i) {
         const uint8_t* q = S + kSample * i;
-        r.samples.push_back({id8(q + 107), name32(q + 75), static_cast<uint16_t>(q[119] << 8 | q[120])});
+        r.samples.push_back({id8(q + 107), name32(q + 75), be16(q + 119)});
     }
     for (uint64_t i = 0; i < nd; ++i) {
         const uint8_t* q = D + kDrum * i;
@@ -94,7 +99,7 @@ inline bool parsePa5xKmp(const uint8_t* p, size_t n, Pa5xKmp& out, std::string* 
         const uint8_t* q = M + kMulti * i;
         Pa5xMultisample m{id8(q + 168), name32(q), be32(q + 32), q[166]};
         if (uint64_t(m.firstZone) + m.zoneCount > nz) return fail("multisample " + std::to_string(i) + ": zones run past the zone table");
-        contiguous &= m.firstZone == expect; expect = uint64_t(m.firstZone) + m.zoneCount;
+        contiguous = contiguous && (m.firstZone == expect); expect = uint64_t(m.firstZone) + m.zoneCount;
         r.multisamples.push_back(std::move(m));
     }
     r.zonesContiguous = contiguous && expect == nz;
