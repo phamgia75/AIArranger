@@ -630,8 +630,10 @@ inline std::string verifyKit(const fs::path& dir, const std::vector<Item>* expec
         if (n == "KIT.md" || n == "manifest.json" || n == "PACKAGE.sha256" || detail::finderLitter(n)) continue;
         if (n == "SELECTIVE_MANIFEST.json" || n == "DIAGNOSTICS.json") {
             std::error_code sec;
+            if (top->is_symlink(sec) || sec || !top->is_regular_file(sec))
+                return n + " is not a regular file of at most 4 MiB";
             const auto sz = fs::file_size(top->path(), sec);
-            if (sec || !top->is_regular_file(sec) || top->is_symlink(sec) || sz > (4u << 20))
+            if (sec || sz > (4u << 20))
                 return n + " is not a regular file of at most 4 MiB";
             std::FILE* sf = media::detail::openRegular(AT_FDCWD, top->path().c_str());
             if (!sf) return n + " is not a regular file";
@@ -642,11 +644,28 @@ inline std::string verifyKit(const fs::path& dir, const std::vector<Item>* expec
             Json sj;
             if (const auto pe = parseJson(stext, &sj); !pe.empty()) return n + " is not valid JSON: " + pe;
             const Json* sc = sj.t == Json::T::Obj ? sj.get("schema") : nullptr;
+            const Json* lb = sj.t == Json::T::Obj ? sj.get("label") : nullptr;
             const Json* hv = sj.t == Json::T::Obj ? sj.get("hardwareVerified") : nullptr;
             if (!sc || sc->t != Json::T::Str || sc->s != "aiarranger-selective-export-report/1")
                 return n + ": schema is not aiarranger-selective-export-report/1";
+            if (!lb || lb->t != Json::T::Str || lb->s != kLabel)
+                return n + ": label is missing or different";
             if (!hv || hv->t != Json::T::Bool || hv->b)
                 return n + ": hardwareVerified must be false";
+            if (const Json* mp = sj.get("memoryProjection"); mp && mp->t == Json::T::Obj) {
+                const Json* mhv = mp->get("hardwareVerified");
+                if (!mhv || mhv->t != Json::T::Bool || mhv->b)
+                    return n + ": memoryProjection.hardwareVerified must be false";
+            }
+            if (const Json* cov = sj.get("coverage"); cov && cov->t == Json::T::Obj) {
+                const Json* dp = cov->get("deleteProofAvailable");
+                if (!dp || dp->t != Json::T::Bool || dp->b)
+                    return n + ": coverage.deleteProofAvailable must be false";
+            }
+            if (const Json* src = sj.get("source"); src && src->t == Json::T::Obj) {
+                if (const Json* dp = src->get("deleteProofAvailable"); dp && (dp->t != Json::T::Bool || dp->b))
+                    return n + ": source.deleteProofAvailable must be false";
+            }
             continue;
         }
         Kind want = Kind::Unknown;

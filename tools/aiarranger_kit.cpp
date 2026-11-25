@@ -64,7 +64,7 @@ static bool parseBindArg(const std::string& arg, sel::SlotAddress& addrOut, fs::
         return false;
     }
     const auto parsed = sel::SlotAddress::fromBankAndSlot(bankStr, static_cast<uint32_t>(slotVal));
-    if (!parsed.has_value()) {
+    if (!parsed.has_value() || !parsed->isInSpec()) {
         errOut = "invalid --bind bank/slot (expected USER01..12/0..127 or USERDK01..06/0..127): " + lhs;
         return false;
     }
@@ -111,6 +111,7 @@ static int runSelectiveCli(const std::string& cmd, int argc, char** argv) {
     std::string expectFp;
     bool moveLeftoverAside = false;
     bool jsonOut = false;
+    bool policySet = false;
 
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -143,17 +144,31 @@ static int runSelectiveCli(const std::string& cmd, int argc, char** argv) {
                 std::fprintf(stderr, "error: %s\n", berr.c_str());
                 return 1;
             }
+            if (req.slotToPackageMap.count(addr) > 0) {
+                std::fprintf(stderr, "error: duplicate --bind for slot %s\n", addr.shortLabel().c_str());
+                return 1;
+            }
             req.slotToPackageMap[addr] = std::move(pkg);
         } else if (a == "--sound-map") {
             const char* v = needVal("--sound-map");
             if (!v) return usage();
             const std::string sv = v;
             const size_t eq = sv.find('=');
+            std::string smKey;
+            fs::path smPath;
             if (eq != std::string::npos && eq > 0 && eq + 1 < sv.size() && sv[0] != '/') {
-                req.styleSoundMaps[sv.substr(0, eq)] = fs::path(sv.substr(eq + 1));
+                smKey = sv.substr(0, eq);
+                smPath = fs::path(sv.substr(eq + 1));
             } else {
-                req.styleSoundMaps[""] = fs::path(sv);
+                smKey = "";
+                smPath = fs::path(sv);
             }
+            if (req.styleSoundMaps.count(smKey) > 0) {
+                std::fprintf(stderr, "error: duplicate --sound-map for '%s'\n",
+                             smKey.empty() ? "<default>" : smKey.c_str());
+                return 1;
+            }
+            req.styleSoundMaps[smKey] = std::move(smPath);
         } else if (a == "--target-kst") {
             const char* v = needVal("--target-kst");
             if (!v || req.targetKst.has_value()) return usage();
@@ -161,6 +176,11 @@ static int runSelectiveCli(const std::string& cmd, int argc, char** argv) {
         } else if (a == "--policy") {
             const char* v = needVal("--policy");
             if (!v) return usage();
+            if (policySet) {
+                std::fprintf(stderr, "error: duplicate --policy flag\n");
+                return 1;
+            }
+            policySet = true;
             const std::string pv = v;
             if (pv == "block") req.conflictPolicy = sel::ConflictPolicy::BlockWithReport;
             else if (pv == "reuse") req.conflictPolicy = sel::ConflictPolicy::ReuseIdenticalTargetSlot;

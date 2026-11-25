@@ -142,7 +142,7 @@ inline std::string canonicalPathKey(const fs::path& p) {
     return ec ? p.lexically_normal().generic_string() : wc.generic_string();
 }
 
-// Checks whether the entry itself (and when `workspaceRoot` is given, any relative component below it) is a symlink.
+// Checks whether any component of `rel` below `base` is a symlink.
 inline bool hasSymlinkBelow(const fs::path& base, const fs::path& rel) {
     std::error_code ec;
     fs::path cur = base;
@@ -154,6 +154,75 @@ inline bool hasSymlinkBelow(const fs::path& base, const fs::path& rel) {
         if (fs::is_symlink(st)) return true;
     }
     return false;
+}
+
+inline bool hasDotDotComponent(const fs::path& p) {
+    for (const auto& part : p) {
+        if (part == "..") return true;
+    }
+    return false;
+}
+
+// Rejects any symlink at `p` itself, along `p` relative to `workspaceRoot`, or along any
+// non-system ancestor component via `jobs::detail::symlinkIn()`.
+inline bool checkNoSymlinkPath(const fs::path& p, const fs::path& workspaceRoot, std::string& errOut) {
+    errOut.clear();
+    std::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(p, ec))) {
+        errOut = p.filename().string() + " is a symlink; links are never followed";
+        return false;
+    }
+    if (!workspaceRoot.empty()) {
+        const fs::path rel = p.lexically_relative(workspaceRoot);
+        if (!rel.empty() && !rel.is_absolute() && !hasDotDotComponent(rel) && hasSymlinkBelow(workspaceRoot, rel)) {
+            errOut = "path traverses a symlink inside workspace; links are never followed";
+            return false;
+        }
+    }
+    const fs::path absP = fs::absolute(p, ec);
+    if (!ec) {
+        if (const std::string link = jobs::detail::symlinkIn(absP); !link.empty()) {
+            errOut = "path traverses a symlink; links are never followed";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Scrubs host filesystem paths from diagnostic/conflict text so JSON/Markdown never leaks
+// local `/Users/...`, `/tmp/...`, `/var/...`, `/private/...`, or workspace/target paths.
+inline std::string scrubHostPaths(std::string text,
+                                  const std::vector<std::pair<std::string, std::string>>& knownReplacements) {
+    std::vector<std::pair<std::string, std::string>> sorted = knownReplacements;
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+        return a.first.size() > b.first.size();
+    });
+    for (const auto& [needle, repl] : sorted) {
+        if (needle.empty()) continue;
+        for (size_t pos = 0; (pos = text.find(needle, pos)) != std::string::npos;) {
+            text.replace(pos, needle.size(), repl);
+            pos += repl.size();
+        }
+    }
+    // Generic fallback scrubber for any remaining absolute host path prefixes
+    static const char* kPrefixes[] = {"/Users/", "/home/", "/tmp/", "/var/", "/private/", "/Volumes/"};
+    for (const char* pfx : kPrefixes) {
+        const size_t pfxLen = std::strlen(pfx);
+        for (size_t pos = 0; (pos = text.find(pfx, pos)) != std::string::npos;) {
+            size_t end = pos + pfxLen;
+            while (end < text.size()) {
+                const char c = text[end];
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ':' || c == ',' ||
+                    c == ';' || c == '"' || c == '\'' || c == ')' || c == ']') {
+                    break;
+                }
+                ++end;
+            }
+            text.replace(pos, end - pos, "<local-path>");
+            pos += 12;
+        }
+    }
+    return text;
 }
 
 // Reads a regular file strictly with O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK and S_ISREG check.
@@ -270,23 +339,76 @@ inline bool computeTargetPcmBaselineBytes(const fs::path& kstDir,
     return true;
 }
 
-// Resolves a user-supplied Style or Package path relative to workspaceRoot (if relative).
-// Also checks standard workspace subfolders ("SOUNDS", "DRUMKITS", "KMP", "STYLES") for relative leaf paths.
-inline fs::path resolveWorkspacePath(const fs::path& workspaceRoot, const fs::path& raw, bool isStyle) {
-    if (raw.empty() || raw.is_absolute() || workspaceRoot.empty()) return raw;
-    std::error_code ec;
-    const fs::path direct = workspaceRoot / raw;
-    if (fs::exists(fs::symlink_status(direct, ec))) return direct;
-    if (isStyle) {
-        const fs::path inStyles = workspaceRoot / "STYLES" / raw;
-        if (fs::exists(fs::symlink_status(inStyles, ec))) return inStyles;
-    } else {
-        for (const char* sub : {"SOUNDS", "DRUMKITS", "KMP"}) {
-            const fs::path cand = workspaceRoot / sub / raw;
-            if (fs::exists(fs::symlink_status(cand, ec))) return cand;
-        }
+// Strictly resolves a user-supplied path relative to workspaceRoot (if relative), NEVER following
+// symlinks (including workspace subfolders STYLES/SOUNDS/DRUMKITS/KMP) and refusing '..' traversal
+// escapes outside workspaceRoot as well as symlink components on explicit paths.
+inline bool resolveWorkspacePathStrict(const fs::path& workspaceRoot,
+                                       const fs::path& raw,
+                                       bool allowSubfolders,
+                                       bool isStyle,
+                                       fs::path& outPath,
+                                       std::string& errOut) {
+    outPath.clear();
+    errOut.clear();
+    if (raw.empty()) {
+        errOut = "empty path";
+        return false;
     }
-    return direct;
+    if (!workspaceRoot.empty() && !raw.is_absolute()) {
+        if (hasDotDotComponent(raw)) {
+            errOut = "relative path must not contain '..' traversal outside workspace";
+            return false;
+        }
+        if (hasSymlinkBelow(workspaceRoot, raw)) {
+            errOut = "path traverses a symlink inside workspace; links are never followed";
+            return false;
+        }
+        std::error_code ec;
+        const fs::path direct = workspaceRoot / raw;
+        if (fs::exists(fs::symlink_status(direct, ec))) {
+            if (!checkNoSymlinkPath(direct, workspaceRoot, errOut)) return false;
+            outPath = direct;
+            return true;
+        }
+        if (allowSubfolders) {
+            const std::vector<const char*> subs = isStyle
+                ? std::vector<const char*>{"STYLES"}
+                : std::vector<const char*>{"SOUNDS", "DRUMKITS", "KMP"};
+            for (const char* sub : subs) {
+                const fs::path subDir = workspaceRoot / sub;
+                const auto subSt = fs::symlink_status(subDir, ec);
+                if (!ec && fs::is_symlink(subSt)) {
+                    errOut = std::string("workspace subfolder '") + sub + "' is a symlink; links are never followed";
+                    return false;
+                }
+                if (ec || !fs::is_directory(subSt)) continue;
+                const fs::path relSub = fs::path(sub) / raw;
+                if (hasSymlinkBelow(workspaceRoot, relSub)) {
+                    errOut = "path traverses a symlink inside workspace; links are never followed";
+                    return false;
+                }
+                const fs::path cand = workspaceRoot / relSub;
+                if (fs::exists(fs::symlink_status(cand, ec))) {
+                    if (!checkNoSymlinkPath(cand, workspaceRoot, errOut)) return false;
+                    outPath = cand;
+                    return true;
+                }
+            }
+        }
+        outPath = direct;
+        return true;
+    }
+    if (!checkNoSymlinkPath(raw, workspaceRoot, errOut)) return false;
+    outPath = raw;
+    return true;
+}
+
+// Non-throwing best-effort resolver for ExportSpec::sources registration (never follows symlinked subfolders).
+inline fs::path resolveWorkspacePath(const fs::path& workspaceRoot, const fs::path& raw, bool isStyle) {
+    fs::path resolved;
+    std::string err;
+    if (resolveWorkspacePathStrict(workspaceRoot, raw, true, isStyle, resolved, err)) return resolved;
+    return raw.is_absolute() || workspaceRoot.empty() ? raw : (workspaceRoot / raw);
 }
 
 inline std::string makeRelativeDisplayLabel(const fs::path& workspaceRoot, const fs::path& p, const char* fallbackPrefix) {
@@ -531,6 +653,7 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
         f.report.sourceKind = "provisional-workspace";
         f.report.sourceLabel = "<workspace>";
         f.report.coverage.deleteProofAvailable = false;
+        const std::string scrubbedReason = sd::scrubHostPaths(reason, {});
         f.report.diagnostics.push_back({
             sel::DiagnosticCategory::VERIFIED_MISSING,
             sel::collector_diag_code::kSourceUnavailable,
@@ -538,7 +661,7 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
             sel::EvidenceLevel::Verified,
             "<workspace>",
             "",
-            reason,
+            scrubbedReason,
             "Verify input paths are existing, readable, non-symlink local files/folders.",
             {}
         });
@@ -552,6 +675,8 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
 
     // 1. Validate optional workspaceRoot (strictly read-only, no symlinks)
     if (!req.workspaceRoot.empty()) {
+        std::string serr;
+        if (!sd::checkNoSymlinkPath(req.workspaceRoot, {}, serr)) return makeFatal("workspace root: " + serr);
         std::error_code ec;
         const auto st = fs::symlink_status(req.workspaceRoot, ec);
         if (ec || !fs::exists(st)) return makeFatal("workspace root does not exist or cannot be examined");
@@ -564,6 +689,8 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
     uint64_t targetBaselineBytes = 0;
     if (req.targetKst.has_value()) {
         if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
+        std::string serr;
+        if (!sd::checkNoSymlinkPath(*req.targetKst, {}, serr)) return makeFatal("target KST: " + serr);
         std::error_code ec;
         const auto tst = fs::symlink_status(*req.targetKst, ec);
         if (ec || !fs::exists(tst)) return makeFatal("target KST folder does not exist or cannot be examined");
@@ -617,9 +744,10 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
     std::vector<std::pair<std::string, std::string>> soundMapRelAndSha;
     for (const auto& [skey, rawPath] : req.styleSoundMaps) {
         if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
-        const fs::path resolved = sd::resolveWorkspacePath(req.workspaceRoot, rawPath, false);
-        if (!req.workspaceRoot.empty() && !rawPath.is_absolute() && sd::hasSymlinkBelow(req.workspaceRoot, rawPath)) {
-            return makeFatal("sound map path traverses a symlink; links are never followed");
+        fs::path resolved;
+        std::string rserr;
+        if (!sd::resolveWorkspacePathStrict(req.workspaceRoot, rawPath, false, false, resolved, rserr)) {
+            return makeFatal("sound map path refused: " + rserr);
         }
         std::vector<uint8_t> bytes;
         std::string rerr;
@@ -643,17 +771,32 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
     // 4. Discover & deduplicate candidate packages (workspaceRoot + packageInputs + slotToPackageMap)
     std::map<std::string, sd::CandidatePackage> candidatesByCanonKey;
     std::vector<std::pair<fs::path, bool>> rawCandidates; // (path, explicitInput)
+    std::map<sel::SlotAddress, fs::path> resolvedBindPaths;
 
-    auto enqueueCandidate = [&](const fs::path& raw, bool explicitInput) -> std::string {
-        const fs::path p = sd::resolveWorkspacePath(req.workspaceRoot, raw, false);
-        if (!req.workspaceRoot.empty() && !raw.is_absolute() && sd::hasSymlinkBelow(req.workspaceRoot, raw)) {
-            return "candidate package path traverses a symlink; links are never followed";
+    auto enqueueCandidate = [&](const fs::path& raw, bool explicitInput, fs::path* resolvedOut = nullptr) -> std::string {
+        fs::path p;
+        std::string rserr;
+        if (!sd::resolveWorkspacePathStrict(req.workspaceRoot, raw, true, false, p, rserr)) {
+            return "candidate package path refused: " + rserr;
         }
         std::error_code ec;
         const auto st = fs::symlink_status(p, ec);
         if (fs::is_symlink(st)) {
             return p.filename().string() + " is a symlink; links are never followed";
         }
+        if (explicitInput) {
+            if (ec || !fs::exists(st)) {
+                return "explicit package path does not exist: " + raw.filename().string();
+            }
+            if (!fs::is_directory(st)) {
+                return "explicit package path is not a package folder: " + raw.filename().string();
+            }
+            const auto cl = classify(p);
+            if (cl.kind != Kind::Sound && cl.kind != Kind::DrumKit && cl.kind != Kind::Kmp) {
+                return "explicit package path is not a Sound, Drum Kit, or KMP folder: " + raw.filename().string();
+            }
+        }
+        if (resolvedOut) *resolvedOut = p;
         rawCandidates.emplace_back(p, explicitInput);
         return "";
     };
@@ -662,9 +805,11 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
         if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
         if (const auto e = enqueueCandidate(p, true); !e.empty()) return makeFatal(e);
     }
-    for (const auto& [_, p] : req.slotToPackageMap) {
+    for (const auto& [addr, p] : req.slotToPackageMap) {
         if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
-        if (const auto e = enqueueCandidate(p, true); !e.empty()) return makeFatal(e);
+        fs::path rp;
+        if (const auto e = enqueueCandidate(p, true, &rp); !e.empty()) return makeFatal(e);
+        resolvedBindPaths[addr] = std::move(rp);
     }
     if (!req.workspaceRoot.empty()) {
         std::vector<fs::path> scanDirs{req.workspaceRoot};
@@ -757,8 +902,7 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
 
     // Map SlotAddress -> canonicalKey for explicit bindings
     std::map<sel::SlotAddress, std::string> slotToCandKey;
-    for (const auto& [addr, rawPkg] : req.slotToPackageMap) {
-        const fs::path resolved = sd::resolveWorkspacePath(req.workspaceRoot, rawPkg, false);
+    for (const auto& [addr, resolved] : resolvedBindPaths) {
         slotToCandKey[addr] = sd::canonicalPathKey(resolved);
     }
 
@@ -779,9 +923,10 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
 
     for (const auto& rawStyle : req.selectedStyles) {
         if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
-        const fs::path resolved = sd::resolveWorkspacePath(req.workspaceRoot, rawStyle, true);
-        if (!req.workspaceRoot.empty() && !rawStyle.is_absolute() && sd::hasSymlinkBelow(req.workspaceRoot, rawStyle)) {
-            return makeFatal("selected style path traverses a symlink; links are never followed");
+        fs::path resolved;
+        std::string rserr;
+        if (!sd::resolveWorkspacePathStrict(req.workspaceRoot, rawStyle, true, true, resolved, rserr)) {
+            return makeFatal("selected style path refused: " + rserr);
         }
         std::error_code ec;
         const auto sst = fs::symlink_status(resolved, ec);
@@ -847,10 +992,40 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
         styleRelAndSha.emplace_back(st.relPath, st.sha256);
     }
 
-    // 6. Build M2b ProvisionalWorkspaceInput & adapt with M2b `adaptProvisionalWorkspace()`
-    sel::ProvisionalWorkspaceInput wsIn;
-    for (const auto& [_, cand] : candidatesByCanonKey) {
+    // 6. Determine bound packages actually referenced by selected Styles (P2-4: never feed unrelated unused
+    //    workspace packages into adaptProvisionalWorkspace(), preventing unused duplicate-packageId poisoning!)
+    std::set<sel::SlotAddress> referencedSlots;
+    for (const auto& st : styles) {
         if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
+        if (!st.isUasf && !st.bytes.empty()) {
+            std::vector<media::panative::closure::Select> sels;
+            std::string serr;
+            if (media::panative::closure::selects(st.bytes.data(), st.bytes.size(), sels, serr)) {
+                for (const auto& s : sels) {
+                    if (const auto slot = sel::SlotAddress::fromMidi(s.msb, s.lsb, s.program); slot.has_value()) {
+                        referencedSlots.insert(*slot);
+                    }
+                }
+            }
+        }
+        for (const auto& a : st.explicitSelections) {
+            if (const auto slot = sel::SlotAddress::fromMidi(a.msb, a.lsb, a.program); slot.has_value()) {
+                referencedSlots.insert(*slot);
+            }
+        }
+    }
+    std::set<std::string> boundReferencedCandKeys;
+    for (const auto& [addr, ckey] : slotToCandKey) {
+        if (referencedSlots.count(addr) > 0) boundReferencedCandKeys.insert(ckey);
+    }
+
+    // Build M2b ProvisionalWorkspaceInput & adapt with M2b `adaptProvisionalWorkspace()`
+    sel::ProvisionalWorkspaceInput wsIn;
+    for (const std::string& ckey : boundReferencedCandKeys) {
+        if (!sd::tickCancel(keepGoing, tick)) return makeCancelled();
+        const auto cit = candidatesByCanonKey.find(ckey);
+        if (cit == candidatesByCanonKey.end()) continue;
+        const auto& cand = cit->second;
         if (cand.classified.kind != Kind::Sound && cand.classified.kind != Kind::DrumKit) continue;
         sel::ProvisionalPackageInput pi;
         pi.relDir = cand.kitPath;
@@ -1059,8 +1234,10 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
         }
     }
 
-    // Populate targetReusedSounds cleanly
+    // Populate targetReusedSounds cleanly & track unanalysed target USERDK reuse (P3-3)
+    size_t reusedTargetDrumKits = 0;
     for (const auto& [addr, roots] : targetReusedSlotRoots) {
+        if (addr.isDrumKit) ++reusedTargetDrumKits;
         TargetReusedSound tr;
         tr.slot = addr;
         if (targetMap.has_value()) {
@@ -1089,6 +1266,10 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
     plan.report.targetPresent = targetMap.has_value();
     plan.report.targetLibraryKey = plan.targetLibraryKey;
     plan.report.userSounds = usedBoundSlotToCandKey.size() + targetReusedSlotRoots.size();
+    if (reusedTargetDrumKits > 0) {
+        plan.report.coverage.unanalysedDrumKits += reusedTargetDrumKits;
+        plan.report.coverage.coverageComplete = false;
+    }
 
     // Add KMP uncompressed sample bytes if any KMP folders were selected
     for (const std::string& ckey : usedPackageCanonKeys) {
@@ -1274,6 +1455,41 @@ inline SelectiveKitPlan selectivePlan(const SelectiveKitRequest& req,
         plan.basePlan.fingerprint = planFingerprint(plan.basePlan.items, plan.basePlan.files);
     }
 
+    // Scrub host filesystem paths from every diagnostic and conflict before canonicalizing & serializing (P2-1)
+    std::vector<std::pair<std::string, std::string>> pathReps;
+    for (const auto& it : plan.basePlan.items) {
+        pathReps.emplace_back(it.source.string(), it.kitPath());
+        pathReps.emplace_back(sd::canonicalPathKey(it.source), it.kitPath());
+    }
+    for (const auto& [_, cand] : candidatesByCanonKey) {
+        pathReps.emplace_back(cand.path.string(), cand.kitPath);
+        pathReps.emplace_back(cand.canonicalKey, cand.kitPath);
+    }
+    for (const auto& st : styles) {
+        pathReps.emplace_back(st.path.string(), st.relPath);
+        pathReps.emplace_back(st.canonKey, st.relPath);
+    }
+    if (!req.workspaceRoot.empty()) {
+        pathReps.emplace_back(req.workspaceRoot.string(), "<workspace>");
+        pathReps.emplace_back(sd::canonicalPathKey(req.workspaceRoot), "<workspace>");
+    }
+    if (req.targetKst.has_value()) {
+        pathReps.emplace_back(req.targetKst->string(), "<target>");
+        pathReps.emplace_back(sd::canonicalPathKey(*req.targetKst), "<target>");
+    }
+    for (auto& d : plan.report.diagnostics) {
+        d.subject = sd::scrubHostPaths(std::move(d.subject), pathReps);
+        d.referencedTarget = sd::scrubHostPaths(std::move(d.referencedTarget), pathReps);
+        d.summary = sd::scrubHostPaths(std::move(d.summary), pathReps);
+        d.remediation = sd::scrubHostPaths(std::move(d.remediation), pathReps);
+    }
+    for (auto& c : plan.report.conflicts) {
+        c.address = sd::scrubHostPaths(std::move(c.address), pathReps);
+        c.sourceLabel = sd::scrubHostPaths(std::move(c.sourceLabel), pathReps);
+        c.targetLabel = sd::scrubHostPaths(std::move(c.targetLabel), pathReps);
+        c.detail = sd::scrubHostPaths(std::move(c.detail), pathReps);
+    }
+
     // Re-canonicalize report & compute deterministic selectiveFingerprint
     plan.report = sel::canonicalizeReport(std::move(plan.report));
     plan.selectiveFingerprint = sd::computeSelectiveFingerprint(
@@ -1426,6 +1642,10 @@ inline ExportSpec selectiveImportKit(const SelectiveKitRequest& req,
         const auto& items = state->reviewed.basePlan.items;
         const auto& files = state->reviewed.basePlan.files;
         const auto& reviewedSha = state->reviewed.basePlan.sha;
+
+        if (!expectedShaPtr->empty() && files.size() != expectedShaPtr->size()) {
+            return {"the planned file set differs from the review (file count mismatch); review again; nothing was published", ""};
+        }
 
         media::sound::pkgio::FileSet set{};
         set.root = out;

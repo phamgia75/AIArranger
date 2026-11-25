@@ -747,6 +747,228 @@ int main() {
              snapshotDir(ws) == wsBefore && snapshotDir(targetKst) == targetBefore);
     }
 
+    // ── Audit Regression Tests (P1-1, P2-1, P2-3, P2-4, P3-1, P3-3, P3-4) ──
+
+    // [P1-1] Symlinked workspace subfolders (ws/STYLES and ws/SOUNDS) and '..' escape refused fail-closed
+    {
+        const fs::path extStyles = root / "p1_ext_styles";
+        const fs::path extSounds = root / "p1_ext_sounds";
+        fs::create_directories(extStyles);
+        fs::create_directories(extSounds);
+        fs::copy(ws / "StyleA.mid", extStyles / "StyleA.mid");
+        fs::copy(ws / "AIA Demo Organ", extSounds / "AIA Demo Organ", fs::copy_options::recursive);
+        fs::copy(ws / "AIA Demo Kit", extSounds / "AIA Demo Kit", fs::copy_options::recursive);
+
+        const fs::path symWs1 = root / "p1_ws_sym_styles";
+        fs::create_directories(symWs1);
+        fs::create_directory_symlink(extStyles, symWs1 / "STYLES");
+        fs::copy(ws / "AIA Demo Organ", symWs1 / "AIA Demo Organ", fs::copy_options::recursive);
+        fs::copy(ws / "AIA Demo Kit", symWs1 / "AIA Demo Kit", fs::copy_options::recursive);
+        {
+            k::SelectiveKitRequest req;
+            req.workspaceRoot = symWs1;
+            req.selectedStyles = {"StyleA.mid"};
+            req.slotToPackageMap[{false, 1, 3}] = "AIA Demo Organ";
+            req.slotToPackageMap[{true, 1, 0}] = "AIA Demo Kit";
+            const auto p = k::selectivePlan(req);
+            TEST("P1-1a: symlinked ws/STYLES subfolder refused fail-closed",
+                 !p.ok && !p.executable() && has(p.fatalError, "symlink"));
+        }
+
+        const fs::path symWs2 = root / "p1_ws_sym_sounds";
+        fs::create_directories(symWs2);
+        fs::copy(ws / "StyleA.mid", symWs2 / "StyleA.mid");
+        fs::create_directory_symlink(extSounds, symWs2 / "SOUNDS");
+        fs::copy(ws / "AIA Demo Kit", symWs2 / "AIA Demo Kit", fs::copy_options::recursive);
+        {
+            k::SelectiveKitRequest req;
+            req.workspaceRoot = symWs2;
+            req.selectedStyles = {"StyleA.mid"};
+            req.slotToPackageMap[{false, 1, 3}] = "AIA Demo Organ";
+            req.slotToPackageMap[{true, 1, 0}] = "AIA Demo Kit";
+            const auto p = k::selectivePlan(req);
+            TEST("P1-1b: symlinked ws/SOUNDS subfolder refused fail-closed",
+                 !p.ok && !p.executable() && has(p.fatalError, "symlink"));
+        }
+
+        // '..' traversal escape outside workspaceRoot refused fail-closed
+        const fs::path symWs3 = root / "p1_ws_dotdot";
+        fs::create_directories(symWs3);
+        {
+            k::SelectiveKitRequest req;
+            req.workspaceRoot = symWs3;
+            req.selectedStyles = {"../workspace/StyleA.mid"};
+            const auto p = k::selectivePlan(req);
+            TEST("P1-1c: '..' traversal escape outside workspaceRoot refused fail-closed",
+                 !p.ok && !p.executable());
+        }
+    }
+
+    // [P2-1] Corrupted/failing bound package emits ZERO host/temp filesystem paths in JSON diagnostics
+    {
+        const fs::path badWs = root / "p2_1_corrupt_ws";
+        fs::create_directories(badWs);
+        fs::copy(ws / "StyleA.mid", badWs / "StyleA.mid");
+        fs::copy(ws / "AIA Demo Organ", badWs / "AIA Demo Organ", fs::copy_options::recursive);
+        fs::copy(ws / "AIA Demo Kit", badWs / "AIA Demo Kit", fs::copy_options::recursive);
+        // Corrupt a WAV in AIA Demo Organ so both loadPackage() and checkMember() fail with host path in raw error
+        for (const auto& e : fs::recursive_directory_iterator(badWs / "AIA Demo Organ")) {
+            if (e.is_regular_file() && e.path().extension() == ".wav") {
+                putStrFile(e.path(), "CORRUPTED_WAV_BYTES");
+                break;
+            }
+        }
+        k::SelectiveKitRequest req;
+        req.workspaceRoot = badWs;
+        req.selectedStyles = {"StyleA.mid"};
+        req.slotToPackageMap[{false, 1, 3}] = badWs / "AIA Demo Organ";
+        req.slotToPackageMap[{true, 1, 0}] = badWs / "AIA Demo Kit";
+
+        const auto p = k::selectivePlan(req);
+        TEST("P2-1: corrupted bound package fails closed with ZERO host path leaks in SELECTIVE_MANIFEST.json & DIAGNOSTICS.json",
+             p.ok && !p.executable() &&
+             !has(p.selectiveManifestJson, root.string()) &&
+             !has(p.selectiveManifestJson, badWs.string()) &&
+             !has(p.selectiveManifestJson, "/var/") &&
+             !has(p.selectiveManifestJson, "/tmp/") &&
+             !has(p.selectiveManifestJson, "/Users/") &&
+             !has(p.diagnosticsJson, root.string()) &&
+             !has(p.diagnosticsJson, badWs.string()) &&
+             !has(p.diagnosticsJson, "/var/") &&
+             !has(p.diagnosticsJson, "/tmp/") &&
+             !has(p.diagnosticsJson, "/Users/"));
+    }
+
+    // [P2-3] Explicit --in / --bind paths that are missing or Kind::Unknown fail closed (ok=false)
+    {
+        k::SelectiveKitRequest reqMissing;
+        reqMissing.workspaceRoot = ws;
+        reqMissing.selectedStyles = {"StyleA.mid"};
+        reqMissing.slotToPackageMap[{false, 1, 3}] = ws / "AIA Demo Organ";
+        reqMissing.slotToPackageMap[{true, 1, 0}] = ws / "AIA Demo Kit";
+        reqMissing.packageInputs = {root / "does_not_exist_pkg"};
+        const auto pMissing = k::selectivePlan(reqMissing);
+        TEST("P2-3a: explicit nonexistent --in path fails closed (ok=false)",
+             !pMissing.ok && !pMissing.executable());
+
+        const fs::path badTxt = root / "invalid_pkg.txt";
+        putStrFile(badTxt, "not a sound package");
+        k::SelectiveKitRequest reqUnknown = reqMissing;
+        reqUnknown.packageInputs = {badTxt};
+        const auto pUnknown = k::selectivePlan(reqUnknown);
+        TEST("P2-3b: explicit Kind::Unknown --in file fails closed (ok=false)",
+             !pUnknown.ok && !pUnknown.executable());
+
+        k::SelectiveKitRequest reqBadBind;
+        reqBadBind.workspaceRoot = ws;
+        reqBadBind.selectedStyles = {"StyleA.mid"};
+        reqBadBind.slotToPackageMap[{false, 1, 3}] = root / "nonexistent_bind_pkg";
+        reqBadBind.slotToPackageMap[{true, 1, 0}] = ws / "AIA Demo Kit";
+        const auto pBadBind = k::selectivePlan(reqBadBind);
+        TEST("P2-3c: explicit nonexistent --bind path fails closed (ok=false)",
+             !pBadBind.ok && !pBadBind.executable());
+    }
+
+    // [P2-4] Unrelated unused workspace package with duplicate packageId must NOT poison a valid bound package
+    {
+        const fs::path dupWs = root / "p2_4_dup_pkgid_ws";
+        fs::create_directories(dupWs);
+        fs::copy(ws / "StyleA.mid", dupWs / "StyleA.mid");
+        fs::copy(ws / "AIA Demo Organ", dupWs / "AIA Demo Organ", fs::copy_options::recursive);
+        fs::copy(ws / "AIA Demo Kit", dupWs / "AIA Demo Kit", fs::copy_options::recursive);
+        // Copy AIA Demo Organ into an unused folder with the SAME packageId but modified PACKAGE.sha256 content!
+        fs::copy(ws / "AIA Demo Organ", dupWs / "Z_Unused_DupId_Organ", fs::copy_options::recursive);
+        putStrFile(dupWs / "Z_Unused_DupId_Organ" / "PACKAGE.sha256",
+                   slurp(dupWs / "Z_Unused_DupId_Organ" / "PACKAGE.sha256") + "# extra comment changing sha\n");
+
+        k::SelectiveKitRequest req;
+        req.workspaceRoot = dupWs;
+        req.selectedStyles = {"StyleA.mid"};
+        req.slotToPackageMap[{false, 1, 3}] = dupWs / "AIA Demo Organ";
+        req.slotToPackageMap[{true, 1, 0}] = dupWs / "AIA Demo Kit";
+
+        const auto p = k::selectivePlan(req);
+        TEST("P2-4: unused duplicate-packageId folder in workspace does NOT poison valid bound package",
+             p.ok && p.executable() && p.basePlan.items.size() == 3);
+    }
+
+    // [P3-1] verifyKit() rejects forged label, nested memoryProjection.hardwareVerified=true, or coverage.deleteProofAvailable=true
+    {
+        k::SelectiveKitRequest req;
+        req.workspaceRoot = ws;
+        req.selectedStyles = {"StyleA.mid"};
+        req.slotToPackageMap[{false, 1, 3}] = ws / "AIA Demo Organ";
+        req.slotToPackageMap[{true, 1, 0}] = ws / "AIA Demo Kit";
+        const auto p = k::selectivePlan(req);
+        const fs::path baseKit = root / "P3_1_BaseKit";
+        const auto st = runJob(k::selectiveImportKit(req, baseKit, p.selectiveFingerprint, p.basePlan.sha, ""));
+        TEST("P3-1 setup: base selective kit built cleanly", st.phase == Phase::Done);
+
+        auto tamperAndVerify = [&](const std::string& tag, const std::string& from, const std::string& to) {
+            const fs::path t = root / ("P3_1_" + tag);
+            fs::copy(baseKit, t, fs::copy_options::recursive);
+            std::string js = slurp(t / "SELECTIVE_MANIFEST.json");
+            const auto pos = js.find(from);
+            if (pos != std::string::npos) js.replace(pos, from.size(), to);
+            putStrFile(t / "SELECTIVE_MANIFEST.json", js);
+            resignKit(t);
+            std::string outText;
+            return k::verifyKit(t, nullptr, &outText);
+        };
+
+        TEST("P3-1a: verifyKit rejects forged label in SELECTIVE_MANIFEST.json",
+             !tamperAndVerify("forged_label", k::kLabel, "PA5X VERIFIED").empty());
+        TEST("P3-1b: verifyKit rejects nested memoryProjection.hardwareVerified=true",
+             !tamperAndVerify("nested_hw", "\"memoryProjection\": {\n    \"unit\": \"uncompressed_pcm_bytes\",\n    \"hardwareVerified\": false",
+                              "\"memoryProjection\": {\n    \"unit\": \"uncompressed_pcm_bytes\",\n    \"hardwareVerified\": true").empty());
+        TEST("P3-1c: verifyKit rejects coverage.deleteProofAvailable=true",
+             !tamperAndVerify("del_proof", "\"coverage\": {\n    \"coverageComplete\": true,\n    \"deleteProofAvailable\": false",
+                              "\"coverage\": {\n    \"coverageComplete\": true,\n    \"deleteProofAvailable\": true").empty());
+    }
+
+    // [P3-3] Reusing an occupied target USERDK increments unanalysedDrumKits and sets coverageComplete=false
+    {
+        const fs::path dkTarget = root / "P3_3_DkTarget.KST";
+        writeSyntheticTargetKst(dkTarget, false);
+        // Populate USERDK01/0 in dkTarget
+        const Bytes dkPcg = buildKorfContainer({
+            {0x10020038u, 0x10, 0, 0, "TargetDK0", Bytes(48, 0x77), ""}
+        });
+        putBytes(dkTarget / "SOUND" / "USERDK01.PCG", dkPcg);
+
+        const fs::path dkStyle = root / "p3_3_style_reuse_dk.mid";
+        const bool madeStyle = writeSyntheticStyleSmf(dkStyle, {
+            {8, {121, 0, 33}},
+            {9, {120, 64, 0}}  // USERDK01/0 occupied in dkTarget (unbound -> reuse-target!)
+        });
+        TEST("P3-3 setup: Style referencing target USERDK01/0 created", madeStyle);
+
+        k::SelectiveKitRequest req;
+        req.selectedStyles = {dkStyle};
+        req.targetKst = dkTarget;
+        const auto p = k::selectivePlan(req);
+        TEST("P3-3: reusing occupied target USERDK sets unanalysedDrumKits > 0 and coverageComplete == false",
+             p.ok && p.executable() &&
+             p.report.coverage.unanalysedDrumKits >= 1 &&
+             !p.report.coverage.coverageComplete);
+    }
+
+    // [P3-4] expectSha file-count mismatch refused fail-closed in writeAt
+    {
+        k::SelectiveKitRequest req;
+        req.workspaceRoot = ws;
+        req.selectedStyles = {"StyleA.mid"};
+        req.slotToPackageMap[{false, 1, 3}] = ws / "AIA Demo Organ";
+        req.slotToPackageMap[{true, 1, 0}] = ws / "AIA Demo Kit";
+        const auto p = k::selectivePlan(req);
+        auto extraSha = p.basePlan.sha;
+        extraSha["STYLES/UnexpectedExtra.mid"] = std::string(64, 'a');
+        const fs::path outP34 = root / "P3_4_ExtraShaKit";
+        const auto st = runJob(k::selectiveImportKit(req, outP34, p.selectiveFingerprint, extraSha, ""));
+        TEST("P3-4: expectSha file-count mismatch fails closed at Run, nothing published",
+             st.phase == Phase::Failed && st.stoppedAt == Phase::Run && !fs::exists(outP34));
+    }
+
     fs::remove_all(root);
     std::printf("Summary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;

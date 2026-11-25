@@ -71,5 +71,27 @@ expect 1 "$B/aiarranger-kit" select-build --workspace "$T/out" --style WaltzUser
     --out "$T/out/OverlapKit"
 check "overlap select-build wrote nothing" "[ ! -e '$T/out/OverlapKit' ]"
 
+# [P2-2] duplicate --bind slot, duplicate --sound-map key, repeated --policy rejected (exit 1)
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit"
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --sound-map "$T/map_user.txt" --sound-map "$T/map_user.txt"
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --policy block --policy remap
+
+# [P2-3] missing or invalid explicit --in rejected (exit 1)
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --in "$T/does_not_exist_pkg"
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --in "$T/map_user.txt"
+
+# [P3-2] out-of-spec --bind USERDK07/0 rejected at parse time (exit 1)
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USERDK07/0=AIA Demo Kit"
+
 rm -rf "$T"
 [ "$fails" -eq 0 ]
