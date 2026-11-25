@@ -1092,7 +1092,7 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
             if (dr.left != panative::kNoIndex && dr.left < rawKmp.samples.size()) {
                 df.leftSampleId = rawKmp.samples[dr.left].id;
                 const auto pit = pcm.byId.find(df.leftSampleId);
-                if (pit != pcm.byId.end() && pit->second.payloadBytes > 0) {
+                if (rawKmp.samples[dr.left].rate > 0 && pit != pcm.byId.end() && pit->second.payloadBytes > 0) {
                     df.leftPcmPresent = true;
                     df.leftPcmPayloadBytes = pit->second.payloadBytes;
                 }
@@ -1101,7 +1101,7 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
                 df.hasRight = true;
                 df.rightSampleId = rawKmp.samples[dr.right].id;
                 const auto pit = pcm.byId.find(df.rightSampleId);
-                if (pit != pcm.byId.end() && pit->second.payloadBytes > 0) {
+                if (rawKmp.samples[dr.right].rate > 0 && pit != pcm.byId.end() && pit->second.payloadBytes > 0) {
                     df.rightPcmPresent = true;
                     df.rightPcmPayloadBytes = pit->second.payloadBytes;
                 }
@@ -2284,17 +2284,22 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
         // No proven-identical Sound anywhere in target (either Different or InsufficientEvidence)
         const bool isInsufficient = (eq.verdict == EquivalenceVerdict::InsufficientEvidence);
         if (isInsufficient && (req.sourceAddress.isDrumKit || targetEntry->address.isDrumKit)) {
-            result.diagnostics.push_back({
-                DiagnosticCategory::UNSUPPORTED_FORMAT,
-                diag_code::kDrumkitBodyUnparsed,
-                DiagnosticSeverity::Warning,
-                EvidenceLevel::Unsupported,
-                subj,
-                addrStr,
-                "User Drum Kit slot " + req.sourceAddress.shortLabel() + " cannot be proven equivalent because Drum Kit bodies are unparsed.",
-                "Never auto-reused; remap to a free USERDK slot or load individually on Pa5X (MAN5 p.736).",
-                req.affectedRoots
-            });
+            const bool anyUnanalysedDk =
+                (req.sourceAddress.isDrumKit && !req.equivalence.analysed) ||
+                (targetEntry->address.isDrumKit && !targetEntry->equivalence.analysed);
+            if (anyUnanalysedDk) {
+                result.diagnostics.push_back({
+                    DiagnosticCategory::UNSUPPORTED_FORMAT,
+                    diag_code::kDrumkitBodyUnparsed,
+                    DiagnosticSeverity::Warning,
+                    EvidenceLevel::Unsupported,
+                    subj,
+                    addrStr,
+                    "User Drum Kit slot " + req.sourceAddress.shortLabel() + " cannot be proven equivalent because Drum Kit body is unanalysed (" + eq.reason + ").",
+                    "Never auto-reused; remap to a free USERDK slot or load individually on Pa5X (MAN5 p.736).",
+                    req.affectedRoots
+                });
+            }
         }
 
         if (input.policy == ConflictPolicy::RemapToFreeSlotInNewLib) {

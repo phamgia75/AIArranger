@@ -486,13 +486,13 @@ inline bool validateDrumKitBody(const std::vector<uint8_t>& body, const DrumKitL
     totalLayersOut = 0;
     hasId8Out = false;
     failGapOut = Gap::SizeDoesNotFit;
-    if (L.keyStride < 12u || L.keyStride > 64u || L.layerCountOffset >= L.keyStride - 2u ||
+    if (L.keyStride < 12u || L.keyStride > 64u ||
         L.headerBytes == 0u || L.modeFlagOffset >= L.headerBytes) {
         failGapOut = Gap::NoLayoutForKind;
         return false;
     }
     const uint32_t velOff = L.velOffset != 0u ? L.velOffset : (L.keyStride - 10u);
-    if (velOff > L.keyStride - 10u) {
+    if (velOff > L.keyStride - 10u || L.layerCountOffset >= velOff) {
         failGapOut = Gap::NoLayoutForKind;
         return false;
     }
@@ -574,22 +574,21 @@ inline bool validateDrumKitBody(const std::vector<uint8_t>& body, const DrumKitL
 }
 
 // Strict separation of Drum Kit Sounds vs Melodic Sounds before melodic layout fitting or oscillator parsing.
-// USERDK* banks always route to the Drum Kit path; non-USERDK banks route to Drum Kit only if their decoded body
-// is large enough for a 128-key table and has header mode-flag bit 7 set for a known drum-kit kind.
+// Strictly bank-aligned (USERDK*) to match native_kst_closure.h, m1_manifest_adapter.h, and slot_conflicts.h;
+// within USERDK* banks, validateDrumKitBody() enforces the header mode-flag bit-7 guard fail-closed.
 inline bool isDrumKitSound(const DecodedSound& s) {
-    if (native_detail::isDrumKitBank(s.bank)) return true;
-    if (const auto known = knownDrumKitLayout(s.kind); known.has_value()) {
-        const uint64_t prefix = uint64_t(known->headerBytes) + 128ull * uint64_t(known->keyStride);
-        if (s.body.size() >= prefix && (s.body[known->modeFlagOffset] & 0x80u) != 0u) return true;
-    }
-    return false;
+    return native_detail::isDrumKitBank(s.bank);
 }
 
 // Data-verified / invariant-checked USERDK Drum Kit layout fitter.
 // Never guesses: every candidate layout must satisfy all 128-key cumEnd, 0x8000 sentinel, 8-byte monotonic velocity,
 // header mode-flag bit-7, exact byte-length closure, and (when RAM DrumSample ID8s are present) exact trailing ID8 alignment.
 inline std::optional<DrumKitLayout> fitDrumKitLayout(const std::vector<const DecodedSound*>& sameKind, const KmpIndex& k) {
-    if (sameKind.empty()) return std::nullopt;
+    const DecodedSound* firstNonNull = nullptr;
+    for (const DecodedSound* s : sameKind) {
+        if (s != nullptr) { firstNonNull = s; break; }
+    }
+    if (!firstNonNull) return std::nullopt;
     std::set<Id8> drumIds;
     for (const auto& d : k.drums) drumIds.insert(d.id);
     drumIds.insert(k.drumIds.begin(), k.drumIds.end());
@@ -615,7 +614,7 @@ inline std::optional<DrumKitLayout> fitDrumKitLayout(const std::vector<const Dec
     };
 
     // 1. Check verified structural layout candidate for known variable-layer chunk kinds.
-    const uint32_t kind = sameKind[0]->kind;
+    const uint32_t kind = firstNonNull->kind;
     if (const auto known = knownDrumKitLayout(kind); known.has_value()) {
         size_t validWithId8 = 0;
         size_t alignedValid = 0;
@@ -869,10 +868,14 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                 ks.layerCount = lc;
                 for (uint32_t j = 0; j < 8u; ++j) ks.velTop[j] = kr[velOff + j];
                 if (DL.keyStride >= 20u) ks.advisoryKeyGainRaw = native_detail::be16(kr);
-                ks.advisoryPan = kr[DL.layerCountOffset + 1u];
-                ks.advisoryExclusiveGroup = (DL.keyStride == 18u && DL.layerStride == 20u)
-                                                ? kr[5]
-                                                : kr[DL.layerCountOffset + 6u];
+                ks.advisoryPan = (DL.layerCountOffset + 1u < velOff) ? kr[DL.layerCountOffset + 1u] : 64u;
+                if (DL.keyStride == 18u && DL.layerStride == 20u) {
+                    ks.advisoryExclusiveGroup = kr[5];
+                } else if (DL.layerCountOffset + 6u < velOff) {
+                    ks.advisoryExclusiveGroup = kr[DL.layerCountOffset + 6u];
+                } else {
+                    ks.advisoryExclusiveGroup = 0u;
+                }
                 ks.layers.reserve(lc);
 
                 uint8_t prevVel = 0;
@@ -884,9 +887,10 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                     const Id8 lid = native_detail::id8(lr + DL.layerStride - 8u);
                     const bool idIsZero = native_detail::allSame(lid, 0u);
                     const uint8_t velHi = ks.velTop[l];
-                    const uint8_t velLo = (l == 0u)
-                                              ? 1u
-                                              : static_cast<uint8_t>(std::min<uint32_t>(127u, uint32_t(prevVel) + 1u));
+                    const uint8_t rawVelLo = (l == 0u)
+                                                 ? 1u
+                                                 : static_cast<uint8_t>(std::min<uint32_t>(127u, uint32_t(prevVel) + 1u));
+                    const uint8_t velLo = std::min(rawVelLo, velHi);
                     prevVel = velHi;
 
                     DrumKitLayerSummary ls;
@@ -901,7 +905,7 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                         ls.advisoryLayerGainRaw = native_detail::be16(lr + 4);
                         ls.advisoryTranspose = static_cast<int8_t>(lr[6]);
                         ls.advisoryFineTune = static_cast<int8_t>(lr[7]);
-                    } else {
+                    } else if (DL.layerStride >= 20u) {
                         ls.advisoryTranspose = static_cast<int8_t>(lr[5]);
                         ls.advisoryFineTune = static_cast<int8_t>(lr[6]);
                     }

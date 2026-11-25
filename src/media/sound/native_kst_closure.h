@@ -14,8 +14,10 @@
 //                      User Sound/DK bank addressing (MSB 121/120, LSB 64..75 -> USER01..12 / USERDK01..12),
 //                      KORF/OC31/OC32 container & codec, raw Pa5X RAM.KMP (0x11080018 v0x0103) -> Zone -> Sample -> PCM.
 //      - INFERRED    : Factory/GM2 ROM classification (MSB 121/120, LSB 0..63; ROM bank table not hardware-verified),
-//                      Sound -> Oscillator -> High/Low Multisample layout (fitLayout), stored PCM byte proxy.
-//      - UNSUPPORTED : OC31 Pa700/Pa4X RAM.KMP (0x11050038), User Drum Kit Sound -> DrumSample body edges,
+//                      Sound -> Oscillator -> High/Low Multisample layout (fitLayout),
+//                      User Drum Kit Sound -> DrumSample body edges (read-only variable-layer USERDK parser),
+//                      stored PCM byte proxy.
+//      - UNSUPPORTED : OC31 Pa700/Pa4X RAM.KMP (0x11050038), OC32 USERDK without 0x8000 ID8 sentinel / legacy fixed 4,322 B USERDK,
 //                      SongBook (.SBD), Global (SETUP.GBL), malformed SMF leaves (e.g. CC11 >= 0x80),
 //                      and unknown-origin MIDI bank addresses (MSB outside {120,121}, LSB > 75, or missing CC0/CC32).
 //  * Determinism: every input, node ID, edge, manifest collection, and JSON output is canonically sorted;
@@ -1748,6 +1750,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "    \"notProvablyDeletable\": true,\n";
     o += "    \"userSounds\": "; writeIdVec(o, m.orphanUserSounds); o += ",\n";
     o += "    \"multisamples\": "; writeIdVec(o, m.orphanMultisamples); o += ",\n";
+    o += "    \"drumSamples\": "; writeIdVec(o, m.orphanDrumSamples); o += ",\n";
     o += "    \"pcmFiles\": "; writeStrVec(o, m.orphanPcmFiles); o += ",\n";
     o += "    \"unmatchedPcmEntries\": [";
     for (size_t i = 0; i < m.orphanPcmEntries.size(); ++i) {

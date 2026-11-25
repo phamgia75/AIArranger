@@ -11,6 +11,7 @@
 #include "media/sound/native_kst_closure.h"
 #include "media/sound/native_refs.h"
 #include "media/sound/resource_graph.h"
+#include "media/sound/selective_collector.h"
 #include "media/sound/slot_conflicts.h"
 
 #include <algorithm>
@@ -974,12 +975,235 @@ static void testGroupC_CorruptAndBoundaryRefusals(const SynthUniverse& U) {
     }
 }
 
+static void testGroupD_AuditRound1Regressions(const SynthUniverse& U) {
+    std::printf("\n[Group D] Audit Round 1 Regression Tests (T19..T22 & P3-1..P3-5)\n");
+
+    // T19 (P1-1): Same-slot Identical USERDK01/0 in RootTreeSubKst STILL blocks with NATIVE_SOUND_WRITE_HOLD
+    //             (matching selective_sub_kst.h), AND closureNodes includes Kind::DrumSample!
+    {
+        auto keysOne = makeDefaultKeys();
+        keysOne[36].layers = {{1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)}};
+        const Bytes dkBody = buildSynthUserDkBody(kProf1005, keysOne);
+
+        NativeKstClosureInput cin;
+        cin.downstream = U.makeBaseInput();
+        cin.downstream.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 0, "SYN_KIT_IDENT", rawKorfPayload(dkBody), ""}
+            })}
+        };
+        cin.upstreamRoots = {
+            {"STYLE/BankA/UsesIdentDk.stg", makeStyleTree({{9, 120, 64, 0}})}
+        };
+
+        const M1AdapterView srcView = adaptNativeKstInput(cin);
+        const TargetOccupancyMap targetMap = inspectTargetKstInput(cin.downstream);
+
+        CollectorRequest req;
+        req.mode = ExportMode::RootTreeSubKst;
+        req.conflictPolicy = ConflictPolicy::BlockWithReport;
+        req.targets = {{SelectedKind::Style, "STYLE/BankA/UsesIdentDk.stg", "", ""}};
+
+        const DryRunExportPlan plan = collectSelectiveExportWithTargetMap(srcView, req, &targetMap);
+        const ResourceId wantDs0{false, "KST", Kind::DrumSample, 0};
+        const bool hasDs0InClosure =
+            std::find(plan.closureNodes.begin(), plan.closureNodes.end(), wantDs0) != plan.closureNodes.end();
+        TEST("T19 (P1-1): same-slot Identical USERDK blocks with NATIVE_SOUND_WRITE_HOLD in RootTreeSubKst & closureNodes includes DrumSample/0",
+             plan.ok && !plan.executable &&
+             plan.hasBlockingCode(diag_code::kNativeSoundWriteHold) &&
+             hasDs0InClosure);
+    }
+
+    // T20 (P2-1): fitDrumKitLayout() handles nullptr elements without crashing
+    {
+        const Bytes validT1 = buildSynthUserDkBody(kProf1005, makeT1Keys());
+        KmpIndex kmp;
+        kmp.drums.push_back({makeId(0xD0, 1), "SYN_DRUM_KICK_S", 0, 1, 0});
+        DecodedSound validKit{"USERDK01", 0, kProf1005.kind, "SYN_KIT_STD", validT1};
+
+        const std::vector<const DecodedSound*> onlyNull{nullptr};
+        const std::vector<const DecodedSound*> leadingNull{nullptr, &validKit};
+        const auto rNull = fitDrumKitLayout(onlyNull, kmp);
+        const auto rLead = fitDrumKitLayout(leadingNull, kmp);
+        TEST("T20 (P2-1): fitDrumKitLayout({nullptr}) returns nullopt & fitDrumKitLayout({nullptr, &valid}) recovers layout safely",
+             !rNull.has_value() && rLead.has_value() &&
+             rLead->headerBytes == kProf1005.hdr && rLead->layerStride == kProf1005.lst);
+    }
+
+    // T21 (P2-2): Custom DrumKitLayout keyStride/layerCountOffset aliasing & bounds safety under ASan+UBSan
+    {
+        const Bytes dummy(4096u, 0x00);
+        DrumKitLayout aliasing{16u, 12u, 9u, 20u, 2u, 0u, true}; // velOff=2, lcOff=9 >= velOff -> must reject!
+        uint32_t tl = 0; bool h8 = false; Gap fg = Gap::SizeDoesNotFit;
+        const bool aliasOk = validateDrumKitBody(dummy, aliasing, tl, h8, fg);
+
+        // Tight valid custom layout: hdr=16, keyStride=12, lcOff=0 (< velOff=2), layerStride=12 (hasId8=true)
+        // Here lcOff+6 == 6 >= velOff(2) and layerStride == 12 < 20; buildNativeGraph must not OOB-read!
+        const DrumKitLayout tight{16u, 12u, 0u, 12u, 2u, 0u, true};
+        Bytes tightBody(16u + 128u * 12u + 128u * 12u, 0x00);
+        tightBody[2] = 0x82u;
+        for (uint32_t k = 0; k < 128u; ++k) {
+            const size_t ko = 16u + size_t(k) * 12u;
+            tightBody[ko + 0u] = 1u;
+            tightBody[ko + 1u] = 64u;
+            for (size_t j = 0; j < 8u; ++j) tightBody[ko + 2u + j] = 127u;
+            const uint16_t rawEnd = static_cast<uint16_t>((k + 1u) | (k == 127u ? 0x8000u : 0u));
+            putBe16(tightBody, ko + 10u, rawEnd);
+        }
+        const size_t l0Off = 16u + 128u * 12u;
+        tightBody[l0Off + 0u] = 1u;
+        putBe16(tightBody, l0Off + 2u, 0u);
+        const Id8 d0 = makeId(0xD0, 1);
+        std::copy(d0.begin(), d0.end(), tightBody.begin() + static_cast<std::ptrdiff_t>(l0Off + 4u));
+
+        KmpIndex kmp;
+        kmp.drums.push_back({d0, "SYN_DRUM_KICK_S", kNoZoneSample, kNoZoneSample, 0});
+        DecodedSound ds{"USERDK01", 0, 0x10980038u, "SYN_TIGHT", tightBody};
+        NativeRefReport rep;
+        std::map<ResourceId, DrumKitKeyMap> kmaps;
+        std::string err;
+        const auto g = buildNativeGraph(kmp, {ds}, {}, {{0x10980038u, tight}}, rep, &err, &kmaps);
+        const auto kmit = kmaps.find({false, "USERDK01", Kind::Sound, 0});
+        TEST("T21 (P2-2): aliasing custom layout rejected (NoLayoutForKind); tight custom keyStride=12 parses with 0 OOB reads",
+             !aliasOk && fg == Gap::NoLayoutForKind &&
+             g.has_value() && rep.drumKitsAnalysed == 1 && rep.ramDrumLayers == 1 &&
+             kmit != kmaps.end() && kmit->second.keys[0].advisoryExclusiveGroup == 0 &&
+             !kmit->second.keys[0].layers[0].advisoryTranspose.has_value());
+    }
+
+    // T22 (P2-3): Large synthetic melodic Sound (>= 3,074 B) in USER01 with bit 7 set at modeFlagOffset
+    //             is NOT misclassified as a Drum Kit and parses normally as melodic!
+    {
+        // Melodic layout: base=24, record=32, pairOffset=12, 100 oscillators -> 3,224 B (>= 514 + 128*20 = 3,074 B!)
+        const RecordLayout melL{24, 32, 12};
+        Bytes bigMel(24u + 100u * 32u, 0x00);
+        bigMel[2] = 0x82u; // bit 7 set at 10050038 modeFlagOffset!
+        const Id8 ms0 = makeId(0xB0, 1);
+        std::copy(ms0.begin(), ms0.end(), bigMel.begin() + 24);
+
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USER01.PCG", "USER01", buildKorfContainer({
+                {0x10050038u, 4, 9, 0, "SYN_BIG_MELODIC", rawKorfPayload(bigMel), ""}
+            })}
+        };
+        NativeKstOptions opts;
+        opts.layouts = {{0x10050038u, melL}};
+        opts.allowFitLayout = false;
+        const NativeKstResult res = resolveNativeKst(in, opts);
+        TEST("T22 (P2-3): large >=3074 B melodic USER01 Sound with bit-7 set at modeFlagOffset parses cleanly as melodic (not DrumKit)",
+             res.ok && res.report.refs.analysed == 1 && res.report.refs.drumKitsAnalysed == 0 &&
+             res.report.refs.unanalysed.empty() &&
+             res.graph->uses({false, "USER01", Kind::Sound, 0}).size() == 1);
+    }
+
+    // P3-1: Analysed USERDK with InsufficientEvidence (duplicate DrumSample ID8) emits kSoundSlotEquivalenceInsufficient
+    //       and does NOT emit misleading DRUMKIT_BODY_UNPARSED!
+    {
+        auto keysDup = makeDefaultKeys();
+        keysDup[68].layers = {{1, 5, 0x8000u, 0, 0, makeId(0xD0, 6)}};
+        const Bytes dupBody = buildSynthUserDkBody(kProf1001, keysDup);
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USERDK02.PCG", "USERDK02", buildKorfContainer({
+                {kProf1001.kind, 4, 20, 10, "SYN_DUP_KIT", rawKorfPayload(dupBody), ""}
+            })}
+        };
+        const TargetOccupancyMap target = inspectTargetKstInput(in);
+        const auto* e = target.findOccupied({true, 2, 10});
+        CollisionMatrixInput cmIn;
+        cmIn.policy = ConflictPolicy::BlockWithReport;
+        cmIn.soundRequests.push_back({"pa5x:USERDK02/Sound/10", {true, 2, 10}, "SYN_DUP_KIT", e->equivalence, false, {"STYLE/B/S.stg"}});
+        const CollisionMatrixResult cm = evaluateCollisionMatrix(target, cmIn);
+        bool hasUnparsedDiag = false, hasInsuffDiag = false;
+        for (const auto& d : cm.diagnostics) {
+            if (d.code == diag_code::kDrumkitBodyUnparsed) hasUnparsedDiag = true;
+            if (d.code == diag_code::kSoundSlotEquivalenceInsufficient) hasInsuffDiag = true;
+        }
+        TEST("P3-1: analysed USERDK with duplicate DrumSample ID emits SOUND_SLOT_EQUIVALENCE_INSUFFICIENT (not DRUMKIT_BODY_UNPARSED)",
+             e != nullptr && e->equivalence.analysed && e->equivalence.hasDuplicateDrumSampleId &&
+             cm.hasBlockingConflicts() && hasInsuffDiag && !hasUnparsedDiag);
+    }
+
+    // P3-3: serializeManifestJson() serializes "drumSamples" array inside "orphans"
+    {
+        NativeKstClosureInput cin;
+        cin.downstream = U.makeBaseInput();
+        const NativeKstClosureResult cres = resolveNativeKstClosure(cin);
+        const std::string json = serializeManifestJson(cres.manifest);
+        const size_t orphansPos = json.find("\"orphans\": {");
+        const size_t dsOrphanPos = orphansPos != std::string::npos ? json.find("\"drumSamples\": [", orphansPos) : std::string::npos;
+        TEST("P3-3: serializeManifestJson() emits orphans.drumSamples list alongside orphanDrumSampleCount",
+             cres.ok && orphansPos != std::string::npos && dsOrphanPos != std::string::npos &&
+             json.find("pa5x:KST/DrumSample/0", dsOrphanPos) != std::string::npos);
+    }
+
+    // P3-4: Sample with rate == 0 marks DrumSampleFingerprint::leftPcmPresent == false (parity with m1_manifest_adapter.h)
+    {
+        std::vector<SynthSampleSpec> badRateSamples = {
+            {makeId(0xA0, 1), "SYN_ZERO_RATE", 0 /*rate==0*/, "PCM/ram01.pcm", 4096}
+        };
+        std::vector<SynthDrumSpec> badRateDrums = {
+            {makeId(0xD0, 1), "SYN_DRUM_ZR", 0, kNoIndex, 0}
+        };
+        NativeKstInput in;
+        in.kmpContainer = RawNamedBlob{"MULTISMP/RAM.KMP", "", buildKorfContainer({
+            {kPa5xKmpChunkId, 6, 0, 0, "RAM.KMP", buildRawKmpPayload(badRateSamples, badRateDrums, {}, {}), ""}
+        })};
+        in.pcmContainers = {{"PCM/ram01.pcm", "", buildKorfContainer({
+            {0x12020010u, 6, 0, 0, "SYN_ZERO_RATE", Bytes(4096, 0x11), idAsStr(makeId(0xA0, 1))}
+        })}};
+        auto keysZr = makeDefaultKeys();
+        keysZr[36].layers = {{1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)}};
+        in.soundContainers = {{"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+            {kProf1005.kind, 4, 11, 0, "SYN_KIT_ZR", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysZr)), ""}
+        })}};
+        const TargetOccupancyMap occ = inspectTargetKstInput(in);
+        const auto* e0 = occ.findOccupied({true, 1, 0});
+        TEST("P3-4: DrumSample pointing to rate==0 Sample marks leftPcmPresent==false & provablyComparable==false",
+             e0 != nullptr && e0->equivalence.analysed && !e0->equivalence.allReferencedDrumSamplesHavePcm() &&
+             !e0->equivalence.provablyComparable());
+    }
+
+    // P3-5: Degenerate velTop sequences ({0, 0, 127} and {64, 64, 127}) clamp velLo <= velHi cleanly
+    {
+        auto keysDeg = makeDefaultKeys();
+        keysDeg[36].velTops = {0, 0, 127};
+        keysDeg[36].layers = {
+            {1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)},
+            {1, 1, 0x8000u, 0, 0, makeId(0xD0, 2)},
+            {1, 2, 0x8000u, 0, 0, makeId(0xD0, 3)},
+        };
+        keysDeg[38].velTops = {64, 64, 127};
+        keysDeg[38].layers = {
+            {1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)},
+            {1, 1, 0x8000u, 0, 0, makeId(0xD0, 2)},
+            {1, 2, 0x8000u, 0, 0, makeId(0xD0, 3)},
+        };
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {{"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+            {kProf1005.kind, 4, 11, 0, "SYN_KIT_DEGVEL", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysDeg)), ""}
+        })}};
+        const NativeKstResult res = resolveNativeKst(in);
+        const auto* km = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 0});
+        TEST("P3-5: degenerate velTop {0,0,127} and {64,64,127} clamp velLo <= velHi on every layer",
+             res.ok && km != nullptr &&
+             km->keys[36].layers[0].velLo == 0 && km->keys[36].layers[0].velHi == 0 &&
+             km->keys[36].layers[1].velLo == 0 && km->keys[36].layers[1].velHi == 0 &&
+             km->keys[36].layers[2].velLo == 1 && km->keys[36].layers[2].velHi == 127 &&
+             km->keys[38].layers[0].velLo == 1 && km->keys[38].layers[0].velHi == 64 &&
+             km->keys[38].layers[1].velLo == 64 && km->keys[38].layers[1].velHi == 64 &&
+             km->keys[38].layers[2].velLo == 65 && km->keys[38].layers[2].velHi == 127);
+    }
+}
+
 int main() {
-    std::printf("Test: Read-Only USERDK Drum Kit Parser, Resource Graph Integration & Equivalence (T1..T18)\n");
+    std::printf("Test: Read-Only USERDK Drum Kit Parser, Resource Graph Integration & Equivalence (T1..T22)\n");
     const SynthUniverse U;
     testGroupA_PositiveControls(U);
     testGroupB_AnomaliesAndLegacy(U);
     testGroupC_CorruptAndBoundaryRefusals(U);
+    testGroupD_AuditRound1Regressions(U);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }
