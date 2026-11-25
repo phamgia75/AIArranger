@@ -28,6 +28,7 @@
 #include "media/panative/kst_closure.h"
 #include "media/panative/kst_demo.h"
 #include "jobs/export_specs.h"   // kst-native from-set: the SET -> KST export job (E9 publish)
+#include "jobs/selective_sub_kst.h"
 #include "media/panative/panative_reader.h"
 #include "media/sound/evidence_import.h"
 #include "media/sound/memory_check.h"
@@ -53,6 +54,11 @@ static int usage() {
                          "           --select REL [--target-bank BANK] [--target-name NAME] [--select ...]\n"
                          "           [--policy block|reuse|remap] [--no-embedded-kbdsets] [--no-embedded-pads]\n"
                          "           [--json] [--export-plan OUT_DIR]   (read-only advisory plan; zero native KST writes)\n"
+                         "       aiarranger-resources kst-native selective-export --source SRC.KST [--target DST.KST]\n"
+                         "           --select REL [--target-bank BANK] [--target-name NAME] [--select ...]\n"
+                         "           [--policy block|reuse|remap] [--approve-remap SRC=DST] --out OUT.KST\n"
+                         "           [--expect-fingerprint HEX64] [--move-leftover-aside] [--json]\n"
+                         "           (EXPERIMENTAL Root-tree sub-KST ONLY; ZERO PCM/SOUND/MULTISMP/SONGBOOK; NOT VERIFIED ON A PA5X)\n"
                          "       aiarranger-resources kst-native demo OUTDIR   (writes 3 NOT HARDWARE-VERIFIED test KSTs)\n"
                          "       aiarranger-resources kst-native from-set SETDIR OUT.KST   (resources only, NOT VERIFIED ON A PA5X)\n"
                          "  any command: --evidence FILE (owner-authorized evidence, repeatable)\n");
@@ -73,17 +79,31 @@ static int panativeInspect(const std::string& path) {
     return unreadable ? 1 : invalid ? 3 : 0;
 }
 
-static int kstNativeSelectivePlan(int argc, char** argv) {
-    using namespace ai_arranger::media::selective;
-    NativeSelectivePlanRequest req;
-    req.mode = ExportMode::AdvisoryPlan;
+struct SelectiveKstCliArgs {
+    std::string sourceKst;
+    std::optional<std::string> targetKst;
+    std::vector<ai_arranger::media::selective::SelectionTarget> targets;
+    ai_arranger::media::selective::ConflictPolicy policy =
+        ai_arranger::media::selective::ConflictPolicy::BlockWithReport;
+    bool includeEmbeddedKbdSets = true;
+    bool includeEmbeddedPads = true;
     bool jsonOut = false;
+    std::string exportPlanDir;        // selective-plan only
+    std::string outKstDir;            // selective-export only
+    std::string expectFingerprint;    // selective-export only
+    bool moveLeftoverAside = false;   // selective-export only
+    std::map<graph::ResourceId, graph::ResourceId> approvedSoundRemaps; // selective-export only
+};
+
+static int parseSelectiveKstArgs(int argc, char** argv, bool isExport, SelectiveKstCliArgs& out) {
+    using namespace ai_arranger::media::selective;
     bool hasSource = false;
     bool hasTarget = false;
     bool hasPolicy = false;
+    bool hasOut = false;
+    bool hasExpectFingerprint = false;
     bool hasTargetBankForCurrent = false;
     bool hasTargetNameForCurrent = false;
-    std::string exportPlanDir;
 
     auto inferKind = [](const std::string& rel) -> SelectedKind {
         if (graph::native_detail::endsWithUpper(rel, ".KSC")) return SelectedKind::KeyboardSet;
@@ -101,12 +121,12 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
         if (a == "--source") {
             std::string v;
             if (hasSource || !needVal(v) || v.empty()) return usage();
-            req.sourceKst = v;
+            out.sourceKst = std::move(v);
             hasSource = true;
         } else if (a == "--target") {
             std::string v;
             if (hasTarget || !needVal(v) || v.empty()) return usage();
-            req.targetKst = v;
+            out.targetKst = std::move(v);
             hasTarget = true;
         } else if (a == "--select") {
             std::string v;
@@ -114,47 +134,100 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
             SelectionTarget t;
             t.relPath = v;
             t.kind = inferKind(v);
-            req.targets.push_back(std::move(t));
+            out.targets.push_back(std::move(t));
             hasTargetBankForCurrent = false;
             hasTargetNameForCurrent = false;
         } else if (a == "--target-bank") {
             std::string v;
-            if (req.targets.empty() || hasTargetBankForCurrent || !needVal(v) || v.empty()) return usage();
-            req.targets.back().targetBank = v;
+            if (out.targets.empty() || hasTargetBankForCurrent || !needVal(v) || v.empty()) return usage();
+            out.targets.back().targetBank = std::move(v);
             hasTargetBankForCurrent = true;
         } else if (a == "--target-name") {
             std::string v;
-            if (req.targets.empty() || hasTargetNameForCurrent || !needVal(v) || v.empty()) return usage();
-            req.targets.back().targetName = v;
+            if (out.targets.empty() || hasTargetNameForCurrent || !needVal(v) || v.empty()) return usage();
+            out.targets.back().targetName = std::move(v);
             hasTargetNameForCurrent = true;
         } else if (a == "--policy") {
             std::string v;
             if (hasPolicy || !needVal(v)) return usage();
-            if (v == "block") req.policy = ConflictPolicy::BlockWithReport;
-            else if (v == "reuse") req.policy = ConflictPolicy::ReuseIdenticalTargetSlot;
-            else if (v == "remap") req.policy = ConflictPolicy::RemapToFreeSlotInNewLib;
+            if (v == "block") out.policy = ConflictPolicy::BlockWithReport;
+            else if (v == "reuse") out.policy = ConflictPolicy::ReuseIdenticalTargetSlot;
+            else if (v == "remap") out.policy = ConflictPolicy::RemapToFreeSlotInNewLib;
             else {
                 std::fprintf(stderr, "ERROR: invalid --policy '%s' (expected block|reuse|remap)\n",
                              panative::printable(v).c_str());
                 return 1;
             }
             hasPolicy = true;
-        } else if (a == "--no-embedded-kbdsets") {
-            req.includeEmbeddedKbdSets = false;
-        } else if (a == "--no-embedded-pads") {
-            req.includeEmbeddedPads = false;
         } else if (a == "--json") {
-            jsonOut = true;
-        } else if (a == "--export-plan") {
+            out.jsonOut = true;
+        } else if (!isExport && a == "--no-embedded-kbdsets") {
+            out.includeEmbeddedKbdSets = false;
+        } else if (!isExport && a == "--no-embedded-pads") {
+            out.includeEmbeddedPads = false;
+        } else if (!isExport && a == "--export-plan") {
             std::string v;
-            if (!exportPlanDir.empty() || !needVal(v) || v.empty()) return usage();
-            exportPlanDir = v;
+            if (!out.exportPlanDir.empty() || !needVal(v) || v.empty()) return usage();
+            out.exportPlanDir = std::move(v);
+        } else if (isExport && a == "--out") {
+            std::string v;
+            if (hasOut || !needVal(v) || v.empty()) return usage();
+            out.outKstDir = std::move(v);
+            hasOut = true;
+        } else if (isExport && a == "--expect-fingerprint") {
+            std::string v;
+            if (hasExpectFingerprint || !needVal(v) || !ai_arranger::jobs::subkst::detail::isHex64(v)) {
+                std::fprintf(stderr, "ERROR: --expect-fingerprint requires a single 64-character hex SHA-256\n");
+                return 1;
+            }
+            out.expectFingerprint = std::move(v);
+            hasExpectFingerprint = true;
+        } else if (isExport && a == "--move-leftover-aside") {
+            out.moveLeftoverAside = true;
+        } else if (isExport && a == "--approve-remap") {
+            std::string v;
+            if (!needVal(v)) return usage();
+            const size_t eq = v.find('=');
+            if (eq == std::string::npos || eq == 0 || eq + 1 >= v.size()) {
+                std::fprintf(stderr, "ERROR: invalid --approve-remap '%s' (expected SRC_SLOT=DST_SLOT, e.g. USER01/5=USER04/12)\n",
+                             panative::printable(v).c_str());
+                return 1;
+            }
+            graph::ResourceId srcId, dstId;
+            if (!ai_arranger::jobs::subkst::parseSlotOrResourceId(v.substr(0, eq), srcId) ||
+                !ai_arranger::jobs::subkst::parseSlotOrResourceId(v.substr(eq + 1), dstId)) {
+                std::fprintf(stderr, "ERROR: invalid Sound slot in --approve-remap '%s'\n",
+                             panative::printable(v).c_str());
+                return 1;
+            }
+            if (!out.approvedSoundRemaps.emplace(srcId, dstId).second) {
+                std::fprintf(stderr, "ERROR: duplicate --approve-remap source slot '%s'\n",
+                             srcId.str().c_str());
+                return 1;
+            }
         } else {
             return usage();
         }
     }
 
-    if (!hasSource || req.targets.empty()) return usage();
+    if (!hasSource || out.targets.empty()) return usage();
+    if (isExport && !hasOut) return usage();
+    return 0;
+}
+
+static int kstNativeSelectivePlan(int argc, char** argv) {
+    using namespace ai_arranger::media::selective;
+    SelectiveKstCliArgs cli;
+    if (const int rc = parseSelectiveKstArgs(argc, argv, false, cli); rc != 0) return rc;
+
+    NativeSelectivePlanRequest req;
+    req.sourceKst = cli.sourceKst;
+    if (cli.targetKst.has_value()) req.targetKst = *cli.targetKst;
+    req.targets = std::move(cli.targets);
+    req.mode = ExportMode::AdvisoryPlan;
+    req.policy = cli.policy;
+    req.includeEmbeddedKbdSets = cli.includeEmbeddedKbdSets;
+    req.includeEmbeddedPads = cli.includeEmbeddedPads;
 
     const NativeSelectivePlanResult res = planNativeSelectiveExport(req);
     if (!res.ok || res.cancelled) {
@@ -171,11 +244,11 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
         return 1;
     }
 
-    if (!exportPlanDir.empty()) {
+    if (!cli.exportPlanDir.empty()) {
         ai_arranger::jobs::JobState st;
         st.id = 1;
         ai_arranger::jobs::runExport(
-            advisoryPlanExportSpec(req, res, exportPlanDir),
+            advisoryPlanExportSpec(req, res, cli.exportPlanDir),
             st,
             [] { return false; },
             [](const ai_arranger::jobs::JobState&) {});
@@ -186,11 +259,101 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
         }
     }
 
-    const std::string output = jsonOut
+    const std::string output = cli.jsonOut
                                    ? serializeNativeSelectivePlanJson(res)
                                    : serializeNativeSelectivePlanMarkdown(res);
     std::fputs(output.c_str(), stdout);
     return res.executable() ? 0 : 3;
+}
+
+static int kstNativeSelectiveExport(int argc, char** argv) {
+    using namespace ai_arranger::media::selective;
+    using namespace ai_arranger::jobs::subkst;
+    SelectiveKstCliArgs cli;
+    if (const int rc = parseSelectiveKstArgs(argc, argv, true, cli); rc != 0) return rc;
+
+    SubKstExportRequest req;
+    req.sourceKst = cli.sourceKst;
+    if (cli.targetKst.has_value()) req.targetKst = *cli.targetKst;
+    req.targets = std::move(cli.targets);
+    req.mode = ExportMode::RootTreeSubKst;
+    req.policy = cli.policy;
+    req.approvedSoundRemaps = std::move(cli.approvedSoundRemaps);
+    req.moveLeftoverAside = cli.moveLeftoverAside;
+    req.expectFingerprint = cli.expectFingerprint;
+
+    // 1. Pre-check destination overlap / output-guard / safe .KST name before heavy KST reads
+    std::error_code absEc;
+    const std::filesystem::path destAbs =
+        ai_arranger::media::folderPath(std::filesystem::absolute(cli.outKstDir, absEc));
+    const std::string leaf = destAbs.filename().string();
+    if (leaf.size() <= 4 || leaf.compare(leaf.size() - 4, 4, ".KST") != 0 ||
+        !panative::assemble::safeName(leaf.substr(0, leaf.size() - 4))) {
+        std::fprintf(stderr, "ERROR: output folder must be named NAME.KST with a safe NAME: %s\n",
+                     panative::printable(leaf).c_str());
+        return 1;
+    }
+    if (ai_arranger::jobs::detail::overlaps(destAbs, req.sourceKst) ||
+        (req.targetKst.has_value() && ai_arranger::jobs::detail::overlaps(destAbs, *req.targetKst))) {
+        std::fprintf(stderr, "ERROR: refusing D18 overlap — output folder overlaps source or target KST\n");
+        return 1;
+    }
+
+    // 2. Plan & evaluate eligibility strictly READ-ONLY (zero disk writes if blocked!)
+    const SubKstExportPlan reviewed = planSubKstExport(req);
+    if (!reviewed.ok || reviewed.cancelled) {
+        std::fprintf(stderr, "ERROR: %s\n",
+                     reviewed.error.empty() ? "selective export planning failed" : reviewed.error.c_str());
+        return 1;
+    }
+    if (reviewed.missingSelectionTarget) {
+        for (const auto& d : reviewed.planResult.report.diagnostics) {
+            if (d.code == collector_diag_code::kSelectedRootNotFound) {
+                std::fprintf(stderr, "ERROR: selected path not found in source KST: %s\n",
+                             panative::printable(d.subject).c_str());
+            }
+        }
+        return 1;
+    }
+    if (!req.expectFingerprint.empty() && reviewed.planFingerprint != req.expectFingerprint) {
+        std::fprintf(stderr, "ERROR: sources or target changed since review (planFingerprint mismatch); nothing written\n");
+        return 1;
+    }
+    if (!reviewed.executable()) {
+        // Exit 3: analysis succeeded, blocked by HOLD / missing Sound / conflict / malformed MIDI / OC31.
+        // Emit full deterministic JSON or Markdown report to stdout and write NOTHING to disk!
+        const std::string output = cli.jsonOut
+                                       ? serializeNativeSelectivePlanJson(reviewed.planResult)
+                                       : serializeNativeSelectivePlanMarkdown(reviewed.planResult);
+        std::fputs(output.c_str(), stdout);
+        return 3;
+    }
+
+    // 3. Pin the reviewed planFingerprint & targetLibraryKey into the E6/E9 export job (TOCTOU guard!)
+    req.expectFingerprint = reviewed.planFingerprint;
+    req.expectTargetLibraryKey = reviewed.targetLibraryKey;
+
+    const auto finalPlan = std::make_shared<SubKstExportPlan>();
+    const auto execSummary = std::make_shared<SubKstExecutionSummary>();
+    ai_arranger::jobs::JobState st;
+    st.id = 1;
+    ai_arranger::jobs::runExport(
+        selectiveSubKstExportSpec(req, cli.outKstDir, finalPlan, execSummary),
+        st,
+        [] { return false; },
+        [](const ai_arranger::jobs::JobState&) {});
+
+    if (st.phase != ai_arranger::jobs::Phase::Done) {
+        std::fprintf(stderr, "ERROR: sub-KST NOT written (%s): %s\n",
+                     ai_arranger::jobs::phaseName(st.stoppedAt), st.reason.c_str());
+        return 1;
+    }
+
+    const std::string output = cli.jsonOut
+                                   ? serializeSubKstExportJson(*finalPlan, *execSummary, st)
+                                   : serializeSubKstExportMarkdown(*finalPlan, *execSummary, st);
+    std::fputs(output.c_str(), stdout);
+    return 0;
 }
 
 int main(int argc, char** argv) {
@@ -204,6 +367,9 @@ int main(int argc, char** argv) {
     }
     if (cmd == "kst-native" && argc >= 3 && std::string(argv[2]) == "selective-plan") {
         return kstNativeSelectivePlan(argc, argv);
+    }
+    if (cmd == "kst-native" && argc >= 3 && std::string(argv[2]) == "selective-export") {
+        return kstNativeSelectiveExport(argc, argv);
     }
     if (cmd == "kst-native" && argc == 4 && std::string(argv[2]) == "closure") {
         const auto c = panative::closure::check(argv[3]);

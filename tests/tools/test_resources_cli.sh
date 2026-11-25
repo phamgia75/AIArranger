@@ -57,5 +57,25 @@ ok test -f "$T/advisory-out/PACKAGE.sha256"
 ok sh -c "test -z \"\$(find '$T/advisory-out' -type f \( -iname '*.pcg' -o -iname '*.kmp' -o -iname '*.pcm' -o -iname '*.stg' -o -iname '*.ksc' -o -iname '*.pdc' \))\""
 expect 1 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --select "$DEMO_REL" --export-plan "$DEMO_KST/overlap-d18"
 
+# M2e-2: kst-native selective-export CLI contract (exit 0 published / 3 blocked HOLD / 1 usage, D18, TOCTOU, leftover)
+expect 1 "$B/aiarranger-resources" kst-native selective-export
+expect 1 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL"
+expect 1 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --out "$T/NoKstSuffix"
+expect 1 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --policy block --policy reuse --out "$T/DupPol.KST"
+expect 1 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --out "$DEMO_KST/InsideSource.KST"
+expect 1 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --expect-fingerprint 0000000000000000000000000000000000000000000000000000000000000000 --out "$T/BadFp.KST"
+expect 0 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --out "$T/SubOut.KST"
+ok test -f "$T/SubOut.KST/$DEMO_REL"
+ok sh -c "test ! -d '$T/SubOut.KST/PCM' && test ! -d '$T/SubOut.KST/SOUND' && test ! -d '$T/SubOut.KST/MULTISMP' && test ! -d '$T/SubOut.KST/SONGBOOK'"
+expect 0 "$B/aiarranger-resources" validate "$T/SubOut.KST"
+expect 0 "$B/aiarranger-resources" kst-native closure "$T/SubOut.KST"
+ok sh -c "'$B/aiarranger-resources' kst-native selective-export --source '$DEMO_KST' --select '$DEMO_REL' --out '$T/SubOutJson.KST' --json | '$PY' -I -c 'import json,sys; raw=sys.stdin.read(); assert \"$T\" not in raw; d=json.loads(raw); assert d[\"schema\"]==\"aiarranger-selective-sub-kst-export/1\" and d[\"published\"] is True and d[\"hardwareVerified\"] is False and d[\"deleteProofAvailable\"] is False and d[\"verification\"][\"L1\"]==\"passed\" and d[\"verification\"][\"L2\"]==\"not-run\" and d[\"verification\"][\"L3\"]==\"not-run\" and d[\"summary\"][\"forbiddenNativeDirsPresent\"] is False'"
+# Leftover NAME.KST.INCOMPLETE refusal (D17) and --move-leftover-aside recovery
+mkdir -p "$T/RecOut.KST.INCOMPLETE"
+printf 'export job 1 Selective Root-Tree Sub-KST (EXPERIMENTAL, NOT VERIFIED ON A PA5X) -> %s\n' "$T/RecOut.KST" > "$T/RecOut.KST.INCOMPLETE/AIARRANGER-EXPORT-JOB"
+expect 1 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --out "$T/RecOut.KST"
+expect 0 "$B/aiarranger-resources" kst-native selective-export --source "$DEMO_KST" --select "$DEMO_REL" --out "$T/RecOut.KST" --move-leftover-aside
+ok test -f "$T/RecOut.KST/$DEMO_REL"
+
 rm -rf "$T"
 [ "$fails" -eq 0 ]
