@@ -76,12 +76,16 @@ struct CollectorRequest {
     bool includeEmbeddedKbdSets = true;            // Include Style embedded KBD Sets
     bool includeEmbeddedPads = true;               // Include Style embedded Pads
     bool requireCompleteSampleClosure = true;      // Fail-closed on unanalysed USERDK / OC31 KMP / missing PCM
+    // Explicit approved cross-slot Sound remaps (source Sound ResourceId -> proven-identical Target Sound ResourceId).
+    // Cross-slot Identical matches NEVER lift NATIVE_SOUND_WRITE_HOLD without an explicit entry here!
+    std::map<graph::ResourceId, graph::ResourceId> approvedSoundRemaps;
     size_t cancelCheckStride = kDefaultCancelCheckStride; // Clamped to [1, 256]
 };
 
 enum class BlockingCode {
     EMPTY_SELECTION,
     SOURCE_UNAVAILABLE,
+    TARGET_UNAVAILABLE,
     SELECTED_ROOT_NOT_FOUND,
     MALFORMED_ROOT_TREE,
     MALFORMED_MIDI_LEAF,
@@ -97,6 +101,7 @@ enum class BlockingCode {
     SOUND_DECODE_FAILED,
     DRUMKIT_BODY_UNPARSED,
     UNANALYSED_USER_SOUND,
+    SMF_REMAP_REQUIRED,
     NATIVE_SOUND_WRITE_HOLD
 };
 
@@ -104,6 +109,7 @@ inline const char* blockingCodeName(BlockingCode c) {
     switch (c) {
         case BlockingCode::EMPTY_SELECTION:             return "EMPTY_SELECTION";
         case BlockingCode::SOURCE_UNAVAILABLE:          return "SOURCE_UNAVAILABLE";
+        case BlockingCode::TARGET_UNAVAILABLE:          return "TARGET_UNAVAILABLE";
         case BlockingCode::SELECTED_ROOT_NOT_FOUND:     return "SELECTED_ROOT_NOT_FOUND";
         case BlockingCode::MALFORMED_ROOT_TREE:         return "MALFORMED_ROOT_TREE";
         case BlockingCode::MALFORMED_MIDI_LEAF:         return "MALFORMED_MIDI_LEAF";
@@ -119,6 +125,7 @@ inline const char* blockingCodeName(BlockingCode c) {
         case BlockingCode::SOUND_DECODE_FAILED:         return "SOUND_DECODE_FAILED";
         case BlockingCode::DRUMKIT_BODY_UNPARSED:       return "DRUMKIT_BODY_UNPARSED";
         case BlockingCode::UNANALYSED_USER_SOUND:       return "UNANALYSED_USER_SOUND";
+        case BlockingCode::SMF_REMAP_REQUIRED:          return "SMF_REMAP_REQUIRED";
         case BlockingCode::NATIVE_SOUND_WRITE_HOLD:     return "NATIVE_SOUND_WRITE_HOLD";
     }
     return "UNKNOWN_BLOCKER";
@@ -230,8 +237,10 @@ struct CollectedSoundSummary {
     size_t multisampleCount = 0;
     size_t sampleCount = 0;
     uint64_t uniqueSampleBytes = 0;
-    bool satisfiedByTarget = false;
-    std::string targetMatchSlot;           // populated when proven Identical in target
+    bool satisfiedByTarget = false;        // true ONLY on exact same-slot match OR explicitly approved cross-slot remap
+    bool requiresRemap = false;            // true when proven Identical target Sound sits at a different slot (!= id)
+    std::string matchedTargetSlot;         // populated when proven Identical in target (exact slot preferred)
+    std::string targetMatchSlot;           // kept in sync with matchedTargetSlot for compatibility
 };
 
 struct DryRunExportPlan {
@@ -352,6 +361,13 @@ inline std::string computePlanFingerprint(const DryRunExportPlan& p) {
     for (const auto& pkg : p.uniqueProvisionalPackages) {
         adapter_detail::hashField(h, "pkg");
         adapter_detail::hashField(h, pkg);
+    }
+    for (const auto& cs : p.collectedSounds) {
+        adapter_detail::hashField(h, "cs");
+        adapter_detail::hashField(h, cs.id.str());
+        adapter_detail::hashField(h, cs.satisfiedByTarget ? "1" : "0");
+        adapter_detail::hashField(h, cs.requiresRemap ? "1" : "0");
+        adapter_detail::hashField(h, cs.matchedTargetSlot);
     }
     for (const auto& dg : p.dedupGroups) {
         adapter_detail::hashField(h, "dedup");
@@ -550,6 +566,14 @@ inline DryRunExportPlan collectSelectiveExport(
         addBlocker(BlockingCode::SOURCE_UNAVAILABLE, "<source>",
                    "Source manifest view is unavailable or failed to load.",
                    "Inspect source container errors before planning a selective export.");
+    }
+    if (optionalTarget != nullptr) {
+        if (optionalTarget->cancelled) return makeCancelled();
+        if (!optionalTarget->ok) {
+            addBlocker(BlockingCode::TARGET_UNAVAILABLE, "<target>",
+                       "Target manifest view failed to load or is uninspectable; refusing silent 0-byte baseline.",
+                       "Inspect target container errors before planning against this target.");
+        }
     }
 
     // 1. Canonicalize, sort, and deduplicate selection targets (order-independent!)
@@ -836,7 +860,7 @@ inline DryRunExportPlan collectSelectiveExport(
                                "Restore missing PCM/*.pcm container before exporting.",
                                root->relPath);
                 } else {
-                    rawReferencedSampleBytes += spIt->second.payloadBytes;
+                    rawReferencedSampleBytes = adapter_detail::satAdd(rawReferencedSampleBytes, spIt->second.payloadBytes);
                     if (!spIt->second.pcmRelPath.empty()) pcmFileSet.insert(spIt->second.pcmRelPath);
                 }
             }
@@ -874,7 +898,7 @@ inline DryRunExportPlan collectSelectiveExport(
                 ++sampleRawRefCount[smpId];
                 const auto spIt = source.samples.find(smpId);
                 if (spIt != source.samples.end() && spIt->second.hasPcm) {
-                    rawReferencedSampleBytes += spIt->second.payloadBytes;
+                    rawReferencedSampleBytes = adapter_detail::satAdd(rawReferencedSampleBytes, spIt->second.payloadBytes);
                 } else {
                     unknownSampleRoots[smpId].insert(root->relPath);
                     selectedHasUnanalysedOrGap = true;
@@ -897,12 +921,18 @@ inline DryRunExportPlan collectSelectiveExport(
     }
 
     // 3. Tier 3 Native KST Equivalence (source vs optionalTarget AND intra-source same-name/same-hash check)
-    std::map<graph::ResourceId, std::string> targetMatchedSoundSlot;
+    struct TargetSoundMatch {
+        graph::ResourceId matchedTargetId;
+        bool requiresRemap = false;
+        bool satisfied = false;            // true iff exact same-slot OR explicitly approved in request.approvedSoundRemaps
+    };
+    std::map<graph::ResourceId, TargetSoundMatch> targetMatchedSounds;
     if (source.isNativeKst()) {
         // 3a. Compare selected roots against optionalTarget by case-folded relative path
-        if (optionalTarget && optionalTarget->isNativeKst()) {
+        if (optionalTarget && optionalTarget->ok && optionalTarget->isNativeKst()) {
             std::map<std::string, const RootItemRecord*> targetRootsFolded;
             for (const auto& tr : optionalTarget->roots) {
+                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
                 targetRootsFolded[graph::native_detail::upperAscii(tr.relPath)] = &tr;
             }
             for (const auto& sel : plan.selectedTargets) {
@@ -946,6 +976,7 @@ inline DryRunExportPlan collectSelectiveExport(
             std::map<std::string, std::vector<graph::ResourceId>> targetByBodySha;
             std::map<std::string, std::vector<graph::ResourceId>> targetByName;
             for (const auto& [tid, tsc] : optionalTarget->sounds) {
+                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
                 if (!tsc.decodedBodySha256.empty()) targetByBodySha[tsc.decodedBodySha256].push_back(tid);
                 if (!tsc.name.empty()) targetByName[graph::native_detail::upperAscii(tsc.name)].push_back(tid);
             }
@@ -956,37 +987,78 @@ inline DryRunExportPlan collectSelectiveExport(
                 if (scIt == source.sounds.end()) continue;
                 const SoundClosureRecord& sc = scIt->second;
 
-                std::set<graph::ResourceId> candidates;
-                if (optionalTarget->sounds.count(sid)) candidates.insert(sid);
+                std::set<graph::ResourceId> otherCandidates;
                 if (!sc.decodedBodySha256.empty()) {
                     if (const auto bit = targetByBodySha.find(sc.decodedBodySha256); bit != targetByBodySha.end()) {
-                        candidates.insert(bit->second.begin(), bit->second.end());
+                        otherCandidates.insert(bit->second.begin(), bit->second.end());
                     }
                 }
                 if (!sc.name.empty()) {
                     if (const auto nit = targetByName.find(graph::native_detail::upperAscii(sc.name)); nit != targetByName.end()) {
-                        candidates.insert(nit->second.begin(), nit->second.end());
+                        otherCandidates.insert(nit->second.begin(), nit->second.end());
                     }
                 }
+                const auto approvedIt = request.approvedSoundRemaps.find(sid);
+                if (approvedIt != request.approvedSoundRemaps.end() && optionalTarget->sounds.count(approvedIt->second)) {
+                    otherCandidates.insert(approvedIt->second);
+                }
 
-                for (const graph::ResourceId& candId : candidates) {
+                // P1 invariant: ALWAYS check exact same-slot `sid` FIRST so an exact-slot match strictly wins
+                // over any lexicographically earlier cross-slot match!
+                std::optional<graph::ResourceId> exactMatch;
+                std::optional<graph::ResourceId> approvedCrossMatch;
+                std::optional<graph::ResourceId> firstCrossMatch;
+
+                if (optionalTarget->sounds.count(sid)) {
+                    otherCandidates.erase(sid);
+                    NativeEquivalenceEntry eq = classifyNativeSoundEquivalence(source, sid, *optionalTarget, sid, "source-vs-target-sound");
+                    if (eq.verdict == NativeEquivalenceVerdict::Identical) exactMatch = sid;
+                    plan.nativeEquivalences.push_back(std::move(eq));
+                }
+
+                for (const graph::ResourceId& candId : otherCandidates) {
+                    if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
                     NativeEquivalenceEntry eq = classifyNativeSoundEquivalence(source, sid, *optionalTarget, candId, "source-vs-target-sound");
-                    if (eq.verdict == NativeEquivalenceVerdict::Identical && !targetMatchedSoundSlot.count(sid)) {
-                        targetMatchedSoundSlot[sid] = candId.str();
-                        DedupGroup dg;
-                        dg.tier = DedupTier::Tier3NativeEquivalence;
-                        dg.resourceKind = "Sound";
-                        dg.keyType = "native-sound-equivalence";
-                        dg.keyValue = sc.decodedBodySha256;
-                        dg.canonicalMember = candId.str();
-                        dg.members = {sid.str(), candId.str()};
-                        std::sort(dg.members.begin(), dg.members.end());
-                        dg.occurrenceCount = 2;
-                        dg.savedBytes = sc.storedPcmBytesProxy;
-                        dg.appliedInExport = false; // advisory; RootTreeSubKst reuses target without rewriting KMP/PCG
-                        plan.dedupGroups.push_back(std::move(dg));
+                    if (eq.verdict == NativeEquivalenceVerdict::Identical) {
+                        if (approvedIt != request.approvedSoundRemaps.end() && approvedIt->second == candId) {
+                            approvedCrossMatch = candId;
+                        }
+                        if (!firstCrossMatch.has_value()) firstCrossMatch = candId;
                     }
                     plan.nativeEquivalences.push_back(std::move(eq));
+                }
+
+                std::optional<graph::ResourceId> chosenMatch;
+                bool requiresRemap = false;
+                bool satisfied = false;
+                if (exactMatch.has_value()) {
+                    chosenMatch = *exactMatch;
+                    requiresRemap = false;
+                    satisfied = true;
+                } else if (approvedCrossMatch.has_value()) {
+                    chosenMatch = *approvedCrossMatch;
+                    requiresRemap = true;
+                    satisfied = true; // explicitly approved remap override
+                } else if (firstCrossMatch.has_value()) {
+                    chosenMatch = *firstCrossMatch;
+                    requiresRemap = true;
+                    satisfied = false; // cross-slot match MUST NOT lift HOLD without explicit remap!
+                }
+
+                if (chosenMatch.has_value()) {
+                    targetMatchedSounds[sid] = {*chosenMatch, requiresRemap, satisfied};
+                    DedupGroup dg;
+                    dg.tier = DedupTier::Tier3NativeEquivalence;
+                    dg.resourceKind = "Sound";
+                    dg.keyType = "native-sound-equivalence";
+                    dg.keyValue = sc.decodedBodySha256;
+                    dg.canonicalMember = chosenMatch->str();
+                    dg.members = {sid.str(), chosenMatch->str()};
+                    std::sort(dg.members.begin(), dg.members.end());
+                    dg.occurrenceCount = 2;
+                    dg.savedBytes = sc.storedPcmBytesProxy;
+                    dg.appliedInExport = false; // advisory; RootTreeSubKst reuses target without rewriting KMP/PCG
+                    plan.dedupGroups.push_back(std::move(dg));
                 }
             }
         }
@@ -998,6 +1070,7 @@ inline DryRunExportPlan collectSelectiveExport(
         for (const auto& [sid, _] : soundRefRoots) collectedSoundIds.push_back(sid);
         std::map<std::string, std::vector<graph::ResourceId>> srcByNameOrSha;
         for (const auto& sid : collectedSoundIds) {
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
             const auto it = source.sounds.find(sid);
             if (it == source.sounds.end()) continue;
             if (!it->second.name.empty())
@@ -1034,14 +1107,26 @@ inline DryRunExportPlan collectSelectiveExport(
             }
         }
 
-        // Enforce NATIVE_SOUND_WRITE_HOLD when export mode would require writing a Native User Sound not satisfied by target
+        // Enforce NATIVE_SOUND_WRITE_HOLD and SMF_REMAP_REQUIRED for write modes:
+        // Only exact same-slot Identical target matches (or explicitly approved remaps) satisfy the target!
         if (request.mode == CollectorExportMode::RootTreeSubKst || request.mode == CollectorExportMode::ImportKitBundle) {
             for (const auto& [sid, roots] : soundRefRoots) {
-                if (!targetMatchedSoundSlot.count(sid)) {
+                const auto tmit = targetMatchedSounds.find(sid);
+                if (tmit != targetMatchedSounds.end() && tmit->second.satisfied) continue;
+                if (tmit != targetMatchedSounds.end() && tmit->second.requiresRemap) {
+                    for (const std::string& r : roots) {
+                        addBlocker(BlockingCode::SMF_REMAP_REQUIRED, sid.str(),
+                                   "Selected item references " + sid.str() + " which matches identical Target Sound at different slot " +
+                                       tmit->second.matchedTargetId.str() + "; SMF Bank/PC remap is required before RootTreeSubKst export.",
+                                   "Approve an explicit SMF Bank/PC remap to " + tmit->second.matchedTargetId.str() +
+                                       " or use AdvisoryPlan.",
+                                   r);
+                    }
+                } else {
                     for (const std::string& r : roots) {
                         addBlocker(BlockingCode::NATIVE_SOUND_WRITE_HOLD, sid.str(),
                                    "Selected item requires Native User Sound " + sid.str() +
-                                       " which is not proven equivalent in Target KST; native .PCG/.KMP/.PCM writing is on HOLD.",
+                                       " which is not proven equivalent at the same slot in Target KST; native .PCG/.KMP/.PCM writing is on HOLD.",
                                    "Use AdvisoryPlan + Pa5X single-Sound load (MAN5 p.736), remap to a Factory/Target Sound, or replace via Import Kit.",
                                    r);
                     }
@@ -1070,9 +1155,11 @@ inline DryRunExportPlan collectSelectiveExport(
         css.multisampleCount = sc.multisampleIds.size();
         css.sampleCount = sc.sampleIds.size();
         css.uniqueSampleBytes = sc.storedPcmBytesProxy;
-        if (const auto tmit = targetMatchedSoundSlot.find(sid); tmit != targetMatchedSoundSlot.end()) {
-            css.satisfiedByTarget = true;
-            css.targetMatchSlot = tmit->second;
+        if (const auto tmit = targetMatchedSounds.find(sid); tmit != targetMatchedSounds.end()) {
+            css.satisfiedByTarget = tmit->second.satisfied;
+            css.requiresRemap = tmit->second.requiresRemap;
+            css.matchedTargetSlot = tmit->second.matchedTargetId.str();
+            css.targetMatchSlot = css.matchedTargetSlot;
         }
         plan.unresolvedSlotsInAnalysedCount += sc.unresolvedSlotsInAnalysed.size();
         plan.unresolvedSlotsInUnanalysedCount += sc.unresolvedSlotsInUnanalysed.size();
@@ -1087,7 +1174,7 @@ inline DryRunExportPlan collectSelectiveExport(
             dg.canonicalMember = sid.str();
             dg.members.assign(roots.begin(), roots.end());
             dg.occurrenceCount = roots.size();
-            dg.savedBytes = (roots.size() - 1) * sc.storedPcmBytesProxy;
+            dg.savedBytes = adapter_detail::satMul(static_cast<uint64_t>(roots.size() - 1), sc.storedPcmBytesProxy);
             dg.appliedInExport = true;
             plan.dedupGroups.push_back(std::move(dg));
         }
@@ -1128,7 +1215,7 @@ inline DryRunExportPlan collectSelectiveExport(
         uint64_t sbytes = 0;
         if (spIt != source.samples.end() && spIt->second.hasPcm) {
             sbytes = spIt->second.payloadBytes;
-            uniqueLogicalSampleBytes += sbytes;
+            uniqueLogicalSampleBytes = adapter_detail::satAdd(uniqueLogicalSampleBytes, sbytes);
             // Tier 2b candidate: provisional WAV audio fingerprint (contentHash + bytes) across distinct packages
             if (smpId.provisional && spIt->second.info.has_value() && !spIt->second.info->contentHash.empty()) {
                 const std::string hkey = spIt->second.info->contentHash + "|" + std::to_string(sbytes);
@@ -1150,7 +1237,7 @@ inline DryRunExportPlan collectSelectiveExport(
             const auto& roots = sampleRefRoots[smpId];
             dg.members.assign(roots.begin(), roots.end());
             dg.occurrenceCount = rawCount;
-            dg.savedBytes = (rawCount - 1) * sbytes;
+            dg.savedBytes = adapter_detail::satMul(static_cast<uint64_t>(rawCount - 1), sbytes);
             dg.appliedInExport = true;
             plan.dedupGroups.push_back(std::move(dg));
         }
@@ -1171,7 +1258,7 @@ inline DryRunExportPlan collectSelectiveExport(
             dg.canonicalMember = pkgId;
             dg.members.assign(roots.begin(), roots.end());
             dg.occurrenceCount = rc;
-            dg.savedBytes = (rc - 1) * pkg.totalUncompressedBytes;
+            dg.savedBytes = adapter_detail::satMul(static_cast<uint64_t>(rc - 1), pkg.totalUncompressedBytes);
             dg.appliedInExport = true;
             plan.dedupGroups.push_back(std::move(dg));
         }
@@ -1179,12 +1266,13 @@ inline DryRunExportPlan collectSelectiveExport(
 
     uint64_t identicalContentExtraBytes = 0;
     for (const auto& [hkey, ids] : provisionalWavByContentHash) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         if (ids.size() <= 1) continue;
         std::vector<graph::ResourceId> sortedIds = ids;
         std::sort(sortedIds.begin(), sortedIds.end());
         const uint64_t oneBytes = source.samples.at(sortedIds.front()).payloadBytes;
-        const uint64_t extra = (sortedIds.size() - 1) * oneBytes;
-        identicalContentExtraBytes += extra;
+        const uint64_t extra = adapter_detail::satMul(static_cast<uint64_t>(sortedIds.size() - 1), oneBytes);
+        identicalContentExtraBytes = adapter_detail::satAdd(identicalContentExtraBytes, extra);
 
         DedupGroup dg;
         dg.tier = DedupTier::Tier2ProvisionalContent;
@@ -1214,11 +1302,12 @@ inline DryRunExportPlan collectSelectiveExport(
     uint64_t targetBaselineBytes = 0;
     if (optionalTarget && optionalTarget->ok) {
         for (const auto& [_, sr] : optionalTarget->samples) {
-            if (sr.hasPcm) targetBaselineBytes += sr.payloadBytes;
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+            if (sr.hasPcm) targetBaselineBytes = adapter_detail::satAdd(targetBaselineBytes, sr.payloadBytes);
         }
     }
     mp.targetBaselineSampleBytes = targetBaselineBytes;
-    mp.projectedCombinedBytes = targetBaselineBytes + uniqueLogicalSampleBytes;
+    mp.projectedCombinedBytes = adapter_detail::satAdd(targetBaselineBytes, uniqueLogicalSampleBytes);
 
     const bool anyNativeProxy = source.isNativeKst() || (optionalTarget && optionalTarget->isNativeKst());
     mp.sampleBytesAreNativeStoredProxy = anyNativeProxy;
@@ -1256,9 +1345,10 @@ inline DryRunExportPlan collectSelectiveExport(
     std::sort(plan.blockingReasons.begin(), plan.blockingReasons.end());
     std::sort(plan.notices.begin(), plan.notices.end());
 
-    plan.ok = source.ok;
+    const bool targetOk = (!optionalTarget || optionalTarget->ok);
+    plan.ok = source.ok && targetOk;
     plan.coverageComplete =
-        source.ok && !selectedHasUnanalysedOrGap &&
+        plan.ok && !selectedHasUnanalysedOrGap &&
         (source.isProvisional() ? source.coverage.coverageComplete
                                 : (source.coverage.kmpParsed && !source.coverage.songBookPresent));
     plan.executable = plan.ok && !plan.cancelled && plan.blockingReasons.empty() &&
@@ -1368,6 +1458,8 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
              ", \"sampleCount\": " + std::to_string(cs.sampleCount) +
              ", \"uniqueSampleBytes\": " + std::to_string(cs.uniqueSampleBytes) +
              ", \"satisfiedByTarget\": " + std::string(bstr(cs.satisfiedByTarget)) +
+             ", \"requiresRemap\": " + std::string(bstr(cs.requiresRemap)) +
+             ", \"matchedTargetSlot\": " + q(cs.matchedTargetSlot) +
              ", \"targetMatchSlot\": " + q(cs.targetMatchSlot) + "}";
     }
     o += p.collectedSounds.empty() ? "],\n" : "\n  ],\n";
@@ -1448,19 +1540,62 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
 }
 
 // ── Reproducible, Path-Free Markdown Dry-Run Preview Serializer ──────────────────────────────────────────────────────
+namespace collector_detail {
+
+// Escapes control bytes, newlines, backslashes (via panative::printable) and Markdown syntax characters
+// so untrusted resource names, paths, or error strings cannot inject Markdown headings/lists/links/code.
+inline std::string mdSanitizeText(const std::string& s) {
+    const std::string p = panative::printable(s);
+    std::string out;
+    out.reserve(p.size() + 8);
+    for (char c : p) {
+        switch (c) {
+            case '`': case '*': case '_': case '[': case ']':
+            case '<': case '>': case '|': case '#':
+                out += '\\';
+                out += c;
+                break;
+            default:
+                out += c;
+                break;
+        }
+    }
+    return out;
+}
+
+// Inline Markdown code span: sanitizes control chars/newlines via printable() and replaces backticks
+// with \x60 so untrusted input can never close or break out of the surrounding single-backtick span.
+inline std::string mdCodeSpan(const std::string& s) {
+    const std::string p = panative::printable(s);
+    std::string out;
+    out.reserve(p.size() + 8);
+    out += '`';
+    for (char c : p) {
+        if (c == '`') out += "\\x60";
+        else out += c;
+    }
+    out += '`';
+    return out;
+}
+
+}  // namespace collector_detail
+
 inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
+    using collector_detail::mdCodeSpan;
+    using collector_detail::mdSanitizeText;
     std::string o;
     o.reserve(2048 + p.blockingReasons.size() * 128 + p.dedupGroups.size() * 96);
     o += "# Selective Export Dry-Run Plan Preview\n\n";
-    o += "> **" + p.banner + "** (`hardwareVerified: false`, `deleteProofAvailable: false`)\n\n";
+    o += "> **" + (p.banner == kStructuralOnlyBanner ? p.banner : mdSanitizeText(p.banner)) +
+         "** (`hardwareVerified: false`, `deleteProofAvailable: false`)\n\n";
     if (!p.coverageComplete) {
         o += "> **Coverage Notice:** Partial coverage — delete safety cannot be proven.\n\n";
     }
-    o += "- **Schema:** `" + p.schema + "`\n";
-    o += "- **Source Kind:** `" + std::string(adapterSourceKindName(p.sourceKind)) + "`\n";
-    o += "- **Export Mode:** `" + std::string(collectorExportModeName(p.mode)) + "`\n";
+    o += "- **Schema:** " + mdCodeSpan(p.schema) + "\n";
+    o += "- **Source Kind:** " + mdCodeSpan(adapterSourceKindName(p.sourceKind)) + "\n";
+    o += "- **Export Mode:** " + mdCodeSpan(collectorExportModeName(p.mode)) + "\n";
     o += "- **Executable:** `" + std::string(p.executable ? "true" : "false") + "`\n";
-    o += "- **Plan Fingerprint (SHA-256):** `" + p.planFingerprint + "`\n";
+    o += "- **Plan Fingerprint (SHA-256):** " + mdCodeSpan(p.planFingerprint) + "\n";
     o += "- **Selected Items:** " + std::to_string(p.selectedTargets.size()) + "\n";
     o += "- **Closure Summary:** " + std::to_string(p.collectedSounds.size()) + " User Sound(s), " +
          std::to_string(p.uniqueProvisionalPackages.size()) + " Provisional Package(s), " +
@@ -1474,8 +1609,8 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
 
     const auto& mp = p.memoryProjection;
     o += "## Memory & Sample RAM Projection\n\n";
-    o += "- **Unit:** `" + mp.unit + "`\n";
-    o += "- **Fit Verdict:** `" + mp.fitVerdict + "`\n";
+    o += "- **Unit:** " + mdCodeSpan(mp.unit) + "\n";
+    o += "- **Fit Verdict:** " + mdCodeSpan(mp.fitVerdict) + "\n";
     o += "- **Pre-Dedup Referenced Sample Bytes:** " + std::to_string(mp.rawReferencedSampleBytes) + "\n";
     o += "- **Unique Logical Sample Bytes:** " + std::to_string(mp.uniqueLogicalSampleBytes) + "\n";
     o += "- **Tier-1 Logical Dedup Saved Bytes:** " + std::to_string(mp.logicalDedupSavedBytes) + "\n";
@@ -1484,15 +1619,15 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
          std::to_string(mp.unknownSizeSamplesCount) + "\n";
     o += "- **Target Baseline / Projected Combined Bytes:** " + std::to_string(mp.targetBaselineSampleBytes) +
          " / " + std::to_string(mp.projectedCombinedBytes) + "\n";
-    o += "- **Caveat:** " + mp.caveat + "\n\n";
+    o += "- **Caveat:** " + mdSanitizeText(mp.caveat) + "\n\n";
 
     o += "## Blocking Issues (" + std::to_string(p.blockingReasons.size()) + ")\n\n";
     if (p.blockingReasons.empty()) {
         o += "_None._\n\n";
     } else {
         for (const auto& b : p.blockingReasons) {
-            o += "- **`" + std::string(blockingCodeName(b.code)) + "`** (`" + b.subject + "`): " + b.summary +
-                 " — _Remediation:_ " + b.remediation + "\n";
+            o += "- **" + mdCodeSpan(blockingCodeName(b.code)) + "** (" + mdCodeSpan(b.subject) + "): " +
+                 mdSanitizeText(b.summary) + " — _Remediation:_ " + mdSanitizeText(b.remediation) + "\n";
         }
         o += "\n";
     }
@@ -1502,8 +1637,9 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
         o += "_None._\n\n";
     } else {
         for (const auto& dg : p.dedupGroups) {
-            o += "- `" + std::string(dedupTierName(dg.tier)) + "` | `" + dg.resourceKind + "` | `" + dg.keyType +
-                 "` | canonical `" + dg.canonicalMember + "` | refs=" + std::to_string(dg.occurrenceCount) +
+            o += "- " + mdCodeSpan(dedupTierName(dg.tier)) + " | " + mdCodeSpan(dg.resourceKind) + " | " +
+                 mdCodeSpan(dg.keyType) + " | canonical " + mdCodeSpan(dg.canonicalMember) +
+                 " | refs=" + std::to_string(dg.occurrenceCount) +
                  " | savedBytes=" + std::to_string(dg.savedBytes) + " | applied=" +
                  (dg.appliedInExport ? "true" : "false") + "\n";
         }
@@ -1513,8 +1649,9 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
     if (!p.nativeEquivalences.empty()) {
         o += "## Tier-3 Native KST Equivalence (" + std::to_string(p.nativeEquivalences.size()) + ")\n\n";
         for (const auto& ne : p.nativeEquivalences) {
-            o += "- `" + ne.scope + "` | `" + ne.sourceSubject + "` vs `" + ne.targetSubject + "` -> **`" +
-                 std::string(nativeEquivalenceVerdictName(ne.verdict)) + "`** (" + ne.reason + ")\n";
+            o += "- " + mdCodeSpan(ne.scope) + " | " + mdCodeSpan(ne.sourceSubject) + " vs " +
+                 mdCodeSpan(ne.targetSubject) + " -> **" + mdCodeSpan(nativeEquivalenceVerdictName(ne.verdict)) +
+                 "** (" + mdSanitizeText(ne.reason) + ")\n";
         }
         o += "\n";
     }

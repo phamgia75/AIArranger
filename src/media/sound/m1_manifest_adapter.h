@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -336,6 +337,19 @@ inline size_t clampStride(size_t s) {
     if (s == 0) return 1;
     if (s > kMaxCancelCheckStride) return kMaxCancelCheckStride;
     return s;
+}
+
+inline uint64_t satAdd(uint64_t a, uint64_t b) {
+    return (std::numeric_limits<uint64_t>::max() - a < b)
+               ? std::numeric_limits<uint64_t>::max()
+               : (a + b);
+}
+
+inline uint64_t satMul(uint64_t a, uint64_t b) {
+    if (a == 0 || b == 0) return 0;
+    return (std::numeric_limits<uint64_t>::max() / a < b)
+               ? std::numeric_limits<uint64_t>::max()
+               : (a * b);
 }
 
 inline bool tickCancel(const KeepGoing& keepGoing, size_t& counter, size_t stride) {
@@ -647,13 +661,22 @@ inline bool hashNativeRelFilesFolder(
 
     std::vector<std::string> sorted;
     sorted.reserve(relPaths.size());
-    for (const std::string& p : relPaths) sorted.push_back(graph::closure_detail::normalizeRelPath(p));
+    for (const std::string& p : relPaths) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
+            outFileSha256.clear();
+            return false;
+        }
+        sorted.push_back(graph::closure_detail::normalizeRelPath(p));
+    }
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
 
     size_t remainingBudget = maxTotalBytes;
     for (const std::string& rel : sorted) {
-        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return false;
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
+            outFileSha256.clear();
+            return false;
+        }
         if (rel.empty() || rel.find("..") != std::string::npos) continue;
         // Walk path components with O_NOFOLLOW | O_DIRECTORY
         std::vector<std::string> parts;
@@ -866,7 +889,7 @@ inline M1AdapterView adaptFromM1Closure(
                 else if (dep.kind == graph::Kind::Sample) {
                     smps.insert(dep);
                     if (const auto spIt = view.samples.find(dep); spIt != view.samples.end() && spIt->second.hasPcm) {
-                        bytesProxy += spIt->second.payloadBytes;
+                        bytesProxy = adapter_detail::satAdd(bytesProxy, spIt->second.payloadBytes);
                         if (!spIt->second.pcmRelPath.empty()) pcms.insert(spIt->second.pcmRelPath);
                     }
                 }
@@ -1117,9 +1140,10 @@ inline M1AdapterView adaptProvisionalWorkspace(
             uint64_t totalBytes = 0;
             uint32_t sampleIdx = 0;
             for (const auto& [nid, node] : rec.graph.nodes()) {
+                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
                 if (!node.sample) continue;
                 sids.insert(nid);
-                totalBytes += node.sample->bytes();
+                totalBytes = adapter_detail::satAdd(totalBytes, node.sample->bytes());
                 SampleRecord sr;
                 sr.id = nid;
                 sr.index = sampleIdx++;
@@ -1185,10 +1209,17 @@ inline M1AdapterView adaptProvisionalWorkspace(
         } else {
             Sha256 h;
             adapter_detail::hashField(h, rec.relPath);
-            for (const auto& a : ri.explicitSelections) {
+            std::vector<graph::MidiSoundAddress> sortedExplicit = ri.explicitSelections;
+            std::sort(sortedExplicit.begin(), sortedExplicit.end());
+            for (const auto& a : sortedExplicit) {
                 adapter_detail::hashField(h, std::to_string(a.msb) + "/" + std::to_string(a.lsb) + "/" + std::to_string(a.program));
             }
-            for (const auto& pid : ri.directPackageIds) adapter_detail::hashField(h, pid);
+            for (const auto& [addr, pid] : ri.addressToPackageId) {
+                adapter_detail::hashField(h, "map:" + std::to_string(addr.msb) + "/" + std::to_string(addr.lsb) + "/" +
+                                             std::to_string(addr.program) + "=" + pid);
+            }
+            std::set<std::string> sortedDirectPkgs(ri.directPackageIds.begin(), ri.directPackageIds.end());
+            for (const auto& pid : sortedDirectPkgs) adapter_detail::hashField(h, pid);
             rec.contentSha256 = h.hex();
         }
         view.sourceFileSha256[rec.relPath] = rec.contentSha256;
