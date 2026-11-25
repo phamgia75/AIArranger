@@ -282,10 +282,23 @@ static int kstNativeSelectiveExport(int argc, char** argv) {
     req.moveLeftoverAside = cli.moveLeftoverAside;
     req.expectFingerprint = cli.expectFingerprint;
 
-    // 1. Pre-check destination overlap / output-guard / safe .KST name before heavy KST reads
+    // 1. Pre-check destination symlink / overlap / output-guard / safe .KST name before heavy KST reads
     std::error_code absEc;
     const std::filesystem::path destAbs =
         ai_arranger::media::folderPath(std::filesystem::absolute(cli.outKstDir, absEc));
+    {
+        std::error_code symEc;
+        const auto destStat = std::filesystem::symlink_status(destAbs, symEc);
+        if (symEc && destStat.type() != std::filesystem::file_type::not_found) {
+            std::fprintf(stderr, "ERROR: cannot inspect destination path: %s\n",
+                         panative::printable(symEc.message()).c_str());
+            return 1;
+        }
+        if (std::filesystem::is_symlink(destStat)) {
+            std::fprintf(stderr, "ERROR: refusing destination symlink (symlinks are never followed or replaced)\n");
+            return 1;
+        }
+    }
     const std::string leaf = destAbs.filename().string();
     if (leaf.size() <= 4 || leaf.compare(leaf.size() - 4, 4, ".KST") != 0 ||
         !panative::assemble::safeName(leaf.substr(0, leaf.size() - 4))) {
@@ -303,7 +316,8 @@ static int kstNativeSelectiveExport(int argc, char** argv) {
     const SubKstExportPlan reviewed = planSubKstExport(req);
     if (!reviewed.ok || reviewed.cancelled) {
         std::fprintf(stderr, "ERROR: %s\n",
-                     reviewed.error.empty() ? "selective export planning failed" : reviewed.error.c_str());
+                     reviewed.error.empty() ? "selective export planning failed"
+                                            : panative::printable(reviewed.error).c_str());
         return 1;
     }
     if (reviewed.missingSelectionTarget) {
@@ -345,9 +359,10 @@ static int kstNativeSelectiveExport(int argc, char** argv) {
 
     if (st.phase != ai_arranger::jobs::Phase::Done) {
         std::fprintf(stderr, "ERROR: sub-KST NOT written (%s): %s\n",
-                     ai_arranger::jobs::phaseName(st.stoppedAt), st.reason.c_str());
+                     ai_arranger::jobs::phaseName(st.stoppedAt), panative::printable(st.reason).c_str());
         return 1;
     }
+    execSummary->published = true;
 
     const std::string output = cli.jsonOut
                                    ? serializeSubKstExportJson(*finalPlan, *execSummary, st)

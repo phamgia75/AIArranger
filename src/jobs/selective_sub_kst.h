@@ -201,12 +201,13 @@ inline std::vector<std::string> splitComponents(const std::string& rel) {
 }
 
 // Strict validation for RootTreeSubKst output relative paths:
-//  - STYLE/<bank>/<name>.stg
-//  - KEYBOARDSET/<bank>/<name>.ksc
-//  - PAD/<bank>/<name>.pdc
-//  - SETTINGS/<name>.ksc (optional)
-// Refuses PCM/, SOUND/, MULTISMP/, SONGBOOK/, unsafe FAT/KST names, wrong extensions, or depth mismatches.
-inline std::string validateSubKstDestRelPath(const std::string& rel) {
+//  - SelectedKind::Style       -> STYLE/<bank>/<name>.stg
+//  - SelectedKind::KeyboardSet -> KEYBOARDSET/<bank>/<name>.ksc or SETTINGS/<name>.ksc
+//  - SelectedKind::Pad         -> PAD/<bank>/<name>.pdc
+// Refuses PCM/, SOUND/, MULTISMP/, SONGBOOK/, cross-type redirects, unsafe FAT/KST names, wrong extensions, or depth mismatches.
+inline std::string validateSubKstDestRelPath(
+    const std::string& rel,
+    std::optional<media::selective::SelectedKind> expectedKind = std::nullopt) {
     if (!library::detail::plainRel(rel)) {
         return "destination path is not a plain relative path: " + rel;
     }
@@ -220,6 +221,18 @@ inline std::string validateSubKstDestRelPath(const std::string& rel) {
     }
     if (!isAllowedRootTopDirUpper(topUpper)) {
         return "unsupported top-level directory for RootTreeSubKst: " + comps[0];
+    }
+    if (expectedKind.has_value()) {
+        using media::selective::SelectedKind;
+        const bool kindMatchesTop =
+            (*expectedKind == SelectedKind::Style && topUpper == "STYLE") ||
+            (*expectedKind == SelectedKind::KeyboardSet && (topUpper == "KEYBOARDSET" || topUpper == "SETTINGS")) ||
+            (*expectedKind == SelectedKind::Pad && topUpper == "PAD");
+        if (!kindMatchesTop) {
+            return "cross-type target override refused: " +
+                   std::string(media::selective::selectedKindName(*expectedKind)) +
+                   " cannot be exported into " + topUpper + "/ (" + rel + ")";
+        }
     }
     for (size_t i = 1; i < comps.size(); ++i) {
         if (!media::panative::assemble::safeName(comps[i])) {
@@ -624,6 +637,15 @@ inline SubKstExportPlan planSubKstExport(const SubKstExportRequest& req) {
         }
     }
 
+    // Track any extra diagnostics added after planNativeSelectiveExportFromViews() so both
+    // report and dryRunPlan stay 100% canonicalized and synchronized on executable().
+    bool addedDiag = false;
+    auto pushExtraDiag = [&](Diagnostic d) {
+        addedDiag = true;
+        planRes.report.diagnostics.push_back(d);
+        planRes.dryRunPlan.diagnostics.push_back(std::move(d));
+    };
+
     // Also fail closed if user explicitly passed an approved remap entry targeting a slot that is NOT
     // proven Identical in targetKst (or when targetKst is missing/uninspectable).
     if (planRes.ok && !req.approvedSoundRemaps.empty()) {
@@ -642,7 +664,7 @@ inline SubKstExportPlan planSubKstExport(const SubKstExportRequest& req) {
             if (referenced && !matchedAndSatisfied) {
                 const bool alreadyBlocked = planRes.report.blockingDiagnosticCount() > 0;
                 if (!alreadyBlocked) {
-                    Diagnostic d{
+                    pushExtraDiag({
                         DiagnosticCategory::UNSUPPORTED_FORMAT,
                         diag_code::kNativeSoundWriteHold,
                         DiagnosticSeverity::Blocking,
@@ -653,9 +675,7 @@ inline SubKstExportPlan planSubKstExport(const SubKstExportRequest& req) {
                             srcId.str() + " in Target KST.",
                         "Target slot must hold a proven-identical analysed Sound; otherwise use AdvisoryPlan + MAN5 p.736 single-Sound load.",
                         {}
-                    };
-                    planRes.report.diagnostics.push_back(d);
-                    planRes.dryRunPlan.diagnostics.push_back(std::move(d));
+                    });
                 }
             }
         }
@@ -672,12 +692,6 @@ inline SubKstExportPlan planSubKstExport(const SubKstExportRequest& req) {
     }
 
     // 6. Strict Belt-and-Suspenders Sound Eligibility & Allowed Target-Matched Slot Extraction
-    bool addedDiag = false;
-    auto pushExtraDiag = [&](Diagnostic d) {
-        addedDiag = true;
-        planRes.report.diagnostics.push_back(d);
-        planRes.dryRunPlan.diagnostics.push_back(std::move(d));
-    };
 
     for (const CollectedSoundSummary& cs : planRes.dryRunPlan.collectedSounds) {
         if (!adapter_detail::tickCancel(req.keepGoing, tick, stride)) return makeCancelled();
@@ -788,6 +802,21 @@ inline SubKstExportPlan planSubKstExport(const SubKstExportRequest& req) {
                 }
             }
         }
+        if (out.expectedTargetSoundBankSha256.size() < wantedPcgUpper.size()) {
+            pushExtraDiag({
+                DiagnosticCategory::UNSUPPORTED_FORMAT,
+                diag_code::kTargetUninspectable,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Unsupported,
+                "<target>",
+                "SOUND/*.PCG",
+                "Failed to pin SHA-256 of every referenced target SOUND/*.PCG bank file (expected " +
+                    std::to_string(wantedPcgUpper.size()) + ", pinned " +
+                    std::to_string(out.expectedTargetSoundBankSha256.size()) + "); refusing fail-closed.",
+                "Verify target KST SOUND/*.PCG files are readable regular files (no symlinks) and retry.",
+                {}
+            });
+        }
     }
 
     // 7. Build deterministic PlannedRootObjects & validate every destination path strictly
@@ -820,9 +849,9 @@ inline SubKstExportPlan planSubKstExport(const SubKstExportRequest& req) {
         if (obj.renamedOrRebanked) out.anyObjectRenamedOrRebanked = true;
         obj.requiresSmfRemap = !out.midiRemapRules.empty();
 
-        // Enforce strict Root-tree destination path invariant (zero PCM/SOUND/MULTISMP/SONGBOOK)
+        // Enforce strict Root-tree destination path & kind-matching invariant (zero PCM/SOUND/MULTISMP/SONGBOOK, zero cross-type redirect)
         if (!obj.destRelPath.empty()) {
-            const std::string pathErr = detail::validateSubKstDestRelPath(obj.destRelPath);
+            const std::string pathErr = detail::validateSubKstDestRelPath(obj.destRelPath, obj.kind);
             if (!pathErr.empty()) {
                 pushExtraDiag({
                     DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
@@ -958,7 +987,17 @@ inline ExportSpec selectiveSubKstExportSpec(
     s.validate = [st, req, destAbs, outPlan, testHook]() -> std::string {
         if (testHook) testHook("validateStart");
 
-        // Destination checks first (zero wasted source reads on invalid destination / D18 overlap).
+        // Destination checks first (zero wasted source reads on invalid destination / dangling symlink / D18 overlap).
+        {
+            std::error_code symEc;
+            const fs::file_status destStat = fs::symlink_status(destAbs, symEc);
+            if (symEc && destStat.type() != fs::file_type::not_found) {
+                return "refusing: cannot inspect destination path: " + symEc.message();
+            }
+            if (fs::is_symlink(destStat)) {
+                return "refusing: destination path is a symlink (symlinks are never followed or replaced)";
+            }
+        }
         if (const auto why = media::outputFolderRefusal(destAbs);
             !why.empty() && why != media::incompleteRefusal(destAbs)) {
             return why;
@@ -1057,7 +1096,7 @@ inline ExportSpec selectiveSubKstExportSpec(
         size_t totalRemappedEvents = 0;
 
         for (const auto& obj : st->plan.plannedObjects) {
-            if (const std::string perr = detail::validateSubKstDestRelPath(obj.destRelPath); !perr.empty()) {
+            if (const std::string perr = detail::validateSubKstDestRelPath(obj.destRelPath, obj.kind); !perr.empty()) {
                 return {"refusing: " + perr, ""};
             }
 
@@ -1342,7 +1381,7 @@ inline ExportSpec selectiveSubKstExportSpec(
         return filesOnly;
     };
 
-    s.beforePublish = [st, req, outSummary, testHook](const fs::path& out) -> std::string {
+    s.beforePublish = [st, req, testHook](const fs::path& out) -> std::string {
         if (testHook) testHook("beforePublish");
 
         // (1) Re-verify every selected source root file SHA-256 unchanged via pinned source fd (O_NOFOLLOW)
@@ -1396,10 +1435,10 @@ inline ExportSpec selectiveSubKstExportSpec(
             }
         }
 
-        // (3) LAST: re-verify every staged file's descriptor identity & SHA-256 right before renameAtNoReplace
+        // (3) LAST: re-verify every staged file's descriptor identity & SHA-256 right before renameAtNoReplace.
+        // Do NOT set outSummary->published = true here: publication succeeds only after renameAtNoReplace reaches Phase::Done!
         const std::string recheckErr = library::recheckPinned(*st->pinned, out);
         if (!recheckErr.empty()) return recheckErr;
-        if (outSummary) outSummary->published = true;
         return "";
     };
 
@@ -1524,14 +1563,15 @@ inline std::string serializeSubKstExportMarkdown(const SubKstExportPlan& plan,
                                                  const SubKstExecutionSummary& exec,
                                                  const JobState& job) {
     using namespace media::selective;
+    using collector_detail::mdCodeSpan;
     std::string o;
     o += "# Selective Root-Tree Sub-KST Export\n\n";
     o += "> **" + std::string(kHardwareUnverifiedBanner) + "** (`hardwareVerified: false`, `deleteProofAvailable: false`)\n\n";
     o += "- **Published:** `" + std::string(job.phase == Phase::Done ? "true" : "false") + "`\n";
-    o += "- **Output Folder:** `" + diag_detail::mdCell(exec.outputLeafName) + "`\n";
-    o += "- **Mode:** `" + std::string(exportModeName(plan.planResult.report.mode)) + "`"
-         " | **Policy:** `" + std::string(conflictPolicyName(plan.planResult.report.conflictPolicy)) + "`\n";
-    o += "- **Plan Fingerprint (SHA-256):** `" + plan.planFingerprint + "`\n";
+    o += "- **Output Folder:** " + mdCodeSpan(exec.outputLeafName) + "\n";
+    o += "- **Mode:** " + mdCodeSpan(exportModeName(plan.planResult.report.mode)) +
+         " | **Policy:** " + mdCodeSpan(conflictPolicyName(plan.planResult.report.conflictPolicy)) + "\n";
+    o += "- **Plan Fingerprint (SHA-256):** " + mdCodeSpan(plan.planFingerprint) + "\n";
     o += "- **Verification:** L1=" + std::string(job.level.l1.state == Check::Passed ? "PASSED" : "FAILED") +
          ", L2=NOT RUN, L3=NOT RUN\n";
     o += "- **Exported Files:** " + std::to_string(exec.exportedFiles.size()) +
@@ -1542,7 +1582,8 @@ inline std::string serializeSubKstExportMarkdown(const SubKstExportPlan& plan,
     if (!plan.soundRemaps.empty()) {
         o += "## Sound Remaps Applied (SMF Bank/PC)\n\n";
         for (const auto& rm : plan.soundRemaps) {
-            o += "- `" + rm.sourceAddress.shortLabel() + "` -> `" + rm.targetAddress.shortLabel() + "`\n";
+            o += "- " + mdCodeSpan(rm.sourceAddress.shortLabel()) + " -> " +
+                 mdCodeSpan(rm.targetAddress.shortLabel()) + "\n";
         }
         o += "\n";
     }
@@ -1557,7 +1598,7 @@ inline std::string serializeSubKstExportMarkdown(const SubKstExportPlan& plan,
 
     o += "## Exported Root-Tree Files\n\n";
     for (const auto& f : exec.exportedFiles) {
-        o += "- `" + diag_detail::mdCell(f.destRelPath) + "` (`" + f.sha256 + "`, " +
+        o += "- " + mdCodeSpan(f.destRelPath) + " (" + mdCodeSpan(f.sha256) + ", " +
              std::to_string(f.bytes) + " bytes" +
              (f.remapped ? (", " + std::to_string(f.remappedEvents) + " MIDI event(s) remapped") : ", verbatim") +
              ")\n";

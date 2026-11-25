@@ -1274,6 +1274,125 @@ int main() {
                      "--move-leftover-aside"}).exitCode == 0 && fs::is_directory(cliRecOut));
     }
 
+    std::printf("=== 9. Hardening Regression Tests (P2-1, P2-2, P3-2, P3-3, P3-4) ===\n");
+    {
+        // P2-1: Invalid --approve-remap for an exact-matched Sound (USER01/5 -> USER04/12, different Sound)
+        // must synchronize dryRunPlan.executable == false, report.executable() == false, and canonicalize diagnostics!
+        subkst::SubKstExportRequest reqBadRemap;
+        reqBadRemap.sourceKst = fx.srcKst;
+        reqBadRemap.targetKst = fx.tgtKst;
+        reqBadRemap.policy = ConflictPolicy::ReuseIdenticalTargetSlot;
+        reqBadRemap.targets = {{SelectedKind::Style, "STYLE/Pop/ExactUser.stg", "", ""}};
+        ResourceId src5, dst12;
+        TEST("Parse slot IDs for P2-1 test",
+             subkst::parseSlotOrResourceId("USER01/5", src5) &&
+             subkst::parseSlotOrResourceId("USER04/12", dst12));
+        reqBadRemap.approvedSoundRemaps[src5] = dst12;
+        const auto plBadRemap = subkst::planSubKstExport(reqBadRemap);
+        const bool diagsSorted = std::is_sorted(
+            plBadRemap.planResult.report.diagnostics.begin(),
+            plBadRemap.planResult.report.diagnostics.end());
+        TEST("P2-1: invalid --approve-remap fails closed & keeps dryRunPlan/report executable in sync",
+             plBadRemap.ok && !plBadRemap.executable() &&
+             !plBadRemap.planResult.dryRunPlan.executable &&
+             !plBadRemap.planResult.report.executable() &&
+             plBadRemap.planResult.dryRunPlan.hasBlockingCode(diag_code::kNativeSoundWriteHold) &&
+             diagsSorted);
+        const fs::path badRemapOut = fx.tmpRoot / "P21BadRemap.KST";
+        const auto rBadRemap = runCli({"kst-native", "selective-export",
+                                       "--source", fx.srcKst.string(),
+                                       "--target", fx.tgtKst.string(),
+                                       "--select", "STYLE/Pop/ExactUser.stg",
+                                       "--policy", "reuse",
+                                       "--approve-remap", "USER01/5=USER04/12",
+                                       "--out", badRemapOut.string(),
+                                       "--json"});
+        TEST("P2-1 CLI: invalid --approve-remap exits 3 & writes nothing",
+             rBadRemap.exitCode == 3 && !fs::exists(badRemapOut) &&
+             !fs::exists(ai_arranger::media::incompletePath(badRemapOut)));
+
+        // P2-2: Cross-type --target-bank redirect (Style -> KEYBOARDSET/Pop/Fake.ksc) refused at PLAN TIME!
+        subkst::SubKstExportRequest reqCrossType;
+        reqCrossType.sourceKst = fx.srcKst;
+        reqCrossType.targets = {{SelectedKind::Style, "STYLE/Pop/FactoryBeat.stg", "KEYBOARDSET/Pop", "Fake.ksc"}};
+        const auto plCrossType = subkst::planSubKstExport(reqCrossType);
+        TEST("P2-2: cross-type Style -> KEYBOARDSET/Pop/Fake.ksc refused at plan time",
+             plCrossType.ok && !plCrossType.executable() &&
+             !plCrossType.planResult.dryRunPlan.executable &&
+             !plCrossType.planResult.report.executable());
+        const fs::path crossOut = fx.tmpRoot / "P22CrossType.KST";
+        const auto rCross = runCli({"kst-native", "selective-export",
+                                    "--source", fx.srcKst.string(),
+                                    "--select", "STYLE/Pop/FactoryBeat.stg",
+                                    "--target-bank", "KEYBOARDSET/Pop",
+                                    "--target-name", "Fake.ksc",
+                                    "--out", crossOut.string(),
+                                    "--json"});
+        TEST("P2-2 CLI: cross-type redirect exits 3 with zero output & zero .INCOMPLETE",
+             rCross.exitCode == 3 && !fs::exists(crossOut) &&
+             !fs::exists(ai_arranger::media::incompletePath(crossOut)));
+
+        // P3-2: outSummary->published stays false if publish fails after beforePublish
+        {
+            subkst::SubKstExportRequest rP32;
+            rP32.sourceKst = fx.srcKst;
+            rP32.targets = {{SelectedKind::Style, "STYLE/Pop/FactoryBeat.stg", "", ""}};
+            const fs::path outP32 = fx.tmpRoot / "P32NoPremature.KST";
+            auto sumP32 = std::make_shared<subkst::SubKstExecutionSummary>();
+            bool sawPublishedInBeforePublish = false;
+            jobs::JobState stP32; stP32.id = 50;
+            jobs::runExport(
+                subkst::selectiveSubKstExportSpec(rP32, outP32, nullptr, sumP32, [&](const char* phase) {
+                    if (std::strcmp(phase, "beforePublish") == 0) {
+                        sawPublishedInBeforePublish = sumP32->published;
+                        // Create dest concurrently so renameAtNoReplace fails after beforePublish returns ""!
+                        fs::create_directory(outP32);
+                    }
+                }),
+                stP32, [] { return false; }, [](const jobs::JobState&) {});
+            TEST("P3-2: outSummary->published is NOT set prematurely before renameAtNoReplace",
+                 !sawPublishedInBeforePublish && stP32.phase == jobs::Phase::Failed && !sumP32->published);
+        }
+
+        // P3-3: Markdown serializer safely escapes backticks inside code spans via mdCodeSpan
+        {
+            subkst::SubKstExportPlan dummyPlan;
+            dummyPlan.planFingerprint = std::string(64, 'a');
+            subkst::SubKstExecutionSummary dummyExec;
+            dummyExec.outputLeafName = "Weird`Name.KST";
+            dummyExec.exportedFiles.push_back({"STYLE/A/x.stg", "STYLE/A`B/x.stg", std::string(64, 'b'), 42, false, 0});
+            jobs::JobState dummyJob;
+            dummyJob.phase = jobs::Phase::Done;
+            dummyJob.level.l1 = {jobs::Check::Passed, "ok"};
+            const std::string md = subkst::serializeSubKstExportMarkdown(dummyPlan, dummyExec, dummyJob);
+            TEST("P3-3: Markdown code spans escape backticks via mdCodeSpan",
+                 md.find("`Weird\\x60Name.KST`") != std::string::npos &&
+                 md.find("`STYLE/A\\x60B/x.stg`") != std::string::npos);
+        }
+
+        // P3-4: Dangling symlink at --out refused cleanly BEFORE staging (zero .INCOMPLETE created!)
+        {
+            const fs::path danglingOut = fx.tmpRoot / "DanglingOut.KST";
+            const fs::path danglingInc = ai_arranger::media::incompletePath(danglingOut);
+            fs::create_directory_symlink(fx.tmpRoot / "does_not_exist_target", danglingOut);
+            subkst::SubKstExportRequest rDang;
+            rDang.sourceKst = fx.srcKst;
+            rDang.targets = {{SelectedKind::Style, "STYLE/Pop/FactoryBeat.stg", "", ""}};
+            jobs::JobState stDang; stDang.id = 51;
+            jobs::runExport(subkst::selectiveSubKstExportSpec(rDang, danglingOut), stDang, [] { return false; }, [](const jobs::JobState&) {});
+            TEST("P3-4: dangling symlink at --out refused at Phase::Validate with zero .INCOMPLETE",
+                 stDang.phase == jobs::Phase::Failed && stDang.stoppedAt == jobs::Phase::Validate &&
+                 !fs::exists(danglingInc) && fs::is_symlink(fs::symlink_status(danglingOut)));
+            const auto rDangCli = runCli({"kst-native", "selective-export",
+                                          "--source", fx.srcKst.string(),
+                                          "--select", "STYLE/Pop/FactoryBeat.stg",
+                                          "--out", danglingOut.string()});
+            TEST("P3-4 CLI: dangling symlink at --out returns exit 1 with zero .INCOMPLETE",
+                 rDangCli.exitCode == 1 && !fs::exists(danglingInc) &&
+                 fs::is_symlink(fs::symlink_status(danglingOut)));
+        }
+    }
+
     // Final invariant: source & target KSTs 100% byte-identical before & after all tests!
     TEST("Source KST 100% unchanged after entire test suite", dirDigest(fx.srcKst) == srcDigestBefore);
     TEST("Target KST 100% unchanged after entire test suite", dirDigest(fx.tgtKst) == tgtDigestBefore);
