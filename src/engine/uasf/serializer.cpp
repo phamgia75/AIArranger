@@ -45,7 +45,7 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
     std::vector<uint8_t> snam;   // 'SNAM' payload: names the reader would not restore by itself
     for (size_t si = 0; si < style.sections.size() && si < format::kMaxSections; ++si) {
         const auto& n = style.sections[si].name;
-        if (!style.sections[si].keep_name || n.empty()) continue;   // importer names are not stored (files unchanged)
+        if (!style.sections[si].keep_name || n.empty()) continue;   // only keep_name sections are written into 'SNAM'
         if (n.size() > 64) return {false, {}, "Section " + std::to_string(si) + ": name longer than 64 bytes"};
         snam.push_back(static_cast<uint8_t>(si));
         snam.push_back(static_cast<uint8_t>(n.size()));
@@ -76,7 +76,11 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
             kexp.insert(kexp.end(), {static_cast<uint8_t>(key.first), key.second, s.msb, s.lsb, s.pc});
         }
     }
-    std::vector<uint8_t> casm;   // 'CASM' payload (v1.2 additive extension)
+    std::vector<uint8_t> casm;   // 'CASM' payload (v1.2 additive extension, 34 bytes/record)
+    auto zoneValid = [](const CasmZoneParams& z) {
+        return z.ntt <= 127 && z.high_key <= 11 && z.note_low <= 127 &&
+               z.note_high <= 127 && z.note_low <= z.note_high;
+    };
     for (size_t si = 0; si < style.sections.size() && si < format::kMaxSections; ++si) {
         const auto& tracks = style.sections[si].tracks;
         for (size_t ti = 0; ti < tracks.size() && ti < format::kMaxTracksPerSection; ++ti) {
@@ -84,7 +88,8 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
             if (!a.hasCasmMetadata()) continue;
             if (a.ntt > 127 || a.source_chord_root > 11 || a.note_mute_mask > 0x0FFF ||
                 (a.chord_mute_mask >> 34) != 0 || a.zone_low > 127 || a.zone_high > 127 ||
-                a.zone_low > a.zone_high || (a.dest_channel > 15 && a.dest_channel != 0xFF)) {
+                a.zone_low > a.zone_high || (a.dest_channel > 15 && a.dest_channel != 0xFF) ||
+                !zoneValid(a.low_zone) || !zoneValid(a.high_zone)) {
                 return {false, {}, "Section " + std::to_string(si) + " track " + std::to_string(ti) +
                                        ": invalid CASM metadata"};
             }
@@ -105,8 +110,19 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
             casm.push_back(a.zone_low);
             casm.push_back(a.zone_high);
             casm.push_back(a.dest_channel);
-            casm.push_back(0);
-            casm.push_back(0);
+            casm.push_back(a.casm_editable);
+            auto writeZone = [&](const CasmZoneParams& z) {
+                casm.push_back(z.ntr);
+                casm.push_back(z.ntt);
+                casm.push_back(z.ntt_bass ? 1 : 0);
+                casm.push_back(z.high_key);
+                casm.push_back(z.note_low);
+                casm.push_back(z.note_high);
+                casm.push_back(z.rtr);
+            };
+            writeZone(a.low_zone);
+            writeZone(a.high_zone);
+            casm.push_back(0);  // reserved
         }
     }
     header.flags = (style.tempo_bpm != 0 || !trns.empty() || !kexp.empty() || !snam.empty() ||

@@ -235,11 +235,24 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                     return result;
                 };
                 if (haveCasm) return badCasm("duplicate");
-                if (ext.length < 1 || (ext.length - 1) % 20 != 0) return badCasm("length");
+                constexpr uint32_t kCasmRecordSize = 34;
+                if (ext.length < 1 || (ext.length - 1) % kCasmRecordSize != 0) return badCasm("length");
                 const uint8_t ver = readU8();
                 if (ver != 1) return badCasm("version");
-                const uint32_t count = (ext.length - 1) / 20;
+                const uint32_t count = (ext.length - 1) / kCasmRecordSize;
                 int lastKey = -1;
+                auto readZone = [&](CasmZoneParams& z) -> bool {
+                    z.ntr = readU8();
+                    z.ntt = readU8();
+                    const uint8_t b = readU8();
+                    z.high_key = readU8();
+                    z.note_low = readU8();
+                    z.note_high = readU8();
+                    z.rtr = readU8();
+                    z.ntt_bass = b != 0;
+                    return z.ntt <= 127 && b <= 1 && z.high_key <= 11 &&
+                           z.note_low <= 127 && z.note_high <= 127 && z.note_low <= z.note_high;
+                };
                 for (uint32_t k = 0; k < count; ++k) {
                     const uint8_t si = readU8();
                     const uint8_t ti = readU8();
@@ -257,14 +270,18 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                     const uint8_t zLo = readU8();
                     const uint8_t zHi = readU8();
                     const uint8_t destCh = readU8();
-                    (void)readU16(); // reserved
+                    const uint8_t editable = readU8();
+                    CasmZoneParams lowZ{}, highZ{};
+                    const bool lowOk = readZone(lowZ);
+                    const bool highOk = readZone(highZ);
+                    (void)readU8(); // reserved
                     const int key = (static_cast<int>(si) << 8) | static_cast<int>(ti);
                     if (key <= lastKey || si >= style.sections.size() ||
                         ti >= style.sections[si].tracks.size() ||
                         ntt > 127 || nttBass > 1 || srcRoot > 11 ||
                         noteMute > 0x0FFF || (chordMute >> 34) != 0 ||
                         zLo > 127 || zHi > 127 || zLo > zHi ||
-                        (destCh > 15 && destCh != 0xFF)) {
+                        (destCh > 15 && destCh != 0xFF) || !lowOk || !highOk) {
                         return badCasm("entry out of range");
                     }
                     lastKey = key;
@@ -281,6 +298,9 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                     a.zone_low = zLo;
                     a.zone_high = zHi;
                     a.dest_channel = destCh;
+                    a.casm_editable = editable;
+                    a.low_zone = lowZ;
+                    a.high_zone = highZ;
                 }
                 haveCasm = true;
                 continue;

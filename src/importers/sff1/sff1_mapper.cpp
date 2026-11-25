@@ -19,6 +19,19 @@ void setRegisterLimits(uasf::ArticulationMetadata& a, const CasmTrackConfig& c) 
     a.note_low  = limitsOk ? c.note_low : 0;
     a.note_high = limitsOk ? c.note_high : 127;
 }
+uasf::CasmZoneParams mapZone(const CasmZoneConfig& z) noexcept {
+    uasf::CasmZoneParams out{};
+    out.ntr = z.ntr;
+    out.ntt = z.ntt & 0x7F;
+    out.ntt_bass = z.ntt_bass;
+    out.high_key = (z.high_key <= 11) ? z.high_key : 11;
+    const bool ok = z.note_high <= 127 && z.note_low <= z.note_high;
+    out.note_low = ok ? z.note_low : 0;
+    out.note_high = ok ? z.note_high : 127;
+    out.rtr = z.rtr;
+    return out;
+}
+
 void setCasmArticulation(uasf::ArticulationMetadata& a, const CasmTrackConfig& c) noexcept {
     a.has_casm_meta = true;
     a.ntr = c.ntr;
@@ -32,6 +45,9 @@ void setCasmArticulation(uasf::ArticulationMetadata& a, const CasmTrackConfig& c
     a.zone_low = (c.zone_low <= 127) ? c.zone_low : 0;
     a.zone_high = (c.zone_high <= 127 && c.zone_high >= a.zone_low) ? c.zone_high : 127;
     a.dest_channel = (c.dest_channel <= 15) ? c.dest_channel : 0xFF;
+    a.casm_editable = c.editable;
+    a.low_zone = mapZone(c.low_zone);
+    a.high_zone = mapZone(c.high_zone);
     setRegisterLimits(a, c);
 }
 

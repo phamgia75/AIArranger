@@ -94,6 +94,16 @@ struct PlaybackRecommendation {
     bool degradation_allowed = false;   // GM fallback only with warning
 };
 
+struct CasmZoneParams {
+    uint8_t ntr = 0;
+    uint8_t ntt = 0;
+    bool    ntt_bass = false;
+    uint8_t high_key = 11;
+    uint8_t note_low = 0;
+    uint8_t note_high = 127;
+    uint8_t rtr = 0;
+};
+
 struct ArticulationMetadata {
     ArticulationProfile profile = ArticulationProfile::Generic;
     FidelityRequirement fidelity = FidelityRequirement::Low;
@@ -111,16 +121,19 @@ struct ArticulationMetadata {
     }
     // Extended per-track CASM metadata persisted in additive UASF extension 'CASM' (v1.2).
     // Absent in v1.0/v1.1 files (has_casm_meta == false -> zero 'CASM' bytes written).
-    bool     has_casm_meta = false;
-    bool     ntt_bass = false;
-    uint8_t  rtr = 0;
-    uint8_t  source_chord_root = 0;
-    uint8_t  source_chord_type = 0;
-    uint16_t note_mute_mask = 0x0FFF;
-    uint64_t chord_mute_mask = 0x3FFFFFFFFull;
-    uint8_t  zone_low = 0;
-    uint8_t  zone_high = 127;
-    uint8_t  dest_channel = 0xFF;     // 0..15 or 0xFF = unset
+    bool           has_casm_meta = false;
+    bool           ntt_bass = false;
+    uint8_t        rtr = 0;
+    uint8_t        source_chord_root = 0;
+    uint8_t        source_chord_type = 0;
+    uint16_t       note_mute_mask = 0x0FFF;
+    uint64_t       chord_mute_mask = 0x3FFFFFFFFull;
+    uint8_t        zone_low = 0;
+    uint8_t        zone_high = 127;
+    uint8_t        dest_channel = 0xFF;     // 0..15 or 0xFF = unset
+    uint8_t        casm_editable = 0;
+    CasmZoneParams low_zone{};
+    CasmZoneParams high_zone{};
     bool hasCasmMetadata() const noexcept { return has_casm_meta; }
     std::string vendor;
     std::string vendor_articulation;
@@ -150,8 +163,9 @@ struct SectionDefinition {
     uint32_t beats_per_bar = 0;
     uint32_t beat_note = 0;       // denominator (4 = quarter note)
     std::vector<TrackDefinition> tracks;
-    // The name is stored in UASF ('SNAM'): set by a Studio rename or a new element, and on names read from 'SNAM'.
-    // Other names (the importer's) are not stored, as before (the reader gives "Section <index>").
+    // The name is stored in UASF ('SNAM') when keep_name is true: set by SFF1/SFF2 imports
+    // for named Yamaha sections, by Studio renames/new elements, and on names read from 'SNAM'.
+    // Manually built styles with keep_name=false and legacy v1.0/v1.1 files without 'SNAM' remain unchanged.
     bool keep_name = false;
 };
 

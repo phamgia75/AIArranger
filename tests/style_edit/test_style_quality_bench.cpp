@@ -1,15 +1,21 @@
-// Track B Milestone Q1 Comprehensive Regression Tests:
-//   1. SFF1 Ctab / Cntt parsing & UASF round-trip
+// Track B Milestone Q1 Comprehensive Regression Tests (incl. Audit Round 1 P1/P2/P3 checks):
+//   1. SFF1 Ctab / Cntt parsing, section-scoped Cntt (P3-2) & UASF round-trip
 //   2. Full SFF2 Ctb2 (editable, 12-bit note mute, 34-bit chord mute, source chord,
 //      Low/Mid/High zones, RTR, dest_channel) + explicit OTSc/FNRP/MDB detection
-//   3. UASF additive 'CASM' extension serialize/deserialize, malformed rejection,
-//      v1.0/v1.1 golden backward compatibility, and 'SNAM' importer section names
+//   3. UASF additive 'CASM' v1 (34-byte records incl. editable + Low/High zones, P2-3),
+//      malformed rejection, v1.0/v1.1 golden backward compatibility & 'SNAM' names
 //   4. SInt mix CC propagation (CC7/10/11/91/93, excluding Bank/PC) to ALL sections
-//   5. Mixed-meter FF 58 per-element preservation (6/8 + 4/4 + 2/4)
-//   6. BreakPolicy::Yamaha1BarCap ("br" 1-bar cap, 0 stuck notes, STYLE_QUAL_BREAK_TAIL_TRUNCATED)
-//   7. Offline multi-chord 13-chord benchmark matrix, determinism, fixed-weight invariant,
-//      path-scrubbed JSON, epistemic stamps, and CLI execution
-//   8. Malformed / truncated / encrypted .sty fail-closed hardening
+//   5. Mixed-meter FF 58 per-element preservation (6/8 + 4/4 + 2/4) & BreakPolicy::Yamaha1BarCap
+//   6. Offline 13-chord benchmark matrix, fixed weights, determinism, path-scrubbing,
+//      P1-1 (no side-channel UASF credit + slash-chord bass-inversion math),
+//      P1-2 (honest M6 scoring + targetKstEvaluated),
+//      P1-3 (M2.3 source-velocity bucketing: raw fails, Q2-sanitized passes!),
+//      P1-4 (corpusSummary + activeComposite + corpusGrade),
+//      P1-5 (M3.4 p99DriftMs detects +40 ms exported timing shift!),
+//      P2-1 (M4.2/M4.4 drum family preservation & velocity correlation under Q3 remap),
+//      P2-2 (active-channel CASM preservation = 1.0, zero false warnings),
+//      P2-5 (toMarkdown emits INVALID label when !structuralValid)
+//   7. Malformed / truncated / encrypted .sty fail-closed hardening
 
 #include "engine/uasf/deserializer.h"
 #include "engine/uasf/format.h"
@@ -53,6 +59,11 @@ static std::string fx(const char* name) {
     return std::string(REPO_DIR) + "/fixtures/synthetic/" + name;
 }
 
+static std::vector<uint8_t> readFileBytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
 static std::vector<uint8_t> makeChunk(const char* id4, const std::vector<uint8_t>& body) {
     std::vector<uint8_t> b;
     b.insert(b.end(), id4, id4 + 4);
@@ -66,7 +77,7 @@ static std::vector<uint8_t> makeChunk(const char* id4, const std::vector<uint8_t
 }
 
 static void testSff1CtabCntt() {
-    std::printf("1. SFF1 Ctab / Cntt parsing & UASF round-trip\n");
+    std::printf("1. SFF1 Ctab / Cntt parsing, section-scoped Cntt (P3-2) & UASF round-trip\n");
     const auto pr = Sff1Reader().parseFile(fx("SYNTH_SFF1_CTAB_CNTT.sty"));
     TEST("sff1: parses successfully", pr.success && !pr.casm_sections.empty());
     TEST("sff1: all CASM configs came from Ctab (0 Ctb2)",
@@ -85,6 +96,32 @@ static void testSff1CtabCntt() {
          bass->high_key == 4 && bass->note_low == 28 && bass->note_high == 55 && bass->rtr == 4);
     TEST("sff1: E.Piano Ctab routes ch 4 -> dest_channel 14, ntr=1, ntt=2",
          ep && ep->name == "E.Piano" && ep->dest_channel == 14 && ep->ntr == 1 && ep->ntt == 2 && !ep->ntt_bass);
+
+    // P3-2: Cntt in section 2 for a channel absent in section 2 must NOT clobber section 1's Ctab!
+    {
+        std::vector<uint8_t> ctab1(33, 0);
+        ctab1[0] = 10;
+        std::memcpy(&ctab1[1], "Bass    ", 8);
+        ctab1[9] = 10; ctab1[20] = 0; ctab1[21] = 0x01; ctab1[22] = 5; ctab1[23] = 28; ctab1[24] = 55;
+        std::vector<uint8_t> s1;
+        auto sd1 = makeChunk("Sdec", {'M', 'a', 'i', 'n', ' ', 'A'});
+        auto ct1 = makeChunk("Ctab", ctab1);
+        s1.insert(s1.end(), sd1.begin(), sd1.end());
+        s1.insert(s1.end(), ct1.begin(), ct1.end());
+
+        std::vector<uint8_t> s2;
+        auto sd2 = makeChunk("Sdec", {'M', 'a', 'i', 'n', ' ', 'B'});
+        auto cn2 = makeChunk("Cntt", {10, 0x82}); // ch 10 not present in Main B!
+        s2.insert(s2.end(), sd2.begin(), sd2.end());
+        s2.insert(s2.end(), cn2.begin(), cn2.end());
+        auto cseg2 = makeChunk("CSEG", s2);
+        s1.insert(s1.end(), cseg2.begin(), cseg2.end());
+
+        auto casm = makeChunk("CASM", makeChunk("CSEG", s1));
+        const auto r = Sff1Reader().parseBuffer(casm, "cntt_scope.sty");
+        TEST("P3-2: Cntt in section 2 does not clobber section 1's Ctab config",
+             r.success && r.casm_configs.size() == 1 && !r.casm_configs[0].ntt_bass && r.casm_configs[0].ntt == 1);
+    }
 
     const auto mr = Sff1ToUasfMapper().map(pr);
     TEST("sff1: mapper succeeds & preserves section names (keep_name=true)",
@@ -113,7 +150,6 @@ static void testSff1CtabCntt() {
     TEST("sff1: UASF round-trip keeps SNAM section names and CASM Bass + routed E.Piano",
          namesKept && foundBass && foundEp);
 
-    // Korg export from reloaded UASF (even with empty opt.route!) routes ch 4 -> Acc4 via UASF CASM dest_channel!
     korg::MapOptions kopt;
     kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
     const auto kr = korg::mapToKorg(des.style, kopt);
@@ -175,8 +211,7 @@ static void testSff2FullCtb2AndChunks() {
 }
 
 static void testUasfCasmExtensionAndCompat() {
-    std::printf("3. UASF 'CASM' extension round-trip, validation & v1.0/v1.1 backward compatibility\n");
-    // v1.0 golden file loads, validates, has no CASM, re-serializes with zero CASM block
+    std::printf("3. UASF 'CASM' v1 (34-byte incl. editable + Low/High zones, P2-3) & golden compat\n");
     {
         const std::string goldenPath = std::string(REPO_DIR) + "/tests/golden/uasf/gate-3-demo-v1.uasf";
         const auto r = uasf::UasfDeserializer().deserializeFromFile(goldenPath);
@@ -191,43 +226,60 @@ static void testUasfCasmExtensionAndCompat() {
                                             std::begin("CASM"), std::begin("CASM") + 4) != ser.data.end();
         TEST("v1.0 golden: re-serializes without 'CASM' block", ser.success && !hasCasmTag);
     }
-    // Full round-trip + malformed CASM trust-boundary checks
+    // P2-3: Multi-zone editable + low_zone + high_zone full lossless UASF round-trip!
     {
-        const auto pr = Sff1Reader().parseFile(fx("SYNTH_CHORD_MUTE_SPLIT.sty"));
+        const auto pr = Sff1Reader().parseFile(fx("SYNTH_MULTI_ZONE_SART_OTS.sty"));
         const auto mr = Sff1ToUasfMapper().map(pr);
         const auto ser = uasf::UasfSerializer().serialize(mr.style);
         const auto des = uasf::UasfDeserializer().deserialize(ser.data);
-        TEST("casm ext: serialize + deserialize succeeds", ser.success && des.success);
+        TEST("P2-3 multi-zone: serialize + deserialize succeeds", ser.success && des.success);
+        bool zoneRoundTripOk = false;
+        for (const auto& sec : des.style.sections) {
+            for (const auto& tr : sec.tracks) {
+                if (tr.midi_channel != 11) continue;
+                const auto& a = tr.articulation;
+                if (a.has_casm_meta && a.casm_editable == 1 && a.zone_low == 48 && a.zone_high == 72 &&
+                    a.low_zone.ntr == 0 && a.low_zone.ntt == 1 && a.low_zone.ntt_bass &&
+                    a.low_zone.high_key == 5 && a.low_zone.note_low == 28 && a.low_zone.note_high == 52 && a.low_zone.rtr == 1 &&
+                    a.ntr == 0 && a.ntt == 2 && a.rtr == 3 &&
+                    a.high_zone.ntr == 1 && a.high_zone.ntt == 1 && !a.high_zone.ntt_bass &&
+                    a.high_zone.high_key == 11 && a.high_zone.note_low == 72 && a.high_zone.note_high == 96 && a.high_zone.rtr == 2) {
+                    zoneRoundTripOk = true;
+                }
+            }
+        }
+        TEST("P2-3 multi-zone: editable + Low/Mid/High zones survive UASF round-trip 100% losslessly", zoneRoundTripOk);
+
         const auto ser2 = uasf::UasfSerializer().serialize(des.style);
         TEST("casm ext: serialize(deserialize(x)) == x (byte-identical)", ser2.success && ser2.data == ser.data);
 
-        // Locate 'CASM' extension block and test fail-closed mutations
+        // Locate 'CASM' block and test strict validation mutations
         size_t casmAt = 0;
         for (size_t i = 0; i + 8 < ser.data.size(); ++i) {
             if (std::memcmp(ser.data.data() + i, "CASM", 4) == 0) { casmAt = i; break; }
         }
         TEST("casm ext: 'CASM' tag present in serialized bytes", casmAt > 0);
         if (casmAt > 0) {
-            auto badVer = ser.data;
-            badVer[casmAt + 8] = 2; // version != 1
+            auto badVer = ser.data; badVer[casmAt + 8] = 2;
             TEST("casm ext: bad version rejected", !uasf::UasfDeserializer().deserialize(badVer).success);
 
-            auto badRoot = ser.data;
-            badRoot[casmAt + 8 + 1 + 6] = 12; // source_chord_root > 11
+            auto badRoot = ser.data; badRoot[casmAt + 8 + 1 + 6] = 12;
             TEST("casm ext: source_chord_root > 11 rejected", !uasf::UasfDeserializer().deserialize(badRoot).success);
 
-            auto badDest = ser.data;
-            badDest[casmAt + 8 + 1 + 17] = 16; // dest_channel == 16 (not 0..15 or 0xFF)
+            auto badDest = ser.data; badDest[casmAt + 8 + 1 + 17] = 16;
             TEST("casm ext: invalid dest_channel 16 rejected", !uasf::UasfDeserializer().deserialize(badDest).success);
 
-            auto badNtt = ser.data;
-            badNtt[casmAt + 8 + 1 + 3] = 0x80; // ntt > 127
+            auto badNtt = ser.data; badNtt[casmAt + 8 + 1 + 3] = 0x80;
             TEST("casm ext: ntt > 127 rejected", !uasf::UasfDeserializer().deserialize(badNtt).success);
 
-            auto badZone = ser.data;
-            badZone[casmAt + 8 + 1 + 15] = 80; // zone_low > zone_high
-            badZone[casmAt + 8 + 1 + 16] = 40;
+            auto badZone = ser.data; badZone[casmAt + 8 + 1 + 15] = 80; badZone[casmAt + 8 + 1 + 16] = 40;
             TEST("casm ext: zone_low > zone_high rejected", !uasf::UasfDeserializer().deserialize(badZone).success);
+
+            auto badLowHk = ser.data; badLowHk[casmAt + 8 + 1 + 19 + 3] = 12; // low_zone.high_key > 11
+            TEST("casm ext: low_zone high_key > 11 rejected", !uasf::UasfDeserializer().deserialize(badLowHk).success);
+
+            auto badHighLoHi = ser.data; badHighLoHi[casmAt + 8 + 1 + 26 + 4] = 90; badHighLoHi[casmAt + 8 + 1 + 26 + 5] = 40;
+            TEST("casm ext: high_zone note_low > note_high rejected", !uasf::UasfDeserializer().deserialize(badHighLoHi).success);
         }
     }
 }
@@ -266,7 +318,6 @@ static void testSintPropagationAllSections() {
 
 static void testMixedMeterAndBreakPolicy() {
     std::printf("5. Mixed-meter FF 58 preservation & BreakPolicy::Yamaha1BarCap\n");
-    // Mixed meter: 6/8 Intro + 4/4 Main A/B + 2/4 Fill In AA + 4/4 Break + 4/4 Ending A
     {
         const auto pr = Sff1Reader().parseFile(fx("SYNTH_MIXED_METER_RUBATO.sty"));
         TEST("mixed_meter: reader records all 4 FF 58 events", pr.success && pr.time_signatures.size() == 4);
@@ -284,14 +335,12 @@ static void testMixedMeterAndBreakPolicy() {
                 if (e.marker == marker) return e.num == num && e.den == den && e.length == expectedLen;
             return false;
         };
-        TEST("mixed_meter: i1cv1=6/8 (2 bars=2304), v1cv1=4/4 (2 bars=3072), f1cv1=2/4 (1 bar=768), br=4/4 (1 bar=1536)",
+        TEST("mixed_meter: i1cv1=6/8 (2304), v1cv1=4/4 (3072), f1cv1=2/4 (768), br=4/4 (1536)",
              checkEl("i1cv1", 6, 8, 2 * 1152) &&
              checkEl("v1cv1", 4, 4, 2 * 1536) &&
              checkEl("f1cv1", 2, 4, 1 * 768) &&
              checkEl("br", 4, 4, 1 * 1536));
     }
-
-    // BreakPolicy::Yamaha1BarCap on SYNTH_BREAK_TAIL.sty (#26)
     {
         const auto pr = Sff1Reader().parseFile(fx("SYNTH_BREAK_TAIL.sty"));
         const auto mr = Sff1ToUasfMapper().map(pr);
@@ -323,9 +372,10 @@ static void testMixedMeterAndBreakPolicy() {
     }
 }
 
-static void testBenchmarkMatrixDeterminismAndInvariants() {
-    std::printf("6. Benchmark 13-chord matrix, fixed weights, determinism & path-scrubbing\n");
-    // Immutable fixed weight check
+static void testAuditCalibrationAndBenchmarkInvariants() {
+    std::printf("6. Benchmark calibration (P1-1..P1-5, P2-1/P2-2/P2-5), fixed weights & determinism\n");
+
+    // Immutable fixed weights invariant
     const double wSum = bench::kWeightM1 + bench::kWeightM2 + bench::kWeightM3 +
                         bench::kWeightM4 + bench::kWeightM5 + bench::kWeightM6;
     TEST("weights: exact immutable spec values (25/20/15/15/12/13, sum=100%)",
@@ -338,6 +388,20 @@ static void testBenchmarkMatrixDeterminismAndInvariants() {
          std::string(bench::kTestChords[4].symbol) == "Cm7b5" &&
          std::string(bench::kTestChords[12].symbol) == "G7/B");
 
+    // P1-1: Bass inversion math on G7/B shifts root trigger C (36) -> B (47 or 35),
+    // while 5th G (43) shifts by rootPc (+7 -> D = 50 or 38), NEVER by bassPc (+11 -> F#)!
+    {
+        bench::Pa5xTrackParams p{};
+        p.hasOverride = true;
+        p.bassInversion = true;
+        p.wrapKey = 5;
+        const auto& g7b = bench::kTestChords[12]; // G7/B (rootPc=7, bassPc=11)
+        const uint8_t rootOut = bench::detail::simulatePa5xNote(36, korg::kBassCh, false, g7b, p);
+        const uint8_t fifthOut = bench::detail::simulatePa5xNote(43, korg::kBassCh, false, g7b, p);
+        TEST("P1-1 bass inversion math: G7/B maps C->B (pc 11) and G->D (pc 2, NOT F#)",
+             (rootOut % 12) == 11 && (fifthOut % 12) == 2);
+    }
+
     const char* kAll12[] = {
         "SYNTH_POP_SFF2.sty", "SYNTH_FULL_SFF2.sty", "SYNTH_WALTZ_68.sty", "SYNTH_BREAK_TAIL.sty",
         "SYNTH_SFF1_CTAB_CNTT.sty", "SYNTH_SRC_CHORD_NON_C.sty", "SYNTH_CHORD_MUTE_SPLIT.sty",
@@ -349,32 +413,178 @@ static void testBenchmarkMatrixDeterminismAndInvariants() {
     opt.targetPpqn = 384;
     opt.breakYamaha1BarCap = true;
 
+    std::vector<bench::BenchResult> allResults;
     bool allOk = true, allDeterministic = true, allScrubbed = true, allEpistemic = true;
+    bool allCasmActiveOk = true, allM6Honest = true;
     for (const char* name : kAll12) {
         const std::string path = fx(name);
         const auto r1 = bench::evaluateStyleFile(path, opt);
         const auto r2 = bench::evaluateStyleFile(path, opt);
         if (!r1.ok || !r1.structuralValid || r1.matrixSummary.cellsEvaluated == 0) allOk = false;
+        // P2-2: Active-channel CASM preservation must be 100% with zero false STYLE_QUAL_CASM_LOST!
+        if (r1.m1.casmPreservationRate < 0.999) allCasmActiveOk = false;
+        for (const auto& d : r1.diagnostics) if (d.code == "STYLE_QUAL_CASM_LOST") allCasmActiveOk = false;
+        // P1-2: M6 with 0 resolved sounds must be <= 15.0 and targetKstEvaluated=false, targetKstValid=false!
+        if (r1.m6.score > 15.01 || r1.m6.targetKstEvaluated || r1.m6.targetKstValid) allM6Honest = false;
+
         const std::string j1 = bench::toJson(r1);
         const std::string j2 = bench::toJson(r2);
         if (j1 != j2) allDeterministic = false;
         if (j1.find(REPO_DIR) != std::string::npos || j1.find("/Users/") != std::string::npos ||
-            j1.find("/home/") != std::string::npos) {
-            allScrubbed = false;
-        }
+            j1.find("/home/") != std::string::npos) allScrubbed = false;
         if (j1.find("\"hardwareVerified\": false") == std::string::npos ||
             j1.find("\"l3Status\": \"NotRun\"") == std::string::npos ||
             j1.find("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X") == std::string::npos ||
-            j1.find("aiarranger-style-quality-bench/1") == std::string::npos) {
-            allEpistemic = false;
-        }
+            j1.find("aiarranger-style-quality-bench/1") == std::string::npos) allEpistemic = false;
+        allResults.push_back(r1);
     }
     TEST("bench: all 12 CC0 torture fixtures evaluate & structurally validate", allOk);
+    TEST("P2-2: active-channel CASM preservation = 1.0 across all 12 fixtures (zero false CASM_LOST)", allCasmActiveOk);
+    TEST("P1-2: honest M6 <= 15.0 with 0 resolved sounds & targetKstEvaluated=false/targetKstValid=false", allM6Honest);
     TEST("bench: 100% deterministic byte-identical JSON across repeated runs", allDeterministic);
     TEST("bench: JSON output is path-scrubbed (zero host paths leaked)", allScrubbed);
-    TEST("bench: epistemic stamps present (hardwareVerified=false, L3=NotRun, NOT VERIFIED ON A PA5X)", allEpistemic);
+    TEST("bench: epistemic stamps present (hardwareVerified=false, L3=NotRun)", allEpistemic);
 
-    // CLI smoke test
+    // P1-1: Verify SYNTH_MEGAVOICE_GUITAR_BASS has NO side-channel UASF folding or Bass Inversion credit!
+    const auto& megaRes = allResults[7];
+    TEST("P1-1: SYNTH_MEGAVOICE_GUITAR_BASS leaked FX notes keep registerViolationRate > 0.15 & bassSlash < 0.80",
+         megaRes.fixtureName == "SYNTH_MEGAVOICE_GUITAR_BASS.sty" &&
+         megaRes.m1.registerViolationRate > 0.15 && megaRes.m1.bassSlashAccuracy < 0.80 &&
+         megaRes.m2.velocityInversions == 2);
+
+    // P1-2: Explicit --target-kst nonexistent sets targetKstEvaluated=true, targetKstValid=false, m6.score=0
+    {
+        bench::BenchOptions kstOpt = opt;
+        kstOpt.targetKstPath = "/nonexistent/path/Target.KST";
+        const auto rk = bench::evaluateStyleFile(fx("SYNTH_POP_SFF2.sty"), kstOpt);
+        TEST("P1-2: bad --target-kst reports targetKstEvaluated=true, targetKstValid=false, m6=0",
+             rk.ok && rk.m6.targetKstEvaluated && !rk.m6.targetKstValid && rk.m6.score == 0.0);
+    }
+
+    // P1-3: M2.3 velocity-zone bucketing by SOURCE velocity (raw MegaVoice fails; Q2-sanitized passes!)
+    {
+        const std::string megaPath = fx("SYNTH_MEGAVOICE_GUITAR_BASS.sty");
+        const auto rawBytes = readFileBytes(megaPath);
+        const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_MEGAVOICE_GUITAR_BASS.sty");
+        const auto mr = Sff1ToUasfMapper().map(pr);
+        korg::MapOptions kopt;
+        kopt.ppqn = 384;
+        kopt.route = korg::routeFromCasm(pr);
+        kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+        auto kr = korg::mapToKorg(mr.style, kopt);
+        // Simulate Q2 MegaVoice sanitizer on exported SMF:
+        //   - Strip >= 96 FX notes on Bass (ch 8) and Guitar (ch 12)
+        //   - Lift source normal notes (vel 1..64) -> vel 88
+        //   - Soften source high-zone harmonic/muted notes (vel 91..127) -> vel 42
+        korg::Style sanitized = kr.style;
+        for (auto& el : sanitized.elements) {
+            std::vector<korg::Event> clean;
+            for (auto ev : el.events) {
+                uint8_t ch = ev.status & 0x0F;
+                uint8_t hi = ev.status & 0xF0;
+                if ((ch == korg::kBassCh || ch == 12) && (hi == 0x90 || hi == 0x80) && ev.d1 >= 96) continue;
+                if ((ch == korg::kBassCh || ch == 12) && hi == 0x90 && ev.d2 > 0) {
+                    if (ev.d2 <= 64) ev.d2 = 88;
+                    else if (ev.d2 >= 91) ev.d2 = 42;
+                }
+                clean.push_back(ev);
+            }
+            el.events = std::move(clean);
+        }
+        const auto q2Eval = bench::evaluateExportedStyleAgainstSty(
+            rawBytes, sanitized, kr.report, "SYNTH_MEGAVOICE_GUITAR_BASS.sty", opt);
+        TEST("P1-3: Q2-sanitized MegaVoice (src 1..64 -> 88, src 91..127 -> 42) passes with velocityInversions == 0 & leakedFx == 0",
+             q2Eval.ok && q2Eval.structuralValid && q2Eval.m2.velocityInversions == 0 && q2Eval.m2.leakedFxNotesCount == 0);
+    }
+
+    // P1-4: CorpusSummary activeComposite & corpusGrade prevent N/A=100 dilution clearing 85.0
+    {
+        const auto cs = bench::computeCorpusSummary(allResults);
+        TEST("P1-4: corpusSummary exposes honest activeComposite < meanComposite < 85.0, hardViol > 0, corpusGrade == FAIL",
+             cs.fixtureCount == 12 && cs.activeComposite < cs.meanComposite &&
+             cs.meanComposite < 85.0 && cs.hardInvariantViolations > 0 && cs.corpusGrade == "FAIL");
+    }
+
+    // P1-5: M3.4 p99DriftMs detects +40 ms timing shift in actual exported SMF!
+    {
+        const std::string popPath = fx("SYNTH_POP_SFF2.sty");
+        const auto rawBytes = readFileBytes(popPath);
+        const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_POP_SFF2.sty");
+        const auto mr = Sff1ToUasfMapper().map(pr);
+        korg::MapOptions kopt;
+        kopt.ppqn = 384;
+        kopt.route = korg::routeFromCasm(pr);
+        kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+        auto kr = korg::mapToKorg(mr.style, kopt);
+        // Shift all Note-On/Off events in Main A (v1cv1) by +31 ticks (~40.36 ms at 120 BPM, 384 PPQN)
+        korg::Style drifted = kr.style;
+        for (auto& el : drifted.elements) {
+            if (el.marker != "v1cv1") continue;
+            for (auto& ev : el.events) {
+                uint8_t hi = ev.status & 0xF0;
+                if ((hi == 0x90 || hi == 0x80) && ev.tick + 31 < el.length - 1) ev.tick += 31;
+            }
+            std::stable_sort(el.events.begin(), el.events.end(),
+                             [](const korg::Event& a, const korg::Event& b) { return a.tick < b.tick; });
+        }
+        const auto driftEval = bench::evaluateExportedStyleAgainstSty(
+            rawBytes, drifted, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("P1-5: M3.4 p99DriftMs detects +40 ms shifted exported SMF notes (p99DriftMs >= 39.0)",
+             driftEval.ok && driftEval.m3.p99DriftMs >= 39.0);
+    }
+
+    // P2-1: M4.2 family preservation & M4.4 velocity correlation under simulated Q3 drum remap
+    {
+        const std::string drumPath = fx("SYNTH_REVO_XG_DRUMS.sty");
+        const auto rawBytes = readFileBytes(drumPath);
+        const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_REVO_XG_DRUMS.sty");
+        const auto mr = Sff1ToUasfMapper().map(pr);
+        korg::MapOptions kopt;
+        kopt.ppqn = 384;
+        kopt.route = korg::routeFromCasm(pr);
+        kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+        auto kr = korg::mapToKorg(mr.style, kopt);
+        korg::Style remapped = kr.style;
+        auto mapToGm = [](uint8_t p) -> uint8_t {
+            if (p >= 35 && p <= 81) return p;
+            char fam = bench::detail::sourceDrumFamilyOf(p);
+            switch (fam) {
+                case 'B': return 36;
+                case 'S': return 38;
+                case 'H': return 42;
+                case 'T': return 45;
+                case 'C': return 49;
+                default:  return 70; // Latin/Perc
+            }
+        };
+        for (auto& el : remapped.elements) {
+            for (auto& ev : el.events) {
+                uint8_t ch = ev.status & 0x0F;
+                uint8_t hi = ev.status & 0xF0;
+                if ((ch == korg::kDrumCh || ch == korg::kPercCh) && (hi == 0x90 || hi == 0x80)) {
+                    ev.d1 = mapToGm(ev.d1);
+                }
+            }
+        }
+        const auto drumEval = bench::evaluateExportedStyleAgainstSty(
+            rawBytes, remapped, kr.report, "SYNTH_REVO_XG_DRUMS.sty", opt);
+        TEST("P2-1: Q3-style family-preserving drum remap lifts familyPreservationRate to 1.0 & keeps velCorrelation >= 0.99",
+             drumEval.ok && drumEval.m4.familyPreservationRate >= 0.999 && drumEval.m4.velCorrelation >= 0.99);
+    }
+
+    // P2-5: toMarkdown emits STRUCTURALLY INVALID label when !structuralValid
+    {
+        bench::BenchResult invalidRes;
+        invalidRes.ok = true;
+        invalidRes.fixtureName = "BAD_STYLE.sty";
+        invalidRes.structuralValid = false;
+        const std::string md = bench::toMarkdown({invalidRes});
+        TEST("P2-5: toMarkdown emits STRUCTURALLY INVALID label when !structuralValid",
+             md.find(bench::kInvalidLabel) != std::string::npos &&
+             md.find(bench::kValidLabel) == std::string::npos);
+    }
+
+    // CLI smoke test (verifying corpusSummary in batchToJson!)
 #if defined(BENCH_BIN) && !defined(_WIN32)
     {
         const fs::path tmpDir = fs::temp_directory_path() / ("aiarr_bench_test_" + std::to_string(::getpid()));
@@ -396,8 +606,12 @@ static void testBenchmarkMatrixDeterminismAndInvariants() {
         std::ifstream f1(j1, std::ios::binary), f2(j2, std::ios::binary);
         const std::string s1((std::istreambuf_iterator<char>(f1)), {});
         const std::string s2((std::istreambuf_iterator<char>(f2)), {});
-        TEST("bench CLI: exits 0 on 12-fixture dir & produces byte-identical JSON",
-             rc1 == 0 && rc2 == 0 && !s1.empty() && s1 == s2 && fs::exists(md));
+        TEST("bench CLI: exits 0, byte-identical JSON, emits corpusSummary/activeComposite/corpusGrade",
+             rc1 == 0 && rc2 == 0 && !s1.empty() && s1 == s2 && fs::exists(md) &&
+             s1.find("\"corpusSummary\"") != std::string::npos &&
+             s1.find("\"activeComposite\"") != std::string::npos &&
+             s1.find("\"hardInvariantViolations\"") != std::string::npos &&
+             s1.find("\"corpusGrade\": \"FAIL\"") != std::string::npos);
         fs::remove_all(tmpDir);
     }
 #endif
@@ -407,19 +621,16 @@ static void testMalformedFailClosed() {
     std::printf("7. Malformed / truncated / encrypted .sty fail-closed checks\n");
     Sff1Reader reader;
 
-    // Truncated MThd (< 6 bytes)
     {
         auto buf = makeChunk("MThd", {0, 0, 0, 1});
         const auto r = reader.parseBuffer(buf, "trunc_mthd.sty");
         TEST("malformed: truncated MThd fails closed", !r.success);
     }
-    // Zero division MThd
     {
         auto buf = makeChunk("MThd", {0, 0, 0, 1, 0, 0});
         const auto r = reader.parseBuffer(buf, "zero_div.sty");
         TEST("malformed: zero-division MThd fails closed", !r.success);
     }
-    // Encrypted/DRM Yamaha container fails closed
     {
         auto mthd = makeChunk("MThd", {0, 0, 0, 1, 0x01, 0xE0});
         auto cryp = makeChunk("CRYP", {0xDE, 0xAD, 0xBE, 0xEF});
@@ -428,7 +639,6 @@ static void testMalformedFailClosed() {
         TEST("encrypted: CRYP chunk fails closed with encrypted_or_drm=true",
              !r.success && r.encrypted_or_drm);
     }
-    // Truncated Ctab (< 26 bytes) and truncated Cntt (< 2 bytes): safe ignore, zero crash
     {
         auto sdec = makeChunk("Sdec", {'M', 'a', 'i', 'n', ' ', 'A'});
         auto badCtab = makeChunk("Ctab", std::vector<uint8_t>(10, 0));
@@ -442,7 +652,6 @@ static void testMalformedFailClosed() {
         TEST("malformed: truncated Ctab/Cntt ignored safely (0 configs, no crash)",
              r.success && r.casm_configs.empty());
     }
-    // Benchmark fails closed on corrupt buffer
     {
         const auto br = bench::evaluateStyleBuffer({0x01, 0x02, 0x03}, "corrupt.sty");
         TEST("bench: corrupt buffer fails closed (ok=false)", !br.ok && !br.error.empty());
@@ -456,7 +665,7 @@ int main() {
     testUasfCasmExtensionAndCompat();
     testSintPropagationAllSections();
     testMixedMeterAndBreakPolicy();
-    testBenchmarkMatrixDeterminismAndInvariants();
+    testAuditCalibrationAndBenchmarkInvariants();
     testMalformedFailClosed();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

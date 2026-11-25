@@ -46,41 +46,57 @@ bool writeText(const std::string& path, const std::string& text) {
 
 std::string batchToJson(const std::vector<BenchResult>& results) {
     using detail::fmtNum;
+    const CorpusSummary cs = computeCorpusSummary(results);
     std::ostringstream o;
-    double sumM1 = 0, sumM2 = 0, sumM3 = 0, sumM4 = 0, sumM5 = 0, sumM6 = 0, sumComp = 0;
-    size_t okCount = 0;
-    bool allValid = !results.empty();
-    for (const auto& r : results) {
-        if (!r.ok || !r.structuralValid) allValid = false;
-        if (r.ok) {
-            ++okCount;
-            sumM1 += r.m1.score; sumM2 += r.m2.score; sumM3 += r.m3.score;
-            sumM4 += r.m4.score; sumM5 += r.m5.score; sumM6 += r.m6.score;
-            sumComp += r.compositeScore;
-        }
-    }
-    const double denom = okCount ? double(okCount) : 1.0;
     o << "{\n";
     o << "  \"schema\": \"" << kSchemaId << "\",\n";
     o << "  \"hardwareVerified\": false,\n";
     o << "  \"l3Status\": \"NotRun\",\n";
-    o << "  \"label\": \"" << (allValid ? kValidLabel : kInvalidLabel) << "\",\n";
+    o << "  \"label\": \"" << (cs.allStructuralValid ? kValidLabel : kInvalidLabel) << "\",\n";
     o << "  \"weights\": { \"M1\": 0.25, \"M2\": 0.20, \"M3\": 0.15, \"M4\": 0.15, \"M5\": 0.12, \"M6\": 0.13 },\n";
-    o << "  \"fixtureCount\": " << results.size() << ",\n";
-    o << "  \"allStructuralValid\": " << (allValid ? "true" : "false") << ",\n";
+    o << "  \"fixtureCount\": " << cs.fixtureCount << ",\n";
+    o << "  \"allStructuralValid\": " << (cs.allStructuralValid ? "true" : "false") << ",\n";
     o << "  \"meanScores\": {\n";
-    o << "    \"composite\": " << fmtNum(sumComp / denom, 2) << ",\n";
-    o << "    \"M1\": " << fmtNum(sumM1 / denom, 2) << ",\n";
-    o << "    \"M2\": " << fmtNum(sumM2 / denom, 2) << ",\n";
-    o << "    \"M3\": " << fmtNum(sumM3 / denom, 2) << ",\n";
-    o << "    \"M4\": " << fmtNum(sumM4 / denom, 2) << ",\n";
-    o << "    \"M5\": " << fmtNum(sumM5 / denom, 2) << ",\n";
-    o << "    \"M6\": " << fmtNum(sumM6 / denom, 2) << "\n";
+    o << "    \"composite\": " << fmtNum(cs.meanComposite, 2) << ",\n";
+    o << "    \"M1\": " << fmtNum(cs.meanDimensions[0], 2) << ",\n";
+    o << "    \"M2\": " << fmtNum(cs.meanDimensions[1], 2) << ",\n";
+    o << "    \"M3\": " << fmtNum(cs.meanDimensions[2], 2) << ",\n";
+    o << "    \"M4\": " << fmtNum(cs.meanDimensions[3], 2) << ",\n";
+    o << "    \"M5\": " << fmtNum(cs.meanDimensions[4], 2) << ",\n";
+    o << "    \"M6\": " << fmtNum(cs.meanDimensions[5], 2) << "\n";
+    o << "  },\n";
+    o << "  \"corpusSummary\": {\n";
+    o << "    \"fixtureCount\": " << cs.fixtureCount << ",\n";
+    o << "    \"gradeCounts\": { \"pass\": " << cs.passCount
+      << ", \"warn\": " << cs.warnCount
+      << ", \"fail\": " << cs.failCount << " },\n";
+    o << "    \"meanComposite\": " << fmtNum(cs.meanComposite, 2) << ",\n";
+    o << "    \"minComposite\": " << fmtNum(cs.minComposite, 2) << ",\n";
+    o << "    \"minDimensionScores\": { \"M1\": " << fmtNum(cs.minDimensionScores[0], 2)
+      << ", \"M2\": " << fmtNum(cs.minDimensionScores[1], 2)
+      << ", \"M3\": " << fmtNum(cs.minDimensionScores[2], 2)
+      << ", \"M4\": " << fmtNum(cs.minDimensionScores[3], 2)
+      << ", \"M5\": " << fmtNum(cs.minDimensionScores[4], 2)
+      << ", \"M6\": " << fmtNum(cs.minDimensionScores[5], 2) << " },\n";
+    o << "    \"activeDimensionMeans\": { \"M1\": " << fmtNum(cs.activeDimensionMeans[0], 2)
+      << ", \"M2\": " << fmtNum(cs.activeDimensionMeans[1], 2)
+      << ", \"M3\": " << fmtNum(cs.activeDimensionMeans[2], 2)
+      << ", \"M4\": " << fmtNum(cs.activeDimensionMeans[3], 2)
+      << ", \"M5\": " << fmtNum(cs.activeDimensionMeans[4], 2)
+      << ", \"M6\": " << fmtNum(cs.activeDimensionMeans[5], 2) << " },\n";
+    o << "    \"activeDimensionCounts\": { \"M1\": " << cs.activeDimensionCounts[0]
+      << ", \"M2\": " << cs.activeDimensionCounts[1]
+      << ", \"M3\": " << cs.activeDimensionCounts[2]
+      << ", \"M4\": " << cs.activeDimensionCounts[3]
+      << ", \"M5\": " << cs.activeDimensionCounts[4]
+      << ", \"M6\": " << cs.activeDimensionCounts[5] << " },\n";
+    o << "    \"activeComposite\": " << fmtNum(cs.activeComposite, 2) << ",\n";
+    o << "    \"hardInvariantViolations\": " << cs.hardInvariantViolations << ",\n";
+    o << "    \"corpusGrade\": \"" << cs.corpusGrade << "\"\n";
     o << "  },\n";
     o << "  \"fixtures\": [\n";
     for (size_t i = 0; i < results.size(); ++i) {
         std::string item = toJson(results[i]);
-        // Indent by 4 spaces
         std::istringstream iss(item);
         std::string line;
         bool firstLine = true;
@@ -141,8 +157,7 @@ int main(int argc, char** argv) {
         const std::string md = toMarkdown({r});
         if (!jsonOut.empty() && !writeText(jsonOut, js)) return 1;
         if (!mdOut.empty() && !writeText(mdOut, md)) return 1;
-        if (jsonOut.empty() && mdOut.empty()) std::cout << md;
-        else std::cout << md;
+        std::cout << md;
         return r.structuralValid ? 0 : 2;
     }
 

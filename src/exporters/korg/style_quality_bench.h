@@ -10,7 +10,7 @@
 //   hardwareVerified = false, l3Status = "NotRun",
 //   label = "STRUCTURALLY VALID — NOT VERIFIED ON A PA5X".
 //
-// Immutable benchmark weights (sum = 100%):
+// Immutable benchmark weights (sum = 100% — NEVER MODIFY):
 //   M1 Harmonic & Voice-Leading           = 25%
 //   M2 Articulation & MegaVoice Hygiene   = 20%
 //   M3 Section & Structural Completeness  = 15%
@@ -88,26 +88,47 @@ constexpr uint16_t pcMask(std::initializer_list<int> pcs) noexcept {
 }
 
 inline constexpr std::array<TestChord, 13> kTestChords = {{
-    {"Cmaj",  pcMask({0, 4, 7}),     pcMask({0, 2, 4, 7, 9, 11}),   0, 0,  TestChordKind::Major},
-    {"Cmin",  pcMask({0, 3, 7}),     pcMask({0, 2, 3, 5, 7, 10}),   0, 0,  TestChordKind::Minor},
-    {"C7",    pcMask({0, 4, 7, 10}), pcMask({0, 2, 4, 7, 9, 10}),   0, 0,  TestChordKind::Dom7},
-    {"Cmaj7", pcMask({0, 4, 7, 11}), pcMask({0, 2, 4, 7, 9, 11}),   0, 0,  TestChordKind::Maj7},
-    {"Cm7b5", pcMask({0, 3, 6, 10}), pcMask({0, 3, 5, 6, 8, 10}),   0, 0,  TestChordKind::Min7b5},
-    {"Cdim7", pcMask({0, 3, 6, 9}),  pcMask({0, 2, 3, 5, 6, 8, 9, 11}), 0, 0, TestChordKind::Dim7},
-    {"Csus4", pcMask({0, 5, 7}),     pcMask({0, 2, 5, 7, 9, 10}),   0, 0,  TestChordKind::Sus4},
-    {"Cadd9", pcMask({0, 2, 4, 7}),  pcMask({0, 2, 4, 7, 9, 11}),   0, 0,  TestChordKind::Add9},
-    {"C/E",   pcMask({0, 4, 7}),     pcMask({0, 2, 4, 7, 9, 11}),   0, 4,  TestChordKind::Major},
-    {"C/G",   pcMask({0, 4, 7}),     pcMask({0, 2, 4, 7, 9, 11}),   0, 7,  TestChordKind::Major},
-    {"F#maj", pcMask({6, 10, 1}),    pcMask({6, 8, 10, 1, 3, 5}),   6, 6,  TestChordKind::Major},
-    {"Bbmin", pcMask({10, 1, 5}),    pcMask({10, 0, 1, 3, 5, 8}),  10, 10, TestChordKind::Minor},
-    {"G7/B",  pcMask({7, 11, 2, 5}), pcMask({7, 9, 11, 2, 4, 5}),   7, 11, TestChordKind::Dom7},
+    {"Cmaj",  pcMask({0, 4, 7}),     pcMask({0, 2, 4, 7, 9, 11}),       0, 0,  TestChordKind::Major},
+    {"Cmin",  pcMask({0, 3, 7}),     pcMask({0, 2, 3, 5, 7, 10}),       0, 0,  TestChordKind::Minor},
+    {"C7",    pcMask({0, 4, 7, 10}), pcMask({0, 2, 4, 7, 9, 10}),       0, 0,  TestChordKind::Dom7},
+    {"Cmaj7", pcMask({0, 4, 7, 11}), pcMask({0, 2, 4, 7, 9, 11}),       0, 0,  TestChordKind::Maj7},
+    {"Cm7b5", pcMask({0, 3, 6, 10}), pcMask({0, 3, 5, 6, 8, 10}),       0, 0,  TestChordKind::Min7b5},
+    {"Cdim7", pcMask({0, 3, 6, 9}),  pcMask({0, 2, 3, 5, 6, 8, 9, 11}), 0, 0,  TestChordKind::Dim7},
+    {"Csus4", pcMask({0, 5, 7}),     pcMask({0, 2, 5, 7, 9, 10}),       0, 0,  TestChordKind::Sus4},
+    {"Cadd9", pcMask({0, 2, 4, 7}),  pcMask({0, 2, 4, 7, 9, 11}),       0, 0,  TestChordKind::Add9},
+    {"C/E",   pcMask({0, 4, 7}),     pcMask({0, 2, 4, 7, 9, 11}),       0, 4,  TestChordKind::Major},
+    {"C/G",   pcMask({0, 4, 7}),     pcMask({0, 2, 4, 7, 9, 11}),       0, 7,  TestChordKind::Major},
+    {"F#maj", pcMask({6, 10, 1}),    pcMask({6, 8, 10, 1, 3, 5}),       6, 6,  TestChordKind::Major},
+    {"Bbmin", pcMask({10, 1, 5}),    pcMask({10, 0, 1, 3, 5, 8}),      10, 10, TestChordKind::Minor},
+    {"G7/B",  pcMask({7, 11, 2, 5}), pcMask({7, 9, 11, 2, 4, 5}),       7, 11, TestChordKind::Dom7},
 }};
+
+// ── Explicit Optional Converter-Emitted Pa5X Style Edit Parameter Sheet ──
+// When empty (default in Q1 — because SMF carries MIDI notes/CCs only and Q1
+// emits no Style Edit Parameter Sheet), the simulator uses Pa5X Import SMF
+// (Initialize) defaults: Parallel NTT, no Bass Inversion, wrapKey = 11,
+// no Note Limits, no Guitar Mode. NEVER populated side-channel from UASF!
+struct Pa5xTrackParams {
+    bool hasOverride = false;
+    bool bassInversion = false;
+    bool fixedNtr = false;
+    bool guitarMode = false;
+    uint8_t wrapKey = 11;
+    uint8_t limitLow = 0;
+    uint8_t limitHigh = 127;
+};
+
+struct Pa5xParameterSheet {
+    // Key: (baseElement e.g. "v1", korgCh 8..15)
+    std::map<std::pair<std::string, uint8_t>, Pa5xTrackParams> tracks;
+};
 
 // ── Benchmark Options & Structured Output Models ─────────────────────
 struct BenchOptions {
     uint16_t targetPpqn = 384;          // Pa5X native internal resolution (or 0 = keep source)
     bool breakYamaha1BarCap = true;     // Used when BreakPolicy is available in MapOptions
     std::string targetKstPath;          // Optional read-only Target KST path (never written)
+    Pa5xParameterSheet parameterSheet;  // Optional explicit converter-emitted Parameter Sheet (empty in Q1)
 };
 
 struct Diagnostic {
@@ -141,6 +162,7 @@ struct M1Scores {
     double voiceLeadingAvgSemis = 0.0;
     double registerViolationRate = 0.0;
     double voicingCollapseRate = 0.0;
+    // Independent UASF-layer diagnostic ONLY (never fed into Pa5X SMF playback simulation!)
     double casmPreservationRate = 0.0;
 };
 
@@ -148,6 +170,7 @@ struct M2Scores {
     double score = 0.0;
     uint32_t leakedChordRange = 0;
     double leakedFxKeyRate = 0.0;
+    uint32_t leakedFxNotesCount = 0;
     uint32_t velocityInversions = 0;
     double guitarStrumCoherence = 1.0;
 };
@@ -180,7 +203,18 @@ struct M6Scores {
     double score = 0.0;
     double familyMatchRate = 0.0;
     double elementVoicePreservation = 1.0;
-    bool targetKstValid = true;
+    bool hasMidStyleVoiceChanges = false;
+    bool targetKstEvaluated = false;
+    bool targetKstValid = false;
+};
+
+struct ApplicabilityFlags {
+    bool m1Harmonic = false;            // Chord-driven tracks present
+    bool m2Articulation = false;        // MegaVoice / S.Art / Guitar NTR=2 present
+    bool m3SectionStress = false;       // Break / mixed meter / tempo map / loop errors present
+    bool m4DrumStress = false;          // Extended non-GM drums or swapped Rhythm1/2 present
+    bool m5MixStress = false;           // XG SysEx or proprietary NRPN/CC94 present
+    bool m6Timbre = false;              // Exported tracks present
 };
 
 struct MatrixSummary {
@@ -203,6 +237,7 @@ struct BenchResult {
     std::vector<std::string> validationErrors;
     double compositeScore = 0.0;
     std::string grade = "FAIL";
+    ApplicabilityFlags applicability;
     M1Scores m1;
     M2Scores m2;
     M3Scores m3;
@@ -212,6 +247,23 @@ struct BenchResult {
     std::vector<Diagnostic> diagnostics;
     MatrixSummary matrixSummary;
     std::vector<MatrixCell> cells;
+};
+
+struct CorpusSummary {
+    uint32_t fixtureCount = 0;
+    uint32_t passCount = 0;
+    uint32_t warnCount = 0;
+    uint32_t failCount = 0;
+    bool allStructuralValid = false;
+    double meanComposite = 0.0;
+    double minComposite = 0.0;
+    std::array<double, 6> meanDimensions{};
+    std::array<double, 6> minDimensionScores{};
+    std::array<double, 6> activeDimensionMeans{};
+    std::array<uint32_t, 6> activeDimensionCounts{};
+    double activeComposite = 0.0;
+    uint32_t hardInvariantViolations = 0;
+    std::string corpusGrade = "FAIL";
 };
 
 namespace detail {
@@ -257,7 +309,8 @@ inline std::string fmtNum(double v, int prec = 4) {
     return oss.str();
 }
 
-inline char drumFamilyOf(uint8_t note) noexcept {
+// Target Pa5X standard GM2 Drum Family (populated keys 35..81; 0 = unmapped).
+inline char targetPa5xDrumFamilyOf(uint8_t note) noexcept {
     if (note == 35 || note == 36) return 'B';                                 // Bass drum
     if (note == 37 || note == 38 || note == 39 || note == 40) return 'S';     // Snare / Rim / Clap
     if (note == 42 || note == 44 || note == 46) return 'H';                   // Hi-Hat
@@ -265,6 +318,18 @@ inline char drumFamilyOf(uint8_t note) noexcept {
     if (note == 49 || note == 51 || note == 52 || note == 53 || note == 55 || note == 57 || note == 59) return 'C'; // Cymbals
     if (note >= 54 && note <= 81) return 'L';                                 // Latin / Perc
     return 0;                                                                 // Outside GM 35..81
+}
+
+// Source Yamaha XG / Revo! Drum Family (GM 35..81 plus documented XG extended keys 13..34, 82..105).
+inline char sourceDrumFamilyOf(uint8_t note) noexcept {
+    if (const char gm = targetPa5xDrumFamilyOf(note); gm != 0) return gm;
+    if (note >= 13 && note <= 16) return 'S';  // XG Surdo/Rim/Snare roll / Brush tap
+    if (note >= 17 && note <= 24) return 'B';  // XG Kick / Low drum variants
+    if (note >= 25 && note <= 28) return 'S';  // XG Snare Roll / Finger Snap / Brush Swirl-Slap
+    if (note >= 29 && note <= 32) return 'L';  // XG Scratch / Perc / Metronome
+    if (note == 33 || note == 34) return 'B';  // XG Kick / Rim-Kick low variants
+    if (note >= 82 && note <= 105) return 'L'; // XG Shaker / Jingle / Bell Tree / Castanets / Surdo / Ethnic
+    return 'X';                                // Other extended SFX
 }
 
 inline bool isPrimaryKitHit(uint8_t note) noexcept {
@@ -327,6 +392,16 @@ inline int cvIndexOfMarker(const std::string& m) noexcept {
 }
 
 // ── Stage 1: Independent Reference Analyzer (raw .sty bytes) ─────────
+struct RefCasmZone {
+    uint8_t ntr = 0;
+    uint8_t ntt = 0;
+    bool nttBass = false;
+    uint8_t highKey = 11;
+    uint8_t noteLow = 0;
+    uint8_t noteHigh = 127;
+    uint8_t rtr = 0;
+};
+
 struct RefCasmEntry {
     std::string sectionName;
     std::string trackName;
@@ -346,6 +421,8 @@ struct RefCasmEntry {
     uint8_t noteLow = 0;
     uint8_t noteHigh = 127;
     uint8_t rtr = 0;
+    RefCasmZone lowZone{};
+    RefCasmZone highZone{};
     bool fromSff1Ctab = false;
 };
 
@@ -368,6 +445,7 @@ struct RefSection {
     uint32_t expectedBars = 1;
     bool breakHasTail = false;
     std::vector<RefNote> notes;
+    std::set<uint8_t> activeChannels; // channels with any channel event in section
     std::map<uint8_t, std::tuple<int, int, int>> sectionVoices; // ch -> (msb, lsb, pc) changed in section
 };
 
@@ -380,6 +458,7 @@ struct RefAnalysis {
     std::vector<std::pair<uint32_t, uint32_t>> tempos;
     std::vector<std::tuple<uint32_t, uint8_t, uint8_t>> timeSigs;
     uint32_t xgSysexCount = 0;
+    uint32_t srcUnsafeCcCount = 0;
     std::vector<std::string> extraChunks; // OTSc, OTSm, OTS, FNRP, MDB
     std::map<uint8_t, std::map<uint8_t, uint8_t>> sintMixCc;     // ch -> {cc -> val}
     std::map<uint8_t, std::tuple<int, int, int>> sintVoice;      // ch -> (msb, lsb, pc)
@@ -391,11 +470,24 @@ struct RefAnalysis {
     std::set<uint8_t> sartSrcChannels;
     std::set<uint8_t> guitarNtrSrcChannels;
     bool hasChordMutePairs = false;
+    bool hasExtendedDrumNotes = false;
     uint32_t midStyleVoiceChanges = 0;
 };
 
 inline uint32_t readBE32(const uint8_t* p) noexcept {
     return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+
+inline RefCasmZone readRefZone(const uint8_t* z) noexcept {
+    RefCasmZone out{};
+    out.ntr = z[0];
+    out.nttBass = (z[1] & 0x80) != 0;
+    out.ntt = z[1] & 0x7F;
+    out.highKey = z[2];
+    out.noteLow = z[3];
+    out.noteHigh = z[4];
+    out.rtr = z[5];
+    return out;
 }
 
 inline void parseRefCasmRec(const uint8_t* data, size_t size, int depth,
@@ -429,13 +521,16 @@ inline void parseRefCasmRec(const uint8_t* data, size_t size, int depth,
             e.srcType = d[19];
             e.zoneLow = d[20];
             e.zoneHigh = d[21];
-            e.ntr = d[28];
-            e.nttBass = (d[29] & 0x80) != 0;
-            e.ntt = d[29] & 0x7F;
-            e.highKey = d[30];
-            e.noteLow = d[31];
-            e.noteHigh = d[32];
-            e.rtr = d[33];
+            e.lowZone = readRefZone(d + 22);
+            const auto mid = readRefZone(d + 28);
+            e.ntr = mid.ntr;
+            e.nttBass = mid.nttBass;
+            e.ntt = mid.ntt;
+            e.highKey = mid.highKey;
+            e.noteLow = mid.noteLow;
+            e.noteHigh = mid.noteHigh;
+            e.rtr = mid.rtr;
+            if (sz >= 40) e.highZone = readRefZone(d + 34);
             out.casmEntries.push_back(e);
             if (e.srcCh <= 15) {
                 out.firstCasmByCh.emplace(e.srcCh, e);
@@ -473,7 +568,6 @@ inline void parseRefCasmRec(const uint8_t* data, size_t size, int depth,
             const uint8_t srcCh = d[0];
             const bool bass = (d[1] & 0x80) != 0;
             const uint8_t ntt = d[1] & 0x7F;
-            // Apply to matching entry in current section
             for (auto it = out.casmEntries.rbegin(); it != out.casmEntries.rend(); ++it) {
                 if (it->sectionName == curSec && it->srcCh == srcCh) {
                     it->nttBass = bass;
@@ -573,7 +667,10 @@ inline RefAnalysis analyzeReferenceSty(const std::vector<uint8_t>& buf) {
                     uint8_t hi = st & 0xF0;
                     size_t need = (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
                     if (need > sz - p) break;
-                    events.push_back({static_cast<uint32_t>(abs), st, d[p], need == 2 ? d[p + 1] : uint8_t{0}});
+                    uint8_t d1 = d[p];
+                    uint8_t d2 = need == 2 ? d[p + 1] : uint8_t{0};
+                    if (hi == 0xB0 && (d1 == 98 || d1 == 99 || d1 == 94)) ++out.srcUnsafeCcCount;
+                    events.push_back({static_cast<uint32_t>(abs), st, d1, d2});
                     p += need;
                 }
             }
@@ -644,7 +741,6 @@ inline RefAnalysis analyzeReferenceSty(const std::vector<uint8_t>& buf) {
         out.sections.push_back(std::move(sec));
     }
 
-    // Extract SInt mix CCs & voices
     if (haveSInt) {
         for (const auto& e : events) {
             if (e.tick < sintStart || e.tick >= sintEnd) continue;
@@ -663,7 +759,6 @@ inline RefAnalysis analyzeReferenceSty(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // Collect notes and mid-style voice changes per section
     std::map<uint8_t, uint32_t> highNotesByCh;
     std::map<uint8_t, uint32_t> lowSartByCh;
     std::map<uint8_t, uint8_t> velZoneMaskByCh;
@@ -676,12 +771,15 @@ inline RefAnalysis analyzeReferenceSty(const std::vector<uint8_t>& buf) {
                   (isOff && e.tick == sec.musicalEndTick))) {
                 continue;
             }
+            sec.activeChannels.insert(ch);
             uint32_t rel = e.tick - sec.startTick;
             if (hi == 0x90 && e.d2 > 0) {
                 uint16_t k = static_cast<uint16_t>((ch << 8) | e.d1);
                 open[k].push_back(sec.notes.size());
                 sec.notes.push_back({rel, sec.musicalEndTick - sec.startTick, ch, e.d1, e.d2});
-                if (ch != 8 && ch != 9) {
+                if (ch == 8 || ch == 9) {
+                    if (e.d1 < 35 || e.d1 > 81) out.hasExtendedDrumNotes = true;
+                } else {
                     if (e.d1 >= 96) ++highNotesByCh[ch];
                     if (e.d1 >= 12 && e.d1 <= 23) ++lowSartByCh[ch];
                     uint8_t zm = e.d2 <= 64 ? 1 : e.d2 <= 90 ? 2 : e.d2 <= 100 ? 4 : 8;
@@ -709,7 +807,6 @@ inline RefAnalysis analyzeReferenceSty(const std::vector<uint8_t>& buf) {
         }
     }
 
-    // Detect MegaVoice & S.Art channels from Bank/PC + pitch/vel signals
     for (const auto& [ch, v] : out.sintVoice) {
         int msb = std::get<0>(v), lsb = std::get<1>(v);
         if (msb == 63 && (lsb == 120 || lsb == 60)) out.megaVoiceSrcChannels.insert(ch);
@@ -725,7 +822,6 @@ inline RefAnalysis analyzeReferenceSty(const std::vector<uint8_t>& buf) {
         if (cnt > 0) out.sartSrcChannels.insert(ch);
     }
 
-    // Detect mutually exclusive CASM chord-mute pairs targeting the same Korg channel
     std::map<std::string, std::map<uint8_t, std::vector<RefCasmEntry>>> bySecKorg;
     for (const auto& e : out.casmEntries) {
         uint8_t kch = korgChannelFor(e.destCh);
@@ -765,30 +861,28 @@ inline void applyBreakPolicy(OptT& opt, bool yamaha1Bar) noexcept {
     }
 }
 
-struct RoundTrippedTrackMeta {
+struct RoundTrippedUasfCasmCheck {
     bool hasCasm = false;
     uint8_t ntr = 0;
     uint8_t ntt = 0;
     bool nttBass = false;
-    uint8_t highKey = 11;
-    uint8_t noteLow = 0;
-    uint8_t noteHigh = 127;
     uint8_t rtr = 0;
     uint8_t srcRoot = 0;
     uint8_t srcType = 0;
     uint16_t noteMute = 0x0FFF;
     uint64_t chordMute = 0x3FFFFFFFFull;
     uint8_t destCh = 0xFF;
+    bool hasZonesAndEditable = false;
+    uint8_t editable = 0;
+    RefCasmZone lowZone{};
+    RefCasmZone highZone{};
 };
 
 template <typename ArtT>
-inline RoundTrippedTrackMeta extractUasfMeta(const ArtT& a) noexcept {
-    RoundTrippedTrackMeta m;
+inline RoundTrippedUasfCasmCheck extractUasfCasmDiag(const ArtT& a) noexcept {
+    RoundTrippedUasfCasmCheck m;
     m.ntr = a.ntr;
     m.ntt = a.ntt;
-    m.highKey = a.high_key;
-    m.noteLow = a.note_low;
-    m.noteHigh = a.note_high;
     if constexpr (requires { a.ntt_bass; a.rtr; a.source_chord_root; a.source_chord_type; a.chord_mute_mask; a.dest_channel; a.has_casm_meta; }) {
         m.hasCasm = a.has_casm_meta;
         m.nttBass = a.ntt_bass;
@@ -799,10 +893,20 @@ inline RoundTrippedTrackMeta extractUasfMeta(const ArtT& a) noexcept {
         m.chordMute = a.chord_mute_mask;
         m.destCh = a.dest_channel;
     }
+    if constexpr (requires { a.casm_editable; a.low_zone; a.high_zone; }) {
+        m.hasZonesAndEditable = true;
+        m.editable = a.casm_editable;
+        m.lowZone = {a.low_zone.ntr, a.low_zone.ntt, a.low_zone.ntt_bass,
+                     a.low_zone.high_key, a.low_zone.note_low, a.low_zone.note_high, a.low_zone.rtr};
+        m.highZone = {a.high_zone.ntr, a.high_zone.ntt, a.high_zone.ntt_bass,
+                      a.high_zone.high_key, a.high_zone.note_low, a.high_zone.note_high, a.high_zone.rtr};
+    }
     return m;
 }
 
 // ── Offline Pa5X Playback Simulator (MAN5 documented semantics) ──────
+// Strictly evaluates the exported Pa5X Marker SMF + optional explicit
+// Pa5xParameterSheet (NEVER reads UASF CASM side-channel!).
 struct SimNote {
     uint32_t on = 0;
     uint32_t off = 0;
@@ -853,47 +957,37 @@ inline std::vector<SimNote> extractElementTrackNotes(const Element& el, uint8_t 
 // Simulate Pa5X real-time chord transposition for one note on a chord-driven track.
 // Pa5X Import SMF (Initialize) assumes CV1 is recorded in C Major {0,4,7} and CV2 in C Minor {0,3,7}.
 inline uint8_t simulatePa5xNote(uint8_t srcPitch, uint8_t kch, bool isCv2Minor,
-                                const TestChord& chord, const RoundTrippedTrackMeta& meta,
-                                bool isGuitar) noexcept {
-    // 1. Determine chord-table quality mapping relative to Pa5X's recording key (C Maj on CV1, C Min on CV2).
+                                const TestChord& chord, const Pa5xTrackParams& params) noexcept {
     const int srcPc = srcPitch % 12;
     int deltaSemi = 0;
 
     if (kch == kBassCh) {
-        // Bass track: Pa5X Parallel / Root.
-        // Slash-chord Bass Inversion activates when UASF CASM ntt_bass survived round-trip.
-        const uint8_t targetPc = (meta.hasCasm && meta.nttBass) ? chord.bassPc : chord.rootPc;
-        int rootShift = static_cast<int>(targetPc);
-        uint8_t wrapKey = (meta.hasCasm && meta.highKey <= 11) ? meta.highKey : uint8_t{11};
+        // Pa5X Bass track (Parallel / Root).
+        // When Bass Inversion is explicitly enabled via Parameter Sheet (Q3+):
+        //   - Root triggers (srcPc == 0) move to chord.bassPc
+        //   - Non-root bass notes (e.g. 5th G, 3rd E) shift by chord.rootPc (NEVER by bassPc!)
+        const uint8_t wrapKey = (params.hasOverride && params.wrapKey <= 11) ? params.wrapKey : uint8_t{11};
+        const bool useBassInv = params.hasOverride && params.bassInversion && (srcPc == 0);
+        int rootShift = static_cast<int>(useBassInv ? chord.bassPc : chord.rootPc);
         if (rootShift > static_cast<int>(wrapKey)) rootShift -= 12;
-        // On source root (C=0), play targetPc; other pitches shift parallel by rootShift
-        // (matching Pa5X Parallel Root behavior — if pattern was recorded in non-C like D, D+shift misses targetPc!).
         deltaSemi = rootShift;
     } else {
         // Acc1..5: Pa5X Parallel / Chord NTT relative to CV1 (C Maj) or CV2 (C Min).
         int qualityOffset = 0;
         if (!isCv2Minor) {
-            // CV1 recorded assuming C Major {0, 4, 7}
-            if (srcPc == 4) { // Major 3rd in C Maj
+            if (srcPc == 4) {
                 switch (chord.kind) {
                     case TestChordKind::Minor:
                     case TestChordKind::Min7b5:
-                    case TestChordKind::Dim7:  qualityOffset = -1; break; // E -> Eb
-                    case TestChordKind::Sus4:  qualityOffset = +1; break; // E -> F
+                    case TestChordKind::Dim7:  qualityOffset = -1; break;
+                    case TestChordKind::Sus4:  qualityOffset = +1; break;
                     default: break;
                 }
-            } else if (srcPc == 7) { // Perfect 5th in C Maj
+            } else if (srcPc == 7) {
                 if (chord.kind == TestChordKind::Min7b5 || chord.kind == TestChordKind::Dim7)
-                    qualityOffset = -1; // G -> Gb
-            } else if (srcPc == 11) { // Major 7th in C Maj7 pattern
-                // Standard Pa5X CV1 (C Maj) keeps B as B unless Maj7 chord table is explicitly set:
-                // on C7 (b7), an unnormalized Cmaj7 B shifts parallel and clashes unless NTT handles 7th!
-                // On Cmin/Cm7b5/Cdim7, B also clashes against b7/bb7.
-                if (chord.kind == TestChordKind::Dom7 || chord.kind == TestChordKind::Min7b5)
-                    qualityOffset = 0; // Classic source-CMaj7 vs C7 clash when unnormalized!
+                    qualityOffset = -1;
             }
         } else {
-            // CV2 recorded assuming C Minor {0, 3, 7}
             if (srcPc == 3) {
                 if (chord.kind == TestChordKind::Major || chord.kind == TestChordKind::Dom7 ||
                     chord.kind == TestChordKind::Maj7 || chord.kind == TestChordKind::Add9)
@@ -907,25 +1001,22 @@ inline uint8_t simulatePa5xNote(uint8_t srcPitch, uint8_t kch, bool isCv2Minor,
         }
 
         int rootShift = static_cast<int>(chord.rootPc);
-        // Pa5X Wrap Around: uses preserved CASM highKey (or default 11 if CASM lost).
-        // Under NTR=1 (Root Fixed) when preserved in CASM, fold to nearest octave (wrapKey=5).
         uint8_t wrapKey = 11;
-        if (meta.hasCasm) {
-            if (meta.ntr == 1) wrapKey = 5;
-            else if (meta.highKey <= 11) wrapKey = meta.highKey;
+        if (params.hasOverride) {
+            if (params.fixedNtr) wrapKey = 5;
+            else if (params.wrapKey <= 11) wrapKey = params.wrapKey;
         }
         if (rootShift > static_cast<int>(wrapKey)) rootShift -= 12;
         deltaSemi = rootShift + qualityOffset;
     }
 
     int p = static_cast<int>(srcPitch) + deltaSemi;
-    // Apply preserved CASM Note Limits (Pa5X LimitKeyRange) if present
-    if (meta.hasCasm && meta.noteHigh <= 127 && meta.noteLow <= meta.noteHigh &&
-        (meta.noteHigh - meta.noteLow) >= 11) {
-        while (p < static_cast<int>(meta.noteLow) && p + 12 <= 127) p += 12;
-        while (p > static_cast<int>(meta.noteHigh) && p - 12 >= 0) p -= 12;
+    // Apply explicit Parameter Sheet LimitKeyRange ONLY when emitted by converter (never side-channel!).
+    if (params.hasOverride && params.limitHigh <= 127 && params.limitLow <= params.limitHigh &&
+        (params.limitHigh - params.limitLow) >= 11) {
+        while (p < static_cast<int>(params.limitLow) && p + 12 <= 127) p += 12;
+        while (p > static_cast<int>(params.limitHigh) && p - 12 >= 0) p -= 12;
     }
-    (void)isGuitar;
     if (p < 0) p = 0;
     if (p > 127) p = 127;
     return static_cast<uint8_t>(p);
@@ -951,121 +1042,67 @@ inline double pearsonCorrelation(const std::vector<double>& x, const std::vector
     return num / std::sqrt(dx2 * dy2);
 }
 
-} // namespace detail
-
-// ── Main Entrypoint: Evaluate one .sty buffer ────────────────────────
-inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
-                                       const std::string& displayPath,
-                                       const BenchOptions& opt = {}) {
+// Stage 3 core evaluator: evaluates an exported & re-parsed Pa5X Marker SMF against
+// the independent Reference Analyzer output (also callable directly by unit tests for
+// verifying M2.3 Q2 velocity-zone sanitization and M3.4 timing-drift sensitivity!).
+inline BenchResult evaluateReparsedSmf(const RefAnalysis& ref,
+                                       const Style& reparsedStyle,
+                                       const Report& mapReport,
+                                       const uasf::StyleDefinition* roundTrippedUasf,
+                                       const std::string& fixtureName,
+                                       const BenchOptions& opt) {
     BenchResult res;
-    res.fixtureName = detail::basenameOnly(displayPath);
-
-    // ── Stage 1: Reference Analyzer ──────────────────────────────────
-    const auto ref = detail::analyzeReferenceSty(styBytes);
-    if (!ref.ok) {
-        res.error = "Reference analysis failed: " + ref.error;
-        return res;
-    }
+    res.fixtureName = fixtureName;
     res.format = ref.format;
     res.sourcePpqn = ref.ppqn;
     res.sectionsSource = static_cast<uint32_t>(ref.sections.size());
-
-    // ── Stage 2: Real AIArranger Converter Pipeline ──────────────────
-    importers::sff1::Sff1Reader reader;
-    const auto parsed = reader.parseBuffer(styBytes, res.fixtureName);
-    if (!parsed.success) {
-        res.error = "Sff1Reader failed: " + parsed.error;
-        return res;
-    }
-    importers::sff1::Sff1ToUasfMapper mapper;
-    const auto mappedUasf = mapper.map(parsed);
-    if (!mappedUasf.success) {
-        res.error = "Sff1ToUasfMapper failed: " + mappedUasf.error;
-        return res;
-    }
-
-    // Real UASF serialize -> deserialize round-trip so metadata drops ARE caught!
-    uasf::UasfSerializer uasfSer;
-    const auto serRes = uasfSer.serialize(mappedUasf.style);
-    if (!serRes.success) {
-        res.error = "UasfSerializer failed: " + serRes.error;
-        return res;
-    }
-    uasf::UasfDeserializer uasfDes;
-    const auto desRes = uasfDes.deserialize(serRes.data);
-    if (!desRes.success) {
-        res.error = "UasfDeserializer failed: " + desRes.error;
-        return res;
-    }
-    const uasf::StyleDefinition& roundTripped = desRes.style;
-
-    MapOptions kopt;
-    kopt.ppqn = opt.targetPpqn;
-    kopt.route = routeFromCasm(parsed);
-    detail::applyBreakPolicy(kopt, opt.breakYamaha1BarCap);
-
-    const auto mappedKorg = mapToKorg(roundTripped, kopt);
-    if (!mappedKorg.ok) {
-        res.error = "mapToKorg failed: " + mappedKorg.error;
-        return res;
-    }
-
-    const auto written = write(mappedKorg.style);
-    if (!written.ok) {
-        res.error = "korg::write failed: " + written.error;
-        return res;
-    }
-    const auto reparsed = parse(written.bytes);
-    if (!reparsed.ok) {
-        res.error = "korg::parse failed: " + reparsed.error;
-        return res;
-    }
-    res.validationErrors = validate(reparsed.style);
+    res.validationErrors = validate(reparsedStyle);
     res.structuralValid = res.validationErrors.empty();
-    res.targetPpqn = reparsed.style.ppqn;
-    res.sectionsExported = static_cast<uint32_t>(reparsed.style.elements.size());
+    res.targetPpqn = reparsedStyle.ppqn;
+    res.sectionsExported = static_cast<uint32_t>(reparsedStyle.elements.size());
 
-    // ── Index round-tripped UASF CASM metadata per (sectionType, korgCh) ──
-    std::map<std::pair<uasf::SectionType, uint8_t>, detail::RoundTrippedTrackMeta> uasfMeta;
+    // ── Independent UASF-layer CASM round-trip diagnostic (P1-1 / P2-2) ──
+    // Strictly filtered to CASM entries whose (section, srcCh) has active MIDI events.
     uint32_t casmFieldsChecked = 0, casmFieldsPreserved = 0;
-    for (const auto& sec : roundTripped.sections) {
-        for (const auto& tr : sec.tracks) {
-            auto meta = detail::extractUasfMeta(tr.articulation);
-            uint8_t routed = (meta.hasCasm && meta.destCh <= 15) ? meta.destCh : tr.midi_channel;
-            if (!meta.hasCasm) {
-                auto rit = kopt.route.find(tr.midi_channel);
-                if (rit != kopt.route.end()) routed = rit->second;
-            }
-            uint8_t kch = korgChannelFor(routed);
-            if (kch != 0xFF) uasfMeta[{sec.type, kch}] = meta;
-        }
-    }
-    // Check CASM preservation against Reference Analyzer
-    for (const auto& rc : ref.casmEntries) {
-        uasf::SectionType st;
-        if (!detail::markerToSectionType(rc.sectionName, st)) continue;
-        ++casmFieldsChecked;
-        bool matched = false;
-        for (const auto& sec : roundTripped.sections) {
-            if (sec.type != st) continue;
-            for (const auto& tr : sec.tracks) {
-                if (tr.midi_channel != rc.srcCh) continue;
-                auto m = detail::extractUasfMeta(tr.articulation);
-                if (m.hasCasm && m.ntr == rc.ntr && m.ntt == rc.ntt && m.nttBass == rc.nttBass &&
-                    m.srcRoot == rc.srcRoot && m.srcType == rc.srcType &&
-                    m.chordMute == rc.chordMute && m.destCh == rc.destCh) {
-                    matched = true;
+    if (roundTrippedUasf != nullptr) {
+        std::map<std::string, std::set<uint8_t>> activeBySec;
+        for (const auto& rs : ref.sections) activeBySec[rs.name] = rs.activeChannels;
+        for (const auto& rc : ref.casmEntries) {
+            uasf::SectionType st;
+            if (!markerToSectionType(rc.sectionName, st)) continue;
+            auto ait = activeBySec.find(rc.sectionName);
+            if (ait == activeBySec.end() || !ait->second.count(rc.srcCh)) continue; // P2-2: skip silent channels
+            ++casmFieldsChecked;
+            bool matched = false;
+            for (const auto& sec : roundTrippedUasf->sections) {
+                if (sec.type != st) continue;
+                for (const auto& tr : sec.tracks) {
+                    if (tr.midi_channel != rc.srcCh) continue;
+                    const auto m = extractUasfCasmDiag(tr.articulation);
+                    bool zonesOk = true;
+                    if (m.hasZonesAndEditable && !rc.fromSff1Ctab) {
+                        zonesOk = (m.editable == rc.editable) &&
+                                  (m.lowZone.ntr == rc.lowZone.ntr && m.lowZone.ntt == rc.lowZone.ntt &&
+                                   m.lowZone.nttBass == rc.lowZone.nttBass && m.lowZone.rtr == rc.lowZone.rtr) &&
+                                  (m.highZone.ntr == rc.highZone.ntr && m.highZone.ntt == rc.highZone.ntt &&
+                                   m.highZone.nttBass == rc.highZone.nttBass && m.highZone.rtr == rc.highZone.rtr);
+                    }
+                    if (m.hasCasm && m.ntr == rc.ntr && m.ntt == rc.ntt && m.nttBass == rc.nttBass &&
+                        m.srcRoot == rc.srcRoot && m.srcType == rc.srcType &&
+                        m.chordMute == rc.chordMute && m.destCh == rc.destCh && zonesOk) {
+                        matched = true;
+                    }
                 }
             }
+            if (matched) ++casmFieldsPreserved;
         }
-        if (matched) ++casmFieldsPreserved;
     }
     res.m1.casmPreservationRate = casmFieldsChecked ? double(casmFieldsPreserved) / double(casmFieldsChecked) : 1.0;
 
-    // ── Group exported elements by base element name & index ─────────
+    // ── Group exported elements by base element name & CV index ──────
     std::map<std::string, std::map<int, const Element*>> byBaseEl;
-    for (const auto& el : reparsed.style.elements) {
-        byBaseEl[detail::baseElementOfMarker(el.marker)][detail::cvIndexOfMarker(el.marker)] = &el;
+    for (const auto& el : reparsedStyle.elements) {
+        byBaseEl[baseElementOfMarker(el.marker)][cvIndexOfMarker(el.marker)] = &el;
     }
 
     // Track which Korg channels correspond to MegaVoice / S.Art / Guitar sources
@@ -1086,7 +1123,7 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
         if (kch != 0xFF) guitarKorgChs.insert(kch);
     }
 
-    // ── Stage 3: Offline Pa5X Playback Simulator & 6 Metric Families ──
+    // ── Metric Accumulators ──────────────────────────────────────────
     uint64_t m1TotalNotes = 0, m1ClashNotes = 0;
     uint64_t m1BassTriggers = 0, m1BassHits = 0;
     double m1VlSum = 0.0;
@@ -1098,14 +1135,15 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
     uint64_t m2FlaggedNotes = 0, m2LeakedFxNotes = 0;
     uint32_t m2VelInversions = 0;
     uint64_t m2StrumTotal = 0, m2StrumOk = 0;
-    std::map<uint8_t, std::pair<double, uint32_t>> megaLowVelSum;   // kch -> (sum, cnt) for source vel 1..64
-    std::map<uint8_t, std::pair<double, uint32_t>> megaHighVelSum;  // kch -> (sum, cnt) for source vel 91..127
+    // P1-3: bucket exported velocities by SOURCE note velocity (1..64 vs 91..127)
+    std::map<uint8_t, std::pair<double, uint32_t>> megaSrcLowExpVel;
+    std::map<uint8_t, std::pair<double, uint32_t>> megaSrcHighExpVel;
 
     uint32_t m3LoopErrors = 0;
     std::vector<double> m3OnsetDriftsMs;
 
     uint64_t m4DrumHits = 0, m4UnmappedHits = 0;
-    uint64_t m4FamilyPreserved = 0;
+    uint64_t m4FamilyChecked = 0, m4FamilyPreserved = 0;
     std::vector<double> m4SrcVels, m4ExpVels;
     uint64_t expDrumPrimary = 0, expPercPrimary = 0;
 
@@ -1116,14 +1154,8 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
     // 1. Evaluate every exported element × track × 13 chords
     for (const auto& [baseName, cvMap] : byBaseEl) {
         const Element* cv1 = cvMap.count(1) ? cvMap.at(1) : cvMap.begin()->second;
-        // Find matching UASF SectionType for metadata lookup
-        uasf::SectionType secType = uasf::SectionType::Main1;
-        for (int i = 0; i <= static_cast<int>(uasf::SectionType::Break); ++i) {
-            auto st = static_cast<uasf::SectionType>(i);
-            if (detail::baseMarkerForType(st) == baseName) { secType = st; break; }
-        }
 
-        // Unsafe CC scan across all CVs of this element
+        // Unsafe CC scan across ALL CVs of this element
         for (const auto& [cvNum, elPtr] : cvMap) {
             (void)cvNum;
             for (const auto& ev : elPtr->events) {
@@ -1134,7 +1166,7 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
             }
         }
 
-        // Mix CC consistency check on cv1 (tick-0 SInt CCs expected per active channel)
+        // Mix CC consistency check on cv1
         {
             std::set<uint8_t> activeKorgChs;
             std::map<uint8_t, std::map<uint8_t, uint8_t>> tick0Cc;
@@ -1156,25 +1188,32 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
             }
         }
 
+        // Pre-extract notes & loop-boundary errors for EVERY CV (P3-3: no discarded dummyLoop!)
+        std::map<int, std::map<uint8_t, std::pair<std::vector<SimNote>, uint32_t>>> cvTrackNotes;
+        for (const auto& [cvNum, elPtr] : cvMap) {
+            for (uint8_t kch = kBassCh; kch <= 15; ++kch) {
+                uint32_t errs = 0;
+                auto notes = extractElementTrackNotes(*elPtr, kch, errs);
+                m3LoopErrors += errs;
+                cvTrackNotes[cvNum][kch] = {std::move(notes), errs};
+            }
+        }
+
         // Per-track evaluation across the 8 Korg channels (8..15)
         for (uint8_t kch = kBassCh; kch <= 15; ++kch) {
             const bool isDrumTrack = (kch == kDrumCh || kch == kPercCh);
-            uint32_t trackLoopErrs = 0;
-            const auto cv1Notes = detail::extractElementTrackNotes(*cv1, kch, trackLoopErrs);
-            m3LoopErrors += trackLoopErrs;
+            const auto& [cv1Notes, trackLoopErrs] = cvTrackNotes[cvIndexOfMarker(cv1->marker)][kch];
             if (cv1Notes.empty()) continue;
 
             if (isDrumTrack) {
                 uint32_t unmapped = 0;
                 for (const auto& n : cv1Notes) {
                     ++m4DrumHits;
-                    if (n.pitch < 35 || n.pitch > 81) {
+                    if (targetPa5xDrumFamilyOf(n.pitch) == 0) {
                         ++m4UnmappedHits;
                         ++unmapped;
-                    } else {
-                        ++m4FamilyPreserved;
                     }
-                    if (detail::isPrimaryKitHit(n.pitch)) {
+                    if (isPrimaryKitHit(n.pitch)) {
                         if (kch == kDrumCh) ++expDrumPrimary;
                         else ++expPercPrimary;
                     }
@@ -1186,7 +1225,7 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                 cell.noteCount = static_cast<uint32_t>(cv1Notes.size());
                 cell.loopErrors = trackLoopErrs;
                 double unmapRate = double(unmapped) / double(cv1Notes.size());
-                cell.cellScore = detail::clamp100(100.0 - unmapRate * 200.0 - trackLoopErrs * 25.0);
+                cell.cellScore = clamp100(100.0 - unmapRate * 200.0 - trackLoopErrs * 25.0);
                 res.cells.push_back(cell);
                 continue;
             }
@@ -1208,7 +1247,7 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                 if (loudness >= 0.20 && loudness <= 0.92) ++m5BalanceHealthy;
             }
 
-            // M2 static articulation checks on cv1 notes
+            // M2 static articulation checks on exported cv1 notes
             const bool isMega = megaKorgChs.count(kch) > 0;
             const bool isSart = sartKorgChs.count(kch) > 0;
             const bool isGuitar = guitarKorgChs.count(kch) > 0;
@@ -1220,25 +1259,13 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                     if (isMega && n.pitch >= 96) { ++m2LeakedFxNotes; ++trackLeakedFx; }
                     if (isSart && kch != kBassCh && n.pitch < 24) { ++m2LeakedFxNotes; ++trackLeakedFx; }
                 }
-                if (isMega) {
-                    if (n.vel <= 64) {
-                        megaLowVelSum[kch].first += n.vel;
-                        ++megaLowVelSum[kch].second;
-                    } else if (n.vel >= 91) {
-                        megaHighVelSum[kch].first += n.vel;
-                        ++megaHighVelSum[kch].second;
-                    }
-                }
             }
 
-            // M2.4 Guitar strum coherence
+            // M2.4 Guitar strum coherence — evaluated strictly on exported SMF notes (P1-1: no UASF side-channel!)
             if (isGuitar) {
-                // Cluster note attacks within 80ms into strum chords
-                const double ticksPerMs = (double(reparsed.style.ppqn) * 1000.0) /
-                                          double(reparsed.style.mpqn ? reparsed.style.mpqn : 500000u);
+                const double ticksPerMs = (double(reparsedStyle.ppqn) * 1000.0) /
+                                          double(reparsedStyle.mpqn ? reparsedStyle.mpqn : 500000u);
                 const uint32_t windowTicks = static_cast<uint32_t>(std::max(1.0, 80.0 * ticksPerMs));
-                const auto metaIt = uasfMeta.find({secType, kch});
-                const bool ntrGuitarKept = (metaIt != uasfMeta.end() && metaIt->second.hasCasm && metaIt->second.ntr == 2);
                 size_t i = 0;
                 while (i < cv1Notes.size()) {
                     size_t j = i + 1;
@@ -1247,42 +1274,46 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                         ++m2StrumTotal;
                         uint8_t minP = 127, maxP = 0;
                         bool hasFx = false;
+                        bool monotonic = true;
                         for (size_t k = i; k < j; ++k) {
                             if (cv1Notes[k].pitch >= 96) hasFx = true;
+                            if (k > i && cv1Notes[k].on < cv1Notes[k - 1].on) monotonic = false;
                             minP = std::min(minP, cv1Notes[k].pitch);
                             maxP = std::max(maxP, cv1Notes[k].pitch);
                         }
                         double spreadMs = double(cv1Notes[j - 1].on - cv1Notes[i].on) / std::max(1e-6, ticksPerMs);
-                        bool okStrum = !hasFx && (j - i) <= 6 && (maxP - minP) <= 24 &&
-                                       spreadMs >= 5.0 && spreadMs <= 60.0 && ntrGuitarKept;
+                        bool okStrum = monotonic && !hasFx && (j - i) <= 6 && (maxP - minP) <= 24 &&
+                                       spreadMs >= 5.0 && spreadMs <= 60.0;
                         if (okStrum) ++m2StrumOk;
                     }
                     i = j;
                 }
             }
 
-            const detail::RoundTrippedTrackMeta meta =
-                uasfMeta.count({secType, kch}) ? uasfMeta.at({secType, kch}) : detail::RoundTrippedTrackMeta{};
+            // Strictly use explicit converter-emitted Parameter Sheet (empty/default in Q1!)
+            Pa5xTrackParams params{};
+            if (auto pit = opt.parameterSheet.tracks.find({baseName, kch}); pit != opt.parameterSheet.tracks.end()) {
+                params = pit->second;
+            }
 
             // Simulate all 13 Standardized Test Chords
             std::array<double, 13> chordCentroids{};
             std::array<bool, 13> chordHasCentroid{};
             for (size_t ci = 0; ci < kTestChords.size(); ++ci) {
                 const auto& chd = kTestChords[ci];
-                // Select CV per Pa5X Chord Table
-                const Element* activeEl = cv1;
+                int activeCv = cvIndexOfMarker(cv1->marker);
                 bool isCv2Minor = false;
                 if ((chd.kind == TestChordKind::Minor || chd.kind == TestChordKind::Min7b5) && cvMap.count(2)) {
-                    activeEl = cvMap.at(2);
+                    activeCv = 2;
                     isCv2Minor = true;
                 } else if (chd.kind == TestChordKind::Dom7 && cvMap.count(3)) {
-                    activeEl = cvMap.at(3);
+                    activeCv = 3;
                 } else if (chd.kind == TestChordKind::Dim7 && cvMap.count(4)) {
-                    activeEl = cvMap.at(4);
+                    activeCv = 4;
                 }
 
-                uint32_t dummyLoop = 0;
-                const auto& trackNotes = (activeEl == cv1) ? cv1Notes : detail::extractElementTrackNotes(*activeEl, kch, dummyLoop);
+                const Element* activeEl = cvMap.at(activeCv);
+                const auto& [trackNotes, activeLoopErrs] = cvTrackNotes[activeCv][kch];
                 if (trackNotes.empty()) continue;
 
                 uint32_t cellClashes = 0;
@@ -1290,12 +1321,12 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                 uint32_t cellBassTrig = 0, cellBassHit = 0;
                 double pitchSum = 0.0;
 
-                // Group simultaneous attacks by tick for LIL mud & voicing collapse
-                std::map<uint32_t, std::vector<std::pair<uint8_t, uint8_t>>> atTick; // tick -> (srcPitch, simPitch)
-                const uint32_t barTicks = std::max<uint32_t>(1, static_cast<uint32_t>(uint64_t{reparsed.style.ppqn} * 4 * activeEl->num / activeEl->den));
+                std::map<uint32_t, std::vector<std::pair<uint8_t, uint8_t>>> atTick;
+                const uint32_t barTicks = std::max<uint32_t>(
+                    1, static_cast<uint32_t>(uint64_t{reparsedStyle.ppqn} * 4 * activeEl->num / activeEl->den));
 
                 for (const auto& n : trackNotes) {
-                    const uint8_t simP = detail::simulatePa5xNote(n.pitch, kch, isCv2Minor, chd, meta, isGuitar);
+                    const uint8_t simP = simulatePa5xNote(n.pitch, kch, isCv2Minor, chd, params);
                     const uint8_t simPc = static_cast<uint8_t>(simP % 12);
                     ++m1TotalNotes;
                     pitchSum += simP;
@@ -1305,11 +1336,9 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                         ++m1ClashNotes;
                         ++cellClashes;
                     }
-                    // Register limits
                     bool regBad = false;
                     if (kch == kBassCh) {
                         if (simP < 24 || simP > 55) regBad = true;
-                        // Strong beat bass trigger check (beat 1 of each bar)
                         if ((n.on % barTicks) == 0) {
                             ++m1BassTriggers;
                             ++cellBassTrig;
@@ -1323,7 +1352,6 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                     if (regBad) { ++m1RegViol; ++cellRegViol; }
                 }
 
-                // Check LIL mud (< C2 with interval < 7 st) and voicing collapse per attack
                 for (const auto& [tk, vec] : atTick) {
                     (void)tk;
                     if (vec.size() < 2) continue;
@@ -1337,7 +1365,6 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                             ++m1PolyAttacks;
                             if (simPcs.size() < srcPcs.size()) ++m1CollapseAttacks;
                         }
-                        // LIL mud check
                         for (size_t a = 0; a < vec.size(); ++a) {
                             for (size_t b = a + 1; b < vec.size(); ++b) {
                                 uint8_t p1 = vec[a].second, p2 = vec[b].second;
@@ -1363,17 +1390,16 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
                 cell.bassRootHitRate = cellBassTrig ? double(cellBassHit) / double(cellBassTrig) : 1.0;
                 cell.registerViolations = cellRegViol;
                 cell.leakedFxNotes = trackLeakedFx;
-                cell.loopErrors = trackLoopErrs;
+                cell.loopErrors = activeLoopErrs;
                 double cClash = double(cellClashes) / double(trackNotes.size());
                 double cReg = double(cellRegViol) / double(trackNotes.size());
-                cell.cellScore = detail::clamp100(100.0 - cClash * 300.0 - cReg * 200.0 -
-                                                  (1.0 - cell.bassRootHitRate) * 40.0 -
-                                                  trackLoopErrs * 20.0 - (trackLeakedFx > 0 ? 25.0 : 0.0));
+                cell.cellScore = clamp100(100.0 - cClash * 300.0 - cReg * 200.0 -
+                                          (1.0 - cell.bassRootHitRate) * 40.0 -
+                                          activeLoopErrs * 20.0 - (trackLeakedFx > 0 ? 25.0 : 0.0));
                 res.cells.push_back(cell);
             }
 
-            // M1.3 Voice-leading smoothness across canonical progression:
-            // Cmaj(0) -> F#maj(10) -> Bbmin(11) -> G7/B(12) -> Cmaj(0)
+            // M1.3 Voice-leading smoothness across Cmaj -> F#maj -> Bbmin -> G7/B -> Cmaj
             if (kch != kBassCh) {
                 static constexpr std::array<size_t, 5> kProg = {0, 10, 11, 12, 0};
                 for (size_t k = 0; k + 1 < kProg.size(); ++k) {
@@ -1386,9 +1412,151 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
         }
     }
 
-    // M2.3 Velocity-zone inversion check
+    // 2. Cross-reference source sections vs ACTUAL exported SMF events:
+    //    - M2.3 MegaVoice velocity-zone inversion (bucketed by SOURCE velocity! — P1-3)
+    //    - M3.1 Section coverage, M3.2 Meter & bar accuracy
+    //    - M3.4 Micro-groove timing drift (measured from ACTUAL exported NoteOn ticks! — P1-5)
+    //    - M4.2 Drum family preservation & M4.4 Drum dynamic contour correlation (P2-1)
+    uint32_t matchedSections = 0;
+    uint32_t exactMeterBarSections = 0;
+    const double usPerTickSrc = double(ref.initialMpqn) / double(ref.ppqn);
+    const double usPerTickDst = double(reparsedStyle.mpqn ? reparsedStyle.mpqn : ref.initialMpqn) / double(reparsedStyle.ppqn);
+
+    uint64_t srcR1Primary = 0, srcR2Primary = 0;
+    bool hasBreakSection = false;
+    for (const auto& rs : ref.sections) {
+        if (rs.type == uasf::SectionType::Break) hasBreakSection = true;
+        for (const auto& rn : rs.notes) {
+            if (rn.ch == 8 || rn.ch == 9) {
+                if (isPrimaryKitHit(rn.pitch)) {
+                    if (rn.ch == 8) ++srcR1Primary;
+                    else ++srcR2Primary;
+                }
+            }
+        }
+        const std::string base = baseMarkerForType(rs.type);
+        auto it = byBaseEl.find(base);
+        if (it == byBaseEl.end()) continue;
+        ++matchedSections;
+        const Element* el = it->second.count(1) ? it->second.at(1) : it->second.begin()->second;
+        uint64_t barTicksDst = std::max<uint64_t>(1, uint64_t{reparsedStyle.ppqn} * 4 * el->num / el->den);
+        uint32_t expBars = static_cast<uint32_t>(el->length / barTicksDst);
+        if (el->num == rs.num && el->den == rs.den && expBars == rs.expectedBars) {
+            ++exactMeterBarSections;
+        }
+
+        // Collect actual exported Note-On events in this element
+        struct ExpNoteOn { uint32_t tick; uint8_t kch; uint8_t pitch; uint8_t vel; bool usedDrift; bool usedMega; bool usedDrum; };
+        std::vector<ExpNoteOn> expOns;
+        for (const auto& ev : el->events) {
+            if ((ev.status & 0xF0) == 0x90 && ev.d2 > 0) {
+                expOns.push_back({ev.tick, static_cast<uint8_t>(ev.status & 0x0F), ev.d1, ev.d2, false, false, false});
+            }
+        }
+
+        // P1-5: Measure M3.4 onset timing drift against ACTUAL exported Note-On ticks!
+        for (const auto& rn : rs.notes) {
+            uint8_t rch = ref.casmRoute.count(rn.ch) ? ref.casmRoute.at(rn.ch) : rn.ch;
+            uint8_t kch = korgChannelFor(rch);
+            if (kch == 0xFF) continue;
+            if (isChordDriven(kch) && rn.pitch <= kChordEventNoteMax) continue;
+            uint64_t expectedTick = (uint64_t{rn.on} * reparsedStyle.ppqn + ref.ppqn / 2) / ref.ppqn;
+            if (el->length < 2 || expectedTick >= el->length - 1) continue;
+
+            // Find nearest unmatched actual exported note on same (kch, pitch)
+            size_t bestIdx = expOns.size();
+            uint64_t bestDist = UINT64_MAX;
+            for (size_t idx = 0; idx < expOns.size(); ++idx) {
+                if (expOns[idx].usedDrift || expOns[idx].kch != kch || expOns[idx].pitch != rn.pitch) continue;
+                uint64_t d = expOns[idx].tick > expectedTick ? (expOns[idx].tick - expectedTick)
+                                                             : (expectedTick - expOns[idx].tick);
+                if (d < bestDist) { bestDist = d; bestIdx = idx; }
+            }
+            if (bestIdx < expOns.size()) {
+                expOns[bestIdx].usedDrift = true;
+                double srcMs = (double(rn.on) * usPerTickSrc) / 1000.0;
+                double dstMs = (double(expOns[bestIdx].tick) * usPerTickDst) / 1000.0;
+                m3OnsetDriftsMs.push_back(std::abs(dstMs - srcMs));
+            }
+        }
+
+        // P1-3: Match MegaVoice source notes to actual exported notes, bucketing by SOURCE velocity!
+        for (const auto& rn : rs.notes) {
+            uint8_t rch = ref.casmRoute.count(rn.ch) ? ref.casmRoute.at(rn.ch) : rn.ch;
+            uint8_t kch = korgChannelFor(rch);
+            if (!megaKorgChs.count(kch)) continue;
+            if (rn.pitch <= kChordEventNoteMax) continue;
+            if (rn.vel > 64 && rn.vel < 91) continue; // Only compare source normal (1..64) vs high/FX (91..127)
+            uint64_t expectedTick = (uint64_t{rn.on} * reparsedStyle.ppqn + ref.ppqn / 2) / ref.ppqn;
+            if (el->length < 2 || expectedTick >= el->length - 1) continue;
+
+            // Match nearest unused exported note on same kch within <= 2 ticks (prefer exact pitch, else pitch-class)
+            size_t bestExact = expOns.size(), bestPc = expOns.size();
+            uint64_t distExact = 3, distPc = 3;
+            for (size_t idx = 0; idx < expOns.size(); ++idx) {
+                if (expOns[idx].usedMega || expOns[idx].kch != kch) continue;
+                uint64_t d = expOns[idx].tick > expectedTick ? (expOns[idx].tick - expectedTick)
+                                                             : (expectedTick - expOns[idx].tick);
+                if (d > 2) continue;
+                if (expOns[idx].pitch == rn.pitch && d < distExact) { distExact = d; bestExact = idx; }
+                else if ((expOns[idx].pitch % 12) == (rn.pitch % 12) && d < distPc) { distPc = d; bestPc = idx; }
+            }
+            const size_t pick = (bestExact < expOns.size()) ? bestExact : bestPc;
+            if (pick < expOns.size()) {
+                expOns[pick].usedMega = true;
+                if (rn.vel <= 64) {
+                    megaSrcLowExpVel[kch].first += expOns[pick].vel;
+                    ++megaSrcLowExpVel[kch].second;
+                } else {
+                    megaSrcHighExpVel[kch].first += expOns[pick].vel;
+                    ++megaSrcHighExpVel[kch].second;
+                }
+            }
+        }
+
+        // P2-1: M4.2 Drum family preservation + M4.4 family-paired velocity correlation
+        {
+            std::vector<std::tuple<uint32_t, char, uint8_t>> sDrumHits;
+            for (const auto& rn : rs.notes) {
+                uint8_t rch = ref.casmRoute.count(rn.ch) ? ref.casmRoute.at(rn.ch) : rn.ch;
+                uint8_t kch = korgChannelFor(rch);
+                if (kch != kDrumCh && kch != kPercCh) continue;
+                uint32_t t = static_cast<uint32_t>((uint64_t{rn.on} * reparsedStyle.ppqn + ref.ppqn / 2) / ref.ppqn);
+                if (el->length < 2 || t >= el->length - 1) continue;
+                sDrumHits.emplace_back(t, sourceDrumFamilyOf(rn.pitch), rn.vel);
+            }
+            std::sort(sDrumHits.begin(), sDrumHits.end());
+
+            for (const auto& [st, sFam, sVel] : sDrumHits) {
+                ++m4FamilyChecked;
+                // Prefer nearest unmatched exported drum/perc hit within <= 2 ticks with matching target family;
+                // else nearest unmatched drum/perc hit within <= 2 ticks (so unmapped raw hits still pair for M4.4!).
+                size_t bestSameFam = expOns.size(), bestAny = expOns.size();
+                uint32_t dSame = 3, dAny = 3;
+                for (size_t idx = 0; idx < expOns.size(); ++idx) {
+                    if (expOns[idx].usedDrum) continue;
+                    if (expOns[idx].kch != kDrumCh && expOns[idx].kch != kPercCh) continue;
+                    uint32_t d = expOns[idx].tick > st ? (expOns[idx].tick - st) : (st - expOns[idx].tick);
+                    if (d > 2) continue;
+                    char eFam = targetPa5xDrumFamilyOf(expOns[idx].pitch);
+                    if (eFam != 0 && eFam == sFam && d < dSame) { dSame = d; bestSameFam = idx; }
+                    if (d < dAny) { dAny = d; bestAny = idx; }
+                }
+                const size_t pick = (bestSameFam < expOns.size()) ? bestSameFam : bestAny;
+                if (pick < expOns.size()) {
+                    expOns[pick].usedDrum = true;
+                    char eFam = targetPa5xDrumFamilyOf(expOns[pick].pitch);
+                    if (eFam != 0 && eFam == sFam) ++m4FamilyPreserved;
+                    m4SrcVels.push_back(static_cast<double>(sVel));
+                    m4ExpVels.push_back(static_cast<double>(expOns[pick].vel));
+                }
+            }
+        }
+    }
+
+    // M2.3 Velocity-zone inversion count (from SOURCE-velocity buckets!)
     for (uint8_t kch : megaKorgChs) {
-        auto lo = megaLowVelSum[kch], hi = megaHighVelSum[kch];
+        auto lo = megaSrcLowExpVel[kch], hi = megaSrcHighExpVel[kch];
         if (lo.second > 0 && hi.second > 0) {
             double meanLo = lo.first / double(lo.second);
             double meanHi = hi.first / double(hi.second);
@@ -1396,74 +1564,13 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
         }
     }
 
-    // M3.1, M3.2, M3.4: compare reference source sections vs exported elements
-    uint32_t matchedSections = 0;
-    uint32_t exactMeterBarSections = 0;
-    const double usPerTickSrc = double(ref.initialMpqn) / double(ref.ppqn);
-    const double usPerTickDst = double(reparsed.style.mpqn ? reparsed.style.mpqn : ref.initialMpqn) / double(reparsed.style.ppqn);
-
-    // Source drum velocity baseline & primary-kit channel check (M4.3, M4.4)
-    uint64_t srcR1Primary = 0, srcR2Primary = 0;
-    for (const auto& rs : ref.sections) {
-        for (const auto& rn : rs.notes) {
-            if (rn.ch == 8 || rn.ch == 9) {
-                if (detail::isPrimaryKitHit(rn.pitch)) {
-                    if (rn.ch == 8) ++srcR1Primary;
-                    else ++srcR2Primary;
-                }
-            }
-        }
-        const std::string base = detail::baseMarkerForType(rs.type);
-        auto it = byBaseEl.find(base);
-        if (it == byBaseEl.end()) continue;
-        ++matchedSections;
-        const Element* el = it->second.count(1) ? it->second.at(1) : it->second.begin()->second;
-        uint64_t barTicksDst = std::max<uint64_t>(1, uint64_t{reparsed.style.ppqn} * 4 * el->num / el->den);
-        uint32_t expBars = static_cast<uint32_t>(el->length / barTicksDst);
-        if (el->num == rs.num && el->den == rs.den && expBars == rs.expectedBars) {
-            ++exactMeterBarSections;
-        }
-
-        // Aligned per-section drum velocity correlation (M4.4): match source & exported
-        // drum/perc hits in canonical (scaledTick, pitch) order within this section.
-        {
-            std::vector<std::tuple<uint32_t, uint8_t, uint8_t>> sHits, eHits;
-            for (const auto& rn : rs.notes) {
-                uint8_t rch = ref.casmRoute.count(rn.ch) ? ref.casmRoute.at(rn.ch) : rn.ch;
-                uint8_t kch = korgChannelFor(rch);
-                if (kch != kDrumCh && kch != kPercCh) continue;
-                uint32_t t = static_cast<uint32_t>((uint64_t{rn.on} * reparsed.style.ppqn + ref.ppqn / 2) / ref.ppqn);
-                if (el->length < 2 || t >= el->length - 1) continue;
-                sHits.emplace_back(t, rn.pitch, rn.vel);
-            }
-            for (const auto& ev : el->events) {
-                uint8_t kch = ev.status & 0x0F;
-                if ((ev.status & 0xF0) == 0x90 && ev.d2 > 0 && (kch == kDrumCh || kch == kPercCh)) {
-                    eHits.emplace_back(ev.tick, ev.d1, ev.d2);
-                }
-            }
-            std::sort(sHits.begin(), sHits.end());
-            std::sort(eHits.begin(), eHits.end());
-            const size_t nMatch = std::min(sHits.size(), eHits.size());
-            for (size_t i = 0; i < nMatch; ++i) {
-                m4SrcVels.push_back(static_cast<double>(std::get<2>(sHits[i])));
-                m4ExpVels.push_back(static_cast<double>(std::get<2>(eHits[i])));
-            }
-        }
-
-        // Micro-groove onset drift (M3.4) for matched notes
-        for (const auto& rn : rs.notes) {
-            uint8_t rch = ref.casmRoute.count(rn.ch) ? ref.casmRoute.at(rn.ch) : rn.ch;
-            uint8_t kch = korgChannelFor(rch);
-            if (kch == 0xFF) continue;
-            if (isChordDriven(kch) && rn.pitch <= kChordEventNoteMax) continue;
-            uint64_t expTick = (uint64_t{rn.on} * reparsed.style.ppqn + ref.ppqn / 2) / ref.ppqn;
-            if (expTick >= el->length - 1) continue;
-            double srcMs = (double(rn.on) * usPerTickSrc) / 1000.0;
-            double dstMs = (double(expTick) * usPerTickDst) / 1000.0;
-            m3OnsetDriftsMs.push_back(std::abs(dstMs - srcMs));
-        }
-    }
+    // ── Applicability Flags (P1-4) ───────────────────────────────────
+    res.applicability.m1Harmonic = (m1TotalNotes > 0);
+    res.applicability.m2Articulation = !ref.megaVoiceSrcChannels.empty() || !ref.sartSrcChannels.empty() || !ref.guitarNtrSrcChannels.empty();
+    res.applicability.m3SectionStress = hasBreakSection || ref.timeSigs.size() > 1 || ref.tempos.size() > 1 || m3LoopErrors > 0;
+    res.applicability.m4DrumStress = ref.hasExtendedDrumNotes || (srcR1Primary > srcR2Primary);
+    res.applicability.m5MixStress = (ref.xgSysexCount > 0) || (ref.srcUnsafeCcCount > 0) || (m5UnsafeCc > 0);
+    res.applicability.m6Timbre = !mapReport.tracks.empty();
 
     // ── Compute Final M1..M6 Scores (EXACT Spec §3 Formulas) ─────────
     // M1 Harmonic & Voice-Leading (Weight 25%)
@@ -1473,24 +1580,25 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
     res.m1.registerViolationRate = m1TotalNotes ? double(m1RegViol) / double(m1TotalNotes) : 0.0;
     res.m1.voicingCollapseRate = m1PolyAttacks ? double(m1CollapseAttacks) / double(m1PolyAttacks) : 0.0;
     {
-        const double s11 = res.m1.clashRate <= 0.01 ? 100.0 : detail::clamp100(100.0 - (res.m1.clashRate - 0.01) * 800.0);
-        const double s12 = detail::clamp100(res.m1.bassSlashAccuracy * 100.0);
-        const double s13 = res.m1.voiceLeadingAvgSemis <= 3.5 ? 100.0 : detail::clamp100(100.0 - (res.m1.voiceLeadingAvgSemis - 3.5) * 16.6667);
-        const double s14 = res.m1.registerViolationRate <= 0.005 ? 100.0 : detail::clamp100(100.0 - (res.m1.registerViolationRate - 0.005) * 1500.0);
-        const double s15 = res.m1.voicingCollapseRate <= 0.02 ? 100.0 : detail::clamp100(100.0 - (res.m1.voicingCollapseRate - 0.02) * 500.0);
+        const double s11 = res.m1.clashRate <= 0.01 ? 100.0 : clamp100(100.0 - (res.m1.clashRate - 0.01) * 800.0);
+        const double s12 = clamp100(res.m1.bassSlashAccuracy * 100.0);
+        const double s13 = res.m1.voiceLeadingAvgSemis <= 3.5 ? 100.0 : clamp100(100.0 - (res.m1.voiceLeadingAvgSemis - 3.5) * 16.6667);
+        const double s14 = res.m1.registerViolationRate <= 0.005 ? 100.0 : clamp100(100.0 - (res.m1.registerViolationRate - 0.005) * 1500.0);
+        const double s15 = res.m1.voicingCollapseRate <= 0.02 ? 100.0 : clamp100(100.0 - (res.m1.voicingCollapseRate - 0.02) * 500.0);
         res.m1.score = 0.30 * s11 + 0.25 * s12 + 0.15 * s13 + 0.15 * s14 + 0.15 * s15;
     }
 
     // M2 Articulation & MegaVoice Hygiene (Weight 20%)
     res.m2.leakedChordRange = m2LeakedChordRange;
     res.m2.leakedFxKeyRate = m2FlaggedNotes ? double(m2LeakedFxNotes) / double(m2FlaggedNotes) : 0.0;
+    res.m2.leakedFxNotesCount = static_cast<uint32_t>(m2LeakedFxNotes);
     res.m2.velocityInversions = m2VelInversions;
     res.m2.guitarStrumCoherence = m2StrumTotal ? double(m2StrumOk) / double(m2StrumTotal) : 1.0;
     {
         const double s21 = m2LeakedChordRange == 0 ? 100.0 : 0.0;
-        const double s22 = res.m2.leakedFxKeyRate == 0.0 ? 100.0 : detail::clamp100(100.0 - res.m2.leakedFxKeyRate * 400.0);
-        const double s23 = m2VelInversions == 0 ? 100.0 : detail::clamp100(100.0 - double(m2VelInversions) * 50.0);
-        const double s24 = detail::clamp100(res.m2.guitarStrumCoherence * 100.0);
+        const double s22 = res.m2.leakedFxKeyRate == 0.0 ? 100.0 : clamp100(100.0 - res.m2.leakedFxKeyRate * 400.0);
+        const double s23 = m2VelInversions == 0 ? 100.0 : clamp100(100.0 - double(m2VelInversions) * 50.0);
+        const double s24 = clamp100(res.m2.guitarStrumCoherence * 100.0);
         res.m2.score = 0.25 * s21 + 0.30 * s22 + 0.25 * s23 + 0.20 * s24;
     }
 
@@ -1504,28 +1612,27 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
         res.m3.p99DriftMs = m3OnsetDriftsMs[idx];
     }
     {
-        const double s31 = detail::clamp100(res.m3.coverageRate * 100.0);
-        const double s32 = detail::clamp100(res.m3.meterBarAccuracy * 100.0);
-        const double s33 = m3LoopErrors == 0 ? 100.0 : detail::clamp100(100.0 - double(m3LoopErrors) * 25.0);
-        const double s34 = res.m3.p99DriftMs <= 1.5 ? 100.0 : detail::clamp100(100.0 - (res.m3.p99DriftMs - 1.5) * 20.0);
+        const double s31 = clamp100(res.m3.coverageRate * 100.0);
+        const double s32 = clamp100(res.m3.meterBarAccuracy * 100.0);
+        const double s33 = m3LoopErrors == 0 ? 100.0 : clamp100(100.0 - double(m3LoopErrors) * 25.0);
+        const double s34 = res.m3.p99DriftMs <= 1.5 ? 100.0 : clamp100(100.0 - (res.m3.p99DriftMs - 1.5) * 20.0);
         res.m3.score = res.structuralValid ? (0.30 * s31 + 0.30 * s32 + 0.25 * s33 + 0.15 * s34) : 0.0;
     }
 
     // M4 Drum & Percussion Accuracy (Weight 15%)
     res.m4.unmappedHitRate = m4DrumHits ? double(m4UnmappedHits) / double(m4DrumHits) : 0.0;
-    res.m4.familyPreservationRate = m4DrumHits ? double(m4FamilyPreserved) / double(m4DrumHits) : 1.0;
+    res.m4.familyPreservationRate = m4FamilyChecked ? double(m4FamilyPreserved) / double(m4FamilyChecked) : 1.0;
     if (srcR1Primary > 0 || srcR2Primary > 0) {
-        // Primary kit (Kick+Snare+Hat) should land on Korg Drum (ch 9), not Percussion (ch 10)!
         res.m4.trackSeparationAccuracy = (expDrumPrimary >= expPercPrimary && expDrumPrimary > 0) ? 1.0 : 0.0;
     } else {
         res.m4.trackSeparationAccuracy = 1.0;
     }
-    res.m4.velCorrelation = detail::pearsonCorrelation(m4SrcVels, m4ExpVels);
+    res.m4.velCorrelation = pearsonCorrelation(m4SrcVels, m4ExpVels);
     {
-        const double s41 = res.m4.unmappedHitRate <= 0.02 ? 100.0 : detail::clamp100(100.0 - (res.m4.unmappedHitRate - 0.02) * 300.0);
-        const double s42 = detail::clamp100(res.m4.familyPreservationRate * 100.0);
-        const double s43 = detail::clamp100(res.m4.trackSeparationAccuracy * 100.0);
-        const double s44 = detail::clamp100(std::max(0.0, res.m4.velCorrelation) * 100.0);
+        const double s41 = res.m4.unmappedHitRate <= 0.02 ? 100.0 : clamp100(100.0 - (res.m4.unmappedHitRate - 0.02) * 300.0);
+        const double s42 = clamp100(res.m4.familyPreservationRate * 100.0);
+        const double s43 = clamp100(res.m4.trackSeparationAccuracy * 100.0);
+        const double s44 = clamp100(std::max(0.0, res.m4.velCorrelation) * 100.0);
         res.m4.score = 0.35 * s41 + 0.30 * s42 + 0.20 * s43 + 0.15 * s44;
     }
 
@@ -1533,41 +1640,57 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
     res.m5.mixCcConsistency = m5MixExpected ? double(m5MixPresent) / double(m5MixExpected) : 1.0;
     res.m5.unsafeCcLeaks = m5UnsafeCc;
     res.m5.balanceHealthRate = m5BalanceTracks ? double(m5BalanceHealthy) / double(m5BalanceTracks) : 1.0;
-    res.m5.xgSysexCoverage = ref.xgSysexCount == 0 ? 1.0 : 0.0; // Translated in Q5
+    res.m5.xgSysexCoverage = ref.xgSysexCount == 0 ? 1.0 : 0.0;
     {
-        const double s51 = detail::clamp100(res.m5.mixCcConsistency * 100.0);
-        const double s52 = m5UnsafeCc == 0 ? 100.0 : detail::clamp100(100.0 - double(m5UnsafeCc) * 15.0);
-        const double s53 = detail::clamp100(res.m5.balanceHealthRate * 100.0);
-        const double s54 = detail::clamp100(res.m5.xgSysexCoverage * 100.0);
+        const double s51 = clamp100(res.m5.mixCcConsistency * 100.0);
+        const double s52 = m5UnsafeCc == 0 ? 100.0 : clamp100(100.0 - double(m5UnsafeCc) * 15.0);
+        const double s53 = clamp100(res.m5.balanceHealthRate * 100.0);
+        const double s54 = clamp100(res.m5.xgSysexCoverage * 100.0);
         res.m5.score = 0.35 * s51 + 0.25 * s52 + 0.25 * s53 + 0.15 * s54;
     }
 
-    // M6 Timbre & Target-Resource Coherence (Weight 13%)
+    // M6 Timbre & Target-Resource Coherence (Weight 13% — P1-2 honest scoring!)
     {
         uint32_t exportedTracks = 0;
+        uint32_t resolvedTracks = 0;
         double matchCredit = 0.0;
-        for (const auto& tr : mappedKorg.report.tracks) {
+        for (const auto& tr : mapReport.tracks) {
             if (tr.korg_ch == 0xFF) continue;
             ++exportedTracks;
             const bool identified = (tr.family != "Unidentified" && !tr.family.empty());
             const bool resolved = (tr.target != "UNRESOLVED" && tr.target != "not exported");
+            if (resolved) ++resolvedTracks;
             if (identified && resolved) matchCredit += 1.0;
-            else if (identified) matchCredit += 0.5;
+            else if (identified) matchCredit += 0.15; // Tiny role-hint credit only when UNRESOLVED (0.0 if Unidentified)
         }
         res.m6.familyMatchRate = exportedTracks ? (matchCredit / double(exportedTracks)) : 0.0;
-        res.m6.elementVoicePreservation = ref.midStyleVoiceChanges == 0
-                                              ? 1.0
-                                              : detail::clamp01(double(mappedKorg.report.element_sounds.size()) /
-                                                                double(ref.midStyleVoiceChanges));
-        res.m6.targetKstValid = true;
-        if (!opt.targetKstPath.empty()) {
+        res.m6.hasMidStyleVoiceChanges = (ref.midStyleVoiceChanges > 0);
+        res.m6.elementVoicePreservation = res.m6.hasMidStyleVoiceChanges
+                                              ? clamp01(double(mapReport.element_sounds.size()) /
+                                                        double(ref.midStyleVoiceChanges))
+                                              : 0.0;
+        res.m6.targetKstEvaluated = !opt.targetKstPath.empty();
+        if (res.m6.targetKstEvaluated) {
             std::error_code ec;
-            res.m6.targetKstValid = std::filesystem::exists(opt.targetKstPath, ec) && !ec;
+            const bool exists = std::filesystem::exists(opt.targetKstPath, ec) && !ec;
+            // Require real target path AND at least one resolved target sound slot (Q4)
+            res.m6.targetKstValid = exists && (resolvedTracks > 0);
+        } else {
+            res.m6.targetKstValid = false; // Never claim valid when not evaluated!
         }
-        const double s61 = detail::clamp100(res.m6.familyMatchRate * 100.0);
-        const double s62 = detail::clamp100(res.m6.elementVoicePreservation * 100.0);
+
+        const double s61 = clamp100(res.m6.familyMatchRate * 100.0);
+        const double s62 = clamp100(res.m6.elementVoicePreservation * 100.0);
         const double s63 = res.m6.targetKstValid ? 100.0 : 0.0;
-        res.m6.score = res.m6.targetKstValid ? (0.65 * s61 + 0.25 * s62 + 0.10 * s63) : 0.0;
+        const double w61 = 0.65;
+        const double w62 = res.m6.hasMidStyleVoiceChanges ? 0.25 : 0.0;
+        const double w63 = res.m6.targetKstEvaluated ? 0.10 : 0.0;
+        const double wSum = w61 + w62 + w63;
+        if (res.m6.targetKstEvaluated && !res.m6.targetKstValid) {
+            res.m6.score = 0.0;
+        } else {
+            res.m6.score = (w61 * s61 + w62 * s62 + w63 * s63) / wSum;
+        }
     }
 
     // ── Immutable Weighted Composite Score ───────────────────────────
@@ -1581,7 +1704,9 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
     const double minDim = std::min({res.m1.score, res.m2.score, res.m3.score,
                                     res.m4.score, res.m5.score, res.m6.score});
     if (!res.structuralValid) res.grade = "FAIL";
-    else if (res.compositeScore >= 85.0 && minDim >= 80.0) res.grade = "PASS";
+    else if (res.compositeScore >= 85.0 && minDim >= 80.0 && m3LoopErrors == 0 &&
+             m2LeakedChordRange == 0 && m2LeakedFxNotes == 0 && m2VelInversions == 0)
+        res.grade = "PASS";
     else if (res.compositeScore >= 60.0) res.grade = "WARN";
     else res.grade = "FAIL";
 
@@ -1600,7 +1725,7 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
     }
     if (ref.hasChordMutePairs) {
         bool hasCv2 = false;
-        for (const auto& el : reparsed.style.elements) if (detail::cvIndexOfMarker(el.marker) >= 2) hasCv2 = true;
+        for (const auto& el : reparsedStyle.elements) if (cvIndexOfMarker(el.marker) >= 2) hasCv2 = true;
         if (!hasCv2) {
             res.diagnostics.push_back({"STYLE_QUAL_CHORD_MUTE_SPLIT", "WARN", "*", "Acc4/Acc5", 1, "merged_into_cv1"});
         }
@@ -1636,12 +1761,12 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
             res.diagnostics.push_back({"STYLE_QUAL_UNSUPPORTED_CHUNK", "INFO", cid, "*", 1, "detected_metadata"});
         }
     }
-    for (const auto& sr : mappedKorg.report.sections) {
+    for (const auto& sr : mapReport.sections) {
         if (sr.note.find("STYLE_QUAL_BREAK_TAIL_TRUNCATED") != std::string::npos) {
             res.diagnostics.push_back({"STYLE_QUAL_BREAK_TAIL_TRUNCATED", "INFO", sr.source, "*", 1, "yamaha_1bar_cap"});
         }
     }
-    for (const auto& w : mappedKorg.report.warnings) {
+    for (const auto& w : mapReport.warnings) {
         if (w.find("STYLE_QUAL_BREAK_TAIL_TRUNCATED") != std::string::npos) {
             bool already = std::any_of(res.diagnostics.begin(), res.diagnostics.end(),
                                        [](const Diagnostic& d) { return d.code == "STYLE_QUAL_BREAK_TAIL_TRUNCATED"; });
@@ -1651,7 +1776,6 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
         }
     }
 
-    // Canonical sort diagnostics for byte-identical determinism
     std::sort(res.diagnostics.begin(), res.diagnostics.end(), [](const Diagnostic& a, const Diagnostic& b) {
         return std::tie(a.code, a.severity, a.section, a.track, a.count, a.fallback) <
                std::tie(b.code, b.severity, b.section, b.track, b.count, b.fallback);
@@ -1659,6 +1783,91 @@ inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
 
     res.ok = true;
     return res;
+}
+
+} // namespace detail
+
+// ── Main Entrypoint: Evaluate one .sty buffer ────────────────────────
+inline BenchResult evaluateStyleBuffer(const std::vector<uint8_t>& styBytes,
+                                       const std::string& displayPath,
+                                       const BenchOptions& opt = {}) {
+    BenchResult res;
+    res.fixtureName = detail::basenameOnly(displayPath);
+
+    // ── Stage 1: Reference Analyzer ──────────────────────────────────
+    const auto ref = detail::analyzeReferenceSty(styBytes);
+    if (!ref.ok) {
+        res.error = "Reference analysis failed: " + ref.error;
+        return res;
+    }
+
+    // ── Stage 2: Real AIArranger Converter Pipeline ──────────────────
+    importers::sff1::Sff1Reader reader;
+    const auto parsed = reader.parseBuffer(styBytes, res.fixtureName);
+    if (!parsed.success) {
+        res.error = "Sff1Reader failed: " + parsed.error;
+        return res;
+    }
+    importers::sff1::Sff1ToUasfMapper mapper;
+    const auto mappedUasf = mapper.map(parsed);
+    if (!mappedUasf.success) {
+        res.error = "Sff1ToUasfMapper failed: " + mappedUasf.error;
+        return res;
+    }
+
+    uasf::UasfSerializer uasfSer;
+    const auto serRes = uasfSer.serialize(mappedUasf.style);
+    if (!serRes.success) {
+        res.error = "UasfSerializer failed: " + serRes.error;
+        return res;
+    }
+    uasf::UasfDeserializer uasfDes;
+    const auto desRes = uasfDes.deserialize(serRes.data);
+    if (!desRes.success) {
+        res.error = "UasfDeserializer failed: " + desRes.error;
+        return res;
+    }
+
+    MapOptions kopt;
+    kopt.ppqn = opt.targetPpqn;
+    kopt.route = routeFromCasm(parsed);
+    detail::applyBreakPolicy(kopt, opt.breakYamaha1BarCap);
+
+    const auto mappedKorg = mapToKorg(desRes.style, kopt);
+    if (!mappedKorg.ok) {
+        res.error = "mapToKorg failed: " + mappedKorg.error;
+        return res;
+    }
+
+    const auto written = write(mappedKorg.style);
+    if (!written.ok) {
+        res.error = "korg::write failed: " + written.error;
+        return res;
+    }
+    const auto reparsed = parse(written.bytes);
+    if (!reparsed.ok) {
+        res.error = "korg::parse failed: " + reparsed.error;
+        return res;
+    }
+
+    return detail::evaluateReparsedSmf(ref, reparsed.style, mappedKorg.report, &desRes.style, res.fixtureName, opt);
+}
+
+// Evaluate an already-exported/modified Korg SMF against raw source .sty bytes (for regression testing
+// Q2 velocity sanitization, M3.4 timing-drift detection, Parameter Sheet simulation, etc.).
+inline BenchResult evaluateExportedStyleAgainstSty(const std::vector<uint8_t>& styBytes,
+                                                   const Style& exportedKorgStyle,
+                                                   const Report& mapReport,
+                                                   const std::string& displayPath,
+                                                   const BenchOptions& opt = {}) {
+    BenchResult res;
+    res.fixtureName = detail::basenameOnly(displayPath);
+    const auto ref = detail::analyzeReferenceSty(styBytes);
+    if (!ref.ok) {
+        res.error = "Reference analysis failed: " + ref.error;
+        return res;
+    }
+    return detail::evaluateReparsedSmf(ref, exportedKorgStyle, mapReport, nullptr, res.fixtureName, opt);
 }
 
 inline BenchResult evaluateStyleFile(const std::string& path, const BenchOptions& opt = {}) {
@@ -1684,6 +1893,83 @@ inline BenchResult evaluateStyleFile(const std::string& path, const BenchOptions
     return evaluateStyleBuffer(bytes, path, opt);
 }
 
+// ── Corpus Summary Aggregation (P1-4: Honest Active-Dimension Composite) ──
+inline CorpusSummary computeCorpusSummary(const std::vector<BenchResult>& results) {
+    CorpusSummary cs;
+    cs.fixtureCount = static_cast<uint32_t>(results.size());
+    cs.allStructuralValid = !results.empty();
+    cs.minComposite = results.empty() ? 0.0 : 100.0;
+    cs.minDimensionScores.fill(results.empty() ? 0.0 : 100.0);
+
+    std::array<double, 6> sumDim{};
+    std::array<double, 6> activeSum{};
+    double sumComp = 0.0;
+    uint32_t okCount = 0;
+
+    for (const auto& r : results) {
+        if (!r.ok || !r.structuralValid) {
+            cs.allStructuralValid = false;
+            ++cs.hardInvariantViolations;
+        }
+        if (!r.ok) {
+            ++cs.failCount;
+            cs.minComposite = 0.0;
+            cs.minDimensionScores.fill(0.0);
+            continue;
+        }
+        ++okCount;
+        if (r.grade == "PASS") ++cs.passCount;
+        else if (r.grade == "WARN") ++cs.warnCount;
+        else ++cs.failCount;
+
+        cs.hardInvariantViolations += r.m3.loopBoundaryErrors + r.m2.leakedChordRange +
+                                      r.m2.leakedFxNotesCount + r.m2.velocityInversions;
+
+        const std::array<double, 6> dims = {r.m1.score, r.m2.score, r.m3.score,
+                                            r.m4.score, r.m5.score, r.m6.score};
+        const std::array<bool, 6> app = {r.applicability.m1Harmonic, r.applicability.m2Articulation,
+                                         r.applicability.m3SectionStress, r.applicability.m4DrumStress,
+                                         r.applicability.m5MixStress, r.applicability.m6Timbre};
+        sumComp += r.compositeScore;
+        cs.minComposite = std::min(cs.minComposite, r.compositeScore);
+        for (size_t i = 0; i < 6; ++i) {
+            sumDim[i] += dims[i];
+            cs.minDimensionScores[i] = std::min(cs.minDimensionScores[i], dims[i]);
+            if (app[i]) {
+                activeSum[i] += dims[i];
+                ++cs.activeDimensionCounts[i];
+            }
+        }
+    }
+
+    const double denom = okCount ? double(okCount) : 1.0;
+    cs.meanComposite = sumComp / denom;
+    for (size_t i = 0; i < 6; ++i) {
+        cs.meanDimensions[i] = sumDim[i] / denom;
+        cs.activeDimensionMeans[i] = cs.activeDimensionCounts[i]
+                                         ? (activeSum[i] / double(cs.activeDimensionCounts[i]))
+                                         : cs.meanDimensions[i];
+    }
+    // Exact immutable weights on active-dimension means (eliminates N/A=100 dilution!)
+    cs.activeComposite = kWeightM1 * cs.activeDimensionMeans[0] +
+                         kWeightM2 * cs.activeDimensionMeans[1] +
+                         kWeightM3 * cs.activeDimensionMeans[2] +
+                         kWeightM4 * cs.activeDimensionMeans[3] +
+                         kWeightM5 * cs.activeDimensionMeans[4] +
+                         kWeightM6 * cs.activeDimensionMeans[5];
+
+    if (cs.allStructuralValid && cs.meanComposite >= 85.0 && cs.activeComposite >= 85.0 &&
+        cs.minComposite >= 80.0 && cs.hardInvariantViolations == 0 && cs.failCount == 0) {
+        cs.corpusGrade = "PASS";
+    } else if (!cs.allStructuralValid || cs.hardInvariantViolations > 0 ||
+               cs.failCount > 0 || cs.activeComposite < 60.0) {
+        cs.corpusGrade = "FAIL";
+    } else {
+        cs.corpusGrade = "WARN";
+    }
+    return cs;
+}
+
 // ── Deterministic Path-Scrubbed JSON Serializer ──────────────────────
 inline std::string toJson(const BenchResult& r) {
     using detail::fmtNum;
@@ -1693,8 +1979,12 @@ inline std::string toJson(const BenchResult& r) {
     o << "  \"schema\": \"" << kSchemaId << "\",\n";
     o << "  \"hardwareVerified\": false,\n";
     o << "  \"l3Status\": \"NotRun\",\n";
-    o << "  \"label\": \"" << (r.structuralValid ? kValidLabel : kInvalidLabel) << "\",\n";
+    o << "  \"label\": \"" << ((r.ok && r.structuralValid) ? kValidLabel : kInvalidLabel) << "\",\n";
     o << "  \"fixture\": \"" << jsonEscape(r.fixtureName) << "\",\n";
+    if (!r.ok) {
+        o << "  \"ok\": false,\n";
+        o << "  \"error\": \"" << jsonEscape(r.error) << "\",\n";
+    }
     o << "  \"weights\": { \"M1\": 0.25, \"M2\": 0.20, \"M3\": 0.15, \"M4\": 0.15, \"M5\": 0.12, \"M6\": 0.13 },\n";
     o << "  \"style\": { \"format\": \"" << jsonEscape(r.format)
       << "\", \"sourcePpqn\": " << r.sourcePpqn
@@ -1704,6 +1994,12 @@ inline std::string toJson(const BenchResult& r) {
     o << "  \"structuralValid\": " << (r.structuralValid ? "true" : "false") << ",\n";
     o << "  \"compositeScore\": " << fmtNum(r.compositeScore, 2) << ",\n";
     o << "  \"grade\": \"" << jsonEscape(r.grade) << "\",\n";
+    o << "  \"applicability\": { \"m1\": " << (r.applicability.m1Harmonic ? "true" : "false")
+      << ", \"m2\": " << (r.applicability.m2Articulation ? "true" : "false")
+      << ", \"m3\": " << (r.applicability.m3SectionStress ? "true" : "false")
+      << ", \"m4\": " << (r.applicability.m4DrumStress ? "true" : "false")
+      << ", \"m5\": " << (r.applicability.m5MixStress ? "true" : "false")
+      << ", \"m6\": " << (r.applicability.m6Timbre ? "true" : "false") << " },\n";
     o << "  \"dimensions\": {\n";
     o << "    \"harmonicVoiceLeading\": { \"score\": " << fmtNum(r.m1.score, 2)
       << ", \"clashRate\": " << fmtNum(r.m1.clashRate, 4)
@@ -1715,6 +2011,7 @@ inline std::string toJson(const BenchResult& r) {
     o << "    \"articulationMegaVoice\": { \"score\": " << fmtNum(r.m2.score, 2)
       << ", \"leakedChordRange\": " << r.m2.leakedChordRange
       << ", \"leakedFxKeyRate\": " << fmtNum(r.m2.leakedFxKeyRate, 4)
+      << ", \"leakedFxNotesCount\": " << r.m2.leakedFxNotesCount
       << ", \"velocityInversions\": " << r.m2.velocityInversions
       << ", \"guitarStrumCoherence\": " << fmtNum(r.m2.guitarStrumCoherence, 4) << " },\n";
     o << "    \"sectionCompleteness\": { \"score\": " << fmtNum(r.m3.score, 2)
@@ -1734,7 +2031,9 @@ inline std::string toJson(const BenchResult& r) {
       << ", \"xgSysexCoverage\": " << fmtNum(r.m5.xgSysexCoverage, 4) << " },\n";
     o << "    \"timbreResourceCoherence\": { \"score\": " << fmtNum(r.m6.score, 2)
       << ", \"familyMatchRate\": " << fmtNum(r.m6.familyMatchRate, 4)
+      << ", \"hasMidStyleVoiceChanges\": " << (r.m6.hasMidStyleVoiceChanges ? "true" : "false")
       << ", \"elementVoicePreservation\": " << fmtNum(r.m6.elementVoicePreservation, 4)
+      << ", \"targetKstEvaluated\": " << (r.m6.targetKstEvaluated ? "true" : "false")
       << ", \"targetKstValid\": " << (r.m6.targetKstValid ? "true" : "false") << " }\n";
     o << "  },\n";
     o << "  \"diagnostics\": [";
@@ -1758,30 +2057,25 @@ inline std::string toJson(const BenchResult& r) {
     return o.str();
 }
 
-// ── Deterministic Markdown Report Formatter ──────────────────────────
+// ── Deterministic Markdown Report Formatter (P1-4 & P2-5) ────────────
 inline std::string toMarkdown(const std::vector<BenchResult>& results) {
     using detail::fmtNum;
+    const CorpusSummary cs = computeCorpusSummary(results);
     std::ostringstream o;
     o << "# Offline Style Conversion Quality Benchmark Report\n\n";
     o << "- **Schema:** `" << kSchemaId << "`\n";
     o << "- **Hardware Verified:** `false` (`L3 = NotRun`)\n";
-    o << "- **Status Label:** `STRUCTURALLY VALID — NOT VERIFIED ON A PA5X`\n";
+    o << "- **Status Label:** `" << (cs.allStructuralValid ? kValidLabel : kInvalidLabel) << "`\n";
     o << "- **Immutable Weights:** `M1=25%`, `M2=20%`, `M3=15%`, `M4=15%`, `M5=12%`, `M6=13%` (Sum = `100%`)\n\n";
 
     o << "| Fixture | Format | Sec (Exp/Src) | Valid | M1 (25%) | M2 (20%) | M3 (15%) | M4 (15%) | M5 (12%) | M6 (13%) | Composite | Grade | Cells (P/W/F) | Diags |\n";
     o << "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|\n";
 
-    double sumM1 = 0, sumM2 = 0, sumM3 = 0, sumM4 = 0, sumM5 = 0, sumM6 = 0, sumComp = 0;
-    size_t n = 0;
     for (const auto& r : results) {
         if (!r.ok) {
-            o << "| `" << r.fixtureName << "` | ERR | 0/0 | false | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | FAIL | 0/0/0 | 0 |\n";
+            o << "| `" << r.fixtureName << "` | ERR | 0/0 | FAIL | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** | FAIL | 0/0/0 | 0 |\n";
             continue;
         }
-        ++n;
-        sumM1 += r.m1.score; sumM2 += r.m2.score; sumM3 += r.m3.score;
-        sumM4 += r.m4.score; sumM5 += r.m5.score; sumM6 += r.m6.score;
-        sumComp += r.compositeScore;
         o << "| `" << r.fixtureName << "` | " << r.format
           << " | " << r.sectionsExported << "/" << r.sectionsSource
           << " | " << (r.structuralValid ? "PASS" : "FAIL")
@@ -1796,16 +2090,35 @@ inline std::string toMarkdown(const std::vector<BenchResult>& results) {
           << " | " << r.matrixSummary.cellsPass << "/" << r.matrixSummary.cellsWarn << "/" << r.matrixSummary.cellsFail
           << " | " << r.diagnostics.size() << " |\n";
     }
-    if (n > 0) {
-        o << "| **MEAN (" << n << " fixtures)** | — | — | —"
-          << " | **" << fmtNum(sumM1 / double(n), 2) << "**"
-          << " | **" << fmtNum(sumM2 / double(n), 2) << "**"
-          << " | **" << fmtNum(sumM3 / double(n), 2) << "**"
-          << " | **" << fmtNum(sumM4 / double(n), 2) << "**"
-          << " | **" << fmtNum(sumM5 / double(n), 2) << "**"
-          << " | **" << fmtNum(sumM6 / double(n), 2) << "**"
-          << " | **" << fmtNum(sumComp / double(n), 2) << "**"
-          << " | — | — | — |\n";
+    if (cs.fixtureCount > 0) {
+        o << "| **MEAN (" << cs.fixtureCount << " fixtures)** | — | — | " << (cs.allStructuralValid ? "PASS" : "FAIL")
+          << " | **" << fmtNum(cs.meanDimensions[0], 2) << "**"
+          << " | **" << fmtNum(cs.meanDimensions[1], 2) << "**"
+          << " | **" << fmtNum(cs.meanDimensions[2], 2) << "**"
+          << " | **" << fmtNum(cs.meanDimensions[3], 2) << "**"
+          << " | **" << fmtNum(cs.meanDimensions[4], 2) << "**"
+          << " | **" << fmtNum(cs.meanDimensions[5], 2) << "**"
+          << " | **" << fmtNum(cs.meanComposite, 2) << "**"
+          << " | **" << cs.corpusGrade << "** | — | — |\n";
+        o << "| **ACTIVE-TORTURE MEAN** | — | — | —"
+          << " | **" << fmtNum(cs.activeDimensionMeans[0], 2) << "** (" << cs.activeDimensionCounts[0] << ")"
+          << " | **" << fmtNum(cs.activeDimensionMeans[1], 2) << "** (" << cs.activeDimensionCounts[1] << ")"
+          << " | **" << fmtNum(cs.activeDimensionMeans[2], 2) << "** (" << cs.activeDimensionCounts[2] << ")"
+          << " | **" << fmtNum(cs.activeDimensionMeans[3], 2) << "** (" << cs.activeDimensionCounts[3] << ")"
+          << " | **" << fmtNum(cs.activeDimensionMeans[4], 2) << "** (" << cs.activeDimensionCounts[4] << ")"
+          << " | **" << fmtNum(cs.activeDimensionMeans[5], 2) << "** (" << cs.activeDimensionCounts[5] << ")"
+          << " | **" << fmtNum(cs.activeComposite, 2) << "**"
+          << " | **" << cs.corpusGrade << "** | — | — |\n";
+        o << "| **MIN** | — | — | —"
+          << " | " << fmtNum(cs.minDimensionScores[0], 2)
+          << " | " << fmtNum(cs.minDimensionScores[1], 2)
+          << " | " << fmtNum(cs.minDimensionScores[2], 2)
+          << " | " << fmtNum(cs.minDimensionScores[3], 2)
+          << " | " << fmtNum(cs.minDimensionScores[4], 2)
+          << " | " << fmtNum(cs.minDimensionScores[5], 2)
+          << " | " << fmtNum(cs.minComposite, 2)
+          << " | P:" << cs.passCount << " W:" << cs.warnCount << " F:" << cs.failCount
+          << " | HardViol: " << cs.hardInvariantViolations << " | — |\n";
     }
     return o.str();
 }

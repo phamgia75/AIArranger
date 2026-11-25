@@ -538,19 +538,35 @@ void parseCnttBlock(const uint8_t* data, size_t size, ParseResult& result, int c
     if (casm_section_idx >= 0 &&
         casm_section_idx < static_cast<int>(result.casm_sections.size())) {
         auto& tracks = result.casm_sections[casm_section_idx].tracks;
+        bool matchedInSection = false;
         for (auto it = tracks.rbegin(); it != tracks.rend(); ++it) {
+            if (it->source_channel == srcCh) {
+                it->ntt_bass = bass;
+                it->ntt = ntt;
+                matchedInSection = true;
+                break;
+            }
+        }
+        // Only update the matching entry belonging to this section in flat casm_configs
+        // (never clobbering an earlier section's track config).
+        if (matchedInSection) {
+            const size_t limit = std::min(tracks.size(), result.casm_configs.size());
+            for (size_t k = 0; k < limit; ++k) {
+                auto& cfg = result.casm_configs[result.casm_configs.size() - 1 - k];
+                if (cfg.source_channel == srcCh) {
+                    cfg.ntt_bass = bass;
+                    cfg.ntt = ntt;
+                    break;
+                }
+            }
+        }
+    } else {
+        for (auto it = result.casm_configs.rbegin(); it != result.casm_configs.rend(); ++it) {
             if (it->source_channel == srcCh) {
                 it->ntt_bass = bass;
                 it->ntt = ntt;
                 break;
             }
-        }
-    }
-    for (auto it = result.casm_configs.rbegin(); it != result.casm_configs.rend(); ++it) {
-        if (it->source_channel == srcCh) {
-            it->ntt_bass = bass;
-            it->ntt = ntt;
-            break;
         }
     }
 }
@@ -588,7 +604,7 @@ bool Sff1Reader::parseCasm(const uint8_t* data, size_t size, int depth) {
                              static_cast<uint32_t>(data[pos + 7]);
         pos += 8;
 
-        if (pos + sub_size > size) break;
+        if (sub_size > size - pos) break;
 
         if (sub_id == "Ctb2") {
             parseCtb2Block(data + pos, sub_size);
