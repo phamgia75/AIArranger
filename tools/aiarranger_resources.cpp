@@ -31,6 +31,7 @@
 #include "media/panative/panative_reader.h"
 #include "media/sound/evidence_import.h"
 #include "media/sound/memory_check.h"
+#include "media/sound/selective_plan.h"
 #include <cstdio>
 #include <set>
 
@@ -48,6 +49,10 @@ static int usage() {
                          "       aiarranger-resources panative inspect FILE|FOLDER   (read-only, experimental)\n"
                          "       aiarranger-resources validate FOLDER   (KST or SET folder, file level, read-only)\n"
                          "       aiarranger-resources kst-native closure KSTDIR   (read-only, experimental)\n"
+                         "       aiarranger-resources kst-native selective-plan --source SRC.KST [--target DST.KST]\n"
+                         "           --select REL [--target-bank BANK] [--target-name NAME] [--select ...]\n"
+                         "           [--policy block|reuse|remap] [--no-embedded-kbdsets] [--no-embedded-pads]\n"
+                         "           [--json] [--export-plan OUT_DIR]   (read-only advisory plan; zero native KST writes)\n"
                          "       aiarranger-resources kst-native demo OUTDIR   (writes 3 NOT HARDWARE-VERIFIED test KSTs)\n"
                          "       aiarranger-resources kst-native from-set SETDIR OUT.KST   (resources only, NOT VERIFIED ON A PA5X)\n"
                          "  any command: --evidence FILE (owner-authorized evidence, repeatable)\n");
@@ -68,6 +73,116 @@ static int panativeInspect(const std::string& path) {
     return unreadable ? 1 : invalid ? 3 : 0;
 }
 
+static int kstNativeSelectivePlan(int argc, char** argv) {
+    using namespace ai_arranger::media::selective;
+    NativeSelectivePlanRequest req;
+    req.mode = ExportMode::AdvisoryPlan;
+    bool jsonOut = false;
+    bool hasSource = false;
+    bool hasTarget = false;
+    std::string exportPlanDir;
+
+    auto inferKind = [](const std::string& rel) -> SelectedKind {
+        if (graph::native_detail::endsWithUpper(rel, ".KSC")) return SelectedKind::KeyboardSet;
+        if (graph::native_detail::endsWithUpper(rel, ".PDC")) return SelectedKind::Pad;
+        return SelectedKind::Style;
+    };
+
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto needVal = [&](std::string& v) -> bool {
+            if (i + 1 >= argc) return false;
+            v = argv[++i];
+            return true;
+        };
+        if (a == "--source") {
+            std::string v;
+            if (hasSource || !needVal(v) || v.empty()) return usage();
+            req.sourceKst = v;
+            hasSource = true;
+        } else if (a == "--target") {
+            std::string v;
+            if (hasTarget || !needVal(v) || v.empty()) return usage();
+            req.targetKst = v;
+            hasTarget = true;
+        } else if (a == "--select") {
+            std::string v;
+            if (!needVal(v) || v.empty()) return usage();
+            SelectionTarget t;
+            t.relPath = v;
+            t.kind = inferKind(v);
+            req.targets.push_back(std::move(t));
+        } else if (a == "--target-bank") {
+            std::string v;
+            if (req.targets.empty() || !needVal(v) || v.empty()) return usage();
+            req.targets.back().targetBank = v;
+        } else if (a == "--target-name") {
+            std::string v;
+            if (req.targets.empty() || !needVal(v) || v.empty()) return usage();
+            req.targets.back().targetName = v;
+        } else if (a == "--policy") {
+            std::string v;
+            if (!needVal(v)) return usage();
+            if (v == "block") req.policy = ConflictPolicy::BlockWithReport;
+            else if (v == "reuse") req.policy = ConflictPolicy::ReuseIdenticalTargetSlot;
+            else if (v == "remap") req.policy = ConflictPolicy::RemapToFreeSlotInNewLib;
+            else {
+                std::fprintf(stderr, "ERROR: invalid --policy '%s' (expected block|reuse|remap)\n", v.c_str());
+                return 1;
+            }
+        } else if (a == "--no-embedded-kbdsets") {
+            req.includeEmbeddedKbdSets = false;
+        } else if (a == "--no-embedded-pads") {
+            req.includeEmbeddedPads = false;
+        } else if (a == "--json") {
+            jsonOut = true;
+        } else if (a == "--export-plan") {
+            std::string v;
+            if (!exportPlanDir.empty() || !needVal(v) || v.empty()) return usage();
+            exportPlanDir = v;
+        } else {
+            return usage();
+        }
+    }
+
+    if (!hasSource || req.targets.empty()) return usage();
+
+    const NativeSelectivePlanResult res = planNativeSelectiveExport(req);
+    if (!res.ok || res.cancelled) {
+        std::fprintf(stderr, "ERROR: %s\n", res.error.empty() ? "selective plan failed" : res.error.c_str());
+        return 1;
+    }
+    if (res.missingSelectionTarget) {
+        for (const auto& d : res.report.diagnostics) {
+            if (d.code == collector_diag_code::kSelectedRootNotFound) {
+                std::fprintf(stderr, "ERROR: selected path not found in source KST: %s\n", d.subject.c_str());
+            }
+        }
+        return 1;
+    }
+
+    if (!exportPlanDir.empty()) {
+        ai_arranger::jobs::JobState st;
+        st.id = 1;
+        ai_arranger::jobs::runExport(
+            advisoryPlanExportSpec(req, res, exportPlanDir),
+            st,
+            [] { return false; },
+            [](const ai_arranger::jobs::JobState&) {});
+        if (st.phase != ai_arranger::jobs::Phase::Done) {
+            std::fprintf(stderr, "ERROR: advisory plan NOT written (%s): %s\n",
+                         ai_arranger::jobs::phaseName(st.stoppedAt), st.reason.c_str());
+            return 1;
+        }
+    }
+
+    const std::string output = jsonOut
+                                   ? serializeNativeSelectivePlanJson(res)
+                                   : serializeNativeSelectivePlanMarkdown(res);
+    std::fputs(output.c_str(), stdout);
+    return res.executable() ? 0 : 3;
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
     const std::string cmd = argv[1];
@@ -76,6 +191,9 @@ int main(int argc, char** argv) {
         const auto v = ai_arranger::library::validate(argv[2]);
         std::fputs(ai_arranger::library::validationText(v).c_str(), v.ok ? stdout : stderr);
         return !v.ok ? 1 : v.count(ai_arranger::library::Severity::Error) ? 3 : 0;
+    }
+    if (cmd == "kst-native" && argc >= 3 && std::string(argv[2]) == "selective-plan") {
+        return kstNativeSelectivePlan(argc, argv);
     }
     if (cmd == "kst-native" && argc == 4 && std::string(argv[2]) == "closure") {
         const auto c = panative::closure::check(argv[3]);
