@@ -46,52 +46,98 @@ bool writeText(const std::string& path, const std::string& text) {
 
 std::string batchToJson(const std::vector<BenchResult>& results) {
     using detail::fmtNum;
+    using detail::jsonEscape;
     const CorpusSummary cs = computeCorpusSummary(results);
+    auto optAgg = [](uint32_t cnt, double v) -> std::string {
+        return cnt > 0 ? fmtNum(v, 2) : "null";
+    };
+    static constexpr const char* kKeys[6] = {"M1", "M2", "M3", "M4", "M5", "M6"};
     std::ostringstream o;
     o << "{\n";
     o << "  \"schema\": \"" << kSchemaId << "\",\n";
+    o << "  \"statusTaxonomy\": [\"PASS\", \"FAIL\", \"UNSUPPORTED\", \"N/A\", \"NOT_TESTED\"],\n";
     o << "  \"hardwareVerified\": false,\n";
     o << "  \"l3Status\": \"NotRun\",\n";
+    o << "  \"l3HardwareStatus\": \"" << cs.l3HardwareStatus << "\",\n";
     o << "  \"label\": \"" << (cs.allStructuralValid ? kValidLabel : kInvalidLabel) << "\",\n";
     o << "  \"weights\": { \"M1\": 0.25, \"M2\": 0.20, \"M3\": 0.15, \"M4\": 0.15, \"M5\": 0.12, \"M6\": 0.13 },\n";
     o << "  \"fixtureCount\": " << cs.fixtureCount << ",\n";
     o << "  \"allStructuralValid\": " << (cs.allStructuralValid ? "true" : "false") << ",\n";
     o << "  \"meanScores\": {\n";
     o << "    \"composite\": " << fmtNum(cs.meanComposite, 2) << ",\n";
-    o << "    \"M1\": " << fmtNum(cs.meanDimensions[0], 2) << ",\n";
-    o << "    \"M2\": " << fmtNum(cs.meanDimensions[1], 2) << ",\n";
-    o << "    \"M3\": " << fmtNum(cs.meanDimensions[2], 2) << ",\n";
-    o << "    \"M4\": " << fmtNum(cs.meanDimensions[3], 2) << ",\n";
-    o << "    \"M5\": " << fmtNum(cs.meanDimensions[4], 2) << ",\n";
-    o << "    \"M6\": " << fmtNum(cs.meanDimensions[5], 2) << "\n";
+    for (size_t i = 0; i < 6; ++i) {
+        o << "    \"" << kKeys[i] << "\": " << optAgg(cs.evaluatedDimensionCounts[i], cs.meanDimensions[i])
+          << (i < 5 ? ",\n" : "\n");
+    }
     o << "  },\n";
     o << "  \"corpusSummary\": {\n";
     o << "    \"fixtureCount\": " << cs.fixtureCount << ",\n";
+    o << "    \"statusTaxonomy\": [\"PASS\", \"FAIL\", \"UNSUPPORTED\", \"N/A\", \"NOT_TESTED\"],\n";
+    o << "    \"l3HardwareStatus\": \"" << cs.l3HardwareStatus << "\",\n";
+    o << "    \"targetKstSummary\": { \"pass\": " << cs.targetKstPassCount
+      << ", \"fail\": " << cs.targetKstFailCount
+      << ", \"notTested\": " << cs.targetKstNotTestedCount << " },\n";
     o << "    \"gradeCounts\": { \"pass\": " << cs.passCount
       << ", \"warn\": " << cs.warnCount
       << ", \"fail\": " << cs.failCount << " },\n";
+    o << "    \"coverage\": {\n";
+    for (size_t i = 0; i < 6; ++i) {
+        o << "      \"" << kKeys[i] << "\": { \"evaluated\": " << cs.evaluatedDimensionCounts[i]
+          << ", \"activeStress\": " << cs.activeDimensionCounts[i]
+          << ", \"naExcluded\": " << cs.naExcludedCounts[i]
+          << ", \"pass\": " << cs.dimPassCounts[i]
+          << ", \"fail\": " << cs.dimFailCounts[i] << " }"
+          << (i < 5 ? ",\n" : "\n");
+    }
+    o << "    },\n";
     o << "    \"meanComposite\": " << fmtNum(cs.meanComposite, 2) << ",\n";
     o << "    \"minComposite\": " << fmtNum(cs.minComposite, 2) << ",\n";
-    o << "    \"minDimensionScores\": { \"M1\": " << fmtNum(cs.minDimensionScores[0], 2)
-      << ", \"M2\": " << fmtNum(cs.minDimensionScores[1], 2)
-      << ", \"M3\": " << fmtNum(cs.minDimensionScores[2], 2)
-      << ", \"M4\": " << fmtNum(cs.minDimensionScores[3], 2)
-      << ", \"M5\": " << fmtNum(cs.minDimensionScores[4], 2)
-      << ", \"M6\": " << fmtNum(cs.minDimensionScores[5], 2) << " },\n";
-    o << "    \"activeDimensionMeans\": { \"M1\": " << fmtNum(cs.activeDimensionMeans[0], 2)
-      << ", \"M2\": " << fmtNum(cs.activeDimensionMeans[1], 2)
-      << ", \"M3\": " << fmtNum(cs.activeDimensionMeans[2], 2)
-      << ", \"M4\": " << fmtNum(cs.activeDimensionMeans[3], 2)
-      << ", \"M5\": " << fmtNum(cs.activeDimensionMeans[4], 2)
-      << ", \"M6\": " << fmtNum(cs.activeDimensionMeans[5], 2) << " },\n";
+    o << "    \"evaluatedDimensionMeans\": { \"M1\": " << optAgg(cs.evaluatedDimensionCounts[0], cs.meanDimensions[0])
+      << ", \"M2\": " << optAgg(cs.evaluatedDimensionCounts[1], cs.meanDimensions[1])
+      << ", \"M3\": " << optAgg(cs.evaluatedDimensionCounts[2], cs.meanDimensions[2])
+      << ", \"M4\": " << optAgg(cs.evaluatedDimensionCounts[3], cs.meanDimensions[3])
+      << ", \"M5\": " << optAgg(cs.evaluatedDimensionCounts[4], cs.meanDimensions[4])
+      << ", \"M6\": " << optAgg(cs.evaluatedDimensionCounts[5], cs.meanDimensions[5]) << " },\n";
+    o << "    \"minDimensionScores\": { \"M1\": " << optAgg(cs.evaluatedDimensionCounts[0], cs.minDimensionScores[0])
+      << ", \"M2\": " << optAgg(cs.evaluatedDimensionCounts[1], cs.minDimensionScores[1])
+      << ", \"M3\": " << optAgg(cs.evaluatedDimensionCounts[2], cs.minDimensionScores[2])
+      << ", \"M4\": " << optAgg(cs.evaluatedDimensionCounts[3], cs.minDimensionScores[3])
+      << ", \"M5\": " << optAgg(cs.evaluatedDimensionCounts[4], cs.minDimensionScores[4])
+      << ", \"M6\": " << optAgg(cs.evaluatedDimensionCounts[5], cs.minDimensionScores[5]) << " },\n";
+    o << "    \"activeDimensionMeans\": { \"M1\": " << optAgg(cs.activeDimensionCounts[0], cs.activeDimensionMeans[0])
+      << ", \"M2\": " << optAgg(cs.activeDimensionCounts[1], cs.activeDimensionMeans[1])
+      << ", \"M3\": " << optAgg(cs.activeDimensionCounts[2], cs.activeDimensionMeans[2])
+      << ", \"M4\": " << optAgg(cs.activeDimensionCounts[3], cs.activeDimensionMeans[3])
+      << ", \"M5\": " << optAgg(cs.activeDimensionCounts[4], cs.activeDimensionMeans[4])
+      << ", \"M6\": " << optAgg(cs.activeDimensionCounts[5], cs.activeDimensionMeans[5]) << " },\n";
     o << "    \"activeDimensionCounts\": { \"M1\": " << cs.activeDimensionCounts[0]
       << ", \"M2\": " << cs.activeDimensionCounts[1]
       << ", \"M3\": " << cs.activeDimensionCounts[2]
       << ", \"M4\": " << cs.activeDimensionCounts[3]
       << ", \"M5\": " << cs.activeDimensionCounts[4]
       << ", \"M6\": " << cs.activeDimensionCounts[5] << " },\n";
+    o << "    \"naExcludedCounts\": { \"M1\": " << cs.naExcludedCounts[0]
+      << ", \"M2\": " << cs.naExcludedCounts[1]
+      << ", \"M3\": " << cs.naExcludedCounts[2]
+      << ", \"M4\": " << cs.naExcludedCounts[3]
+      << ", \"M5\": " << cs.naExcludedCounts[4]
+      << ", \"M6\": " << cs.naExcludedCounts[5] << " },\n";
     o << "    \"activeComposite\": " << fmtNum(cs.activeComposite, 2) << ",\n";
     o << "    \"hardInvariantViolations\": " << cs.hardInvariantViolations << ",\n";
+    o << "    \"unsupportedSummary\": {\n";
+    o << "      \"totalOccurrences\": " << cs.unsupportedTotalOccurrences << ",\n";
+    o << "      \"fixturesWithUnsupported\": " << cs.fixturesWithUnsupported << ",\n";
+    o << "      \"byFeature\": {";
+    if (!cs.unsupportedByFeature.empty()) {
+        o << "\n";
+        size_t idx = 0;
+        for (const auto& [feat, cnt] : cs.unsupportedByFeature) {
+            o << "        \"" << jsonEscape(feat) << "\": " << cnt
+              << (++idx < cs.unsupportedByFeature.size() ? ",\n" : "\n      ");
+        }
+    }
+    o << "}\n";
+    o << "    },\n";
     o << "    \"corpusGrade\": \"" << cs.corpusGrade << "\"\n";
     o << "  },\n";
     o << "  \"fixtures\": [\n";

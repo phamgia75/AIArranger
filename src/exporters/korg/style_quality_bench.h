@@ -60,6 +60,13 @@ inline constexpr const char* kSchemaId = "aiarranger-style-quality-bench/1";
 inline constexpr const char* kValidLabel = "STRUCTURALLY VALID — NOT VERIFIED ON A PA5X";
 inline constexpr const char* kInvalidLabel = "STRUCTURALLY INVALID — NOT VERIFIED ON A PA5X";
 
+// ── Explicit 5-State Benchmark Status Taxonomy ───────────────────────
+inline constexpr const char* kStatusPass = "PASS";
+inline constexpr const char* kStatusFail = "FAIL";
+inline constexpr const char* kStatusUnsupported = "UNSUPPORTED";
+inline constexpr const char* kStatusNA = "N/A";
+inline constexpr const char* kStatusNotTested = "NOT_TESTED";
+
 // ── Standardized 13-Chord Multi-Chord Torture Suite ──────────────────
 enum class TestChordKind : uint8_t {
     Major = 0,
@@ -140,6 +147,13 @@ struct Diagnostic {
     std::string fallback;
 };
 
+struct UnsupportedFeature {
+    std::string feature;
+    std::string status = kStatusUnsupported;
+    uint32_t count = 0;
+    std::string reason;
+};
+
 struct MatrixCell {
     std::string section;
     std::string track;
@@ -156,34 +170,49 @@ struct MatrixCell {
 };
 
 struct M1Scores {
+    bool applicable = false;
+    std::string status = kStatusNA;
     double score = 0.0;
     double clashRate = 0.0;
     double bassSlashAccuracy = 1.0;
+    std::string bassSlashStatus = kStatusNA;
     double voiceLeadingAvgSemis = 0.0;
+    std::string voiceLeadingStatus = kStatusNA;
     double registerViolationRate = 0.0;
     double voicingCollapseRate = 0.0;
+    std::string voicingCollapseStatus = kStatusNA;
     // Independent UASF-layer diagnostic ONLY (never fed into Pa5X SMF playback simulation!)
     double casmPreservationRate = 0.0;
 };
 
 struct M2Scores {
+    bool applicable = false;
+    std::string status = kStatusNA;
     double score = 0.0;
     uint32_t leakedChordRange = 0;
     double leakedFxKeyRate = 0.0;
     uint32_t leakedFxNotesCount = 0;
+    std::string fxKeyStatus = kStatusNA;
     uint32_t velocityInversions = 0;
+    std::string velocityZoneStatus = kStatusNA;
     double guitarStrumCoherence = 1.0;
+    std::string guitarStrumStatus = kStatusNA;
 };
 
 struct M3Scores {
+    bool applicable = false;
+    std::string status = kStatusNA;
     double score = 0.0;
     double coverageRate = 0.0;
     double meterBarAccuracy = 0.0;
     uint32_t loopBoundaryErrors = 0;
     double p99DriftMs = 0.0;
+    std::string timingDriftStatus = kStatusNA;
 };
 
 struct M4Scores {
+    bool applicable = false;
+    std::string status = kStatusNA;
     double score = 0.0;
     double unmappedHitRate = 0.0;
     double familyPreservationRate = 1.0;
@@ -192,20 +221,30 @@ struct M4Scores {
 };
 
 struct M5Scores {
+    bool applicable = false;
+    std::string status = kStatusNA;
     double score = 0.0;
     double mixCcConsistency = 1.0;
+    std::string mixCcStatus = kStatusNA;
     uint32_t unsafeCcLeaks = 0;
     double balanceHealthRate = 1.0;
+    std::string balanceStatus = kStatusNA;
     double xgSysexCoverage = 1.0;
+    std::string xgSysexStatus = kStatusNA;
 };
 
 struct M6Scores {
+    bool applicable = false;
+    std::string status = kStatusNA;
     double score = 0.0;
     double familyMatchRate = 0.0;
-    double elementVoicePreservation = 1.0;
+    std::string familyMatchStatus = kStatusNA;
+    double elementVoicePreservation = 0.0;
+    std::string elementVoiceStatus = kStatusNA;
     bool hasMidStyleVoiceChanges = false;
     bool targetKstEvaluated = false;
     bool targetKstValid = false;
+    std::string targetKstStatus = kStatusNotTested;
 };
 
 struct ApplicabilityFlags {
@@ -234,9 +273,12 @@ struct BenchResult {
     uint32_t sectionsSource = 0;
     uint32_t sectionsExported = 0;
     bool structuralValid = false;
+    std::string structuralStatus = kStatusFail;
+    std::string l3HardwareStatus = kStatusNotTested;
     std::vector<std::string> validationErrors;
+    double applicableWeightSum = 0.0;
     double compositeScore = 0.0;
-    std::string grade = "FAIL";
+    std::string grade = kStatusFail;
     ApplicabilityFlags applicability;
     M1Scores m1;
     M2Scores m2;
@@ -244,6 +286,7 @@ struct BenchResult {
     M4Scores m4;
     M5Scores m5;
     M6Scores m6;
+    std::vector<UnsupportedFeature> unsupportedFeatures;
     std::vector<Diagnostic> diagnostics;
     MatrixSummary matrixSummary;
     std::vector<MatrixCell> cells;
@@ -255,15 +298,26 @@ struct CorpusSummary {
     uint32_t warnCount = 0;
     uint32_t failCount = 0;
     bool allStructuralValid = false;
+    std::string l3HardwareStatus = kStatusNotTested;
+    uint32_t targetKstPassCount = 0;
+    uint32_t targetKstFailCount = 0;
+    uint32_t targetKstNotTestedCount = 0;
     double meanComposite = 0.0;
     double minComposite = 0.0;
     std::array<double, 6> meanDimensions{};
     std::array<double, 6> minDimensionScores{};
     std::array<double, 6> activeDimensionMeans{};
+    std::array<uint32_t, 6> evaluatedDimensionCounts{};
     std::array<uint32_t, 6> activeDimensionCounts{};
+    std::array<uint32_t, 6> naExcludedCounts{};
+    std::array<uint32_t, 6> dimPassCounts{};
+    std::array<uint32_t, 6> dimFailCounts{};
     double activeComposite = 0.0;
     uint32_t hardInvariantViolations = 0;
-    std::string corpusGrade = "FAIL";
+    uint32_t unsupportedTotalOccurrences = 0;
+    uint32_t fixturesWithUnsupported = 0;
+    std::map<std::string, uint32_t> unsupportedByFeature;
+    std::string corpusGrade = kStatusFail;
 };
 
 namespace detail {
@@ -1058,6 +1112,8 @@ inline BenchResult evaluateReparsedSmf(const RefAnalysis& ref,
     res.sectionsSource = static_cast<uint32_t>(ref.sections.size());
     res.validationErrors = validate(reparsedStyle);
     res.structuralValid = res.validationErrors.empty();
+    res.structuralStatus = res.structuralValid ? kStatusPass : kStatusFail;
+    res.l3HardwareStatus = kStatusNotTested;
     res.targetPpqn = reparsedStyle.ppqn;
     res.sectionsExported = static_cast<uint32_t>(reparsedStyle.elements.size());
 
@@ -1555,101 +1611,177 @@ inline BenchResult evaluateReparsedSmf(const RefAnalysis& ref,
     }
 
     // M2.3 Velocity-zone inversion count (from SOURCE-velocity buckets!)
+    uint32_t m2VelCheckedChannels = 0;
     for (uint8_t kch : megaKorgChs) {
         auto lo = megaSrcLowExpVel[kch], hi = megaSrcHighExpVel[kch];
         if (lo.second > 0 && hi.second > 0) {
+            ++m2VelCheckedChannels;
             double meanLo = lo.first / double(lo.second);
             double meanHi = hi.first / double(hi.second);
             if (meanHi > meanLo) ++m2VelInversions;
         }
     }
 
-    // ── Applicability Flags (P1-4) ───────────────────────────────────
+    // Independent expected active Korg channels from raw source .sty (never supplied by converter!)
+    std::set<uint8_t> expectedKorgChsFromRef;
+    for (const auto& rs : ref.sections) {
+        for (const auto& rn : rs.notes) {
+            uint8_t rch = ref.casmRoute.count(rn.ch) ? ref.casmRoute.at(rn.ch) : rn.ch;
+            uint8_t kch = korgChannelFor(rch);
+            if (kch != 0xFF) expectedKorgChsFromRef.insert(kch);
+        }
+    }
+
+    // ── Applicability Flags (P1-4: Stress/Torture Corpus Tracking) ───
     res.applicability.m1Harmonic = (m1TotalNotes > 0);
     res.applicability.m2Articulation = !ref.megaVoiceSrcChannels.empty() || !ref.sartSrcChannels.empty() || !ref.guitarNtrSrcChannels.empty();
     res.applicability.m3SectionStress = hasBreakSection || ref.timeSigs.size() > 1 || ref.tempos.size() > 1 || m3LoopErrors > 0;
     res.applicability.m4DrumStress = ref.hasExtendedDrumNotes || (srcR1Primary > srcR2Primary);
     res.applicability.m5MixStress = (ref.xgSysexCount > 0) || (ref.srcUnsafeCcCount > 0) || (m5UnsafeCc > 0);
-    res.applicability.m6Timbre = !mapReport.tracks.empty();
+    res.applicability.m6Timbre = !expectedKorgChsFromRef.empty() || !mapReport.tracks.empty();
 
-    // ── Compute Final M1..M6 Scores (EXACT Spec §3 Formulas) ─────────
+    // ── Compute Final M1..M6 Scores (EXACT Spec §3 Formulas; N/A Excluded — Never Fake 100.0!) ──
     // M1 Harmonic & Voice-Leading (Weight 25%)
+    res.m1.applicable = (m1TotalNotes > 0);
     res.m1.clashRate = m1TotalNotes ? double(m1ClashNotes) / double(m1TotalNotes) : 0.0;
-    res.m1.bassSlashAccuracy = m1BassTriggers ? double(m1BassHits) / double(m1BassTriggers) : 1.0;
+    res.m1.bassSlashAccuracy = m1BassTriggers ? double(m1BassHits) / double(m1BassTriggers) : 0.0;
+    res.m1.bassSlashStatus = m1BassTriggers == 0 ? kStatusNA : (res.m1.bassSlashAccuracy >= 0.80 ? kStatusPass : kStatusFail);
     res.m1.voiceLeadingAvgSemis = m1VlCount ? (m1VlSum / double(m1VlCount)) : 0.0;
+    res.m1.voiceLeadingStatus = m1VlCount == 0 ? kStatusNA : (res.m1.voiceLeadingAvgSemis <= 3.5 ? kStatusPass : kStatusFail);
     res.m1.registerViolationRate = m1TotalNotes ? double(m1RegViol) / double(m1TotalNotes) : 0.0;
     res.m1.voicingCollapseRate = m1PolyAttacks ? double(m1CollapseAttacks) / double(m1PolyAttacks) : 0.0;
-    {
+    res.m1.voicingCollapseStatus = m1PolyAttacks == 0 ? kStatusNA : (res.m1.voicingCollapseRate <= 0.02 ? kStatusPass : kStatusFail);
+    if (!res.m1.applicable) {
+        res.m1.score = 0.0;
+        res.m1.status = kStatusNA;
+    } else {
         const double s11 = res.m1.clashRate <= 0.01 ? 100.0 : clamp100(100.0 - (res.m1.clashRate - 0.01) * 800.0);
         const double s12 = clamp100(res.m1.bassSlashAccuracy * 100.0);
         const double s13 = res.m1.voiceLeadingAvgSemis <= 3.5 ? 100.0 : clamp100(100.0 - (res.m1.voiceLeadingAvgSemis - 3.5) * 16.6667);
         const double s14 = res.m1.registerViolationRate <= 0.005 ? 100.0 : clamp100(100.0 - (res.m1.registerViolationRate - 0.005) * 1500.0);
         const double s15 = res.m1.voicingCollapseRate <= 0.02 ? 100.0 : clamp100(100.0 - (res.m1.voicingCollapseRate - 0.02) * 500.0);
-        res.m1.score = 0.30 * s11 + 0.25 * s12 + 0.15 * s13 + 0.15 * s14 + 0.15 * s15;
+        const double w11 = 0.30;
+        const double w12 = m1BassTriggers > 0 ? 0.25 : 0.0;
+        const double w13 = m1VlCount > 0 ? 0.15 : 0.0;
+        const double w14 = 0.15;
+        const double w15 = m1PolyAttacks > 0 ? 0.15 : 0.0;
+        const double wSum = w11 + w12 + w13 + w14 + w15;
+        res.m1.score = (w11 * s11 + w12 * s12 + w13 * s13 + w14 * s14 + w15 * s15) / wSum;
+        res.m1.status = res.m1.score >= 80.0 ? kStatusPass : kStatusFail;
     }
 
     // M2 Articulation & MegaVoice Hygiene (Weight 20%)
+    // N/A when fixture has zero MegaVoice/S.Art/Guitar sources AND zero chord-range leaks (never fake 100.0!).
     res.m2.leakedChordRange = m2LeakedChordRange;
     res.m2.leakedFxKeyRate = m2FlaggedNotes ? double(m2LeakedFxNotes) / double(m2FlaggedNotes) : 0.0;
     res.m2.leakedFxNotesCount = static_cast<uint32_t>(m2LeakedFxNotes);
+    res.m2.fxKeyStatus = m2FlaggedNotes == 0 ? kStatusNA : (m2LeakedFxNotes == 0 ? kStatusPass : kStatusFail);
     res.m2.velocityInversions = m2VelInversions;
-    res.m2.guitarStrumCoherence = m2StrumTotal ? double(m2StrumOk) / double(m2StrumTotal) : 1.0;
-    {
+    res.m2.velocityZoneStatus = m2VelCheckedChannels == 0 ? kStatusNA : (m2VelInversions == 0 ? kStatusPass : kStatusFail);
+    res.m2.guitarStrumCoherence = m2StrumTotal ? double(m2StrumOk) / double(m2StrumTotal) : 0.0;
+    res.m2.guitarStrumStatus = m2StrumTotal == 0 ? kStatusNA : (res.m2.guitarStrumCoherence >= 0.80 ? kStatusPass : kStatusFail);
+    res.m2.applicable = res.applicability.m2Articulation || (m2LeakedChordRange > 0);
+    if (!res.m2.applicable) {
+        res.m2.score = 0.0;
+        res.m2.status = kStatusNA;
+    } else {
         const double s21 = m2LeakedChordRange == 0 ? 100.0 : 0.0;
         const double s22 = res.m2.leakedFxKeyRate == 0.0 ? 100.0 : clamp100(100.0 - res.m2.leakedFxKeyRate * 400.0);
         const double s23 = m2VelInversions == 0 ? 100.0 : clamp100(100.0 - double(m2VelInversions) * 50.0);
         const double s24 = clamp100(res.m2.guitarStrumCoherence * 100.0);
-        res.m2.score = 0.25 * s21 + 0.30 * s22 + 0.25 * s23 + 0.20 * s24;
+        const double w21 = (m1TotalNotes > 0 || m2LeakedChordRange > 0) ? 0.25 : 0.0;
+        const double w22 = m2FlaggedNotes > 0 ? 0.30 : 0.0;
+        const double w23 = m2VelCheckedChannels > 0 ? 0.25 : 0.0;
+        const double w24 = m2StrumTotal > 0 ? 0.20 : 0.0;
+        const double wSum = w21 + w22 + w23 + w24;
+        res.m2.score = wSum > 0.0 ? (w21 * s21 + w22 * s22 + w23 * s23 + w24 * s24) / wSum : 0.0;
+        res.m2.status = (res.m2.score >= 80.0 && m2LeakedChordRange == 0 && m2LeakedFxNotes == 0 && m2VelInversions == 0)
+                            ? kStatusPass
+                            : kStatusFail;
     }
 
     // M3 Section & Structural Completeness (Weight 15%)
-    res.m3.coverageRate = ref.sections.empty() ? 1.0 : double(matchedSections) / double(ref.sections.size());
-    res.m3.meterBarAccuracy = ref.sections.empty() ? 1.0 : double(exactMeterBarSections) / double(ref.sections.size());
+    res.m3.applicable = !ref.sections.empty();
+    res.m3.coverageRate = ref.sections.empty() ? 0.0 : double(matchedSections) / double(ref.sections.size());
+    res.m3.meterBarAccuracy = ref.sections.empty() ? 0.0 : double(exactMeterBarSections) / double(ref.sections.size());
     res.m3.loopBoundaryErrors = m3LoopErrors;
     if (!m3OnsetDriftsMs.empty()) {
         std::sort(m3OnsetDriftsMs.begin(), m3OnsetDriftsMs.end());
         size_t idx = static_cast<size_t>(std::floor(0.99 * double(m3OnsetDriftsMs.size() - 1)));
         res.m3.p99DriftMs = m3OnsetDriftsMs[idx];
     }
-    {
+    res.m3.timingDriftStatus = m3OnsetDriftsMs.empty() ? kStatusNA : (res.m3.p99DriftMs <= 1.5 ? kStatusPass : kStatusFail);
+    if (!res.m3.applicable) {
+        res.m3.score = 0.0;
+        res.m3.status = kStatusNA;
+    } else {
         const double s31 = clamp100(res.m3.coverageRate * 100.0);
         const double s32 = clamp100(res.m3.meterBarAccuracy * 100.0);
         const double s33 = m3LoopErrors == 0 ? 100.0 : clamp100(100.0 - double(m3LoopErrors) * 25.0);
         const double s34 = res.m3.p99DriftMs <= 1.5 ? 100.0 : clamp100(100.0 - (res.m3.p99DriftMs - 1.5) * 20.0);
-        res.m3.score = res.structuralValid ? (0.30 * s31 + 0.30 * s32 + 0.25 * s33 + 0.15 * s34) : 0.0;
+        const double w31 = 0.30, w32 = 0.30, w33 = 0.25;
+        const double w34 = m3OnsetDriftsMs.empty() ? 0.0 : 0.15;
+        const double wSum = w31 + w32 + w33 + w34;
+        res.m3.score = res.structuralValid ? (w31 * s31 + w32 * s32 + w33 * s33 + w34 * s34) / wSum : 0.0;
+        res.m3.status = (res.structuralValid && res.m3.score >= 80.0 && m3LoopErrors == 0) ? kStatusPass : kStatusFail;
     }
 
     // M4 Drum & Percussion Accuracy (Weight 15%)
+    res.m4.applicable = (m4DrumHits > 0 || m4FamilyChecked > 0);
     res.m4.unmappedHitRate = m4DrumHits ? double(m4UnmappedHits) / double(m4DrumHits) : 0.0;
-    res.m4.familyPreservationRate = m4FamilyChecked ? double(m4FamilyPreserved) / double(m4FamilyChecked) : 1.0;
+    res.m4.familyPreservationRate = m4FamilyChecked ? double(m4FamilyPreserved) / double(m4FamilyChecked) : 0.0;
     if (srcR1Primary > 0 || srcR2Primary > 0) {
         res.m4.trackSeparationAccuracy = (expDrumPrimary >= expPercPrimary && expDrumPrimary > 0) ? 1.0 : 0.0;
     } else {
-        res.m4.trackSeparationAccuracy = 1.0;
+        res.m4.trackSeparationAccuracy = 0.0;
     }
-    res.m4.velCorrelation = pearsonCorrelation(m4SrcVels, m4ExpVels);
-    {
+    res.m4.velCorrelation = m4SrcVels.empty() ? 0.0 : pearsonCorrelation(m4SrcVels, m4ExpVels);
+    if (!res.m4.applicable) {
+        res.m4.score = 0.0;
+        res.m4.status = kStatusNA;
+    } else {
         const double s41 = res.m4.unmappedHitRate <= 0.02 ? 100.0 : clamp100(100.0 - (res.m4.unmappedHitRate - 0.02) * 300.0);
         const double s42 = clamp100(res.m4.familyPreservationRate * 100.0);
         const double s43 = clamp100(res.m4.trackSeparationAccuracy * 100.0);
         const double s44 = clamp100(std::max(0.0, res.m4.velCorrelation) * 100.0);
-        res.m4.score = 0.35 * s41 + 0.30 * s42 + 0.20 * s43 + 0.15 * s44;
+        const double w41 = m4DrumHits > 0 ? 0.35 : 0.0;
+        const double w42 = m4FamilyChecked > 0 ? 0.30 : 0.0;
+        const double w43 = (srcR1Primary > 0 || srcR2Primary > 0) ? 0.20 : 0.0;
+        const double w44 = !m4SrcVels.empty() ? 0.15 : 0.0;
+        const double wSum = w41 + w42 + w43 + w44;
+        res.m4.score = wSum > 0.0 ? (w41 * s41 + w42 * s42 + w43 * s43 + w44 * s44) / wSum : 0.0;
+        res.m4.status = res.m4.score >= 80.0 ? kStatusPass : kStatusFail;
     }
 
     // M5 Mix & Dynamic Balance (Weight 12%)
-    res.m5.mixCcConsistency = m5MixExpected ? double(m5MixPresent) / double(m5MixExpected) : 1.0;
+    res.m5.mixCcConsistency = m5MixExpected ? double(m5MixPresent) / double(m5MixExpected) : 0.0;
+    res.m5.mixCcStatus = m5MixExpected == 0 ? kStatusNA : (res.m5.mixCcConsistency >= 0.80 ? kStatusPass : kStatusFail);
     res.m5.unsafeCcLeaks = m5UnsafeCc;
-    res.m5.balanceHealthRate = m5BalanceTracks ? double(m5BalanceHealthy) / double(m5BalanceTracks) : 1.0;
-    res.m5.xgSysexCoverage = ref.xgSysexCount == 0 ? 1.0 : 0.0;
+    res.m5.balanceHealthRate = m5BalanceTracks ? double(m5BalanceHealthy) / double(m5BalanceTracks) : 0.0;
+    res.m5.balanceStatus = m5BalanceTracks == 0 ? kStatusNA : (res.m5.balanceHealthRate >= 0.80 ? kStatusPass : kStatusFail);
+    res.m5.xgSysexCoverage = 0.0;
+    res.m5.xgSysexStatus = ref.xgSysexCount == 0 ? kStatusNA : (res.m5.xgSysexCoverage >= 0.80 ? kStatusPass : kStatusUnsupported);
     {
         const double s51 = clamp100(res.m5.mixCcConsistency * 100.0);
         const double s52 = m5UnsafeCc == 0 ? 100.0 : clamp100(100.0 - double(m5UnsafeCc) * 15.0);
         const double s53 = clamp100(res.m5.balanceHealthRate * 100.0);
         const double s54 = clamp100(res.m5.xgSysexCoverage * 100.0);
-        res.m5.score = 0.35 * s51 + 0.25 * s52 + 0.25 * s53 + 0.15 * s54;
+        const double w51 = m5MixExpected > 0 ? 0.35 : 0.0;
+        const double w52 = !reparsedStyle.elements.empty() ? 0.25 : 0.0;
+        const double w53 = m5BalanceTracks > 0 ? 0.25 : 0.0;
+        const double w54 = ref.xgSysexCount > 0 ? 0.15 : 0.0;
+        const double wSum = w51 + w52 + w53 + w54;
+        res.m5.applicable = (wSum > 0.0);
+        if (!res.m5.applicable) {
+            res.m5.score = 0.0;
+            res.m5.status = kStatusNA;
+        } else {
+            res.m5.score = (w51 * s51 + w52 * s52 + w53 * s53 + w54 * s54) / wSum;
+            res.m5.status = (res.m5.score >= 80.0 && m5UnsafeCc == 0) ? kStatusPass : kStatusFail;
+        }
     }
 
-    // M6 Timbre & Target-Resource Coherence (Weight 13% — P1-2 honest scoring!)
+    // M6 Timbre & Target-Resource Coherence (Weight 13% — P1-2 honest scoring + independent denominator!)
     {
         uint32_t exportedTracks = 0;
         uint32_t resolvedTracks = 0;
@@ -1663,52 +1795,76 @@ inline BenchResult evaluateReparsedSmf(const RefAnalysis& ref,
             if (identified && resolved) matchCredit += 1.0;
             else if (identified) matchCredit += 0.15; // Tiny role-hint credit only when UNRESOLVED (0.0 if Unidentified)
         }
-        res.m6.familyMatchRate = exportedTracks ? (matchCredit / double(exportedTracks)) : 0.0;
+        // Denominator never smaller than independent active Korg channels derived from raw source .sty!
+        const uint32_t m6Denom = std::max<uint32_t>(exportedTracks, static_cast<uint32_t>(expectedKorgChsFromRef.size()));
+        res.m6.familyMatchRate = m6Denom ? clamp01(matchCredit / double(m6Denom)) : 0.0;
+        res.m6.familyMatchStatus = m6Denom == 0 ? kStatusNA : (res.m6.familyMatchRate >= 0.80 ? kStatusPass : kStatusFail);
         res.m6.hasMidStyleVoiceChanges = (ref.midStyleVoiceChanges > 0);
         res.m6.elementVoicePreservation = res.m6.hasMidStyleVoiceChanges
                                               ? clamp01(double(mapReport.element_sounds.size()) /
                                                         double(ref.midStyleVoiceChanges))
                                               : 0.0;
+        res.m6.elementVoiceStatus = !res.m6.hasMidStyleVoiceChanges
+                                        ? kStatusNA
+                                        : (res.m6.elementVoicePreservation >= 0.80
+                                               ? kStatusPass
+                                               : (mapReport.element_sounds.empty() ? kStatusUnsupported : kStatusFail));
         res.m6.targetKstEvaluated = !opt.targetKstPath.empty();
         if (res.m6.targetKstEvaluated) {
             std::error_code ec;
             const bool exists = std::filesystem::exists(opt.targetKstPath, ec) && !ec;
             // Require real target path AND at least one resolved target sound slot (Q4)
             res.m6.targetKstValid = exists && (resolvedTracks > 0);
+            res.m6.targetKstStatus = res.m6.targetKstValid ? kStatusPass : kStatusFail;
         } else {
             res.m6.targetKstValid = false; // Never claim valid when not evaluated!
+            res.m6.targetKstStatus = kStatusNotTested;
         }
 
         const double s61 = clamp100(res.m6.familyMatchRate * 100.0);
         const double s62 = clamp100(res.m6.elementVoicePreservation * 100.0);
         const double s63 = res.m6.targetKstValid ? 100.0 : 0.0;
-        const double w61 = 0.65;
+        const double w61 = m6Denom > 0 ? 0.65 : 0.0;
         const double w62 = res.m6.hasMidStyleVoiceChanges ? 0.25 : 0.0;
         const double w63 = res.m6.targetKstEvaluated ? 0.10 : 0.0;
         const double wSum = w61 + w62 + w63;
-        if (res.m6.targetKstEvaluated && !res.m6.targetKstValid) {
+        res.m6.applicable = (wSum > 0.0);
+        if (!res.m6.applicable) {
             res.m6.score = 0.0;
+            res.m6.status = kStatusNA;
+        } else if (res.m6.targetKstEvaluated && !res.m6.targetKstValid) {
+            res.m6.score = 0.0;
+            res.m6.status = kStatusFail;
         } else {
             res.m6.score = (w61 * s61 + w62 * s62 + w63 * s63) / wSum;
+            res.m6.status = res.m6.score >= 80.0 ? kStatusPass : kStatusFail;
         }
     }
 
-    // ── Immutable Weighted Composite Score ───────────────────────────
-    res.compositeScore = kWeightM1 * res.m1.score +
-                         kWeightM2 * res.m2.score +
-                         kWeightM3 * res.m3.score +
-                         kWeightM4 * res.m4.score +
-                         kWeightM5 * res.m5.score +
-                         kWeightM6 * res.m6.score;
+    // ── Immutable Weighted Composite Score (Renormalized Over Applicable Dimensions ONLY — Zero Fake N/A=100!) ──
+    const std::array<double, 6> kWeights = {kWeightM1, kWeightM2, kWeightM3, kWeightM4, kWeightM5, kWeightM6};
+    const std::array<double, 6> dimScores = {res.m1.score, res.m2.score, res.m3.score,
+                                             res.m4.score, res.m5.score, res.m6.score};
+    const std::array<bool, 6> dimApplicable = {res.m1.applicable, res.m2.applicable, res.m3.applicable,
+                                               res.m4.applicable, res.m5.applicable, res.m6.applicable};
+    double compNum = 0.0, compDen = 0.0;
+    double minDim = 100.0;
+    for (size_t i = 0; i < 6; ++i) {
+        if (dimApplicable[i]) {
+            compNum += kWeights[i] * dimScores[i];
+            compDen += kWeights[i];
+            minDim = std::min(minDim, dimScores[i]);
+        }
+    }
+    res.applicableWeightSum = compDen;
+    res.compositeScore = compDen > 0.0 ? (compNum / compDen) : 0.0;
 
-    const double minDim = std::min({res.m1.score, res.m2.score, res.m3.score,
-                                    res.m4.score, res.m5.score, res.m6.score});
-    if (!res.structuralValid) res.grade = "FAIL";
+    if (!res.structuralValid) res.grade = kStatusFail;
     else if (res.compositeScore >= 85.0 && minDim >= 80.0 && m3LoopErrors == 0 &&
              m2LeakedChordRange == 0 && m2LeakedFxNotes == 0 && m2VelInversions == 0)
-        res.grade = "PASS";
+        res.grade = kStatusPass;
     else if (res.compositeScore >= 60.0) res.grade = "WARN";
-    else res.grade = "FAIL";
+    else res.grade = kStatusFail;
 
     // ── Matrix Summary ───────────────────────────────────────────────
     res.matrixSummary.cellsEvaluated = static_cast<uint32_t>(res.cells.size());
@@ -1718,17 +1874,70 @@ inline BenchResult evaluateReparsedSmf(const RefAnalysis& ref,
         else ++res.matrixSummary.cellsFail;
     }
 
+    // ── Explicit UNSUPPORTED Source & Target Features (5-State Taxonomy) ──
+    bool hasCv2 = false;
+    for (const auto& el : reparsedStyle.elements) if (cvIndexOfMarker(el.marker) >= 2) hasCv2 = true;
+    bool hasGuitarParamSheet = false;
+    for (const auto& [key, tp] : opt.parameterSheet.tracks) {
+        (void)key;
+        if (tp.hasOverride && tp.guitarMode) hasGuitarParamSheet = true;
+    }
+
+    if (hasBreakSection && !opt.breakYamaha1BarCap) {
+        res.unsupportedFeatures.push_back({"BREAK_WITHHELD_BY_POLICY", kStatusUnsupported, 1, "BreakPolicy::Withhold"});
+    }
+    if (ref.hasChordMutePairs && !hasCv2) {
+        res.unsupportedFeatures.push_back({"CHORD_MUTE_CV_SPLIT_Q2", kStatusUnsupported, 1, "merged_into_cv1_until_q2"});
+    }
+    if (!ref.megaVoiceSrcChannels.empty() && (m2LeakedFxNotes > 0 || m2VelInversions > 0)) {
+        res.unsupportedFeatures.push_back({"MEGAVOICE_SANITIZATION_Q2", kStatusUnsupported,
+                                           static_cast<uint32_t>(ref.megaVoiceSrcChannels.size()), "unshaped_until_q2"});
+    }
+    if (!ref.sartSrcChannels.empty() && m2LeakedFxNotes > 0) {
+        res.unsupportedFeatures.push_back({"SART_KEYSWITCH_FILTER_Q2", kStatusUnsupported,
+                                           static_cast<uint32_t>(ref.sartSrcChannels.size()), "unfiltered_until_q2"});
+    }
+    if (!ref.guitarNtrSrcChannels.empty() && !hasGuitarParamSheet) {
+        res.unsupportedFeatures.push_back({"SFF2_GUITAR_MODE_Q2", kStatusUnsupported,
+                                           static_cast<uint32_t>(ref.guitarNtrSrcChannels.size()), "passthrough_until_q2"});
+    }
+    if (ref.hasExtendedDrumNotes && m4UnmappedHits > 0) {
+        res.unsupportedFeatures.push_back({"EXTENDED_XG_REVO_DRUM_MAP_Q3", kStatusUnsupported,
+                                           static_cast<uint32_t>(m4UnmappedHits), "raw_note_until_q3"});
+    }
+    if (ref.midStyleVoiceChanges > 0 && mapReport.element_sounds.empty()) {
+        res.unsupportedFeatures.push_back({"MID_STYLE_ELEMENT_VOICES_Q4", kStatusUnsupported,
+                                           ref.midStyleVoiceChanges, "unmapped_until_q4"});
+    }
+    if (ref.xgSysexCount > 0 && res.m5.xgSysexCoverage < 1.0) {
+        res.unsupportedFeatures.push_back({"XG_DSP_SYSEX_TRANSLATION_Q5", kStatusUnsupported,
+                                           ref.xgSysexCount, "skipped_until_q5"});
+    }
+    if (ref.tempos.size() > 1) {
+        res.unsupportedFeatures.push_back({"MID_STYLE_TEMPO_MAP_RUBATO", kStatusUnsupported,
+                                           static_cast<uint32_t>(ref.tempos.size() - 1), "pa5x_single_style_tempo"});
+    }
+    for (const auto& cid : ref.extraChunks) {
+        if (cid == "OTSc" || cid == "OTSm" || cid == "OTS ") {
+            res.unsupportedFeatures.push_back({"OTS_CHUNK_UNSUPPORTED", kStatusUnsupported, 1, cid});
+        } else if (cid == "FNRP") {
+            res.unsupportedFeatures.push_back({"FNRP_CHUNK_UNSUPPORTED", kStatusUnsupported, 1, cid});
+        } else {
+            res.unsupportedFeatures.push_back({"MDB_CHUNK_UNSUPPORTED", kStatusUnsupported, 1, cid});
+        }
+    }
+    std::sort(res.unsupportedFeatures.begin(), res.unsupportedFeatures.end(),
+              [](const UnsupportedFeature& a, const UnsupportedFeature& b) {
+                  return std::tie(a.feature, a.reason, a.count) < std::tie(b.feature, b.reason, b.count);
+              });
+
     // ── Structured Diagnostics (STYLE_QUAL_*) ────────────────────────
     if (res.m1.casmPreservationRate < 1.0) {
         res.diagnostics.push_back({"STYLE_QUAL_CASM_LOST", "WARN", "*", "*",
                                    casmFieldsChecked - casmFieldsPreserved, "default_pa5x_ntt"});
     }
-    if (ref.hasChordMutePairs) {
-        bool hasCv2 = false;
-        for (const auto& el : reparsedStyle.elements) if (cvIndexOfMarker(el.marker) >= 2) hasCv2 = true;
-        if (!hasCv2) {
-            res.diagnostics.push_back({"STYLE_QUAL_CHORD_MUTE_SPLIT", "WARN", "*", "Acc4/Acc5", 1, "merged_into_cv1"});
-        }
+    if (ref.hasChordMutePairs && !hasCv2) {
+        res.diagnostics.push_back({"STYLE_QUAL_CHORD_MUTE_SPLIT", "WARN", "*", "Acc4/Acc5", 1, "merged_into_cv1"});
     }
     if (m2LeakedFxNotes > 0) {
         res.diagnostics.push_back({"STYLE_QUAL_MEGAVOICE_FX_KEYS", "WARN", "*", "*",
@@ -1893,11 +2102,12 @@ inline BenchResult evaluateStyleFile(const std::string& path, const BenchOptions
     return evaluateStyleBuffer(bytes, path, opt);
 }
 
-// ── Corpus Summary Aggregation (P1-4: Honest Active-Dimension Composite) ──
+// ── Corpus Summary Aggregation (5-State Taxonomy + Coverage/Exclusions/Unsupported) ──
 inline CorpusSummary computeCorpusSummary(const std::vector<BenchResult>& results) {
     CorpusSummary cs;
     cs.fixtureCount = static_cast<uint32_t>(results.size());
     cs.allStructuralValid = !results.empty();
+    cs.l3HardwareStatus = kStatusNotTested;
     cs.minComposite = results.empty() ? 0.0 : 100.0;
     cs.minDimensionScores.fill(results.empty() ? 0.0 : 100.0);
 
@@ -1913,29 +2123,52 @@ inline CorpusSummary computeCorpusSummary(const std::vector<BenchResult>& result
         }
         if (!r.ok) {
             ++cs.failCount;
+            ++cs.targetKstNotTestedCount;
             cs.minComposite = 0.0;
-            cs.minDimensionScores.fill(0.0);
             continue;
         }
         ++okCount;
-        if (r.grade == "PASS") ++cs.passCount;
+        if (r.grade == kStatusPass) ++cs.passCount;
         else if (r.grade == "WARN") ++cs.warnCount;
         else ++cs.failCount;
+
+        if (r.m6.targetKstStatus == kStatusPass) ++cs.targetKstPassCount;
+        else if (r.m6.targetKstStatus == kStatusFail) ++cs.targetKstFailCount;
+        else ++cs.targetKstNotTestedCount;
+
+        if (!r.unsupportedFeatures.empty()) {
+            ++cs.fixturesWithUnsupported;
+            for (const auto& uf : r.unsupportedFeatures) {
+                cs.unsupportedTotalOccurrences += uf.count;
+                cs.unsupportedByFeature[uf.feature] += uf.count;
+            }
+        }
 
         cs.hardInvariantViolations += r.m3.loopBoundaryErrors + r.m2.leakedChordRange +
                                       r.m2.leakedFxNotesCount + r.m2.velocityInversions;
 
         const std::array<double, 6> dims = {r.m1.score, r.m2.score, r.m3.score,
                                             r.m4.score, r.m5.score, r.m6.score};
-        const std::array<bool, 6> app = {r.applicability.m1Harmonic, r.applicability.m2Articulation,
-                                         r.applicability.m3SectionStress, r.applicability.m4DrumStress,
-                                         r.applicability.m5MixStress, r.applicability.m6Timbre};
+        const std::array<bool, 6> evalApp = {r.m1.applicable, r.m2.applicable, r.m3.applicable,
+                                             r.m4.applicable, r.m5.applicable, r.m6.applicable};
+        const std::array<std::string, 6> dimStatus = {r.m1.status, r.m2.status, r.m3.status,
+                                                      r.m4.status, r.m5.status, r.m6.status};
+        const std::array<bool, 6> stressApp = {r.applicability.m1Harmonic, r.applicability.m2Articulation,
+                                               r.applicability.m3SectionStress, r.applicability.m4DrumStress,
+                                               r.applicability.m5MixStress, r.applicability.m6Timbre};
         sumComp += r.compositeScore;
         cs.minComposite = std::min(cs.minComposite, r.compositeScore);
         for (size_t i = 0; i < 6; ++i) {
-            sumDim[i] += dims[i];
-            cs.minDimensionScores[i] = std::min(cs.minDimensionScores[i], dims[i]);
-            if (app[i]) {
+            if (evalApp[i]) {
+                sumDim[i] += dims[i];
+                ++cs.evaluatedDimensionCounts[i];
+                cs.minDimensionScores[i] = std::min(cs.minDimensionScores[i], dims[i]);
+                if (dimStatus[i] == kStatusPass) ++cs.dimPassCounts[i];
+                else ++cs.dimFailCounts[i];
+            } else {
+                ++cs.naExcludedCounts[i];
+            }
+            if (stressApp[i] && evalApp[i]) {
                 activeSum[i] += dims[i];
                 ++cs.activeDimensionCounts[i];
             }
@@ -1945,25 +2178,33 @@ inline CorpusSummary computeCorpusSummary(const std::vector<BenchResult>& result
     const double denom = okCount ? double(okCount) : 1.0;
     cs.meanComposite = sumComp / denom;
     for (size_t i = 0; i < 6; ++i) {
-        cs.meanDimensions[i] = sumDim[i] / denom;
+        if (cs.evaluatedDimensionCounts[i] > 0) {
+            cs.meanDimensions[i] = sumDim[i] / double(cs.evaluatedDimensionCounts[i]);
+        } else {
+            cs.meanDimensions[i] = 0.0;
+            cs.minDimensionScores[i] = 0.0;
+        }
         cs.activeDimensionMeans[i] = cs.activeDimensionCounts[i]
                                          ? (activeSum[i] / double(cs.activeDimensionCounts[i]))
                                          : cs.meanDimensions[i];
     }
     // Exact immutable weights on active-dimension means (eliminates N/A=100 dilution!)
-    cs.activeComposite = kWeightM1 * cs.activeDimensionMeans[0] +
-                         kWeightM2 * cs.activeDimensionMeans[1] +
-                         kWeightM3 * cs.activeDimensionMeans[2] +
-                         kWeightM4 * cs.activeDimensionMeans[3] +
-                         kWeightM5 * cs.activeDimensionMeans[4] +
-                         kWeightM6 * cs.activeDimensionMeans[5];
+    const std::array<double, 6> kWeights = {kWeightM1, kWeightM2, kWeightM3, kWeightM4, kWeightM5, kWeightM6};
+    double actNum = 0.0, actDen = 0.0;
+    for (size_t i = 0; i < 6; ++i) {
+        if (cs.activeDimensionCounts[i] > 0 || cs.evaluatedDimensionCounts[i] > 0) {
+            actNum += kWeights[i] * cs.activeDimensionMeans[i];
+            actDen += kWeights[i];
+        }
+    }
+    cs.activeComposite = actDen > 0.0 ? (actNum / actDen) : 0.0;
 
     if (cs.allStructuralValid && cs.meanComposite >= 85.0 && cs.activeComposite >= 85.0 &&
         cs.minComposite >= 80.0 && cs.hardInvariantViolations == 0 && cs.failCount == 0) {
-        cs.corpusGrade = "PASS";
+        cs.corpusGrade = kStatusPass;
     } else if (!cs.allStructuralValid || cs.hardInvariantViolations > 0 ||
                cs.failCount > 0 || cs.activeComposite < 60.0) {
-        cs.corpusGrade = "FAIL";
+        cs.corpusGrade = kStatusFail;
     } else {
         cs.corpusGrade = "WARN";
     }
@@ -1974,11 +2215,16 @@ inline CorpusSummary computeCorpusSummary(const std::vector<BenchResult>& result
 inline std::string toJson(const BenchResult& r) {
     using detail::fmtNum;
     using detail::jsonEscape;
+    auto optScore = [](bool applicable, double score) -> std::string {
+        return applicable ? fmtNum(score, 2) : "null";
+    };
     std::ostringstream o;
     o << "{\n";
     o << "  \"schema\": \"" << kSchemaId << "\",\n";
+    o << "  \"statusTaxonomy\": [\"PASS\", \"FAIL\", \"UNSUPPORTED\", \"N/A\", \"NOT_TESTED\"],\n";
     o << "  \"hardwareVerified\": false,\n";
     o << "  \"l3Status\": \"NotRun\",\n";
+    o << "  \"l3HardwareStatus\": \"" << jsonEscape(r.l3HardwareStatus) << "\",\n";
     o << "  \"label\": \"" << ((r.ok && r.structuralValid) ? kValidLabel : kInvalidLabel) << "\",\n";
     o << "  \"fixture\": \"" << jsonEscape(r.fixtureName) << "\",\n";
     if (!r.ok) {
@@ -1992,6 +2238,8 @@ inline std::string toJson(const BenchResult& r) {
       << ", \"sectionsSource\": " << r.sectionsSource
       << ", \"sectionsExported\": " << r.sectionsExported << " },\n";
     o << "  \"structuralValid\": " << (r.structuralValid ? "true" : "false") << ",\n";
+    o << "  \"structuralStatus\": \"" << jsonEscape(r.structuralStatus) << "\",\n";
+    o << "  \"applicableWeightSum\": " << fmtNum(r.applicableWeightSum, 2) << ",\n";
     o << "  \"compositeScore\": " << fmtNum(r.compositeScore, 2) << ",\n";
     o << "  \"grade\": \"" << jsonEscape(r.grade) << "\",\n";
     o << "  \"applicability\": { \"m1\": " << (r.applicability.m1Harmonic ? "true" : "false")
@@ -2001,41 +2249,71 @@ inline std::string toJson(const BenchResult& r) {
       << ", \"m5\": " << (r.applicability.m5MixStress ? "true" : "false")
       << ", \"m6\": " << (r.applicability.m6Timbre ? "true" : "false") << " },\n";
     o << "  \"dimensions\": {\n";
-    o << "    \"harmonicVoiceLeading\": { \"score\": " << fmtNum(r.m1.score, 2)
+    o << "    \"harmonicVoiceLeading\": { \"status\": \"" << jsonEscape(r.m1.status)
+      << "\", \"score\": " << optScore(r.m1.applicable, r.m1.score)
       << ", \"clashRate\": " << fmtNum(r.m1.clashRate, 4)
       << ", \"bassSlashAccuracy\": " << fmtNum(r.m1.bassSlashAccuracy, 4)
+      << ", \"bassSlashStatus\": \"" << jsonEscape(r.m1.bassSlashStatus) << "\""
       << ", \"voiceLeadingAvgSemis\": " << fmtNum(r.m1.voiceLeadingAvgSemis, 3)
+      << ", \"voiceLeadingStatus\": \"" << jsonEscape(r.m1.voiceLeadingStatus) << "\""
       << ", \"registerViolationRate\": " << fmtNum(r.m1.registerViolationRate, 4)
       << ", \"voicingCollapseRate\": " << fmtNum(r.m1.voicingCollapseRate, 4)
+      << ", \"voicingCollapseStatus\": \"" << jsonEscape(r.m1.voicingCollapseStatus) << "\""
       << ", \"casmPreservationRate\": " << fmtNum(r.m1.casmPreservationRate, 4) << " },\n";
-    o << "    \"articulationMegaVoice\": { \"score\": " << fmtNum(r.m2.score, 2)
+    o << "    \"articulationMegaVoice\": { \"status\": \"" << jsonEscape(r.m2.status)
+      << "\", \"score\": " << optScore(r.m2.applicable, r.m2.score)
       << ", \"leakedChordRange\": " << r.m2.leakedChordRange
       << ", \"leakedFxKeyRate\": " << fmtNum(r.m2.leakedFxKeyRate, 4)
       << ", \"leakedFxNotesCount\": " << r.m2.leakedFxNotesCount
+      << ", \"fxKeyStatus\": \"" << jsonEscape(r.m2.fxKeyStatus) << "\""
       << ", \"velocityInversions\": " << r.m2.velocityInversions
-      << ", \"guitarStrumCoherence\": " << fmtNum(r.m2.guitarStrumCoherence, 4) << " },\n";
-    o << "    \"sectionCompleteness\": { \"score\": " << fmtNum(r.m3.score, 2)
+      << ", \"velocityZoneStatus\": \"" << jsonEscape(r.m2.velocityZoneStatus) << "\""
+      << ", \"guitarStrumCoherence\": " << fmtNum(r.m2.guitarStrumCoherence, 4)
+      << ", \"guitarStrumStatus\": \"" << jsonEscape(r.m2.guitarStrumStatus) << "\" },\n";
+    o << "    \"sectionCompleteness\": { \"status\": \"" << jsonEscape(r.m3.status)
+      << "\", \"score\": " << optScore(r.m3.applicable, r.m3.score)
       << ", \"coverageRate\": " << fmtNum(r.m3.coverageRate, 4)
       << ", \"meterBarAccuracy\": " << fmtNum(r.m3.meterBarAccuracy, 4)
       << ", \"loopBoundaryErrors\": " << r.m3.loopBoundaryErrors
-      << ", \"p99DriftMs\": " << fmtNum(r.m3.p99DriftMs, 3) << " },\n";
-    o << "    \"drumPercussion\": { \"score\": " << fmtNum(r.m4.score, 2)
+      << ", \"p99DriftMs\": " << fmtNum(r.m3.p99DriftMs, 3)
+      << ", \"timingDriftStatus\": \"" << jsonEscape(r.m3.timingDriftStatus) << "\" },\n";
+    o << "    \"drumPercussion\": { \"status\": \"" << jsonEscape(r.m4.status)
+      << "\", \"score\": " << optScore(r.m4.applicable, r.m4.score)
       << ", \"unmappedHitRate\": " << fmtNum(r.m4.unmappedHitRate, 4)
       << ", \"familyPreservationRate\": " << fmtNum(r.m4.familyPreservationRate, 4)
       << ", \"trackSeparationAccuracy\": " << fmtNum(r.m4.trackSeparationAccuracy, 4)
       << ", \"velCorrelation\": " << fmtNum(r.m4.velCorrelation, 4) << " },\n";
-    o << "    \"mixDynamicBalance\": { \"score\": " << fmtNum(r.m5.score, 2)
+    o << "    \"mixDynamicBalance\": { \"status\": \"" << jsonEscape(r.m5.status)
+      << "\", \"score\": " << optScore(r.m5.applicable, r.m5.score)
       << ", \"mixCcConsistency\": " << fmtNum(r.m5.mixCcConsistency, 4)
+      << ", \"mixCcStatus\": \"" << jsonEscape(r.m5.mixCcStatus) << "\""
       << ", \"unsafeCcLeaks\": " << r.m5.unsafeCcLeaks
       << ", \"balanceHealthRate\": " << fmtNum(r.m5.balanceHealthRate, 4)
-      << ", \"xgSysexCoverage\": " << fmtNum(r.m5.xgSysexCoverage, 4) << " },\n";
-    o << "    \"timbreResourceCoherence\": { \"score\": " << fmtNum(r.m6.score, 2)
+      << ", \"balanceStatus\": \"" << jsonEscape(r.m5.balanceStatus) << "\""
+      << ", \"xgSysexCoverage\": " << fmtNum(r.m5.xgSysexCoverage, 4)
+      << ", \"xgSysexStatus\": \"" << jsonEscape(r.m5.xgSysexStatus) << "\" },\n";
+    o << "    \"timbreResourceCoherence\": { \"status\": \"" << jsonEscape(r.m6.status)
+      << "\", \"score\": " << optScore(r.m6.applicable, r.m6.score)
       << ", \"familyMatchRate\": " << fmtNum(r.m6.familyMatchRate, 4)
+      << ", \"familyMatchStatus\": \"" << jsonEscape(r.m6.familyMatchStatus) << "\""
       << ", \"hasMidStyleVoiceChanges\": " << (r.m6.hasMidStyleVoiceChanges ? "true" : "false")
       << ", \"elementVoicePreservation\": " << fmtNum(r.m6.elementVoicePreservation, 4)
+      << ", \"elementVoiceStatus\": \"" << jsonEscape(r.m6.elementVoiceStatus) << "\""
       << ", \"targetKstEvaluated\": " << (r.m6.targetKstEvaluated ? "true" : "false")
-      << ", \"targetKstValid\": " << (r.m6.targetKstValid ? "true" : "false") << " }\n";
+      << ", \"targetKstValid\": " << (r.m6.targetKstValid ? "true" : "false")
+      << ", \"targetKstStatus\": \"" << jsonEscape(r.m6.targetKstStatus) << "\" }\n";
     o << "  },\n";
+    o << "  \"unsupportedFeatures\": [";
+    if (!r.unsupportedFeatures.empty()) o << "\n";
+    for (size_t i = 0; i < r.unsupportedFeatures.size(); ++i) {
+        const auto& u = r.unsupportedFeatures[i];
+        o << "    { \"feature\": \"" << jsonEscape(u.feature)
+          << "\", \"status\": \"" << jsonEscape(u.status)
+          << "\", \"count\": " << u.count
+          << ", \"reason\": \"" << jsonEscape(u.reason) << "\" }";
+        o << (i + 1 < r.unsupportedFeatures.size() ? ",\n" : "\n  ");
+    }
+    o << "],\n";
     o << "  \"diagnostics\": [";
     if (!r.diagnostics.empty()) o << "\n";
     for (size_t i = 0; i < r.diagnostics.size(); ++i) {
@@ -2057,68 +2335,97 @@ inline std::string toJson(const BenchResult& r) {
     return o.str();
 }
 
-// ── Deterministic Markdown Report Formatter (P1-4 & P2-5) ────────────
+// ── Deterministic Markdown Report Formatter (5-State Taxonomy + Coverage) ──
 inline std::string toMarkdown(const std::vector<BenchResult>& results) {
     using detail::fmtNum;
     const CorpusSummary cs = computeCorpusSummary(results);
+    auto fmtDimCell = [](bool applicable, double score) -> std::string {
+        return applicable ? fmtNum(score, 2) : std::string(kStatusNA);
+    };
+    auto fmtAggDim = [](uint32_t count, double score) -> std::string {
+        return count > 0 ? fmtNum(score, 2) : std::string(kStatusNA);
+    };
     std::ostringstream o;
     o << "# Offline Style Conversion Quality Benchmark Report\n\n";
     o << "- **Schema:** `" << kSchemaId << "`\n";
-    o << "- **Hardware Verified:** `false` (`L3 = NotRun`)\n";
+    o << "- **Status Taxonomy:** `PASS` | `FAIL` | `UNSUPPORTED` | `N/A` | `NOT_TESTED`\n";
+    o << "- **Hardware Verified (`L3`):** `false` (`l3HardwareStatus = NOT_TESTED`, `L3 = NotRun`)\n";
+    o << "- **Target KST Gate:** `PASS=" << cs.targetKstPassCount
+      << "`, `FAIL=" << cs.targetKstFailCount
+      << "`, `NOT_TESTED=" << cs.targetKstNotTestedCount << "`\n";
     o << "- **Status Label:** `" << (cs.allStructuralValid ? kValidLabel : kInvalidLabel) << "`\n";
-    o << "- **Immutable Weights:** `M1=25%`, `M2=20%`, `M3=15%`, `M4=15%`, `M5=12%`, `M6=13%` (Sum = `100%`)\n\n";
+    o << "- **Immutable Weights:** `M1=25%`, `M2=20%`, `M3=15%`, `M4=15%`, `M5=12%`, `M6=13%` (Sum = `100%`; `N/A` dimensions excluded — never awarded fake `100.0`)\n\n";
 
-    o << "| Fixture | Format | Sec (Exp/Src) | Valid | M1 (25%) | M2 (20%) | M3 (15%) | M4 (15%) | M5 (12%) | M6 (13%) | Composite | Grade | Cells (P/W/F) | Diags |\n";
+    o << "| Fixture | Format | Sec (Exp/Src) | Valid | M1 (25%) | M2 (20%) | M3 (15%) | M4 (15%) | M5 (12%) | M6 (13%) | Composite | Grade | Unsup | Cells (P/W/F) |\n";
     o << "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|\n";
 
     for (const auto& r : results) {
         if (!r.ok) {
-            o << "| `" << r.fixtureName << "` | ERR | 0/0 | FAIL | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** | FAIL | 0/0/0 | 0 |\n";
+            o << "| `" << r.fixtureName << "` | ERR | 0/0 | FAIL | N/A | N/A | N/A | N/A | N/A | N/A | **0.00** | FAIL | 0 | 0/0/0 |\n";
             continue;
         }
         o << "| `" << r.fixtureName << "` | " << r.format
           << " | " << r.sectionsExported << "/" << r.sectionsSource
-          << " | " << (r.structuralValid ? "PASS" : "FAIL")
-          << " | " << fmtNum(r.m1.score, 2)
-          << " | " << fmtNum(r.m2.score, 2)
-          << " | " << fmtNum(r.m3.score, 2)
-          << " | " << fmtNum(r.m4.score, 2)
-          << " | " << fmtNum(r.m5.score, 2)
-          << " | " << fmtNum(r.m6.score, 2)
+          << " | " << r.structuralStatus
+          << " | " << fmtDimCell(r.m1.applicable, r.m1.score)
+          << " | " << fmtDimCell(r.m2.applicable, r.m2.score)
+          << " | " << fmtDimCell(r.m3.applicable, r.m3.score)
+          << " | " << fmtDimCell(r.m4.applicable, r.m4.score)
+          << " | " << fmtDimCell(r.m5.applicable, r.m5.score)
+          << " | " << fmtDimCell(r.m6.applicable, r.m6.score)
           << " | **" << fmtNum(r.compositeScore, 2) << "**"
           << " | " << r.grade
-          << " | " << r.matrixSummary.cellsPass << "/" << r.matrixSummary.cellsWarn << "/" << r.matrixSummary.cellsFail
-          << " | " << r.diagnostics.size() << " |\n";
+          << " | " << r.unsupportedFeatures.size()
+          << " | " << r.matrixSummary.cellsPass << "/" << r.matrixSummary.cellsWarn << "/" << r.matrixSummary.cellsFail << " |\n";
     }
     if (cs.fixtureCount > 0) {
-        o << "| **MEAN (" << cs.fixtureCount << " fixtures)** | — | — | " << (cs.allStructuralValid ? "PASS" : "FAIL")
-          << " | **" << fmtNum(cs.meanDimensions[0], 2) << "**"
-          << " | **" << fmtNum(cs.meanDimensions[1], 2) << "**"
-          << " | **" << fmtNum(cs.meanDimensions[2], 2) << "**"
-          << " | **" << fmtNum(cs.meanDimensions[3], 2) << "**"
-          << " | **" << fmtNum(cs.meanDimensions[4], 2) << "**"
-          << " | **" << fmtNum(cs.meanDimensions[5], 2) << "**"
+        o << "| **EVALUATED MEAN (excl. N/A)** | — | — | " << (cs.allStructuralValid ? kStatusPass : kStatusFail)
+          << " | **" << fmtAggDim(cs.evaluatedDimensionCounts[0], cs.meanDimensions[0]) << "** (" << cs.evaluatedDimensionCounts[0] << ")"
+          << " | **" << fmtAggDim(cs.evaluatedDimensionCounts[1], cs.meanDimensions[1]) << "** (" << cs.evaluatedDimensionCounts[1] << ")"
+          << " | **" << fmtAggDim(cs.evaluatedDimensionCounts[2], cs.meanDimensions[2]) << "** (" << cs.evaluatedDimensionCounts[2] << ")"
+          << " | **" << fmtAggDim(cs.evaluatedDimensionCounts[3], cs.meanDimensions[3]) << "** (" << cs.evaluatedDimensionCounts[3] << ")"
+          << " | **" << fmtAggDim(cs.evaluatedDimensionCounts[4], cs.meanDimensions[4]) << "** (" << cs.evaluatedDimensionCounts[4] << ")"
+          << " | **" << fmtAggDim(cs.evaluatedDimensionCounts[5], cs.meanDimensions[5]) << "** (" << cs.evaluatedDimensionCounts[5] << ")"
           << " | **" << fmtNum(cs.meanComposite, 2) << "**"
-          << " | **" << cs.corpusGrade << "** | — | — |\n";
+          << " | **" << cs.corpusGrade << "** | " << cs.fixturesWithUnsupported << "/" << cs.fixtureCount << " | — |\n";
         o << "| **ACTIVE-TORTURE MEAN** | — | — | —"
-          << " | **" << fmtNum(cs.activeDimensionMeans[0], 2) << "** (" << cs.activeDimensionCounts[0] << ")"
-          << " | **" << fmtNum(cs.activeDimensionMeans[1], 2) << "** (" << cs.activeDimensionCounts[1] << ")"
-          << " | **" << fmtNum(cs.activeDimensionMeans[2], 2) << "** (" << cs.activeDimensionCounts[2] << ")"
-          << " | **" << fmtNum(cs.activeDimensionMeans[3], 2) << "** (" << cs.activeDimensionCounts[3] << ")"
-          << " | **" << fmtNum(cs.activeDimensionMeans[4], 2) << "** (" << cs.activeDimensionCounts[4] << ")"
-          << " | **" << fmtNum(cs.activeDimensionMeans[5], 2) << "** (" << cs.activeDimensionCounts[5] << ")"
+          << " | **" << fmtAggDim(cs.activeDimensionCounts[0], cs.activeDimensionMeans[0]) << "** (" << cs.activeDimensionCounts[0] << ")"
+          << " | **" << fmtAggDim(cs.activeDimensionCounts[1], cs.activeDimensionMeans[1]) << "** (" << cs.activeDimensionCounts[1] << ")"
+          << " | **" << fmtAggDim(cs.activeDimensionCounts[2], cs.activeDimensionMeans[2]) << "** (" << cs.activeDimensionCounts[2] << ")"
+          << " | **" << fmtAggDim(cs.activeDimensionCounts[3], cs.activeDimensionMeans[3]) << "** (" << cs.activeDimensionCounts[3] << ")"
+          << " | **" << fmtAggDim(cs.activeDimensionCounts[4], cs.activeDimensionMeans[4]) << "** (" << cs.activeDimensionCounts[4] << ")"
+          << " | **" << fmtAggDim(cs.activeDimensionCounts[5], cs.activeDimensionMeans[5]) << "** (" << cs.activeDimensionCounts[5] << ")"
           << " | **" << fmtNum(cs.activeComposite, 2) << "**"
-          << " | **" << cs.corpusGrade << "** | — | — |\n";
-        o << "| **MIN** | — | — | —"
-          << " | " << fmtNum(cs.minDimensionScores[0], 2)
-          << " | " << fmtNum(cs.minDimensionScores[1], 2)
-          << " | " << fmtNum(cs.minDimensionScores[2], 2)
-          << " | " << fmtNum(cs.minDimensionScores[3], 2)
-          << " | " << fmtNum(cs.minDimensionScores[4], 2)
-          << " | " << fmtNum(cs.minDimensionScores[5], 2)
+          << " | **" << cs.corpusGrade << "** | " << cs.unsupportedTotalOccurrences << " | — |\n";
+        o << "| **MIN (evaluated)** | — | — | —"
+          << " | " << fmtAggDim(cs.evaluatedDimensionCounts[0], cs.minDimensionScores[0])
+          << " | " << fmtAggDim(cs.evaluatedDimensionCounts[1], cs.minDimensionScores[1])
+          << " | " << fmtAggDim(cs.evaluatedDimensionCounts[2], cs.minDimensionScores[2])
+          << " | " << fmtAggDim(cs.evaluatedDimensionCounts[3], cs.minDimensionScores[3])
+          << " | " << fmtAggDim(cs.evaluatedDimensionCounts[4], cs.minDimensionScores[4])
+          << " | " << fmtAggDim(cs.evaluatedDimensionCounts[5], cs.minDimensionScores[5])
           << " | " << fmtNum(cs.minComposite, 2)
           << " | P:" << cs.passCount << " W:" << cs.warnCount << " F:" << cs.failCount
-          << " | HardViol: " << cs.hardInvariantViolations << " | — |\n";
+          << " | HardViol:" << cs.hardInvariantViolations << " | — |\n\n";
+
+        o << "## Corpus Coverage, N/A Exclusions & Unsupported Features\n\n";
+        o << "| Dimension | Evaluated | Active Torture | N/A Excluded | Dim PASS | Dim FAIL |\n";
+        o << "|---|---:|---:|---:|---:|---:|\n";
+        static constexpr const char* kDimNames[6] = {"M1 (25%)", "M2 (20%)", "M3 (15%)", "M4 (15%)", "M5 (12%)", "M6 (13%)"};
+        for (size_t i = 0; i < 6; ++i) {
+            o << "| " << kDimNames[i]
+              << " | " << cs.evaluatedDimensionCounts[i]
+              << " | " << cs.activeDimensionCounts[i]
+              << " | " << cs.naExcludedCounts[i]
+              << " | " << cs.dimPassCounts[i]
+              << " | " << cs.dimFailCounts[i] << " |\n";
+        }
+        if (!cs.unsupportedByFeature.empty()) {
+            o << "\n| Unsupported Feature (`UNSUPPORTED`) | Occurrences |\n|---|---:|\n";
+            for (const auto& [feat, cnt] : cs.unsupportedByFeature) {
+                o << "| `" << feat << "` | " << cnt << " |\n";
+            }
+        }
     }
     return o.str();
 }
