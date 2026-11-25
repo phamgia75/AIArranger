@@ -2,10 +2,14 @@
 #define AI_ARRANGER_MEDIA_SOUND_M1_MANIFEST_ADAPTER_H
 
 // Slice M2b: Thin, Read-Only Adapter over M1's Native-KST Dependency Closure Manifest
-// (`native_kst_closure.h` + `native_refs.h`) and Provisional Package Graphs (`package_graph.h`).
+// (`native_kst_closure.h` + `native_refs.h`), Provisional Package Graphs (`package_graph.h`),
+// and M2a's Canonical Types (`selective_diagnostics.h` + `slot_conflicts.h`).
 //
 // Design & Safety Invariants (M2_SELECTIVE_STYLE_EXPORT_DESIGN.md §2, §3, §8 Slice M2b):
 //  * Strictly READ-ONLY: zero disk writes, zero mutations to source/target libraries, zero OC31 encoder.
+//  * Single Source of Truth with M2a: reuses SlotAddress, CoverageSummary, PartialNativeInspect,
+//    SoundEquivalenceProfile, MultisampleFingerprint, ZoneFingerprint, TargetOccupancyMap, and
+//    finalizeSoundEquivalenceProfile() directly — zero duplicated target/equivalence definitions.
 //  * Delete safety: Native-KST Graph NEVER declares scanned/complete; deleteCheck() NEVER returns Unreferenced.
 //  * Strict boundary classification: NativeUserSound, NativeUserDrumKit, AmbiguousOrOutOfSpec, FactoryRom,
 //    UnknownOrUnanalysed — NEVER silently mapping or substituting missing/ambiguous Sounds!
@@ -26,6 +30,8 @@
 #pragma GCC diagnostic pop
 #endif
 #include "media/sound/resource_graph.h"
+#include "media/sound/selective_diagnostics.h"
+#include "media/sound/slot_conflicts.h"
 
 #include <algorithm>
 #include <array>
@@ -85,6 +91,19 @@ inline const char* rootItemKindName(RootItemKind k) {
     return "Style";
 }
 
+inline SelectedKind toSelectedKind(RootItemKind k) {
+    switch (k) {
+        case RootItemKind::Style:
+        case RootItemKind::ProvisionalMidi:
+        case RootItemKind::ProvisionalUasf:     return SelectedKind::Style;
+        case RootItemKind::KeyboardSet:         return SelectedKind::KeyboardSet;
+        case RootItemKind::Pad:                 return SelectedKind::Pad;
+        case RootItemKind::ProvisionalSoundPkg: return SelectedKind::SoundPackage;
+        case RootItemKind::ProvisionalDrumPkg:  return SelectedKind::DrumKitPackage;
+    }
+    return SelectedKind::Style;
+}
+
 // Strict boundary classification for every MIDI / Sound selection (M2 Design §3.2).
 // Never silently substitutes or coerces missing/ambiguous Sounds into FactoryRom.
 enum class SoundBoundaryKind {
@@ -128,6 +147,7 @@ struct SoundSelectionRecord {
     EdgeConfidence confidence = EdgeConfidence::Unsupported;
     bool bankMissing = false;                         // true when CC0 or CC32 unset before PC
     bool isDrumKit = false;
+    std::optional<SlotAddress> slotAddress;           // M2a canonical SlotAddress when User or out-of-spec DK
     std::string userBank;                             // e.g. "USER01" or "USERDK01" (when applicable)
     std::optional<graph::ResourceId> targetSoundId;   // pa5x:<bank>/Sound/<pc> when user/out-of-spec
     std::string provisionalPackageId;                 // non-empty when bound to a provisional package
@@ -149,6 +169,7 @@ struct RootItemRecord {
     std::string bankFolder;
     std::string displayName;
     std::string contentSha256;                        // 64-hex SHA-256 of root file bytes ("" if not hashed)
+    uint64_t sizeBytes = 0;
     bool parseOk = true;
     std::string parseError;
     size_t midiLeafCount = 0;
@@ -162,6 +183,7 @@ struct RootItemRecord {
 
 struct SoundClosureRecord {
     graph::ResourceId id;
+    std::optional<SlotAddress> slotAddress;           // M2a canonical SlotAddress
     std::string bank;
     uint32_t slot = 0;
     uint32_t kindChunkId = 0;
@@ -174,6 +196,8 @@ struct SoundClosureRecord {
     EdgeConfidence soundToMsConfidence = EdgeConfidence::Unsupported;
     EdgeConfidence msToSampleConfidence = EdgeConfidence::Unsupported;
     std::string decodedBodySha256;                    // 64-hex SHA-256 of decoded Sound body ("" if unavailable)
+    // M2a canonical Sound equivalence profile (exact body SHA-256 + MS/Zone topKey/Sample Id8 + PCM sizes)
+    SoundEquivalenceProfile equivalence;
     std::vector<graph::ResourceId> oscillatorIds;     // sorted unique
     std::vector<graph::ResourceId> multisampleIds;    // sorted unique
     std::vector<graph::ResourceId> sampleIds;         // sorted unique
@@ -190,6 +214,7 @@ struct MultisampleRecord {
     graph::Id8 id8{};
     std::string name;
     std::vector<uint32_t> zoneSampleIndices;          // exact zone table (kNoZoneSample preserved)
+    std::vector<uint8_t> zoneTopKeys;                 // exact zone topKey from raw Pa5xKmp (empty if unavailable)
     std::vector<graph::ResourceId> sampleIds;         // sorted unique reachable Sample ResourceIds
     EdgeConfidence confidence = EdgeConfidence::Confirmed;
 };
@@ -211,7 +236,7 @@ struct SampleRecord {
     graph::Id8 id8{};
     std::string name;
     std::string pcmRelPath;                           // KST-relative PCM file or package-relative WAV
-    uint64_t payloadBytes = 0;
+    uint64_t payloadBytes = 0;                        // exact PCM item payload byte count (or WAV uncompressed bytes)
     uint32_t sampleRate = 0;
     bool isStoredSizeProxy = false;                   // true for Native KST PCMs; false for provisional WAVs
     bool hasPcm = false;                              // false when dangling / missing PCM
@@ -231,6 +256,7 @@ struct ProvisionalPackageRecord {
     uint64_t totalUncompressedBytes = 0;
 };
 
+// Reuses M2a's canonical CoverageSummary & PartialNativeInspect directly while exposing M1 scan metadata.
 struct AdapterCoverageSummary {
     bool readOnly = true;
     bool deleteProofAvailable = false;                // ALWAYS false for Native-KST
@@ -255,6 +281,21 @@ struct AdapterCoverageSummary {
     size_t missingPcmSamples = 0;
     size_t bytesReadDownstream = 0;
     size_t bytesReadUpstream = 0;
+
+    CoverageSummary toM2aCoverageSummary() const {
+        CoverageSummary cs;
+        cs.analysedSounds = soundsAnalysed;
+        cs.unanalysedDrumKits = unanalysedDrumKits;
+        cs.unanalysedNoKnownRef = unanalysedNoKnownRef;
+        cs.unanalysedUnknownKind = unanalysedOther;
+        cs.decodeFailures = decodeFailures;
+        cs.duplicateDrumIds = duplicateDrumIdGroups;
+        cs.unresolvedInAnalysedSounds = unresolvedSlotsInAnalysed;
+        cs.unresolvedInUnanalysedSounds = unresolvedSlotsInUnanalysed;
+        cs.coverageComplete = coverageComplete;
+        cs.deleteProofAvailable = false;
+        return cs;
+    }
 };
 
 struct M1AdapterView {
@@ -262,6 +303,7 @@ struct M1AdapterView {
     bool cancelled = false;
     AdapterSourceKind sourceKind = AdapterSourceKind::NativeKst;
     AdapterCoverageSummary coverage;
+    PartialNativeInspect partialInspect;                            // M2a UX Gate #2 partial inspection payload
 
     std::vector<RootItemRecord> roots;                              // sorted by relPath
     std::map<std::string, size_t> rootIndexByRelPath;               // relPath -> index in `roots`
@@ -300,7 +342,7 @@ struct M1AdapterView {
 
 struct M1AdapterOptions {
     graph::NativeKstClosureOptions closureOptions;
-    bool computeSoundBodyHashes = true;        // hash decoded SOUND/*.PCG bodies for Tier 3 exact Sound equivalence
+    bool computeSoundBodyHashes = true;        // hash decoded SOUND/*.PCG bodies + zone topKeys for M2a equivalence
     bool computeAllRootFileHashes = false;     // hash every .stg/.ksc/.pdc on disk (in-memory blobs are always hashed)
     size_t cancelCheckStride = kDefaultCancelCheckStride; // clamped to [1, 256]
 };
@@ -331,6 +373,16 @@ struct ProvisionalWorkspaceInput {
     std::vector<ProvisionalRootInput> roots;
 };
 
+// Optional extra metadata extracted from raw KMP/PCG/PCM bytes to build byte-exact M2a SoundEquivalenceProfiles
+struct NativeEquivalenceExtra {
+    std::map<graph::ResourceId, std::string> soundBodySha256;
+    std::map<std::string, std::string> fileSha256;
+    std::map<std::string, uint64_t> fileSizes;
+    std::vector<std::vector<uint8_t>> msZoneTopKeys;      // parallel to kmpIndex.multisamples
+    std::map<graph::Id8, uint32_t> exactPcmPayloadBytes;  // exact KORF item payloadBytes (handles odd-byte PCM too)
+    std::set<std::string> extraPresentSoundBanks;
+};
+
 namespace adapter_detail {
 
 inline size_t clampStride(size_t s) {
@@ -359,22 +411,12 @@ inline bool tickCancel(const KeepGoing& keepGoing, size_t& counter, size_t strid
     return true;
 }
 
-inline std::string sha256Bytes(const void* data, size_t n) {
-    Sha256 h;
-    if (n > 0) h.update(data, n);
-    return h.hex();
-}
-
 inline std::string sha256Str(const std::string& s) {
-    return sha256Bytes(s.data(), s.size());
+    return conflict_detail::sha256Bytes(reinterpret_cast<const uint8_t*>(s.data()), s.size());
 }
 
 inline void hashField(Sha256& h, const std::string& s) {
-    const uint64_t len = static_cast<uint64_t>(s.size());
-    uint8_t le[8];
-    for (int i = 0; i < 8; ++i) le[i] = static_cast<uint8_t>((len >> (8 * i)) & 0xFFu);
-    h.update(le, sizeof le);
-    if (!s.empty()) h.update(s.data(), s.size());
+    conflict_detail::hashStr(h, s);
 }
 
 inline bool leafHasPadSetSegment(const std::string& leafPath) {
@@ -407,13 +449,27 @@ inline bool leafHasKbdSetSegment(const std::string& leafPath) {
     return false;
 }
 
-inline bool isOc31KmpError(const std::string& err) {
-    return err.find("OC31") != std::string::npos || err.find("OC32") != std::string::npos;
+inline void extractKmpZoneTopKeys(const uint8_t* data, size_t size, std::vector<std::vector<uint8_t>>& out) {
+    out.clear();
+    panative::Pa5xKmp rawKmp;
+    std::string err;
+    if (!graph::parseKmpContainerBytes(data, size, rawKmp, &err)) return;
+    out.reserve(rawKmp.multisamples.size());
+    for (const auto& m : rawKmp.multisamples) {
+        std::vector<uint8_t> tks;
+        if (m.firstZone <= rawKmp.zones.size() && m.zoneCount <= rawKmp.zones.size() - m.firstZone) {
+            tks.reserve(m.zoneCount);
+            for (size_t z = 0; z < m.zoneCount; ++z) {
+                tks.push_back(rawKmp.zones[static_cast<size_t>(m.firstZone) + z].topKey);
+            }
+        }
+        out.push_back(std::move(tks));
+    }
 }
 
 inline std::string computeViewDigest(const M1AdapterView& v) {
     Sha256 h;
-    hashField(h, "aiarranger-m1-adapter-view/1");
+    hashField(h, "aiarranger-m1-adapter-view/2");
     hashField(h, adapterSourceKindName(v.sourceKind));
     hashField(h, v.coverage.kmpPresent ? "1" : "0");
     hashField(h, v.coverage.kmpParsed ? "1" : "0");
@@ -440,6 +496,7 @@ inline std::string computeViewDigest(const M1AdapterView& v) {
         hashField(h, sc.analysed ? "1" : "0");
         hashField(h, sc.unanalysedGap);
         hashField(h, sc.decodedBodySha256);
+        hashField(h, sc.equivalence.equivalenceDigest);
         hashField(h, std::to_string(sc.storedPcmBytesProxy));
     }
     for (const auto& [pid, pkg] : v.packagesById) {
@@ -459,9 +516,9 @@ inline std::string computeViewDigest(const M1AdapterView& v) {
 
 }  // namespace adapter_detail
 
-// Strict boundary classification helper (M2 Design §3.2):
-//   - MSB 121, LSB 64..75 -> NativeUserSound (USER01..USER12, Verified)
-//   - MSB 120, LSB 64..69 -> NativeUserDrumKit (USERDK01..USERDK06, Verified)
+// Strict boundary classification helper built directly on M2a's canonical `SlotAddress::fromMidi()` (M2 Design §3.2):
+//   - MSB 121, LSB 64..75 -> NativeUserSound (USER01..USER12, Confirmed)
+//   - MSB 120, LSB 64..69 -> NativeUserDrumKit (USERDK01..USERDK06, Confirmed)
 //   - MSB 120, LSB 70..75 -> AmbiguousOrOutOfSpec (USERDK07..USERDK12 outside documented 6 User DK banks)
 //   - MSB 121/120, LSB 0..63 -> FactoryRom (Inferred)
 //   - Anything else (missing CC0/CC32, MSB outside {120,121}, LSB > 75) -> UnknownOrUnanalysed (Unsupported)
@@ -475,40 +532,27 @@ inline SoundSelectionRecord classifySoundSelection(const graph::MidiSoundAddress
         rec.bankMissing = (addr.msb < 0 || addr.lsb < 0);
         return rec;
     }
-    if (addr.msb == 121 && addr.lsb >= 64 && addr.lsb <= 75) {
-        rec.boundary = SoundBoundaryKind::NativeUserSound;
-        rec.confidence = EdgeConfidence::Confirmed;
-        rec.isDrumKit = false;
-        char buf[16];
-        std::snprintf(buf, sizeof buf, "USER%02d", addr.lsb - 63);
-        rec.userBank = buf;
-        rec.targetSoundId = graph::ResourceId{false, rec.userBank, graph::Kind::Sound, static_cast<uint32_t>(addr.program)};
+    if (const auto slot = SlotAddress::fromMidi(addr.msb, addr.lsb, addr.program); slot.has_value()) {
+        rec.slotAddress = *slot;
+        rec.isDrumKit = slot->isDrumKit;
+        rec.userBank = slot->bankName();
+        rec.targetSoundId = slot->resourceId();
+        if (slot->isOutOfSpecDrumKitBank()) {
+            rec.boundary = SoundBoundaryKind::AmbiguousOrOutOfSpec;
+            rec.confidence = EdgeConfidence::Unsupported;
+        } else if (slot->isDrumKit) {
+            rec.boundary = SoundBoundaryKind::NativeUserDrumKit;
+            rec.confidence = EdgeConfidence::Confirmed;
+        } else {
+            rec.boundary = SoundBoundaryKind::NativeUserSound;
+            rec.confidence = EdgeConfidence::Confirmed;
+        }
         return rec;
     }
-    if (addr.msb == 120 && addr.lsb >= 64 && addr.lsb <= 69) {
-        rec.boundary = SoundBoundaryKind::NativeUserDrumKit;
-        rec.confidence = EdgeConfidence::Confirmed;
-        rec.isDrumKit = true;
-        char buf[16];
-        std::snprintf(buf, sizeof buf, "USERDK%02d", addr.lsb - 63);
-        rec.userBank = buf;
-        rec.targetSoundId = graph::ResourceId{false, rec.userBank, graph::Kind::Sound, static_cast<uint32_t>(addr.program)};
-        return rec;
-    }
-    if (addr.msb == 120 && addr.lsb >= 70 && addr.lsb <= 75) {
-        rec.boundary = SoundBoundaryKind::AmbiguousOrOutOfSpec;
-        rec.confidence = EdgeConfidence::Unsupported;
-        rec.isDrumKit = true;
-        char buf[16];
-        std::snprintf(buf, sizeof buf, "USERDK%02d", addr.lsb - 63);
-        rec.userBank = buf;
-        rec.targetSoundId = graph::ResourceId{false, rec.userBank, graph::Kind::Sound, static_cast<uint32_t>(addr.program)};
-        return rec;
-    }
-    if ((addr.msb == 121 || addr.msb == 120) && addr.lsb >= 0 && addr.lsb < 64) {
+    if ((addr.msb == kUserSoundMsb || addr.msb == kUserDrumKitMsb) && addr.lsb >= 0 && addr.lsb < kUserBankLsbBase) {
         rec.boundary = SoundBoundaryKind::FactoryRom;
         rec.confidence = EdgeConfidence::Inferred;
-        rec.isDrumKit = (addr.msb == 120);
+        rec.isDrumKit = (addr.msb == kUserDrumKitMsb);
         return rec;
     }
     rec.boundary = SoundBoundaryKind::UnknownOrUnanalysed;
@@ -516,63 +560,68 @@ inline SoundSelectionRecord classifySoundSelection(const graph::MidiSoundAddress
     return rec;
 }
 
-// Computes decoded Sound body SHA-256 hashes from in-memory NativeKstInput (strictly read-only).
-// Returns false on cooperative cancellation (clearing out maps cleanly).
-inline bool computeSoundBodyHashesInMemory(
+// Extracts decoded Sound body SHA-256, KMP zone topKeys, and exact PCM payload sizes from in-memory NativeKstInput.
+inline bool extractNativeEquivalenceExtraInMemory(
     const graph::NativeKstInput& in,
-    std::map<graph::ResourceId, std::string>& outSoundBodySha256,
-    std::map<std::string, std::string>& outFileSha256,
+    NativeEquivalenceExtra& out,
     const KeepGoing& keepGoing = {},
     size_t cancelCheckStride = kDefaultCancelCheckStride,
     graph::SoundPayloadMode soundMode = graph::SoundPayloadMode::AutoDetectOc31) {
-    outSoundBodySha256.clear();
-    outFileSha256.clear();
+    out = NativeEquivalenceExtra{};
     const size_t stride = adapter_detail::clampStride(cancelCheckStride);
     size_t tick = 0;
     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return false;
 
     if (in.kmpContainer.has_value()) {
-        const std::string rel = graph::closure_detail::normalizeRelPath(in.kmpContainer->label);
-        outFileSha256[rel] = adapter_detail::sha256Bytes(in.kmpContainer->bytes.data(), in.kmpContainer->bytes.size());
+        const std::string rel = conflict_detail::normalizeRelPath(in.kmpContainer->label);
+        out.fileSha256[rel] = conflict_detail::sha256Bytes(in.kmpContainer->bytes.data(), in.kmpContainer->bytes.size());
+        out.fileSizes[rel] = in.kmpContainer->bytes.size();
+        adapter_detail::extractKmpZoneTopKeys(in.kmpContainer->bytes.data(), in.kmpContainer->bytes.size(), out.msZoneTopKeys);
+    }
+    if (in.extraPcm.has_value()) {
+        for (const auto& [id, pe] : in.extraPcm->byId) {
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
+            out.exactPcmPayloadBytes[id] = pe.payloadBytes;
+        }
+    }
+    for (const auto& blob : in.pcmContainers) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
+        graph::PcmInventory tmp;
+        std::string err;
+        if (graph::addPcmContainerBytes(blob.bytes.data(), blob.bytes.size(), blob.label, tmp, &err)) {
+            for (const auto& [id, pe] : tmp.byId) out.exactPcmPayloadBytes[id] = pe.payloadBytes;
+        }
     }
     for (const auto& blob : in.soundContainers) {
-        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
-            outSoundBodySha256.clear();
-            outFileSha256.clear();
-            return false;
-        }
-        const std::string rel = graph::closure_detail::normalizeRelPath(blob.label);
-        outFileSha256[rel] = adapter_detail::sha256Bytes(blob.bytes.data(), blob.bytes.size());
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
+        const std::string rel = conflict_detail::normalizeRelPath(blob.label);
+        out.fileSha256[rel] = conflict_detail::sha256Bytes(blob.bytes.data(), blob.bytes.size());
+        out.fileSizes[rel] = blob.bytes.size();
         const std::string bank = blob.bank.empty() ? graph::native_detail::bankFromLabel(blob.label) : blob.bank;
+        out.extraPresentSoundBanks.insert(graph::native_detail::upperAscii(bank));
         const graph::SoundExtractResult ex = graph::extractSoundsFromPcgBytes(
             blob.bytes.data(), blob.bytes.size(), bank, blob.label, soundMode);
         if (!ex.containerOk) continue;
         for (const graph::DecodedSound& s : ex.sounds) {
-            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
-                outSoundBodySha256.clear();
-                outFileSha256.clear();
-                return false;
-            }
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
             const graph::ResourceId sid = graph::soundId(s);
-            outSoundBodySha256.emplace(sid, adapter_detail::sha256Bytes(s.body.data(), s.body.size()));
+            out.soundBodySha256.emplace(sid, conflict_detail::sha256Bytes(s.body.data(), s.body.size()));
         }
     }
     return true;
 }
 
-// Computes decoded Sound body SHA-256 hashes from a read-only KST folder (O_NOFOLLOW | O_NONBLOCK + S_ISREG).
-// Never modifies disk; returns false on cooperative cancellation (clearing output maps cleanly).
-inline bool computeSoundBodyHashesFolder(
+// Extracts decoded Sound body SHA-256, KMP zone topKeys, and exact PCM metadata sizes from a read-only KST folder
+// using O_NOFOLLOW | O_NONBLOCK + S_ISREG (zero disk mutations, zero symlinks followed).
+inline bool extractNativeEquivalenceExtraFolder(
     const std::filesystem::path& kstDir,
-    std::map<graph::ResourceId, std::string>& outSoundBodySha256,
-    std::map<std::string, std::string>& outFileSha256,
+    NativeEquivalenceExtra& out,
     const KeepGoing& keepGoing = {},
     size_t cancelCheckStride = kDefaultCancelCheckStride,
     size_t maxTotalBytes = 256u << 20,
     size_t maxDirEntries = 1000000,
     graph::SoundPayloadMode soundMode = graph::SoundPayloadMode::AutoDetectOc31) {
-    outSoundBodySha256.clear();
-    outFileSha256.clear();
+    out = NativeEquivalenceExtra{};
     const size_t stride = adapter_detail::clampStride(cancelCheckStride);
     size_t tick = 0;
     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return false;
@@ -587,14 +636,11 @@ inline bool computeSoundBodyHashesFolder(
     if (!graph::native_detail::listDirEntriesAt(rootFd.fd, topEntries, maxDirEntries, err)) return true;
 
     size_t remainingBudget = maxTotalBytes;
+    size_t pcmBytesRead = 0;
     for (const std::string& top : topEntries) {
-        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
-            outSoundBodySha256.clear();
-            outFileSha256.clear();
-            return false;
-        }
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
         const std::string topUpper = graph::native_detail::upperAscii(top);
-        if (topUpper != "SOUND" && topUpper != "MULTISMP") continue;
+        if (topUpper != "SOUND" && topUpper != "MULTISMP" && topUpper != "PCM") continue;
         struct stat st{};
         if (::fstatat(rootFd.fd, top.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(st.st_mode)) continue;
         const graph::native_detail::ScopedFd subFd(
@@ -603,14 +649,22 @@ inline bool computeSoundBodyHashesFolder(
         std::vector<std::string> leaves;
         if (!graph::native_detail::listDirEntriesAt(subFd.fd, leaves, maxDirEntries, err)) continue;
         for (const std::string& leaf : leaves) {
-            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
-                outSoundBodySha256.clear();
-                outFileSha256.clear();
-                return false;
-            }
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
             const bool isPcg = (topUpper == "SOUND") && graph::native_detail::endsWithUpper(leaf, ".PCG");
             const bool isKmp = (topUpper == "MULTISMP") && graph::native_detail::endsWithUpper(leaf, ".KMP");
-            if (!isPcg && !isKmp) continue;
+            const bool isPcm = (topUpper == "PCM") && graph::native_detail::endsWithUpper(leaf, ".PCM");
+            if (!isPcg && !isKmp && !isPcm) continue;
+
+            const std::string rel = top + "/" + leaf;
+            if (isPcm) {
+                graph::PcmInventory tmp;
+                std::string perr;
+                if (graph::addPcmContainerFdAt(subFd.fd, leaf.c_str(), rel, panative::kMaxFileBytes,
+                                               remainingBudget, pcmBytesRead, tmp, &perr)) {
+                    for (const auto& [id, pe] : tmp.byId) out.exactPcmPayloadBytes[id] = pe.payloadBytes;
+                }
+                continue;
+            }
             std::vector<uint8_t> bytes;
             std::string rerr;
             if (!graph::native_detail::readRegularAt(subFd.fd, leaf.c_str(), panative::kMaxFileBytes,
@@ -618,21 +672,20 @@ inline bool computeSoundBodyHashesFolder(
                 continue;
             }
             remainingBudget -= bytes.size();
-            const std::string rel = top + "/" + leaf;
-            outFileSha256[rel] = adapter_detail::sha256Bytes(bytes.data(), bytes.size());
-            if (isPcg) {
+            out.fileSha256[rel] = conflict_detail::sha256Bytes(bytes.data(), bytes.size());
+            out.fileSizes[rel] = bytes.size();
+            if (isKmp) {
+                adapter_detail::extractKmpZoneTopKeys(bytes.data(), bytes.size(), out.msZoneTopKeys);
+            } else if (isPcg) {
                 const std::string bank = graph::native_detail::bankFromLabel(rel);
+                out.extraPresentSoundBanks.insert(graph::native_detail::upperAscii(bank));
                 const graph::SoundExtractResult ex = graph::extractSoundsFromPcgBytes(
                     bytes.data(), bytes.size(), bank, rel, soundMode);
                 if (!ex.containerOk) continue;
                 for (const graph::DecodedSound& s : ex.sounds) {
-                    if (!adapter_detail::tickCancel(keepGoing, tick, stride)) {
-                        outSoundBodySha256.clear();
-                        outFileSha256.clear();
-                        return false;
-                    }
+                    if (!adapter_detail::tickCancel(keepGoing, tick, stride)) { out = NativeEquivalenceExtra{}; return false; }
                     const graph::ResourceId sid = graph::soundId(s);
-                    outSoundBodySha256.emplace(sid, adapter_detail::sha256Bytes(s.body.data(), s.body.size()));
+                    out.soundBodySha256.emplace(sid, conflict_detail::sha256Bytes(s.body.data(), s.body.size()));
                 }
             }
         }
@@ -666,7 +719,7 @@ inline bool hashNativeRelFilesFolder(
             outFileSha256.clear();
             return false;
         }
-        sorted.push_back(graph::closure_detail::normalizeRelPath(p));
+        sorted.push_back(conflict_detail::normalizeRelPath(p));
     }
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
@@ -678,7 +731,6 @@ inline bool hashNativeRelFilesFolder(
             return false;
         }
         if (rel.empty() || rel.find("..") != std::string::npos) continue;
-        // Walk path components with O_NOFOLLOW | O_DIRECTORY
         std::vector<std::string> parts;
         size_t pos = 0;
         bool badPart = false;
@@ -707,18 +759,17 @@ inline bool hashNativeRelFilesFolder(
         std::string rerr;
         if (graph::native_detail::readRegularAt(cur.fd, parts.back().c_str(), maxFileBytes, remainingBudget, bytes, rerr)) {
             remainingBudget -= bytes.size();
-            outFileSha256[rel] = adapter_detail::sha256Bytes(bytes.data(), bytes.size());
+            outFileSha256[rel] = conflict_detail::sha256Bytes(bytes.data(), bytes.size());
         }
     }
     return true;
 }
 
-// Adapts an already-built M1 `NativeKstClosureResult` into a stable, read-only `M1AdapterView`.
-// Cooperative cancellation (`keepGoing`) is checked every <= 256 items; on cancel, all partial state is dropped.
+// Adapts an already-built M1 `NativeKstClosureResult` into a stable, read-only `M1AdapterView`
+// populated with M2a's canonical `SlotAddress`, `SoundEquivalenceProfile`, `CoverageSummary`, and `PartialNativeInspect`.
 inline M1AdapterView adaptFromM1Closure(
     const graph::NativeKstClosureResult& m1,
-    const std::map<graph::ResourceId, std::string>& optionalSoundBodySha256 = {},
-    const std::map<std::string, std::string>& optionalFileSha256 = {},
+    const NativeEquivalenceExtra& extra = {},
     const KeepGoing& keepGoing = {},
     size_t cancelCheckStride = kDefaultCancelCheckStride) {
     const size_t stride = adapter_detail::clampStride(cancelCheckStride);
@@ -733,7 +784,8 @@ inline M1AdapterView adaptFromM1Closure(
 
     M1AdapterView view;
     view.sourceKind = AdapterSourceKind::NativeKst;
-    view.sourceFileSha256 = optionalFileSha256;
+    view.sourceFileSha256 = extra.fileSha256;
+    view.presentSoundBanks = extra.extraPresentSoundBanks;
 
     const graph::NativeKstDependencyManifest& M = m1.manifest;
     view.coverage.readOnly = true;
@@ -741,7 +793,7 @@ inline M1AdapterView adaptFromM1Closure(
     view.coverage.upstreamScanned = M.coverage.upstreamScanned;
     view.coverage.kmpPresent = M.coverage.downstreamKmpPresent;
     view.coverage.kmpParsed = M.coverage.downstreamKmpParsed;
-    view.coverage.kmpIsOc31 = !M.coverage.downstreamKmpParsed && adapter_detail::isOc31KmpError(M.coverage.kmpError);
+    view.coverage.kmpIsOc31 = !M.coverage.downstreamKmpParsed && conflict_detail::isOc31KmpError(M.coverage.kmpError);
     view.coverage.kmpError = M.coverage.kmpError;
     view.coverage.songBookPresent = M.coverage.songBookPresent;
     view.coverage.drumKitBodyEdgesSupported = false;
@@ -757,6 +809,20 @@ inline M1AdapterView adaptFromM1Closure(
     view.coverage.duplicateDrumIdGroups = M.duplicateDrumIds.size();
     view.coverage.missingPcmSamples = M.missingPcmSamples.size();
 
+    // Populate M2a UX Gate #2 PartialNativeInspect
+    view.partialInspect.kmpPresent = M.coverage.downstreamKmpPresent;
+    view.partialInspect.kmpParsed = M.coverage.downstreamKmpParsed;
+    view.partialInspect.kmpIsOc31 = view.coverage.kmpIsOc31;
+    view.partialInspect.kmpError = M.coverage.kmpError;
+    view.partialInspect.soundContainerCount = M.summary.soundContainers;
+    view.partialInspect.pcmContainerCount = M.summary.pcmContainers;
+    view.partialInspect.pcmSampleCount = M.summary.pcmSamplesTotal;
+    view.partialInspect.soundInventory = m1.downstream.report.soundCatalog;
+    if (view.partialInspect.kmpIsOc31) {
+        view.partialInspect.isPartial = true;
+        view.partialInspect.notice = kOc31KmpDegradedNotice;
+    }
+
     view.missingPcmSamples = M.missingPcmSamples;
     view.duplicateDrumIds = M.duplicateDrumIds;
     view.malformedTrees = M.malformedTrees;
@@ -766,6 +832,7 @@ inline M1AdapterView adaptFromM1Closure(
 
     if (!m1.ok || !m1.graph.has_value()) {
         view.ok = false;
+        view.partialInspect.isPartial = true;
         view.manifestSha256 = adapter_detail::computeViewDigest(view);
         return view;
     }
@@ -774,7 +841,7 @@ inline M1AdapterView adaptFromM1Closure(
     view.graph = *m1.graph;
     const graph::Graph& g = *view.graph;
 
-    // 1. Index KMP Samples, Multisamples, DrumSamples with exact Id8 and stored-proxy flag
+    // 1. Index KMP Samples, Multisamples, DrumSamples with exact Id8, zone topKeys, and stored-proxy flag
     const graph::KmpIndex& kmp = m1.downstream.kmpIndex;
     for (uint32_t i = 0; i < kmp.samples.size(); ++i) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
@@ -789,13 +856,21 @@ inline M1AdapterView adaptFromM1Closure(
             rec.hasPcm = true;
             rec.info = sr.info;
             rec.pcmRelPath = sr.info->file;
-            rec.payloadBytes = sr.info->bytes();
+            if (const auto pit = extra.exactPcmPayloadBytes.find(sr.id); pit != extra.exactPcmPayloadBytes.end() && pit->second > 0) {
+                rec.payloadBytes = pit->second;
+            } else {
+                rec.payloadBytes = sr.info->bytes();
+            }
             rec.sampleRate = sr.info->rate;
         } else {
             rec.hasPcm = false;
         }
         view.samples.emplace(rec.id, std::move(rec));
     }
+
+    const bool hasExactZoneTopKeys = (extra.msZoneTopKeys.size() == kmp.multisamples.size());
+    std::vector<MultisampleFingerprint> msFingerprints;
+    msFingerprints.reserve(kmp.multisamples.size());
 
     for (uint32_t i = 0; i < kmp.multisamples.size(); ++i) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
@@ -806,13 +881,38 @@ inline M1AdapterView adaptFromM1Closure(
         rec.id8 = mr.id;
         rec.name = mr.name;
         rec.zoneSampleIndices = mr.zoneSamples;
+        if (hasExactZoneTopKeys && extra.msZoneTopKeys[i].size() == mr.zoneSamples.size()) {
+            rec.zoneTopKeys = extra.msZoneTopKeys[i];
+        }
         rec.confidence = EdgeConfidence::Confirmed;
+
+        MultisampleFingerprint fp;
+        fp.multisampleId = mr.id;
+        fp.zones.reserve(mr.zoneSamples.size());
         std::set<graph::ResourceId> sids;
-        for (uint32_t si : mr.zoneSamples) {
-            if (si != graph::kNoZoneSample) sids.insert(graph::ResourceId{false, "KST", graph::Kind::Sample, si});
+        for (size_t z = 0; z < mr.zoneSamples.size(); ++z) {
+            const uint32_t si = mr.zoneSamples[z];
+            ZoneFingerprint zf;
+            zf.topKey = (z < rec.zoneTopKeys.size()) ? rec.zoneTopKeys[z] : 0;
+            if (si != graph::kNoZoneSample) {
+                const graph::ResourceId smpId{false, "KST", graph::Kind::Sample, si};
+                sids.insert(smpId);
+                zf.hasSample = true;
+                if (const auto spIt = view.samples.find(smpId); spIt != view.samples.end()) {
+                    zf.sampleId = spIt->second.id8;
+                    if (spIt->second.hasPcm && spIt->second.payloadBytes > 0) {
+                        zf.pcmPresent = true;
+                        zf.pcmPayloadBytes = spIt->second.payloadBytes > 0xFFFFFFFFull
+                                                 ? 0xFFFFFFFFu
+                                                 : static_cast<uint32_t>(spIt->second.payloadBytes);
+                    }
+                }
+            }
+            fp.zones.push_back(zf);
         }
         rec.sampleIds.assign(sids.begin(), sids.end());
         view.multisamples.emplace(rec.id, std::move(rec));
+        msFingerprints.push_back(std::move(fp));
     }
 
     for (uint32_t i = 0; i < kmp.drums.size(); ++i) {
@@ -844,13 +944,14 @@ inline M1AdapterView adaptFromM1Closure(
         else unresAnalysedBySound[u.sound].push_back(u);
     }
 
-    // 2. Index User Sounds & downstream closure with confidence provenance
+    // 2. Index User Sounds & build byte-exact M2a SoundEquivalenceProfiles
     for (const graph::UserSoundManifestEntry& use : M.userSounds) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         view.presentSoundBanks.insert(use.bank);
 
         SoundClosureRecord sc;
         sc.id = use.id;
+        sc.slotAddress = SlotAddress::fromBankAndSlot(use.bank, use.slot);
         sc.bank = use.bank;
         sc.slot = use.slot;
         sc.kindChunkId = use.kindChunkId;
@@ -858,17 +959,20 @@ inline M1AdapterView adaptFromM1Closure(
         sc.sourceFile = use.sourceFile;
         sc.isDrumKit = use.isDrumKit;
         sc.decoded = use.decoded;
-        sc.analysed = use.analysed;
-        sc.unanalysedGap = use.gap;
-        sc.soundToMsConfidence = use.analysed ? EdgeConfidence::Inferred : EdgeConfidence::Unsupported;
+        sc.analysed = use.analysed && !use.isDrumKit; // M2a invariant: USERDK bodies are always unparsed
+        sc.unanalysedGap = use.isDrumKit ? (use.gap.empty() ? std::string("DrumKitBodyUnparsed") : use.gap) : use.gap;
+        sc.soundToMsConfidence = sc.analysed ? EdgeConfidence::Inferred : EdgeConfidence::Unsupported;
         sc.msToSampleConfidence = M.coverage.downstreamKmpParsed ? EdgeConfidence::Confirmed : EdgeConfidence::Unsupported;
 
-        if (!use.analysed) {
+        if (use.isDrumKit) ++view.partialInspect.occupiedUserDrumKits;
+        else ++view.partialInspect.occupiedUserSounds;
+
+        if (!sc.analysed) {
             if (use.isDrumKit) ++view.coverage.unanalysedDrumKits;
-            else if (use.gap == "NoKnownReference") ++view.coverage.unanalysedNoKnownRef;
+            else if (sc.unanalysedGap == "NoKnownReference") ++view.coverage.unanalysedNoKnownRef;
             else ++view.coverage.unanalysedOther;
         }
-        if (const auto bit = optionalSoundBodySha256.find(use.id); bit != optionalSoundBodySha256.end()) {
+        if (const auto bit = extra.soundBodySha256.find(use.id); bit != extra.soundBodySha256.end()) {
             sc.decodedBodySha256 = bit->second;
         }
         if (const auto ait = unresAnalysedBySound.find(use.id); ait != unresAnalysedBySound.end()) {
@@ -878,15 +982,31 @@ inline M1AdapterView adaptFromM1Closure(
             sc.unresolvedSlotsInUnanalysed = sit->second;
         }
 
-        if (use.analysed && M.coverage.downstreamKmpParsed) {
+        // Populate M2a SoundEquivalenceProfile directly (matching slot_conflicts.h byte-for-byte!)
+        SoundEquivalenceProfile& eq = sc.equivalence;
+        eq.kindChunkId = use.kindChunkId;
+        eq.bodySha256 = sc.decodedBodySha256;
+        eq.decoded = use.decoded;
+        eq.isDrumKit = use.isDrumKit;
+        eq.analysed = sc.analysed;
+        eq.unanalysedReason = sc.unanalysedGap;
+        eq.unresolvedSlotCount = sc.unresolvedSlotsInAnalysed.size() + sc.unresolvedSlotsInUnanalysed.size();
+        // KMP equivalence requires parsed KMP + exact zone topKeys (if adapted without raw KMP, stay InsufficientEvidence)
+        eq.kmpComplete = M.coverage.downstreamKmpParsed && (kmp.multisamples.empty() || hasExactZoneTopKeys);
+
+        if (sc.analysed && M.coverage.downstreamKmpParsed) {
             const auto cl = g.closure({use.id});
             std::set<graph::ResourceId> oscs, mss, smps;
             std::set<std::string> pcms;
             uint64_t bytesProxy = 0;
             for (const graph::ResourceId& dep : cl) {
                 if (dep.kind == graph::Kind::Oscillator) oscs.insert(dep);
-                else if (dep.kind == graph::Kind::Multisample) mss.insert(dep);
-                else if (dep.kind == graph::Kind::Sample) {
+                else if (dep.kind == graph::Kind::Multisample) {
+                    mss.insert(dep);
+                    if (dep.number < msFingerprints.size()) {
+                        eq.referencedMultisamples.push_back(msFingerprints[dep.number]);
+                    }
+                } else if (dep.kind == graph::Kind::Sample) {
                     smps.insert(dep);
                     if (const auto spIt = view.samples.find(dep); spIt != view.samples.end() && spIt->second.hasPcm) {
                         bytesProxy = adapter_detail::satAdd(bytesProxy, spIt->second.payloadBytes);
@@ -900,6 +1020,7 @@ inline M1AdapterView adaptFromM1Closure(
             sc.pcmFiles.assign(pcms.begin(), pcms.end());
             sc.storedPcmBytesProxy = bytesProxy;
         }
+        finalizeSoundEquivalenceProfile(eq);
         view.sounds.emplace(sc.id, std::move(sc));
     }
 
@@ -913,12 +1034,15 @@ inline M1AdapterView adaptFromM1Closure(
         else if (r.kind == graph::Kind::KeyboardSet) rec.kind = RootItemKind::KeyboardSet;
         else rec.kind = RootItemKind::Pad;
 
-        rec.relPath = graph::closure_detail::normalizeRelPath(r.relPath);
+        rec.relPath = conflict_detail::normalizeRelPath(r.relPath);
         rec.locationCategory = r.locationCategory;
         rec.bankFolder = r.bankFolder;
         rec.displayName = r.displayName;
-        if (const auto fit = optionalFileSha256.find(rec.relPath); fit != optionalFileSha256.end()) {
+        if (const auto fit = extra.fileSha256.find(rec.relPath); fit != extra.fileSha256.end()) {
             rec.contentSha256 = fit->second;
+        }
+        if (const auto szit = extra.fileSizes.find(rec.relPath); szit != extra.fileSizes.end()) {
+            rec.sizeBytes = szit->second;
         }
         rec.parseOk = r.parseOk;
         rec.parseError = r.parseError;
@@ -937,7 +1061,6 @@ inline M1AdapterView adaptFromM1Closure(
             sel.leafOrigins = sr.leafOrigins;
             sel.totalDistinctLeafOrigins = sr.totalDistinctLeafOrigins;
 
-            // Resolve against source sound catalog (strictly preserving AmbiguousOrOutOfSpec boundary!)
             if (sel.targetSoundId.has_value()) {
                 if (view.sounds.count(*sel.targetSoundId) > 0) {
                     sel.resolved = true;
@@ -950,7 +1073,6 @@ inline M1AdapterView adaptFromM1Closure(
                 }
             }
 
-            // Classify embedded KBD Set / Pad / Main Track provenance inside Styles
             if (rec.kind == RootItemKind::Style) {
                 if (sr.via == graph::Via::KeyboardSetPart) {
                     sel.fromEmbeddedKbdSet = true;
@@ -962,15 +1084,11 @@ inline M1AdapterView adaptFromM1Closure(
                         else if (adapter_detail::leafHasKbdSetSegment(lp)) sel.fromEmbeddedKbdSet = true;
                         else anyMain = true;
                     }
-                    // Fail-safe: if leafOrigins was capped (>16 distinct leaves) and we only saw PadSet leaves,
-                    // conservatively mark fromStyleMainTrack = true so we never accidentally drop a dependency.
                     if (sr.totalDistinctLeafOrigins > sr.leafOrigins.size() && !anyMain) anyMain = true;
                     if (!anyPad && !sel.fromEmbeddedKbdSet && !anyMain) anyMain = true;
                     sel.fromEmbeddedPad = anyPad;
                     sel.fromStyleMainTrack = anyMain;
                 }
-            } else if (rec.kind == RootItemKind::KeyboardSet) {
-                sel.fromStyleMainTrack = true;
             } else {
                 sel.fromStyleMainTrack = true;
             }
@@ -989,7 +1107,7 @@ inline M1AdapterView adaptFromM1Closure(
     return view;
 }
 
-// End-to-end in-memory Native-KST adaptation: runs M1 closure + computes decoded Sound body & root SHA-256 hashes.
+// End-to-end in-memory Native-KST adaptation: runs M1 closure + builds M2a SoundEquivalenceProfiles.
 inline M1AdapterView adaptNativeKstInput(
     const graph::NativeKstClosureInput& in,
     const M1AdapterOptions& opts = {},
@@ -1004,22 +1122,22 @@ inline M1AdapterView adaptNativeKstInput(
     };
     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
 
-    std::map<graph::ResourceId, std::string> bodyHashes;
-    std::map<std::string, std::string> fileHashes;
+    NativeEquivalenceExtra extra;
     if (opts.computeSoundBodyHashes) {
-        if (!computeSoundBodyHashesInMemory(in.downstream, bodyHashes, fileHashes, keepGoing, stride,
-                                            opts.closureOptions.downstream.soundMode)) {
+        if (!extractNativeEquivalenceExtraInMemory(in.downstream, extra, keepGoing, stride,
+                                                   opts.closureOptions.downstream.soundMode)) {
             return makeCancelled();
         }
     }
     for (const auto& rb : in.upstreamRoots) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
-        const std::string rel = graph::closure_detail::normalizeRelPath(rb.relPath);
-        fileHashes[rel] = adapter_detail::sha256Bytes(rb.bytes.data(), rb.bytes.size());
+        const std::string rel = conflict_detail::normalizeRelPath(rb.relPath);
+        extra.fileSha256[rel] = conflict_detail::sha256Bytes(rb.bytes.data(), rb.bytes.size());
+        extra.fileSizes[rel] = rb.bytes.size();
     }
     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
     const graph::NativeKstClosureResult m1 = graph::resolveNativeKstClosure(in, opts.closureOptions);
-    return adaptFromM1Closure(m1, bodyHashes, fileHashes, keepGoing, stride);
+    return adaptFromM1Closure(m1, extra, keepGoing, stride);
 }
 
 // End-to-end read-only on-disk Native-KST folder adaptation. Never mutates disk or emits local paths.
@@ -1040,13 +1158,12 @@ inline M1AdapterView adaptNativeKstFolder(
     const graph::NativeKstClosureResult m1 = graph::resolveNativeKstClosureFolder(kstDir, opts.closureOptions);
     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
 
-    std::map<graph::ResourceId, std::string> bodyHashes;
-    std::map<std::string, std::string> fileHashes;
+    NativeEquivalenceExtra extra;
     if (m1.ok && opts.computeSoundBodyHashes) {
-        if (!computeSoundBodyHashesFolder(kstDir, bodyHashes, fileHashes, keepGoing, stride,
-                                          opts.closureOptions.downstream.maxTotalBytes,
-                                          opts.closureOptions.maxDirEntries,
-                                          opts.closureOptions.downstream.soundMode)) {
+        if (!extractNativeEquivalenceExtraFolder(kstDir, extra, keepGoing, stride,
+                                                 opts.closureOptions.downstream.maxTotalBytes,
+                                                 opts.closureOptions.maxDirEntries,
+                                                 opts.closureOptions.downstream.soundMode)) {
             return makeCancelled();
         }
     }
@@ -1054,11 +1171,160 @@ inline M1AdapterView adaptNativeKstFolder(
         std::vector<std::string> rels;
         rels.reserve(m1.manifest.roots.size());
         for (const auto& r : m1.manifest.roots) rels.push_back(r.relPath);
-        if (!hashNativeRelFilesFolder(kstDir, rels, fileHashes, keepGoing, stride)) {
+        if (!hashNativeRelFilesFolder(kstDir, rels, extra.fileSha256, keepGoing, stride)) {
             return makeCancelled();
         }
     }
-    return adaptFromM1Closure(m1, bodyHashes, fileHashes, keepGoing, stride);
+    return adaptFromM1Closure(m1, extra, keepGoing, stride);
+}
+
+// Converts an adapted Native-KST `M1AdapterView` directly into M2a's canonical `TargetOccupancyMap`
+// so M2a's `evaluateCollisionMatrix()` and M2b share one single source of truth for target slots,
+// FAT32 R-18 object paths, Sound equivalence digests, and fail-closed TargetUninspectable checks.
+inline TargetOccupancyMap buildTargetOccupancyFromAdapter(
+    const M1AdapterView& view,
+    const KeepGoing& keepGoing = {},
+    size_t cancelCheckStride = kDefaultCancelCheckStride) {
+    const size_t stride = adapter_detail::clampStride(cancelCheckStride);
+    size_t tick = 0;
+    auto makeCancelled = []() {
+        TargetOccupancyMap c;
+        c.valid = false;
+        c.fullyInspectable = false;
+        c.cancelled = true;
+        c.uninspectableReason = "target occupancy conversion cancelled";
+        c.coverage.deleteProofAvailable = false;
+        return c;
+    };
+    if (view.cancelled || !adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+
+    TargetOccupancyMap map;
+    map.valid = view.ok;
+    map.partialInspect = view.partialInspect;
+    map.coverage = view.coverage.toM2aCoverageSummary();
+    map.bytesReadDownstream = view.coverage.bytesReadDownstream;
+    map.bytesReadObjects = view.coverage.bytesReadUpstream;
+
+    if (!view.ok) {
+        map.fullyInspectable = false;
+        map.partialInspect.isPartial = true;
+        map.uninspectableReason = !view.containerErrors.empty()
+                                      ? view.containerErrors.front()
+                                      : "Target manifest view failed to load or is uninspectable.";
+        map.partialInspect.notice = map.uninspectableReason;
+        map.targetDiagnostics.push_back({
+            DiagnosticCategory::UNSUPPORTED_FORMAT,
+            diag_code::kTargetUninspectable,
+            DiagnosticSeverity::Blocking,
+            EvidenceLevel::Unsupported,
+            "<target>",
+            "",
+            map.uninspectableReason,
+            "Target KST could not be inspected; refusing fail-closed without silent 0-byte baseline.",
+            {}
+        });
+        map.rebuildIndexesAndKey();
+        return map;
+    }
+
+    // Mark present bank files
+    for (const std::string& bank : view.presentSoundBanks) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+        if (const auto probe = SlotAddress::fromBankAndSlot(bank, 0); probe.has_value()) {
+            if (!probe->isDrumKit && probe->bank >= 1 && probe->bank <= kUserSoundBankCount) {
+                map.userSoundBankPresent[probe->bank - 1] = true;
+            } else if (probe->isDrumKit && probe->bank >= 1 && probe->bank <= kUserDrumKitBankCount) {
+                map.userDrumKitBankPresent[probe->bank - 1] = true;
+            } else if (probe->isOutOfSpecDrumKitBank()) {
+                map.extraOutOfSpecDrumKitBanksPresent.insert(probe->bankName());
+            }
+        }
+    }
+
+    // Populate occupied Sound slots with M2a's canonical SoundEquivalenceProfile
+    for (const auto& [sid, sc] : view.sounds) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+        const auto addr = sc.slotAddress.has_value() ? sc.slotAddress : SlotAddress::fromBankAndSlot(sc.bank, sc.slot);
+        if (!addr.has_value()) continue;
+        OccupiedSlotEntry occ;
+        occ.address = *addr;
+        occ.displayName = sc.name;
+        occ.sourceContainer = sc.sourceFile;
+        occ.equivalence = sc.equivalence;
+        map.addOccupiedSlot(std::move(occ));
+    }
+
+    // Register target Style / KeyboardSet / Pad object paths for FAT32 R-18 & collision detection
+    for (const auto& r : view.roots) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+        map.addObjectPath(r.relPath, r.contentSha256, r.sizeBytes);
+    }
+
+    // Detect pre-existing FAT32 R-18 file/dir collisions in target
+    for (const auto& [folded, vec] : map.objectPathsByFolded) {
+        if (vec.size() > 1) {
+            map.targetDiagnostics.push_back({
+                DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                diag_code::kFatCaseCollisionR18,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Verified,
+                folded,
+                vec[0].relPath + " vs " + vec[1].relPath,
+                "Target library contains multiple paths colliding under ASCII case folding (FAT32/exFAT R-18).",
+                "Rename one colliding path in the target library before exporting.",
+                {}
+            });
+        }
+    }
+
+    // Fail-closed TargetUninspectable gate (mirrors slot_conflicts.h §5.2 & UX Gate #2)
+    const bool hasAnySounds = !view.sounds.empty();
+    const bool kmpFailed = view.coverage.kmpPresent ? !view.coverage.kmpParsed : hasAnySounds;
+    if (view.coverage.kmpIsOc31) {
+        map.partialInspect.isPartial = true;
+        map.partialInspect.notice = kOc31KmpDegradedNotice;
+        map.targetDiagnostics.push_back({
+            DiagnosticCategory::UNSUPPORTED_FORMAT,
+            diag_code::kOc31KmpUnsupported,
+            DiagnosticSeverity::Blocking,
+            EvidenceLevel::Unsupported,
+            "MULTISMP/RAM.KMP",
+            "0x11050038",
+            kOc31KmpDegradedNotice,
+            "Requires authentic Pa5X raw RAM.KMP (0x11080018 v0x0103) for Multisample/Sample equivalence & closure.",
+            {}
+        });
+    }
+    if (!view.containerErrors.empty() || view.coverage.decodeFailures > 0 || kmpFailed) {
+        map.fullyInspectable = false;
+        map.partialInspect.isPartial = true;
+        if (view.coverage.kmpIsOc31) {
+            map.uninspectableReason = kOc31KmpDegradedNotice;
+        } else if (!view.containerErrors.empty()) {
+            map.uninspectableReason = "Target KST container error: " + view.containerErrors.front();
+        } else if (view.coverage.decodeFailures > 0) {
+            map.uninspectableReason = "Target KST contains " + std::to_string(view.coverage.decodeFailures) + " undecodable Sound item(s).";
+        } else {
+            map.uninspectableReason = "Target KST RAM.KMP unavailable or invalid: " + view.coverage.kmpError;
+        }
+        map.targetDiagnostics.push_back({
+            DiagnosticCategory::UNSUPPORTED_FORMAT,
+            diag_code::kTargetUninspectable,
+            DiagnosticSeverity::Blocking,
+            EvidenceLevel::Unsupported,
+            "<target>",
+            "",
+            map.uninspectableReason,
+            "Cannot safely verify target Sound equivalence or slot collisions; failing closed.",
+            {}
+        });
+    } else {
+        map.fullyInspectable = true;
+        map.partialInspect.isPartial = false;
+    }
+
+    map.rebuildIndexesAndKey();
+    return map;
 }
 
 // Adapts an in-memory Provisional Workspace (RESOURCES.tsv Sound/DrumKit packages + .mid/.uasf Styles)
@@ -1089,8 +1355,8 @@ inline M1AdapterView adaptProvisionalWorkspace(
     std::vector<size_t> pkgOrder(in.packages.size());
     std::iota(pkgOrder.begin(), pkgOrder.end(), 0);
     std::sort(pkgOrder.begin(), pkgOrder.end(), [&](size_t a, size_t b) {
-        return graph::closure_detail::normalizeRelPath(in.packages[a].relDir) <
-               graph::closure_detail::normalizeRelPath(in.packages[b].relDir);
+        return conflict_detail::normalizeRelPath(in.packages[a].relDir) <
+               conflict_detail::normalizeRelPath(in.packages[b].relDir);
     });
 
     graph::Graph mergedGraph;
@@ -1098,7 +1364,7 @@ inline M1AdapterView adaptProvisionalWorkspace(
     for (size_t idx : pkgOrder) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const ProvisionalPackageInput& pi = in.packages[idx];
-        const std::string relDir = graph::closure_detail::normalizeRelPath(pi.relDir);
+        const std::string relDir = conflict_detail::normalizeRelPath(pi.relDir);
 
         ProvisionalPackageRecord rec;
         rec.relDir = relDir;
@@ -1160,7 +1426,6 @@ inline M1AdapterView adaptProvisionalWorkspace(
             rec.totalUncompressedBytes = totalBytes;
             view.sourceFileSha256[relDir.empty() ? rec.packageId : (relDir + "/RESOURCES.tsv")] = rec.packageSha256;
 
-            // Merge into workspace graph if not already present (identical packageId merges cleanly!)
             std::string merr;
             if (!mergedGraph.merge(rec.graph, &merr)) {
                 rec.valid = false;
@@ -1170,12 +1435,10 @@ inline M1AdapterView adaptProvisionalWorkspace(
         }
 
         if (!relDir.empty()) view.packageIdByRelDir[relDir] = rec.packageId;
-        // Keep canonical first entry per packageId (if two dirs have identical packageId & sha256, deduplicated!)
         const auto existing = view.packagesById.find(rec.packageId);
         if (existing == view.packagesById.end()) {
             view.packagesById.emplace(rec.packageId, std::move(rec));
         } else if (existing->second.packageSha256 != rec.packageSha256) {
-            // Same packageId with differing SHA-256 is an integrity conflict!
             existing->second.valid = false;
             existing->second.error = "conflicting content for packageId " + rec.packageId;
             allPackagesValid = false;
@@ -1186,8 +1449,8 @@ inline M1AdapterView adaptProvisionalWorkspace(
     std::vector<size_t> rootOrder(in.roots.size());
     std::iota(rootOrder.begin(), rootOrder.end(), 0);
     std::sort(rootOrder.begin(), rootOrder.end(), [&](size_t a, size_t b) {
-        return graph::closure_detail::normalizeRelPath(in.roots[a].relPath) <
-               graph::closure_detail::normalizeRelPath(in.roots[b].relPath);
+        return conflict_detail::normalizeRelPath(in.roots[a].relPath) <
+               conflict_detail::normalizeRelPath(in.roots[b].relPath);
     });
 
     uint32_t nextIdx = 0;
@@ -1196,7 +1459,7 @@ inline M1AdapterView adaptProvisionalWorkspace(
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const ProvisionalRootInput& ri = in.roots[idx];
         RootItemRecord rec;
-        rec.relPath = graph::closure_detail::normalizeRelPath(ri.relPath);
+        rec.relPath = conflict_detail::normalizeRelPath(ri.relPath);
         rec.kind = ri.kind;
         rec.id = graph::ResourceId{true, "workspace", graph::Kind::Style, nextIdx++};
         graph::closure_detail::splitRelPathMeta(rec.relPath, rec.locationCategory, rec.bankFolder, rec.displayName);
@@ -1205,8 +1468,10 @@ inline M1AdapterView adaptProvisionalWorkspace(
         if (!ri.contentSha256.empty()) {
             rec.contentSha256 = ri.contentSha256;
         } else if (!ri.smfBytes.empty()) {
-            rec.contentSha256 = adapter_detail::sha256Bytes(ri.smfBytes.data(), ri.smfBytes.size());
+            rec.contentSha256 = conflict_detail::sha256Bytes(ri.smfBytes.data(), ri.smfBytes.size());
+            rec.sizeBytes = ri.smfBytes.size();
         } else {
+            // P3-2: canonical sort before hashing so no-SMF provisional root hash is strictly order-independent!
             Sha256 h;
             adapter_detail::hashField(h, rec.relPath);
             std::vector<graph::MidiSoundAddress> sortedExplicit = ri.explicitSelections;

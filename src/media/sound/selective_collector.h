@@ -2,25 +2,20 @@
 #define AI_ARRANGER_MEDIA_SOUND_SELECTIVE_COLLECTOR_H
 
 // Slice M2b: Automatic Selective Dependency Collector, 3-Tier Deduplicator, Honest Memory Projection,
-// and Reproducible Path-Free Dry-Run Export Plan & Preview Serializer.
+// and Reproducible Path-Free Dry-Run Export Plan & Preview Serializer — unified cleanly on M2a.
 //
-// Design & Safety Invariants (M2_SELECTIVE_STYLE_EXPORT_DESIGN.md §2, §3, §4, §8 Slice M2b):
+// Single Source of Truth with M2a (`selective_diagnostics.h` + `slot_conflicts.h`):
+//  * Reuses M2a's ExportMode, ConflictPolicy, SelectedKind, SelectionTarget, Diagnostic (4-category taxonomy +
+//    diag_code::*), SlotConflict, CoverageSummary, MemoryProjectionReport, DeduplicationGroup,
+//    SelectiveExportReport, EquivalenceVerdict, compareSoundEquivalence(), TargetOccupancyMap,
+//    CollisionMatrixInput/Result, evaluateCollisionMatrix(), safeJsonEscape(), and canonicalPathFreeLabel().
 //  * Strictly READ-ONLY: pure in-memory planning & dry-run preview; zero disk writes or mutations.
 //  * HOLD GATES INTACT: zero OC31 encoder, zero Native Sound KST export, zero apps/macos/ wiring,
-//    `hardwareVerified = false` ("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X").
-//  * Zero silent Sound loss: NEVER drops a dependency or silently substitutes a Factory sound; fails closed
-//    with typed blocking reasons (`executable == false`) on missing/unwritable/unanalysed/malformed dependencies.
-//  * 3-Tier Deduplication (NEVER deduplicates by filename or Sound name alone!):
-//      - Tier 1 (Logical Graph Identity): canonical ResourceId + 8-byte KMP Id8 across all selected roots.
-//      - Tier 2 (Provisional Package & WAV Content Hash): packageId/PACKAGE.sha256 (appliedInExport=true)
-//        and byte-identical WAVs across distinct packages by contentHash+bytes (appliedInExport=false, advisory).
-//      - Tier 3 (Native KST Content Equivalence — 3-Way Classification): Identical (exact SHA-256 + Analysed +
-//        0 unresolved analysed slots + full downstream MS/Zone/Sample Id8 & PCM size match) vs Different vs
-//        InsufficientEvidence (NEVER merges distinct Pa5X Id8 identities!).
-//  * Honest Memory Projection (§4.4): strictly separates "uncompressed_pcm_bytes" from
-//    "native_kst_stored_pcm_proxy_bytes" (mandatory "unverified-proxy" verdict & caveat string).
-//  * Reproducible & Path-Free: deterministic planFingerprint (SHA-256) and canonical JSON/Markdown previews
-//    with zero local filesystem paths, byte-identical across repeated runs and shuffled selection orders.
+//    `hardwareVerified = false` ("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X"), deleteCheck() never Unreferenced.
+//  * Zero silent Sound loss: cross-slot Identical matches NEVER lift NATIVE_SOUND_WRITE_HOLD for RootTreeSubKst
+//    without an explicit approved remap override (SMF_REMAP_REQUIRED); exact same-slot matches always win.
+//  * Overflow-safe 64-bit byte math (satAdd/satMul), fail-closed failed/cancelled optionalTarget handling,
+//    Markdown sanitization (printable + code-span backtick escaping), and <= 256-item cooperative cancellation.
 
 #include "media/panative/panative_reader.h"
 #include "media/sha256.h"
@@ -40,39 +35,26 @@
 namespace ai_arranger::media::selective {
 
 inline constexpr const char* kDryRunPlanSchema = "aiarranger-selective-dry-run-plan/1";
-inline constexpr const char* kStructuralOnlyBanner = "STRUCTURALLY VALID — NOT VERIFIED ON A PA5X";
-inline constexpr const char* kNativeProxyCaveat =
-    "Stored PCM size (compressed 0180 + uncompressed 0110/0210 mix; decoded Pa5X RAM use unverified)";
 inline constexpr const char* kProvisionalUncompressedCaveat =
     "Uncompressed PCM software estimate (hardware validation pending; per-sample overhead and Preload buffer not modelled)";
 
-enum class CollectorExportMode {
-    AdvisoryPlan,        // Read-only dry-run plan & preview (zero native KST bytes written)
-    ImportKitBundle,     // Path A: Pa5X Import Kit (provisional Sound/DrumKit/KMP packages + marker SMF)
-    RootTreeSubKst,      // Path A CLI-only (L1): .stg/.ksc/.pdc only; blocks on any unwritable User Sound
-    NativeSoundKst_HOLD  // Strictly refused fail-closed until OC31/KMP writer + S6 HOLD gates lift
-};
-
-inline const char* collectorExportModeName(CollectorExportMode m) {
-    switch (m) {
-        case CollectorExportMode::AdvisoryPlan:        return "advisory-plan";
-        case CollectorExportMode::ImportKitBundle:     return "import-kit";
-        case CollectorExportMode::RootTreeSubKst:      return "root-tree-sub-kst";
-        case CollectorExportMode::NativeSoundKst_HOLD: return "native-sound-kst-hold";
-    }
-    return "advisory-plan";
-}
-
-struct CollectorSelectionTarget {
-    std::string relPath;       // Source-relative path (canonicalized to forward slashes)
-    std::string targetBank;    // Optional destination bank override
-    std::string targetName;    // Optional destination leaf name override
-    auto operator<=>(const CollectorSelectionTarget&) const = default;
-};
+// Collector-specific diagnostic codes extending M2a's canonical diag_code::* catalog
+namespace collector_diag_code {
+inline constexpr const char* kEmptySelection           = "EMPTY_SELECTION";
+inline constexpr const char* kSourceUnavailable        = "SOURCE_UNAVAILABLE";
+inline constexpr const char* kSelectedRootNotFound     = "SELECTED_ROOT_NOT_FOUND";
+inline constexpr const char* kMalformedRootTree        = "MALFORMED_ROOT_TREE";
+inline constexpr const char* kUnknownOriginMidiAddress = "UNKNOWN_ORIGIN_MIDI_ADDRESS";
+inline constexpr const char* kKmpUnavailable           = "KMP_UNAVAILABLE";
+inline constexpr const char* kSoundDecodeFailed        = "SOUND_DECODE_FAILED";
+inline constexpr const char* kUnanalysedUserSound      = "UNANALYSED_USER_SOUND";
+inline constexpr const char* kSmfRemapRequired         = "SMF_REMAP_REQUIRED";
+}  // namespace collector_diag_code
 
 struct CollectorRequest {
-    std::vector<CollectorSelectionTarget> targets; // 1..N selected roots (order-independent)
-    CollectorExportMode mode = CollectorExportMode::AdvisoryPlan;
+    std::vector<SelectionTarget> targets;          // M2a canonical SelectionTarget (order-independent)
+    ExportMode mode = ExportMode::AdvisoryPlan;    // M2a canonical ExportMode
+    ConflictPolicy conflictPolicy = ConflictPolicy::BlockWithReport; // M2a canonical ConflictPolicy
     bool includeEmbeddedKbdSets = true;            // Include Style embedded KBD Sets
     bool includeEmbeddedPads = true;               // Include Style embedded Pads
     bool requireCompleteSampleClosure = true;      // Fail-closed on unanalysed USERDK / OC31 KMP / missing PCM
@@ -80,74 +62,6 @@ struct CollectorRequest {
     // Cross-slot Identical matches NEVER lift NATIVE_SOUND_WRITE_HOLD without an explicit entry here!
     std::map<graph::ResourceId, graph::ResourceId> approvedSoundRemaps;
     size_t cancelCheckStride = kDefaultCancelCheckStride; // Clamped to [1, 256]
-};
-
-enum class BlockingCode {
-    EMPTY_SELECTION,
-    SOURCE_UNAVAILABLE,
-    TARGET_UNAVAILABLE,
-    SELECTED_ROOT_NOT_FOUND,
-    MALFORMED_ROOT_TREE,
-    MALFORMED_MIDI_LEAF,
-    UNRESOLVED_MIDI_BANK_SELECT,
-    UNKNOWN_ORIGIN_MIDI_ADDRESS,
-    MISSING_USER_SOUND_BANK,
-    MISSING_USER_SOUND_SLOT,
-    MISSING_PCM_FOR_KMP_SAMPLE,
-    MISSING_PACKAGE_WAV_OR_TX,
-    DANGLING_GRAPH_EDGE,
-    OC31_KMP_UNSUPPORTED,
-    KMP_UNAVAILABLE,
-    SOUND_DECODE_FAILED,
-    DRUMKIT_BODY_UNPARSED,
-    UNANALYSED_USER_SOUND,
-    SMF_REMAP_REQUIRED,
-    NATIVE_SOUND_WRITE_HOLD
-};
-
-inline const char* blockingCodeName(BlockingCode c) {
-    switch (c) {
-        case BlockingCode::EMPTY_SELECTION:             return "EMPTY_SELECTION";
-        case BlockingCode::SOURCE_UNAVAILABLE:          return "SOURCE_UNAVAILABLE";
-        case BlockingCode::TARGET_UNAVAILABLE:          return "TARGET_UNAVAILABLE";
-        case BlockingCode::SELECTED_ROOT_NOT_FOUND:     return "SELECTED_ROOT_NOT_FOUND";
-        case BlockingCode::MALFORMED_ROOT_TREE:         return "MALFORMED_ROOT_TREE";
-        case BlockingCode::MALFORMED_MIDI_LEAF:         return "MALFORMED_MIDI_LEAF";
-        case BlockingCode::UNRESOLVED_MIDI_BANK_SELECT: return "UNRESOLVED_MIDI_BANK_SELECT";
-        case BlockingCode::UNKNOWN_ORIGIN_MIDI_ADDRESS: return "UNKNOWN_ORIGIN_MIDI_ADDRESS";
-        case BlockingCode::MISSING_USER_SOUND_BANK:     return "MISSING_USER_SOUND_BANK";
-        case BlockingCode::MISSING_USER_SOUND_SLOT:     return "MISSING_USER_SOUND_SLOT";
-        case BlockingCode::MISSING_PCM_FOR_KMP_SAMPLE:  return "MISSING_PCM_FOR_KMP_SAMPLE";
-        case BlockingCode::MISSING_PACKAGE_WAV_OR_TX:   return "MISSING_PACKAGE_WAV_OR_TX";
-        case BlockingCode::DANGLING_GRAPH_EDGE:         return "DANGLING_GRAPH_EDGE";
-        case BlockingCode::OC31_KMP_UNSUPPORTED:        return "OC31_KMP_UNSUPPORTED";
-        case BlockingCode::KMP_UNAVAILABLE:             return "KMP_UNAVAILABLE";
-        case BlockingCode::SOUND_DECODE_FAILED:         return "SOUND_DECODE_FAILED";
-        case BlockingCode::DRUMKIT_BODY_UNPARSED:       return "DRUMKIT_BODY_UNPARSED";
-        case BlockingCode::UNANALYSED_USER_SOUND:       return "UNANALYSED_USER_SOUND";
-        case BlockingCode::SMF_REMAP_REQUIRED:          return "SMF_REMAP_REQUIRED";
-        case BlockingCode::NATIVE_SOUND_WRITE_HOLD:     return "NATIVE_SOUND_WRITE_HOLD";
-    }
-    return "UNKNOWN_BLOCKER";
-}
-
-struct BlockingReason {
-    BlockingCode code = BlockingCode::SOURCE_UNAVAILABLE;
-    std::string subject;                   // ResourceId::str() or source-relative path (never local path)
-    std::string summary;
-    std::string remediation;
-    std::vector<std::string> affectedRoots; // sorted unique relative paths
-    auto operator<=>(const BlockingReason&) const = default;
-};
-
-struct CollectorNotice {
-    std::string severity;                  // "warning" | "info"
-    std::string code;                      // e.g. "FACTORY_ROM_SOUND_REF", "UNRESOLVED_SOUND_SLOT_ANALYSED", ...
-    std::string evidence;                  // "Confirmed" | "Inferred" | "Unsupported"
-    std::string subject;
-    std::string summary;
-    std::vector<std::string> affectedRoots;
-    auto operator<=>(const CollectorNotice&) const = default;
 };
 
 enum class DedupTier {
@@ -176,52 +90,20 @@ struct DedupGroup {
     uint64_t savedBytes = 0;               // logical or projected savings
     bool appliedInExport = false;          // true for Tier 1 & Tier 2a package dedup; false for advisory WAV/Native KST
     auto operator<=>(const DedupGroup&) const = default;
-};
 
-// Strict 3-Way Classification for Tier 3 Native KST Content Equivalence.
-// NEVER merges distinct Pa5X Id8 identities by content; NEVER deduplicates by filename or Sound name alone!
-enum class NativeEquivalenceVerdict {
-    Identical,            // Exact decoded body SHA-256 + both Analysed + 0 unresolved analysed slots + identical downstream MS/Zone/Sample Id8 & PCM sizes
-    Different,            // Proven different kind, body SHA-256, or downstream MS/Zone/Sample Id8/size
-    InsufficientEvidence  // Unanalysed (e.g. USERDK / NoKnownReference), missing SHA-256, unresolved slot, or KMP unavailable — NEVER merged!
-};
-
-inline const char* nativeEquivalenceVerdictName(NativeEquivalenceVerdict v) {
-    switch (v) {
-        case NativeEquivalenceVerdict::Identical:            return "Identical";
-        case NativeEquivalenceVerdict::Different:            return "Different";
-        case NativeEquivalenceVerdict::InsufficientEvidence: return "InsufficientEvidence";
+    DeduplicationGroup toM2aGroup() const {
+        return {keyType, keyValue, canonicalMember, members, savedBytes, appliedInExport};
     }
-    return "InsufficientEvidence";
-}
+};
 
 struct NativeEquivalenceEntry {
     std::string scope;                     // "source-vs-target-sound" | "intra-source-sound" | "source-vs-target-root"
     std::string sourceSubject;             // ResourceId::str() or relPath
     std::string targetSubject;             // ResourceId::str() or relPath
-    NativeEquivalenceVerdict verdict = NativeEquivalenceVerdict::InsufficientEvidence;
+    EquivalenceVerdict verdict = EquivalenceVerdict::InsufficientEvidence; // M2a canonical 3-way verdict
     std::string reason;
     bool mergesPa5xId8 = false;            // INVARIANT: ALWAYS false (obeys resource_graph.h)
     auto operator<=>(const NativeEquivalenceEntry&) const = default;
-};
-
-struct MemoryProjection {
-    std::string unit;                      // "uncompressed_pcm_bytes" | "native_kst_stored_pcm_proxy_bytes"
-    bool hardwareVerified = false;         // ALWAYS false (S6 HOLD)
-    bool sampleBytesAreNativeStoredProxy = false;
-    uint64_t rawReferencedSampleBytes = 0;
-    uint64_t uniqueLogicalSampleBytes = 0;
-    uint64_t logicalDedupSavedBytes = 0;   // == rawReferencedSampleBytes - uniqueLogicalSampleBytes
-    uint64_t identicalContentExtraBytes = 0;
-    uint64_t uniqueSamplesCount = 0;
-    uint64_t unknownSizeSamplesCount = 0;
-    uint64_t targetBaselineSampleBytes = 0;
-    uint64_t projectedCombinedBytes = 0;
-    uint64_t limitDecimal4GB = graph::kPa5xUserSampleBytesDecimal;
-    uint64_t limitBinary4GiB = graph::kPa5xUserSampleBytesBinary;
-    uint64_t limitCompressed8GB = graph::kPa5xCompressedEquivalentDecimal;
-    std::string fitVerdict;                // "fits" | "ambiguous" | "needs-compression" | "exceeds" | "unverified-proxy"
-    std::string caveat;
 };
 
 struct CollectedSoundSummary {
@@ -237,119 +119,96 @@ struct CollectedSoundSummary {
     size_t multisampleCount = 0;
     size_t sampleCount = 0;
     uint64_t uniqueSampleBytes = 0;
-    bool satisfiedByTarget = false;        // true ONLY on exact same-slot match OR explicitly approved cross-slot remap
+    bool satisfiedByTarget = false;        // true ONLY on exact same-slot Identical OR explicitly approved cross-slot remap
     bool requiresRemap = false;            // true when proven Identical target Sound sits at a different slot (!= id)
-    std::string matchedTargetSlot;         // populated when proven Identical in target (exact slot preferred)
-    std::string targetMatchSlot;           // kept in sync with matchedTargetSlot for compatibility
+    std::string matchedTargetSlot;         // populated when proven Identical in target (exact slot always preferred)
 };
 
 struct DryRunExportPlan {
     std::string schema = kDryRunPlanSchema;
-    std::string banner = kStructuralOnlyBanner;
-    bool hardwareVerified = false;         // ALWAYS false
-    bool ok = false;                       // true = analysis finished cleanly (still check executable!)
-    bool cancelled = false;                // true = cooperatively cancelled; partial state dropped
-    bool executable = false;               // true iff ok && !cancelled && blockingReasons.empty() && mode != NativeSoundKst_HOLD
-    bool coverageComplete = false;         // false whenever any selected Sound/KMP/DK is unanalysed/incomplete
-    bool deleteProofAvailable = false;     // ALWAYS false for Native-KST
+    std::string banner = kHardwareUnverifiedBanner; // M2a canonical unverified banner
+    bool hardwareVerified = false;                  // ALWAYS false
+    bool ok = false;                                // true iff source (and target if given) loaded cleanly
+    bool cancelled = false;                         // true = cooperatively cancelled; partial state dropped
+    bool executable = false;                        // true iff ok && !cancelled && 0 blocking diags/conflicts && mode != HOLD
+    bool coverageComplete = false;                  // false whenever any selected Sound/KMP/DK is unanalysed/incomplete
+    bool deleteProofAvailable = false;              // ALWAYS false for Native-KST
 
     AdapterSourceKind sourceKind = AdapterSourceKind::NativeKst;
-    CollectorExportMode mode = CollectorExportMode::AdvisoryPlan;
+    ExportMode mode = ExportMode::AdvisoryPlan;
+    ConflictPolicy conflictPolicy = ConflictPolicy::BlockWithReport;
     bool includeEmbeddedKbdSets = true;
     bool includeEmbeddedPads = true;
     bool requireCompleteSampleClosure = true;
 
-    std::string planFingerprint;           // 64-hex SHA-256 over canonical selection, closure, dedup, source hashes
+    std::string planFingerprint;                    // 64-hex SHA-256 over canonical selection, closure, dedup, conflicts, hashes
     std::string sourceManifestSha256;
-    std::string targetManifestSha256;
+    std::string targetLibraryKey;                   // M2a TargetOccupancyMap::targetLibraryKey ("" if no target)
+    bool targetPresent = false;
 
-    std::vector<CollectorSelectionTarget> selectedTargets;      // canonical sorted unique
-    std::vector<graph::ResourceId> closureNodes;                // sorted unique forward closure
-    std::vector<CollectedSoundSummary> collectedSounds;         // sorted by ResourceId
-    std::vector<std::string> uniqueProvisionalPackages;         // sorted unique packageIds
-    std::vector<graph::ResourceId> uniqueMultisamples;          // sorted unique
-    std::vector<graph::ResourceId> uniqueSamples;               // sorted unique
-    std::vector<std::string> uniquePcmFiles;                    // sorted unique KST-relative PCM paths
+    std::vector<SelectionTarget> selectedTargets;   // canonical sorted unique (M2a SelectionTarget)
+    std::vector<graph::ResourceId> closureNodes;    // sorted unique forward closure
+    std::vector<CollectedSoundSummary> collectedSounds; // sorted by ResourceId
+    std::vector<std::string> uniqueProvisionalPackages; // sorted unique packageIds
+    std::vector<graph::ResourceId> uniqueMultisamples;  // sorted unique
+    std::vector<graph::ResourceId> uniqueSamples;       // sorted unique
+    std::vector<std::string> uniquePcmFiles;            // sorted unique KST-relative PCM paths
 
     size_t factorySoundSelectCount = 0;
     size_t userSoundSelectCount = 0;
     size_t unresolvedSlotsInAnalysedCount = 0;
     size_t unresolvedSlotsInUnanalysedCount = 0;
 
-    std::vector<DedupGroup> dedupGroups;                        // canonically sorted across Tier 1, 2, 3
-    std::vector<NativeEquivalenceEntry> nativeEquivalences;     // 3-way Tier 3 classification records
-    std::vector<BlockingReason> blockingReasons;                // fail-closed blockers
-    std::vector<CollectorNotice> notices;                       // warnings & info
+    CoverageSummary coverage;                       // M2a canonical UX Gate #1 coverage summary
+    MemoryProjectionReport memoryProjection;        // M2a canonical §4.4 memory projection
+    std::string memoryCaveat;                       // non-empty caveat string (stored-PCM proxy or software estimate)
 
-    MemoryProjection memoryProjection;
-    std::map<std::string, std::string> sourceFileSha256;        // relative path -> SHA-256 (zero local paths!)
+    std::vector<DedupGroup> dedupGroups;            // canonically sorted across Tier 1, 2, 3
+    std::vector<NativeEquivalenceEntry> nativeEquivalences; // 3-way Tier-3 classification records
+    std::vector<SlotConflict> conflicts;            // M2a canonical SlotConflicts from evaluateCollisionMatrix()
+    std::vector<Diagnostic> diagnostics;            // M2a canonical 4-category Diagnostics
+    std::optional<CollisionMatrixResult> collisionMatrix; // full M2a CollisionMatrixResult when target supplied
+    std::map<std::string, std::string> sourceFileSha256;  // relative path -> SHA-256 (zero local paths!)
+
+    size_t blockingDiagnosticCount() const {
+        return static_cast<size_t>(std::count_if(diagnostics.begin(), diagnostics.end(),
+            [](const Diagnostic& d) { return d.severity == DiagnosticSeverity::Blocking; }));
+    }
+    size_t blockingConflictCount() const {
+        return static_cast<size_t>(std::count_if(conflicts.begin(), conflicts.end(),
+            [](const SlotConflict& c) { return c.blocking; }));
+    }
+    bool hasBlockingCode(const std::string& code) const {
+        for (const auto& d : diagnostics) {
+            if (d.severity == DiagnosticSeverity::Blocking && d.code == code) return true;
+        }
+        return false;
+    }
+    bool hasDiagnosticCode(const std::string& code, std::optional<DiagnosticSeverity> sev = std::nullopt) const {
+        for (const auto& d : diagnostics) {
+            if (d.code == code && (!sev.has_value() || d.severity == *sev)) return true;
+        }
+        return false;
+    }
 };
 
 namespace collector_detail {
-
-struct DownstreamZoneSig {
-    graph::Id8 sampleId8{};
-    bool hasPcm = false;
-    uint64_t payloadBytes = 0;
-    uint32_t sampleRate = 0;
-    auto operator<=>(const DownstreamZoneSig&) const = default;
-};
-
-struct DownstreamMsSig {
-    graph::Id8 msId8{};
-    std::vector<DownstreamZoneSig> zones;
-    auto operator<=>(const DownstreamMsSig&) const = default;
-};
-
-inline bool buildSoundDownstreamSignature(
-    const M1AdapterView& view,
-    const SoundClosureRecord& sc,
-    std::vector<DownstreamMsSig>& outSig,
-    std::string& incompleteReason) {
-    outSig.clear();
-    incompleteReason.clear();
-    for (const graph::ResourceId& msId : sc.multisampleIds) {
-        const auto mit = view.multisamples.find(msId);
-        if (mit == view.multisamples.end()) {
-            incompleteReason = "referenced Multisample absent from KMP index";
-            return false;
-        }
-        const MultisampleRecord& ms = mit->second;
-        DownstreamMsSig sig;
-        sig.msId8 = ms.id8;
-        sig.zones.reserve(ms.zoneSampleIndices.size());
-        for (uint32_t si : ms.zoneSampleIndices) {
-            if (si == graph::kNoZoneSample) {
-                sig.zones.push_back({graph::Id8{}, true, 0, 0});
-                continue;
-            }
-            const graph::ResourceId smpId{false, "KST", graph::Kind::Sample, si};
-            const auto sit = view.samples.find(smpId);
-            if (sit == view.samples.end() || !sit->second.hasPcm) {
-                incompleteReason = "referenced Sample missing PCM metadata";
-                return false;
-            }
-            sig.zones.push_back({sit->second.id8, true, sit->second.payloadBytes, sit->second.sampleRate});
-        }
-        outSig.push_back(std::move(sig));
-    }
-    std::sort(outSig.begin(), outSig.end());
-    return true;
-}
 
 inline std::string computePlanFingerprint(const DryRunExportPlan& p) {
     Sha256 h;
     adapter_detail::hashField(h, p.schema);
     adapter_detail::hashField(h, adapterSourceKindName(p.sourceKind));
-    adapter_detail::hashField(h, collectorExportModeName(p.mode));
+    adapter_detail::hashField(h, exportModeName(p.mode));
+    adapter_detail::hashField(h, conflictPolicyName(p.conflictPolicy));
     adapter_detail::hashField(h, p.includeEmbeddedKbdSets ? "1" : "0");
     adapter_detail::hashField(h, p.includeEmbeddedPads ? "1" : "0");
     adapter_detail::hashField(h, p.requireCompleteSampleClosure ? "1" : "0");
     adapter_detail::hashField(h, p.sourceManifestSha256);
-    adapter_detail::hashField(h, p.targetManifestSha256);
+    adapter_detail::hashField(h, p.targetLibraryKey);
 
     for (const auto& t : p.selectedTargets) {
         adapter_detail::hashField(h, "sel");
+        adapter_detail::hashField(h, selectedKindName(t.kind));
         adapter_detail::hashField(h, t.relPath);
         adapter_detail::hashField(h, t.targetBank);
         adapter_detail::hashField(h, t.targetName);
@@ -386,12 +245,21 @@ inline std::string computePlanFingerprint(const DryRunExportPlan& p) {
         adapter_detail::hashField(h, ne.scope);
         adapter_detail::hashField(h, ne.sourceSubject);
         adapter_detail::hashField(h, ne.targetSubject);
-        adapter_detail::hashField(h, nativeEquivalenceVerdictName(ne.verdict));
+        adapter_detail::hashField(h, equivalenceVerdictName(ne.verdict));
     }
-    for (const auto& b : p.blockingReasons) {
-        adapter_detail::hashField(h, "block");
-        adapter_detail::hashField(h, blockingCodeName(b.code));
-        adapter_detail::hashField(h, b.subject);
+    for (const auto& c : p.conflicts) {
+        adapter_detail::hashField(h, "conf");
+        adapter_detail::hashField(h, slotConflictKindName(c.kind));
+        adapter_detail::hashField(h, c.address);
+        adapter_detail::hashField(h, c.resolution);
+        adapter_detail::hashField(h, c.blocking ? "1" : "0");
+    }
+    for (const auto& d : p.diagnostics) {
+        adapter_detail::hashField(h, "diag");
+        adapter_detail::hashField(h, diagnosticCategoryName(d.category));
+        adapter_detail::hashField(h, d.code);
+        adapter_detail::hashField(h, diagnosticSeverityName(d.severity));
+        adapter_detail::hashField(h, d.subject);
     }
     for (const auto& [rel, sha] : p.sourceFileSha256) {
         adapter_detail::hashField(h, "file");
@@ -399,8 +267,8 @@ inline std::string computePlanFingerprint(const DryRunExportPlan& p) {
         adapter_detail::hashField(h, sha);
     }
     adapter_detail::hashField(h, "mem");
-    adapter_detail::hashField(h, p.memoryProjection.unit);
-    adapter_detail::hashField(h, p.memoryProjection.fitVerdict);
+    adapter_detail::hashField(h, p.memoryProjection.unitName());
+    adapter_detail::hashField(h, p.memoryProjection.fitVerdictName());
     adapter_detail::hashField(h, std::to_string(p.memoryProjection.rawReferencedSampleBytes));
     adapter_detail::hashField(h, std::to_string(p.memoryProjection.uniqueLogicalSampleBytes));
     adapter_detail::hashField(h, std::to_string(p.memoryProjection.logicalDedupSavedBytes));
@@ -411,10 +279,46 @@ inline std::string computePlanFingerprint(const DryRunExportPlan& p) {
     return h.hex();
 }
 
+// Escapes control bytes, newlines, backslashes (via panative::printable) and Markdown syntax characters
+// so untrusted resource names, paths, or error strings cannot inject Markdown headings/lists/links/code.
+inline std::string mdSanitizeText(const std::string& s) {
+    const std::string p = panative::printable(s);
+    std::string out;
+    out.reserve(p.size() + 8);
+    for (char c : p) {
+        switch (c) {
+            case '`': case '*': case '_': case '[': case ']':
+            case '<': case '>': case '|': case '#':
+                out += '\\';
+                out += c;
+                break;
+            default:
+                out += c;
+                break;
+        }
+    }
+    return out;
+}
+
+// Inline Markdown code span: sanitizes control chars/newlines via printable() and replaces backticks
+// with \x60 so untrusted input can never close or break out of the surrounding single-backtick span.
+inline std::string mdCodeSpan(const std::string& s) {
+    const std::string p = panative::printable(s);
+    std::string out;
+    out.reserve(p.size() + 8);
+    out += '`';
+    for (char c : p) {
+        if (c == '`') out += "\\x60";
+        else out += c;
+    }
+    out += '`';
+    return out;
+}
+
 }  // namespace collector_detail
 
-// Tier 3 Native KST Sound Equivalence Classifier (strict 3-way: Identical | Different | InsufficientEvidence).
-// Never matches by Sound name alone; never merges distinct Pa5X Id8 identities!
+// Tier-3 Native KST Sound Equivalence Classifier delegating directly to M2a's single-source-of-truth
+// `compareSoundEquivalence()` (`slot_conflicts.h`). Never matches by Sound name or filename!
 inline NativeEquivalenceEntry classifyNativeSoundEquivalence(
     const M1AdapterView& srcView,
     const graph::ResourceId& srcSoundId,
@@ -430,82 +334,24 @@ inline NativeEquivalenceEntry classifyNativeSoundEquivalence(
     const auto sit = srcView.sounds.find(srcSoundId);
     const auto dit = dstView.sounds.find(dstSoundId);
     if (sit == srcView.sounds.end() || dit == dstView.sounds.end()) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
+        out.verdict = EquivalenceVerdict::InsufficientEvidence;
         out.reason = "Sound absent in source or target view";
         return out;
     }
-    const SoundClosureRecord& s = sit->second;
-    const SoundClosureRecord& d = dit->second;
-
-    // Definite structural/content mismatches prove Different even if names match!
-    if (s.isDrumKit != d.isDrumKit) {
-        out.verdict = NativeEquivalenceVerdict::Different;
-        out.reason = "melodic Sound vs Drum Kit mismatch";
-        return out;
-    }
-    if (s.kindChunkId != d.kindChunkId) {
-        out.verdict = NativeEquivalenceVerdict::Different;
-        out.reason = "Sound chunk kind differs";
-        return out;
-    }
-    if (!s.decodedBodySha256.empty() && !d.decodedBodySha256.empty() && s.decodedBodySha256 != d.decodedBodySha256) {
-        out.verdict = NativeEquivalenceVerdict::Different;
-        out.reason = "decoded Sound body SHA-256 differs (same-name Sounds are never merged)";
-        return out;
-    }
-
-    // Check evidence sufficiency before proving Identical
-    if (!srcView.coverage.kmpParsed || !dstView.coverage.kmpParsed) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-        out.reason = "downstream RAM.KMP unparsed in source or target";
-        return out;
-    }
-    if (!s.decoded || !d.decoded) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-        out.reason = "one or both Sounds failed OC31/payload decode";
-        return out;
-    }
-    if (s.decodedBodySha256.empty() || d.decodedBodySha256.empty()) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-        out.reason = "decoded Sound body SHA-256 unavailable";
-        return out;
-    }
-    if (!s.analysed || !d.analysed) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-        out.reason = "unanalysed Sound (" + (s.analysed ? d.unanalysedGap : s.unanalysedGap) + "); never merged";
-        return out;
-    }
-    if (!s.unresolvedSlotsInAnalysed.empty() || !d.unresolvedSlotsInAnalysed.empty()) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-        out.reason = "unresolved slot(s) present in analysed Sound";
-        return out;
-    }
-
-    // Both are Analysed with identical kind & body SHA-256; verify exact downstream MS/Zone/Sample Id8 & PCM sizes
-    std::vector<collector_detail::DownstreamMsSig> sSig, dSig;
-    std::string incomp;
-    if (!collector_detail::buildSoundDownstreamSignature(srcView, s, sSig, incomp) ||
-        !collector_detail::buildSoundDownstreamSignature(dstView, d, dSig, incomp)) {
-        out.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-        out.reason = incomp;
-        return out;
-    }
-    if (sSig != dSig) {
-        out.verdict = NativeEquivalenceVerdict::Different;
-        out.reason = "downstream KMP Multisample/Zone/Sample Id8 or PCM payload size differs";
-        return out;
-    }
-
-    out.verdict = NativeEquivalenceVerdict::Identical;
-    out.reason = "proven equivalent: matching kind, decoded body SHA-256, analysed status, and full downstream Id8/PCM sizes";
+    const EquivalenceResult eq = compareSoundEquivalence(sit->second.equivalence, dit->second.equivalence);
+    out.verdict = eq.verdict;
+    out.reason = eq.reason;
     return out;
 }
 
-// Main M2b Read-Only Selective Collector, 3-Tier Deduplicator & Dry-Run Planner.
-inline DryRunExportPlan collectSelectiveExport(
+// Core M2b Read-Only Selective Collector, 3-Tier Deduplicator, M2a Collision Matrix Integrator & Dry-Run Planner.
+// Accepts a pre-built M2a `TargetOccupancyMap` (plus optional target baseline bytes & target-is-native flag).
+inline DryRunExportPlan collectSelectiveExportWithTargetMap(
     const M1AdapterView& source,
     const CollectorRequest& request,
-    const M1AdapterView* optionalTarget = nullptr,
+    const TargetOccupancyMap* optionalTargetMap = nullptr,
+    uint64_t optionalTargetBaselineBytes = 0,
+    bool optionalTargetIsNativeKst = false,
     const KeepGoing& keepGoing = {}) {
     const size_t stride = adapter_detail::clampStride(request.cancelCheckStride);
     size_t tick = 0;
@@ -518,69 +364,86 @@ inline DryRunExportPlan collectSelectiveExport(
         c.deleteProofAvailable = false;
         c.sourceKind = source.sourceKind;
         c.mode = request.mode;
+        c.conflictPolicy = request.conflictPolicy;
         return c;
     };
     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+
+    if (source.cancelled) return makeCancelled();
+    if (optionalTargetMap && optionalTargetMap->cancelled) return makeCancelled();
 
     DryRunExportPlan plan;
     plan.hardwareVerified = false;
     plan.deleteProofAvailable = false;
     plan.sourceKind = source.sourceKind;
     plan.mode = request.mode;
+    plan.conflictPolicy = request.conflictPolicy;
     plan.includeEmbeddedKbdSets = request.includeEmbeddedKbdSets;
     plan.includeEmbeddedPads = request.includeEmbeddedPads;
     plan.requireCompleteSampleClosure = request.requireCompleteSampleClosure;
     plan.sourceManifestSha256 = source.manifestSha256;
-    if (optionalTarget) plan.targetManifestSha256 = optionalTarget->manifestSha256;
+    plan.coverage = source.coverage.toM2aCoverageSummary();
+    if (optionalTargetMap) {
+        plan.targetPresent = true;
+        plan.targetLibraryKey = optionalTargetMap->targetLibraryKey;
+    }
 
-    // Helper maps for deduplicating blocking reasons and notices deterministically
-    struct BlockerAgg {
+    // Aggregated M2a Diagnostics map (deterministic deduplication + merged affectedRoots)
+    struct DiagAgg {
+        DiagnosticCategory category = DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE;
+        DiagnosticSeverity severity = DiagnosticSeverity::Warning;
+        EvidenceLevel evidence = EvidenceLevel::Inferred;
+        std::string referencedTarget;
         std::string summary;
         std::string remediation;
         std::set<std::string> roots;
     };
-    std::map<std::pair<BlockingCode, std::string>, BlockerAgg> blockerMap;
-    auto addBlocker = [&](BlockingCode code, const std::string& subject, const std::string& summary,
-                          const std::string& remediation, const std::string& rootRel = "") {
-        auto& agg = blockerMap[{code, subject}];
-        if (agg.summary.empty()) { agg.summary = summary; agg.remediation = remediation; }
-        if (!rootRel.empty()) agg.roots.insert(rootRel);
-    };
-
-    struct NoticeAgg {
-        std::string severity;
-        std::string evidence;
-        std::string summary;
-        std::set<std::string> roots;
-    };
-    std::map<std::tuple<std::string, std::string, std::string>, NoticeAgg> noticeMap; // (severity, code, subject)
-    auto addNotice = [&](const std::string& severity, const std::string& code, const std::string& evidence,
-                         const std::string& subject, const std::string& summary, const std::string& rootRel = "") {
-        auto& agg = noticeMap[{severity, code, subject}];
-        if (agg.summary.empty()) { agg.severity = severity; agg.evidence = evidence; agg.summary = summary; }
-        if (!rootRel.empty()) agg.roots.insert(rootRel);
-    };
-
-    if (source.cancelled) return makeCancelled();
-    if (!source.ok) {
-        addBlocker(BlockingCode::SOURCE_UNAVAILABLE, "<source>",
-                   "Source manifest view is unavailable or failed to load.",
-                   "Inspect source container errors before planning a selective export.");
-    }
-    if (optionalTarget != nullptr) {
-        if (optionalTarget->cancelled) return makeCancelled();
-        if (!optionalTarget->ok) {
-            addBlocker(BlockingCode::TARGET_UNAVAILABLE, "<target>",
-                       "Target manifest view failed to load or is uninspectable; refusing silent 0-byte baseline.",
-                       "Inspect target container errors before planning against this target.");
+    using DiagKey = std::tuple<DiagnosticSeverity, DiagnosticCategory, std::string, std::string>; // (sev, cat, code, subject)
+    std::map<DiagKey, DiagAgg> diagMap;
+    auto addDiag = [&](DiagnosticCategory cat, const std::string& code, DiagnosticSeverity sev, EvidenceLevel ev,
+                       const std::string& subject, const std::string& refTarget,
+                       const std::string& summary, const std::string& remediation, const std::string& rootRel = "") {
+        auto& agg = diagMap[{sev, cat, code, subject}];
+        if (agg.summary.empty()) {
+            agg.category = cat;
+            agg.severity = sev;
+            agg.evidence = ev;
+            agg.referencedTarget = refTarget;
+            agg.summary = summary;
+            agg.remediation = remediation;
         }
+        if (!rootRel.empty()) agg.roots.insert(rootRel);
+    };
+
+    if (!source.ok) {
+        addDiag(DiagnosticCategory::VERIFIED_MISSING, collector_diag_code::kSourceUnavailable,
+                DiagnosticSeverity::Blocking, EvidenceLevel::Verified, "<source>", "",
+                "Source manifest view is unavailable or failed to load.",
+                "Inspect source container errors before planning a selective export.");
+    }
+
+    // P2-1: Fail closed on invalid/uninspectable optionalTargetMap (never silent 0-byte baseline!)
+    const bool targetValid = (!optionalTargetMap || optionalTargetMap->valid);
+    if (optionalTargetMap && !optionalTargetMap->valid) {
+        const std::string reason = optionalTargetMap->uninspectableReason.empty()
+                                       ? std::string("Target manifest view failed to load or is uninspectable; refusing silent 0-byte baseline.")
+                                       : optionalTargetMap->uninspectableReason;
+        addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kTargetUninspectable,
+                DiagnosticSeverity::Blocking, EvidenceLevel::Unsupported, "<target>", "",
+                reason, "Inspect target container errors before planning against this target.");
+        plan.conflicts.push_back({
+            SlotConflict::Kind::TargetUninspectable, "<target>", "", "", "BLOCKED", true, reason
+        });
     }
 
     // 1. Canonicalize, sort, and deduplicate selection targets (order-independent!)
-    for (const CollectorSelectionTarget& raw : request.targets) {
+    for (const SelectionTarget& raw : request.targets) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
-        CollectorSelectionTarget norm = raw;
-        norm.relPath = graph::closure_detail::normalizeRelPath(norm.relPath);
+        SelectionTarget norm = raw;
+        norm.relPath = conflict_detail::normalizeRelPath(norm.relPath);
+        if (const RootItemRecord* r = source.findRoot(norm.relPath)) {
+            norm.kind = toSelectedKind(r->kind);
+        }
         plan.selectedTargets.push_back(std::move(norm));
     }
     std::sort(plan.selectedTargets.begin(), plan.selectedTargets.end());
@@ -588,15 +451,17 @@ inline DryRunExportPlan collectSelectiveExport(
                                plan.selectedTargets.end());
 
     if (plan.selectedTargets.empty()) {
-        addBlocker(BlockingCode::EMPTY_SELECTION, "<selection>",
-                   "No Styles, Keyboard Sets, or Pads were selected.",
-                   "Select at least one Style, Keyboard Set, or Pad to collect dependencies.");
+        addDiag(DiagnosticCategory::VERIFIED_MISSING, collector_diag_code::kEmptySelection,
+                DiagnosticSeverity::Blocking, EvidenceLevel::Verified, "<selection>", "",
+                "No Styles, Keyboard Sets, or Pads were selected.",
+                "Select at least one Style, Keyboard Set, or Pad to collect dependencies.");
     }
 
-    if (request.mode == CollectorExportMode::NativeSoundKst_HOLD) {
-        addBlocker(BlockingCode::NATIVE_SOUND_WRITE_HOLD, "<export-mode>",
-                   "Native Sound KST export (.PCG/.KMP/.PCM writing) is on HOLD.",
-                   "Use AdvisoryPlan (Pa5X single-Sound load, MAN5 p.736) or ImportKitBundle.");
+    if (request.mode == ExportMode::NativeSoundKst_HOLD) {
+        addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kNativeSoundWriteHold,
+                DiagnosticSeverity::Blocking, EvidenceLevel::Unsupported, "<export-mode>", "",
+                "Native Sound KST export (.PCG/.KMP/.PCM writing) is on HOLD.",
+                "Use AdvisoryPlan (Pa5X single-Sound load, MAN5 p.736) or ImportKitBundle.");
     }
 
     // Closure & Tier-1/Tier-2/Tier-3 accumulators
@@ -605,23 +470,24 @@ inline DryRunExportPlan collectSelectiveExport(
     std::map<graph::ResourceId, std::set<std::string>> msRefRoots;
     std::map<graph::ResourceId, std::set<graph::ResourceId>> msRefSounds;
     std::map<graph::ResourceId, std::set<std::string>> sampleRefRoots;
-    std::map<graph::ResourceId, size_t> sampleRawRefCount;     // exact count of (root, sound/pkg) expansions reaching sample
+    std::map<graph::ResourceId, size_t> sampleRawRefCount;
     std::map<graph::ResourceId, std::set<std::string>> unknownSampleRoots;
     std::set<std::string> pcmFileSet;
-    std::map<std::string, std::set<std::string>> provPkgRefRoots; // packageId -> referencing selected root relPaths
+    std::map<std::string, std::set<std::string>> provPkgRefRoots;
     std::map<std::string, size_t> provPkgRefCount;
 
     bool selectedHasUnanalysedOrGap = false;
     uint64_t rawReferencedSampleBytes = 0;
 
     // 2. Pass 1 & 2: Expand every selected root in canonical sorted order
-    for (const CollectorSelectionTarget& target : plan.selectedTargets) {
+    for (const SelectionTarget& target : plan.selectedTargets) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const RootItemRecord* root = source.findRoot(target.relPath);
         if (!root) {
-            addBlocker(BlockingCode::SELECTED_ROOT_NOT_FOUND, target.relPath,
-                       "Selected item '" + target.relPath + "' was not found in the source manifest.",
-                       "Verify the source-relative path and refresh the source manifest.", target.relPath);
+            addDiag(DiagnosticCategory::VERIFIED_MISSING, collector_diag_code::kSelectedRootNotFound,
+                    DiagnosticSeverity::Blocking, EvidenceLevel::Verified, target.relPath, "",
+                    "Selected item '" + target.relPath + "' was not found in the source manifest.",
+                    "Verify the source-relative path and refresh the source manifest.", target.relPath);
             selectedHasUnanalysedOrGap = true;
             continue;
         }
@@ -630,30 +496,30 @@ inline DryRunExportPlan collectSelectiveExport(
         if (!root->contentSha256.empty()) plan.sourceFileSha256[root->relPath] = root->contentSha256;
 
         if (root->malformedMidiLeafCount > 0) {
-            addBlocker(BlockingCode::MALFORMED_MIDI_LEAF, root->relPath,
-                       "Root contains " + std::to_string(root->malformedMidiLeafCount) +
-                           " malformed SMF 1.0 leaf/leaves (e.g. high-bit data byte >= 0x80).",
-                       "Inspect or fix the malformed MIDI leaf; fail-closed to avoid silent corruption.", root->relPath);
+            addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, diag_code::kMalformedMidiLeaf,
+                    DiagnosticSeverity::Blocking, EvidenceLevel::Verified, root->relPath, "",
+                    "Root contains " + std::to_string(root->malformedMidiLeafCount) +
+                        " malformed SMF 1.0 leaf/leaves (e.g. high-bit data byte >= 0x80).",
+                    "Inspect or fix the malformed MIDI leaf; fail-closed to avoid silent corruption.", root->relPath);
             selectedHasUnanalysedOrGap = true;
         }
         if (!root->parseOk) {
             if (root->malformedMidiLeafCount == 0) {
-                addBlocker(BlockingCode::MALFORMED_ROOT_TREE, root->relPath,
-                           "Root container failed structural parsing: " + root->parseError,
-                           "Inspect or repair the source file before exporting.", root->relPath);
+                addDiag(DiagnosticCategory::VERIFIED_MISSING, collector_diag_code::kMalformedRootTree,
+                        DiagnosticSeverity::Blocking, EvidenceLevel::Verified, root->relPath, "",
+                        "Root container failed structural parsing: " + root->parseError,
+                        "Inspect or repair the source file before exporting.", root->relPath);
             }
             selectedHasUnanalysedOrGap = true;
             continue;
         }
 
-        // Per-root unique User Sound & Provisional Package sets (prevents duplicate counting within one root)
         std::set<graph::ResourceId> rootUserSounds;
         std::set<std::string> rootProvPkgs(root->directPackageIds.begin(), root->directPackageIds.end());
 
         for (const SoundSelectionRecord& sel : root->soundSelections) {
             if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
 
-            // Apply explicit embedded KBD Set / Pad inclusion flags (never dropping main tracks!)
             if (root->kind == RootItemKind::Style) {
                 const bool include =
                     sel.fromStyleMainTrack ||
@@ -662,7 +528,6 @@ inline DryRunExportPlan collectSelectiveExport(
                 if (!include) continue;
             }
 
-            // Provisional package binding (Path A Import Kit / Provisional Workspace)
             if (!sel.provisionalPackageId.empty()) {
                 rootProvPkgs.insert(sel.provisionalPackageId);
                 ++plan.userSoundSelectCount;
@@ -672,35 +537,39 @@ inline DryRunExportPlan collectSelectiveExport(
             switch (sel.boundary) {
                 case SoundBoundaryKind::FactoryRom: {
                     ++plan.factorySoundSelectCount;
-                    addNotice("info", "FACTORY_ROM_SOUND_REF", "Inferred",
-                              std::to_string(sel.address.msb) + "/" + std::to_string(sel.address.lsb) + "/" +
-                                  std::to_string(sel.address.program),
-                              "External Pa5X Factory ROM Sound reference (no User Sound/Sample copied).",
-                              root->relPath);
+                    addDiag(DiagnosticCategory::FACTORY_ASSUMED_EXTERNAL, diag_code::kFactoryRomSoundRef,
+                            DiagnosticSeverity::Info, EvidenceLevel::Inferred,
+                            std::to_string(sel.address.msb) + "/" + std::to_string(sel.address.lsb) + "/" +
+                                std::to_string(sel.address.program),
+                            "",
+                            "External Pa5X Factory ROM Sound reference (no User Sound/Sample copied).",
+                            "Assumes target Pa5X OS carries the same Factory ROM bank.",
+                            root->relPath);
                     break;
                 }
                 case SoundBoundaryKind::UnknownOrUnanalysed: {
                     selectedHasUnanalysedOrGap = true;
                     if (sel.bankMissing) {
-                        addBlocker(BlockingCode::UNRESOLVED_MIDI_BANK_SELECT, root->relPath,
-                                   "Program Change " + std::to_string(sel.address.program) +
-                                       " has unset CC0/CC32 bank select; target cannot be classified.",
-                                   "Add explicit CC0/CC32 Bank Select before Program Change or supply a Sound Map.",
-                                   root->relPath);
+                        addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, diag_code::kUnresolvedMidiBankSelect,
+                                DiagnosticSeverity::Blocking, EvidenceLevel::Unsupported, root->relPath, "",
+                                "Program Change " + std::to_string(sel.address.program) +
+                                    " has unset CC0/CC32 bank select; target cannot be classified.",
+                                "Add explicit CC0/CC32 Bank Select before Program Change or supply a Sound Map.",
+                                root->relPath);
                     } else {
                         const std::string addrStr = std::to_string(sel.address.msb) + "/" +
                                                     std::to_string(sel.address.lsb) + "/" +
                                                     std::to_string(sel.address.program);
-                        if (request.mode != CollectorExportMode::AdvisoryPlan || request.requireCompleteSampleClosure) {
-                            addBlocker(BlockingCode::UNKNOWN_ORIGIN_MIDI_ADDRESS, addrStr,
-                                       "MIDI Bank/PC " + addrStr + " lies outside verified Pa5X User and Factory ranges.",
-                                       "Verify this address on Pa5X or remap explicitly; never silently coerced to Factory.",
-                                       root->relPath);
-                        } else {
-                            addNotice("warning", "UNKNOWN_ORIGIN_MIDI_ADDRESS", "Unsupported", addrStr,
-                                      "MIDI Bank/PC " + addrStr + " lies outside verified Pa5X User/Factory ranges.",
-                                      root->relPath);
-                        }
+                        const DiagnosticSeverity sev =
+                            (request.mode != ExportMode::AdvisoryPlan || request.requireCompleteSampleClosure)
+                                ? DiagnosticSeverity::Blocking
+                                : DiagnosticSeverity::Warning;
+                        addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                                collector_diag_code::kUnknownOriginMidiAddress, sev, EvidenceLevel::Unsupported,
+                                addrStr, "",
+                                "MIDI Bank/PC " + addrStr + " lies outside verified Pa5X User and Factory ranges.",
+                                "Verify this address on Pa5X or remap explicitly; never silently coerced to Factory.",
+                                root->relPath);
                     }
                     break;
                 }
@@ -708,18 +577,21 @@ inline DryRunExportPlan collectSelectiveExport(
                     ++plan.userSoundSelectCount;
                     const std::string subj = sel.targetSoundId ? sel.targetSoundId->str() : sel.userBank;
                     if (sel.resolved && sel.targetSoundId.has_value()) {
-                        addNotice("warning", "AMBIGUOUS_OUT_OF_SPEC_DRUMKIT_BANK", "Unsupported", subj,
-                                  "Address MSB 120 LSB " + std::to_string(sel.address.lsb) +
-                                      " is outside documented USERDK01..06 range but matched an existing bank file.",
-                                  root->relPath);
+                        addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, diag_code::kOutOfSpecDrumkitBank,
+                                DiagnosticSeverity::Warning, EvidenceLevel::Unsupported, subj, sel.userBank,
+                                "Address MSB 120 LSB " + std::to_string(sel.address.lsb) +
+                                    " is outside documented USERDK01..06 range but matched an existing bank file.",
+                                "Verify target Drum Kit bank layout or remap track explicitly to USERDK01..USERDK06.",
+                                root->relPath);
                         rootUserSounds.insert(*sel.targetSoundId);
                     } else {
                         selectedHasUnanalysedOrGap = true;
-                        addBlocker(BlockingCode::MISSING_USER_SOUND_BANK, subj,
-                                   "Out-of-spec User Drum Kit bank " + sel.userBank +
-                                       " (MSB 120 LSB " + std::to_string(sel.address.lsb) + ") is absent.",
-                                   "Supply missing Drum Kit bank or remap track; never silently mapped to Factory.",
-                                   root->relPath);
+                        addDiag(DiagnosticCategory::VERIFIED_MISSING, diag_code::kMissingUserSoundBank,
+                                DiagnosticSeverity::Blocking, EvidenceLevel::Verified, subj, sel.userBank + ".PCG",
+                                "Out-of-spec User Drum Kit bank " + sel.userBank +
+                                    " (MSB 120 LSB " + std::to_string(sel.address.lsb) + ") is absent.",
+                                "Supply missing Drum Kit bank or remap track; never silently mapped to Factory.",
+                                root->relPath);
                     }
                     break;
                 }
@@ -730,12 +602,14 @@ inline DryRunExportPlan collectSelectiveExport(
                     if (!sel.resolved) {
                         selectedHasUnanalysedOrGap = true;
                         const bool bankAbsent = (sel.missingReason == graph::MissingRefReason::SoundBankAbsent);
-                        addBlocker(bankAbsent ? BlockingCode::MISSING_USER_SOUND_BANK : BlockingCode::MISSING_USER_SOUND_SLOT,
-                                   sel.targetSoundId->str(),
-                                   bankAbsent ? ("Referenced User Sound bank " + sel.userBank + " is absent in source.")
-                                              : ("Referenced User Sound slot " + sel.targetSoundId->str() + " is empty in source."),
-                                   "Restore missing Sound bank/slot or remap track explicitly before export.",
-                                   root->relPath);
+                        addDiag(DiagnosticCategory::VERIFIED_MISSING,
+                                bankAbsent ? diag_code::kMissingUserSoundBank : diag_code::kMissingUserSoundSlot,
+                                DiagnosticSeverity::Blocking, EvidenceLevel::Verified,
+                                sel.targetSoundId->str(), sel.userBank,
+                                bankAbsent ? ("Referenced User Sound bank " + sel.userBank + " is absent in source.")
+                                           : ("Referenced User Sound slot " + sel.targetSoundId->str() + " is empty in source."),
+                                "Restore missing Sound bank/slot or remap track explicitly before export.",
+                                root->relPath);
                     } else {
                         rootUserSounds.insert(*sel.targetSoundId);
                     }
@@ -762,79 +636,82 @@ inline DryRunExportPlan collectSelectiveExport(
 
             if (!sc.decoded) {
                 selectedHasUnanalysedOrGap = true;
-                addBlocker(BlockingCode::SOUND_DECODE_FAILED, sid.str(),
-                           "Sound " + sid.str() + " failed OC31/payload decoding.",
-                           "Source Sound item is corrupt or unsupported; cannot trace dependencies.",
-                           root->relPath);
+                addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, collector_diag_code::kSoundDecodeFailed,
+                        DiagnosticSeverity::Blocking, EvidenceLevel::Unsupported, sid.str(), sc.sourceFile,
+                        "Sound " + sid.str() + " failed OC31/payload decoding.",
+                        "Source Sound item is corrupt or unsupported; cannot trace dependencies.",
+                        root->relPath);
                 continue;
             }
 
             if (!source.coverage.kmpParsed) {
                 selectedHasUnanalysedOrGap = true;
+                const DiagnosticSeverity sev =
+                    (request.requireCompleteSampleClosure || request.mode != ExportMode::AdvisoryPlan)
+                        ? DiagnosticSeverity::Blocking
+                        : DiagnosticSeverity::Warning;
                 if (source.coverage.kmpIsOc31) {
-                    if (request.requireCompleteSampleClosure || request.mode != CollectorExportMode::AdvisoryPlan) {
-                        addBlocker(BlockingCode::OC31_KMP_UNSUPPORTED, "MULTISMP/RAM.KMP",
-                                   "Legacy OC31-compressed RAM.KMP (Pa700/Pa4X); Pa5X raw RAM.KMP is required for sample closure.",
-                                   "Use an authentic Pa5X raw RAM.KMP or inspect Sound inventory only.",
-                                   root->relPath);
-                    } else {
-                        addNotice("warning", "OC31_KMP_UNSUPPORTED", "Unsupported", "MULTISMP/RAM.KMP",
-                                  "Legacy OC31-compressed RAM.KMP; downstream sample closure unavailable.",
-                                  root->relPath);
-                    }
+                    addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kOc31KmpUnsupported,
+                            sev, EvidenceLevel::Unsupported, "MULTISMP/RAM.KMP", "0x11050038",
+                            kOc31KmpDegradedNotice,
+                            "Use an authentic Pa5X raw RAM.KMP (0x11080018 v0x0103) or inspect Sound inventory only.",
+                            root->relPath);
                 } else {
-                    if (request.requireCompleteSampleClosure || request.mode != CollectorExportMode::AdvisoryPlan) {
-                        addBlocker(BlockingCode::KMP_UNAVAILABLE, "MULTISMP/RAM.KMP",
-                                   "RAM.KMP is absent or unparsed: " + source.coverage.kmpError,
-                                   "Ensure MULTISMP/RAM.KMP is present and valid.",
-                                   root->relPath);
-                    }
+                    addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, collector_diag_code::kKmpUnavailable,
+                            sev, EvidenceLevel::Unsupported, "MULTISMP/RAM.KMP", "",
+                            "RAM.KMP is absent or unparsed: " + source.coverage.kmpError,
+                            "Ensure MULTISMP/RAM.KMP is present and valid.",
+                            root->relPath);
                 }
                 continue;
             }
 
-            // Record explicit UnresolvedSlot separation for this Sound
+            // Explicit separation of UnresolvedSlot::inUnanalysedSound == false vs true (UX Gate #1)
             for (const auto& u : sc.unresolvedSlotsInAnalysed) {
-                addNotice("warning", "UNRESOLVED_SOUND_SLOT_ANALYSED", "Inferred",
-                          u.sound.str() + ":rec" + std::to_string(u.record) + ":slot" + std::to_string(u.slot),
-                          "Non-empty, non-RAM 8-byte ID in analysed Sound (possible ROM multisample or dangling ID).",
-                          root->relPath);
+                addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, diag_code::kUnresolvedSoundSlotAnalysed,
+                        DiagnosticSeverity::Warning, EvidenceLevel::Inferred,
+                        u.sound.str() + ":rec" + std::to_string(u.record) + ":slot" + std::to_string(u.slot), "",
+                        "Non-empty, non-RAM 8-byte ID in analysed Sound (possible ROM multisample or dangling ID).",
+                        "Verify audibly on Pa5X; Sound is excluded from automatic equivalence reuse.",
+                        root->relPath);
             }
             for (const auto& u : sc.unresolvedSlotsInUnanalysed) {
-                addNotice("info", "UNRESOLVED_SOUND_SLOT_SPECULATIVE", "Unsupported",
-                          u.sound.str() + ":rec" + std::to_string(u.record) + ":slot" + std::to_string(u.slot),
-                          "Speculative slot in unanalysed Sound (layout may not apply).",
-                          root->relPath);
+                addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, diag_code::kUnresolvedSoundSlotSpeculative,
+                        DiagnosticSeverity::Info, EvidenceLevel::Unsupported,
+                        u.sound.str() + ":rec" + std::to_string(u.record) + ":slot" + std::to_string(u.slot), "",
+                        "Speculative slot in unanalysed Sound (layout may not apply).",
+                        "Hidden from blocking counters; inspect in expert details only.",
+                        root->relPath);
             }
 
             if (!sc.analysed) {
                 selectedHasUnanalysedOrGap = true;
                 if (sc.isDrumKit) {
-                    if (request.requireCompleteSampleClosure || request.mode != CollectorExportMode::AdvisoryPlan) {
-                        addBlocker(BlockingCode::DRUMKIT_BODY_UNPARSED, sid.str(),
-                                   "User Drum Kit " + sid.str() + " internal DrumSample edges are not yet parsed (" + sc.unanalysedGap + ").",
-                                   "Sample closure for USERDK is incomplete; use Pa5X single-Sound load or TXPERF Import Kit.",
-                                   root->relPath);
-                    } else {
-                        addNotice("warning", "DRUMKIT_BODY_UNPARSED", "Unsupported", sid.str(),
-                                  "User Drum Kit body edges unparsed; sample closure incomplete.",
-                                  root->relPath);
-                    }
+                    const DiagnosticSeverity sev =
+                        (request.requireCompleteSampleClosure || request.mode != ExportMode::AdvisoryPlan)
+                            ? DiagnosticSeverity::Blocking
+                            : DiagnosticSeverity::Warning;
+                    addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kDrumkitBodyUnparsed,
+                            sev, EvidenceLevel::Unsupported, sid.str(), "",
+                            "User Drum Kit " + sid.str() + " internal DrumSample edges are not yet parsed (" + sc.unanalysedGap + ").",
+                            "Sample closure for USERDK is incomplete; use Pa5X single-Sound load or TXPERF Import Kit.",
+                            root->relPath);
                 } else if (sc.unanalysedGap == "NoKnownReference") {
-                    addNotice("info", "SOUND_NO_RAM_REF_INFERRED_ROM", "Inferred", sid.str(),
-                              "Melodic User Sound fits layout with 0 RAM IDs (consistent with ROM-only multisamples; INFERRED).",
-                              root->relPath);
+                    addDiag(DiagnosticCategory::FACTORY_ASSUMED_EXTERNAL, diag_code::kSoundNoRamRefInferredRom,
+                            DiagnosticSeverity::Info, EvidenceLevel::Inferred, sid.str(), "",
+                            "Melodic User Sound fits layout with 0 RAM IDs (consistent with ROM-only multisamples; INFERRED).",
+                            "Not hardware-verified; verify on Pa5X.",
+                            root->relPath);
                 } else {
-                    if (request.requireCompleteSampleClosure || request.mode != CollectorExportMode::AdvisoryPlan) {
-                        addBlocker(BlockingCode::UNANALYSED_USER_SOUND, sid.str(),
-                                   "User Sound " + sid.str() + " could not be analysed (" + sc.unanalysedGap + ").",
-                                   "Cannot prove complete Multisample/Sample dependencies offline.",
-                                   root->relPath);
-                    } else {
-                        addNotice("warning", "UNANALYSED_USER_SOUND", "Unsupported", sid.str(),
-                                  "User Sound unanalysed (" + sc.unanalysedGap + ").",
-                                  root->relPath);
-                    }
+                    const DiagnosticSeverity sev =
+                        (request.requireCompleteSampleClosure || request.mode != ExportMode::AdvisoryPlan)
+                            ? DiagnosticSeverity::Blocking
+                            : DiagnosticSeverity::Warning;
+                    addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, collector_diag_code::kUnanalysedUserSound,
+                            sev, EvidenceLevel::Unsupported, sid.str(), "",
+                            "User Sound " + sid.str() + " could not be analysed (" + sc.unanalysedGap + ").",
+                            "Cannot prove complete Multisample/Sample dependencies offline.",
+                            root->relPath);
                 }
                 continue;
             }
@@ -855,10 +732,11 @@ inline DryRunExportPlan collectSelectiveExport(
                 if (spIt == source.samples.end() || !spIt->second.hasPcm) {
                     unknownSampleRoots[smpId].insert(root->relPath);
                     selectedHasUnanalysedOrGap = true;
-                    addBlocker(BlockingCode::MISSING_PCM_FOR_KMP_SAMPLE, smpId.str(),
-                               "Reachable KMP Sample " + smpId.str() + " has no matching PCM entry.",
-                               "Restore missing PCM/*.pcm container before exporting.",
-                               root->relPath);
+                    addDiag(DiagnosticCategory::VERIFIED_MISSING, diag_code::kMissingPcmForKmpSample,
+                            DiagnosticSeverity::Blocking, EvidenceLevel::Verified, smpId.str(), "",
+                            "Reachable KMP Sample " + smpId.str() + " has no matching PCM entry.",
+                            "Restore missing PCM/*.pcm container before exporting.",
+                            root->relPath);
                 } else {
                     rawReferencedSampleBytes = adapter_detail::satAdd(rawReferencedSampleBytes, spIt->second.payloadBytes);
                     if (!spIt->second.pcmRelPath.empty()) pcmFileSet.insert(spIt->second.pcmRelPath);
@@ -872,11 +750,12 @@ inline DryRunExportPlan collectSelectiveExport(
             const auto pit = source.packagesById.find(pkgId);
             if (pit == source.packagesById.end() || !pit->second.valid) {
                 selectedHasUnanalysedOrGap = true;
-                addBlocker(BlockingCode::MISSING_PACKAGE_WAV_OR_TX, pkgId,
-                           "Referenced provisional package '" + pkgId + "' is missing or failed validation" +
-                               (pit != source.packagesById.end() && !pit->second.error.empty() ? (": " + pit->second.error) : "."),
-                           "Regenerate or supply the missing Sound/DrumKit package in Sound Studio.",
-                           root->relPath);
+                addDiag(DiagnosticCategory::VERIFIED_MISSING, diag_code::kMissingPackageWavOrTx,
+                        DiagnosticSeverity::Blocking, EvidenceLevel::Verified, pkgId, "",
+                        "Referenced provisional package '" + pkgId + "' is missing or failed validation" +
+                            (pit != source.packagesById.end() && !pit->second.error.empty() ? (": " + pit->second.error) : "."),
+                        "Regenerate or supply the missing Sound/DrumKit package in Sound Studio.",
+                        root->relPath);
                 continue;
             }
             const ProvisionalPackageRecord& pkg = pit->second;
@@ -888,12 +767,14 @@ inline DryRunExportPlan collectSelectiveExport(
             for (const auto& [nid, node] : pkg.graph.nodes()) closureNodeSet.insert(nid);
             if (!pkg.graph.dangling().empty()) {
                 selectedHasUnanalysedOrGap = true;
-                addBlocker(BlockingCode::DANGLING_GRAPH_EDGE, pkg.packageId,
-                           "Provisional package '" + pkg.packageId + "' contains dangling graph references.",
-                           "Regenerate package cleanly before export.",
-                           root->relPath);
+                addDiag(DiagnosticCategory::VERIFIED_MISSING, diag_code::kDanglingGraphEdge,
+                        DiagnosticSeverity::Blocking, EvidenceLevel::Verified, pkg.packageId, "",
+                        "Provisional package '" + pkg.packageId + "' contains dangling graph references.",
+                        "Regenerate package cleanly before export.",
+                        root->relPath);
             }
             for (const graph::ResourceId& smpId : pkg.sampleIds) {
+                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
                 sampleRefRoots[smpId].insert(root->relPath);
                 ++sampleRawRefCount[smpId];
                 const auto spIt = source.samples.find(smpId);
@@ -907,125 +788,186 @@ inline DryRunExportPlan collectSelectiveExport(
         }
     }
 
-    // Record KMP file SHA-256 in sourceFileSha256 if present in source view
     for (const auto& [rel, sha] : source.sourceFileSha256) {
         if (graph::native_detail::endsWithUpper(rel, ".KMP")) plan.sourceFileSha256[rel] = sha;
     }
 
-    // Check duplicate drum IDs in source KMP -> coverageComplete cannot be true
-    if (source.isNativeKst() && !source.duplicateDrumIds.empty()) {
+    if (source.isNativeKst() && source.coverage.kmpIsOc31) {
         selectedHasUnanalysedOrGap = true;
-        addNotice("warning", "DUPLICATE_KMP_DRUM_ID", "Confirmed", "MULTISMP/RAM.KMP",
-                  std::to_string(source.duplicateDrumIds.size()) +
-                      " duplicate 8-byte DrumSample ID group(s) in RAM.KMP (kept positional; delete safety unprovable).");
+        const DiagnosticSeverity sev =
+            (request.requireCompleteSampleClosure || request.mode != ExportMode::AdvisoryPlan)
+                ? DiagnosticSeverity::Blocking
+                : DiagnosticSeverity::Warning;
+        addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kOc31KmpUnsupported,
+                sev, EvidenceLevel::Unsupported, "MULTISMP/RAM.KMP", "0x11050038",
+                kOc31KmpDegradedNotice,
+                "Use an authentic Pa5X raw RAM.KMP (0x11080018 v0x0103) or inspect Sound inventory only.");
     }
 
-    // 3. Tier 3 Native KST Equivalence (source vs optionalTarget AND intra-source same-name/same-hash check)
+    if (source.isNativeKst() && !source.duplicateDrumIds.empty()) {
+        selectedHasUnanalysedOrGap = true;
+        addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, diag_code::kDuplicateKmpDrumId,
+                DiagnosticSeverity::Warning, EvidenceLevel::Verified, "MULTISMP/RAM.KMP", "",
+                std::to_string(source.duplicateDrumIds.size()) +
+                    " duplicate 8-byte DrumSample ID group(s) in RAM.KMP (kept positional; delete safety unprovable).",
+                "Nodes kept positional; coverageComplete is false; never deduce deletion safety.");
+    }
+
+    // 3. M2a Collision Matrix + Tier-3 Native KST Equivalence (single source of truth via M2a!)
     struct TargetSoundMatch {
         graph::ResourceId matchedTargetId;
         bool requiresRemap = false;
-        bool satisfied = false;            // true iff exact same-slot OR explicitly approved in request.approvedSoundRemaps
+        bool satisfied = false; // true ONLY on exact same-slot match OR explicit approvedSoundRemaps override!
     };
     std::map<graph::ResourceId, TargetSoundMatch> targetMatchedSounds;
-    if (source.isNativeKst()) {
-        // 3a. Compare selected roots against optionalTarget by case-folded relative path
-        if (optionalTarget && optionalTarget->ok && optionalTarget->isNativeKst()) {
-            std::map<std::string, const RootItemRecord*> targetRootsFolded;
-            for (const auto& tr : optionalTarget->roots) {
-                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
-                targetRootsFolded[graph::native_detail::upperAscii(tr.relPath)] = &tr;
+
+    if (optionalTargetMap && optionalTargetMap->valid) {
+        CollisionMatrixInput cmIn;
+        cmIn.policy = request.conflictPolicy;
+        cmIn.mode = request.mode;
+
+        // Build M2a ObjectPathCollisionRequests for every selected root
+        for (const SelectionTarget& sel : plan.selectedTargets) {
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+            const RootItemRecord* r = source.findRoot(sel.relPath);
+            if (!r) continue;
+            ObjectPathCollisionRequest oreq;
+            oreq.kind = sel.kind;
+            oreq.sourceRelPath = r->relPath;
+            oreq.targetBank = sel.targetBank;
+            oreq.targetName = sel.targetName;
+            oreq.fileSha256 = r->contentSha256;
+            oreq.affectedRoots = {r->relPath};
+            cmIn.objectRequests.push_back(std::move(oreq));
+        }
+
+        // Build M2a SoundCollisionRequests for every collected Native User Sound
+        for (const auto& [sid, roots] : soundRefRoots) {
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+            const auto scIt = source.sounds.find(sid);
+            if (scIt == source.sounds.end()) continue;
+            const SoundClosureRecord& sc = scIt->second;
+            const auto addr = sc.slotAddress.has_value() ? sc.slotAddress : SlotAddress::fromBankAndSlot(sc.bank, sc.slot);
+            if (!addr.has_value()) continue;
+            SoundCollisionRequest sreq;
+            sreq.requestId = sid.str();
+            sreq.sourceAddress = *addr;
+            sreq.sourceLabel = sc.name;
+            sreq.equivalence = sc.equivalence;
+            sreq.expectExistingInTarget = false;
+            sreq.affectedRoots.assign(roots.begin(), roots.end());
+            cmIn.soundRequests.push_back(std::move(sreq));
+        }
+
+        // Run M2a's canonical Collision Matrix!
+        CollisionMatrixResult cmRes = evaluateCollisionMatrix(*optionalTargetMap, std::move(cmIn));
+
+        // Carry forward M2a's conflicts and diagnostics
+        plan.conflicts.insert(plan.conflicts.end(), cmRes.conflicts.begin(), cmRes.conflicts.end());
+        for (const auto& d : cmRes.diagnostics) {
+            addDiag(d.category, d.code, d.severity, d.evidence, d.subject, d.referencedTarget,
+                    d.summary, d.remediation);
+            if (!d.affectedRoots.empty()) {
+                auto& agg = diagMap[{d.severity, d.category, d.code, d.subject}];
+                agg.roots.insert(d.affectedRoots.begin(), d.affectedRoots.end());
             }
-            for (const auto& sel : plan.selectedTargets) {
-                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
-                const RootItemRecord* sr = source.findRoot(sel.relPath);
-                if (!sr) continue;
-                const auto tit = targetRootsFolded.find(graph::native_detail::upperAscii(sr->relPath));
-                if (tit == targetRootsFolded.end()) continue;
-                const RootItemRecord* tr = tit->second;
+        }
+
+        // Record Tier-3 source-vs-target root equivalence from M2a's objectResolutions
+        for (const auto& ores : cmRes.objectResolutions) {
+            if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+            if (ores.action == "already-present-noop") {
+                const RootItemRecord* sr = source.findRoot(ores.sourceRelPath);
                 NativeEquivalenceEntry eq;
                 eq.scope = "source-vs-target-root";
-                eq.sourceSubject = sr->relPath;
-                eq.targetSubject = tr->relPath;
-                eq.mergesPa5xId8 = false;
-                if (sr->contentSha256.empty() || tr->contentSha256.empty()) {
-                    eq.verdict = NativeEquivalenceVerdict::InsufficientEvidence;
-                    eq.reason = "root file SHA-256 unavailable in source or target";
-                } else if (sr->contentSha256 == tr->contentSha256) {
-                    eq.verdict = NativeEquivalenceVerdict::Identical;
-                    eq.reason = "root file SHA-256 identical in target (advisory no-op)";
+                eq.sourceSubject = ores.sourceRelPath;
+                eq.targetSubject = ores.targetRelPath;
+                eq.verdict = EquivalenceVerdict::Identical;
+                eq.reason = "root file SHA-256 identical in target (M2a already-present-noop)";
+                plan.nativeEquivalences.push_back(std::move(eq));
+                if (sr && !sr->contentSha256.empty()) {
                     DedupGroup dg;
                     dg.tier = DedupTier::Tier3NativeEquivalence;
                     dg.resourceKind = "RootFile";
                     dg.keyType = "root-file-sha256";
                     dg.keyValue = sr->contentSha256;
-                    dg.canonicalMember = tr->relPath;
-                    dg.members = {sr->relPath, tr->relPath};
+                    dg.canonicalMember = ores.targetRelPath;
+                    dg.members = {ores.sourceRelPath, ores.targetRelPath};
                     std::sort(dg.members.begin(), dg.members.end());
                     dg.occurrenceCount = 2;
                     dg.savedBytes = 0;
                     dg.appliedInExport = false;
                     plan.dedupGroups.push_back(std::move(dg));
-                } else {
-                    eq.verdict = NativeEquivalenceVerdict::Different;
-                    eq.reason = "root file SHA-256 differs from target at same case-folded path";
                 }
-                plan.nativeEquivalences.push_back(std::move(eq));
+            } else if (ores.action == "blocked-collision") {
+                plan.nativeEquivalences.push_back({
+                    "source-vs-target-root", ores.sourceRelPath, ores.targetRelPath,
+                    EquivalenceVerdict::Different, ores.detail, false
+                });
             }
+        }
 
-            // Index target Sounds by decodedBodySha256 and by upper-case name (for non-equivalence check)
-            std::map<std::string, std::vector<graph::ResourceId>> targetByBodySha;
-            std::map<std::string, std::vector<graph::ResourceId>> targetByName;
-            for (const auto& [tid, tsc] : optionalTarget->sounds) {
-                if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
-                if (!tsc.decodedBodySha256.empty()) targetByBodySha[tsc.decodedBodySha256].push_back(tid);
-                if (!tsc.name.empty()) targetByName[graph::native_detail::upperAscii(tsc.name)].push_back(tid);
-            }
-
+        // Record Tier-3 source-vs-target Sound equivalence via M2a's TargetOccupancyMap + compareSoundEquivalence()
+        // P1 invariant: ALWAYS check exact same-slot `sid` FIRST so exact same-slot strictly wins over cross-slot!
+        if (source.isNativeKst() && optionalTargetMap->fullyInspectable) {
             for (const auto& [sid, roots] : soundRefRoots) {
                 if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
                 const auto scIt = source.sounds.find(sid);
                 if (scIt == source.sounds.end()) continue;
                 const SoundClosureRecord& sc = scIt->second;
+                const auto srcAddr = sc.slotAddress.has_value() ? sc.slotAddress : SlotAddress::fromBankAndSlot(sc.bank, sc.slot);
+                if (!srcAddr.has_value()) continue;
 
-                std::set<graph::ResourceId> otherCandidates;
-                if (!sc.decodedBodySha256.empty()) {
-                    if (const auto bit = targetByBodySha.find(sc.decodedBodySha256); bit != targetByBodySha.end()) {
-                        otherCandidates.insert(bit->second.begin(), bit->second.end());
-                    }
-                }
-                if (!sc.name.empty()) {
-                    if (const auto nit = targetByName.find(graph::native_detail::upperAscii(sc.name)); nit != targetByName.end()) {
-                        otherCandidates.insert(nit->second.begin(), nit->second.end());
-                    }
-                }
-                const auto approvedIt = request.approvedSoundRemaps.find(sid);
-                if (approvedIt != request.approvedSoundRemaps.end() && optionalTarget->sounds.count(approvedIt->second)) {
-                    otherCandidates.insert(approvedIt->second);
-                }
-
-                // P1 invariant: ALWAYS check exact same-slot `sid` FIRST so an exact-slot match strictly wins
-                // over any lexicographically earlier cross-slot match!
                 std::optional<graph::ResourceId> exactMatch;
                 std::optional<graph::ResourceId> approvedCrossMatch;
                 std::optional<graph::ResourceId> firstCrossMatch;
 
-                if (optionalTarget->sounds.count(sid)) {
-                    otherCandidates.erase(sid);
-                    NativeEquivalenceEntry eq = classifyNativeSoundEquivalence(source, sid, *optionalTarget, sid, "source-vs-target-sound");
-                    if (eq.verdict == NativeEquivalenceVerdict::Identical) exactMatch = sid;
-                    plan.nativeEquivalences.push_back(std::move(eq));
+                const auto approvedIt = request.approvedSoundRemaps.find(sid);
+
+                // Step A: Exact same-slot check FIRST!
+                if (const OccupiedSlotEntry* sameOcc = optionalTargetMap->findOccupied(*srcAddr)) {
+                    const EquivalenceResult eq = compareSoundEquivalence(sc.equivalence, sameOcc->equivalence);
+                    plan.nativeEquivalences.push_back({
+                        "source-vs-target-sound", sid.str(), sameOcc->address.resourceId().str(),
+                        eq.verdict, eq.reason, false
+                    });
+                    if (eq.verdict == EquivalenceVerdict::Identical) {
+                        exactMatch = sid;
+                    }
                 }
 
-                for (const graph::ResourceId& candId : otherCandidates) {
+                // Step B: Cross-slot candidates via M2a's canonical equivalenceIndex (plus explicit approved remap target)
+                std::set<SlotAddress> crossAddrs;
+                if (sc.equivalence.provablyComparable() && !sc.equivalence.equivalenceDigest.empty()) {
+                    if (const auto eit = optionalTargetMap->equivalenceIndex.find(sc.equivalence.equivalenceDigest);
+                        eit != optionalTargetMap->equivalenceIndex.end()) {
+                        for (const SlotAddress& a : eit->second) {
+                            if (a != *srcAddr && a.isDrumKit == srcAddr->isDrumKit) crossAddrs.insert(a);
+                        }
+                    }
+                }
+                if (approvedIt != request.approvedSoundRemaps.end()) {
+                    if (const auto appAddr = SlotAddress::fromBankAndSlot(approvedIt->second.scope, approvedIt->second.number);
+                        appAddr.has_value() && *appAddr != *srcAddr && optionalTargetMap->findOccupied(*appAddr)) {
+                        crossAddrs.insert(*appAddr);
+                    }
+                }
+
+                for (const SlotAddress& candAddr : crossAddrs) {
                     if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
-                    NativeEquivalenceEntry eq = classifyNativeSoundEquivalence(source, sid, *optionalTarget, candId, "source-vs-target-sound");
-                    if (eq.verdict == NativeEquivalenceVerdict::Identical) {
+                    const OccupiedSlotEntry* occ = optionalTargetMap->findOccupied(candAddr);
+                    if (!occ) continue;
+                    const EquivalenceResult eq = compareSoundEquivalence(sc.equivalence, occ->equivalence);
+                    const graph::ResourceId candId = candAddr.resourceId();
+                    plan.nativeEquivalences.push_back({
+                        "source-vs-target-sound", sid.str(), candId.str(), eq.verdict, eq.reason, false
+                    });
+                    if (eq.verdict == EquivalenceVerdict::Identical) {
                         if (approvedIt != request.approvedSoundRemaps.end() && approvedIt->second == candId) {
                             approvedCrossMatch = candId;
                         }
                         if (!firstCrossMatch.has_value()) firstCrossMatch = candId;
                     }
-                    plan.nativeEquivalences.push_back(std::move(eq));
                 }
 
                 std::optional<graph::ResourceId> chosenMatch;
@@ -1038,11 +980,11 @@ inline DryRunExportPlan collectSelectiveExport(
                 } else if (approvedCrossMatch.has_value()) {
                     chosenMatch = *approvedCrossMatch;
                     requiresRemap = true;
-                    satisfied = true; // explicitly approved remap override
+                    satisfied = true; // explicit approvedSoundRemaps override!
                 } else if (firstCrossMatch.has_value()) {
                     chosenMatch = *firstCrossMatch;
                     requiresRemap = true;
-                    satisfied = false; // cross-slot match MUST NOT lift HOLD without explicit remap!
+                    satisfied = false; // cross-slot NEVER lifts HOLD without explicit remap!
                 }
 
                 if (chosenMatch.has_value()) {
@@ -1051,20 +993,24 @@ inline DryRunExportPlan collectSelectiveExport(
                     dg.tier = DedupTier::Tier3NativeEquivalence;
                     dg.resourceKind = "Sound";
                     dg.keyType = "native-sound-equivalence";
-                    dg.keyValue = sc.decodedBodySha256;
+                    dg.keyValue = sc.equivalence.equivalenceDigest;
                     dg.canonicalMember = chosenMatch->str();
                     dg.members = {sid.str(), chosenMatch->str()};
                     std::sort(dg.members.begin(), dg.members.end());
                     dg.occurrenceCount = 2;
                     dg.savedBytes = sc.storedPcmBytesProxy;
-                    dg.appliedInExport = false; // advisory; RootTreeSubKst reuses target without rewriting KMP/PCG
+                    dg.appliedInExport = false;
                     plan.dedupGroups.push_back(std::move(dg));
                 }
             }
         }
 
-        // 3b. Intra-source Sound equivalence check across collected Sounds sharing name OR decodedBodySha256
-        //     (strictly 3-way: Identical vs Different vs InsufficientEvidence; NEVER merges Pa5X identities!)
+        plan.collisionMatrix = std::move(cmRes);
+    }
+
+    // 3b. Intra-source Sound equivalence check across collected Sounds sharing name OR decodedBodySha256
+    //     using M2a's single-source-of-truth `compareSoundEquivalence()` (NEVER merges Pa5X identities!).
+    if (source.isNativeKst()) {
         std::vector<graph::ResourceId> collectedSoundIds;
         collectedSoundIds.reserve(soundRefRoots.size());
         for (const auto& [sid, _] : soundRefRoots) collectedSoundIds.push_back(sid);
@@ -1088,13 +1034,13 @@ inline DryRunExportPlan collectSelectiveExport(
                     if (!comparedPairs.insert(pairKey).second) continue;
                     NativeEquivalenceEntry eq = classifyNativeSoundEquivalence(
                         source, pairKey.first, source, pairKey.second, "intra-source-sound");
-                    if (eq.verdict == NativeEquivalenceVerdict::Identical) {
+                    if (eq.verdict == EquivalenceVerdict::Identical) {
                         const auto& sc = source.sounds.at(pairKey.first);
                         DedupGroup dg;
                         dg.tier = DedupTier::Tier3NativeEquivalence;
                         dg.resourceKind = "Sound";
                         dg.keyType = "native-sound-equivalence";
-                        dg.keyValue = sc.decodedBodySha256;
+                        dg.keyValue = sc.equivalence.equivalenceDigest;
                         dg.canonicalMember = pairKey.first.str();
                         dg.members = {pairKey.first.str(), pairKey.second.str()};
                         dg.occurrenceCount = 2;
@@ -1107,35 +1053,39 @@ inline DryRunExportPlan collectSelectiveExport(
             }
         }
 
-        // Enforce NATIVE_SOUND_WRITE_HOLD and SMF_REMAP_REQUIRED for write modes:
-        // Only exact same-slot Identical target matches (or explicitly approved remaps) satisfy the target!
-        if (request.mode == CollectorExportMode::RootTreeSubKst || request.mode == CollectorExportMode::ImportKitBundle) {
+        // Enforce NATIVE_SOUND_WRITE_HOLD and P1 SMF_REMAP_REQUIRED for write modes:
+        // Only exact same-slot Identical target matches (or explicitly approved remaps) satisfy target!
+        if (request.mode == ExportMode::RootTreeSubKst || request.mode == ExportMode::ImportKitBundle) {
             for (const auto& [sid, roots] : soundRefRoots) {
                 const auto tmit = targetMatchedSounds.find(sid);
                 if (tmit != targetMatchedSounds.end() && tmit->second.satisfied) continue;
                 if (tmit != targetMatchedSounds.end() && tmit->second.requiresRemap) {
                     for (const std::string& r : roots) {
-                        addBlocker(BlockingCode::SMF_REMAP_REQUIRED, sid.str(),
-                                   "Selected item references " + sid.str() + " which matches identical Target Sound at different slot " +
-                                       tmit->second.matchedTargetId.str() + "; SMF Bank/PC remap is required before RootTreeSubKst export.",
-                                   "Approve an explicit SMF Bank/PC remap to " + tmit->second.matchedTargetId.str() +
-                                       " or use AdvisoryPlan.",
-                                   r);
+                        addDiag(DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE, collector_diag_code::kSmfRemapRequired,
+                                DiagnosticSeverity::Blocking, EvidenceLevel::Verified, sid.str(),
+                                tmit->second.matchedTargetId.str(),
+                                "Selected item references " + sid.str() +
+                                    " which matches identical Target Sound at different slot " +
+                                    tmit->second.matchedTargetId.str() + "; SMF Bank/PC remap is required before RootTreeSubKst export.",
+                                "Approve an explicit SMF Bank/PC remap to " + tmit->second.matchedTargetId.str() +
+                                    " or use AdvisoryPlan.",
+                                r);
                     }
                 } else {
                     for (const std::string& r : roots) {
-                        addBlocker(BlockingCode::NATIVE_SOUND_WRITE_HOLD, sid.str(),
-                                   "Selected item requires Native User Sound " + sid.str() +
-                                       " which is not proven equivalent at the same slot in Target KST; native .PCG/.KMP/.PCM writing is on HOLD.",
-                                   "Use AdvisoryPlan + Pa5X single-Sound load (MAN5 p.736), remap to a Factory/Target Sound, or replace via Import Kit.",
-                                   r);
+                        addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kNativeSoundWriteHold,
+                                DiagnosticSeverity::Blocking, EvidenceLevel::Unsupported, sid.str(), "",
+                                "Selected item requires Native User Sound " + sid.str() +
+                                    " which is not proven equivalent at the same slot in Target KST; native .PCG/.KMP/.PCM writing is on HOLD.",
+                                "Use AdvisoryPlan + Pa5X single-Sound load (MAN5 p.736), remap to a Factory/Target Sound, or replace via Import Kit.",
+                                r);
                     }
                 }
             }
         }
     }
 
-    // 4. Build CollectedSoundSummary + Tier 1 Logical Identity Dedup Groups (Sounds, Multisamples, Samples)
+    // 4. Build CollectedSoundSummary + Tier-1 Logical Identity Dedup Groups (Sounds, Multisamples, Samples)
     for (const auto& [sid, roots] : soundRefRoots) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const auto scIt = source.sounds.find(sid);
@@ -1159,7 +1109,6 @@ inline DryRunExportPlan collectSelectiveExport(
             css.satisfiedByTarget = tmit->second.satisfied;
             css.requiresRemap = tmit->second.requiresRemap;
             css.matchedTargetSlot = tmit->second.matchedTargetId.str();
-            css.targetMatchSlot = css.matchedTargetSlot;
         }
         plan.unresolvedSlotsInAnalysedCount += sc.unresolvedSlotsInAnalysed.size();
         plan.unresolvedSlotsInUnanalysedCount += sc.unresolvedSlotsInUnanalysed.size();
@@ -1216,7 +1165,6 @@ inline DryRunExportPlan collectSelectiveExport(
         if (spIt != source.samples.end() && spIt->second.hasPcm) {
             sbytes = spIt->second.payloadBytes;
             uniqueLogicalSampleBytes = adapter_detail::satAdd(uniqueLogicalSampleBytes, sbytes);
-            // Tier 2b candidate: provisional WAV audio fingerprint (contentHash + bytes) across distinct packages
             if (smpId.provisional && spIt->second.info.has_value() && !spIt->second.info->contentHash.empty()) {
                 const std::string hkey = spIt->second.info->contentHash + "|" + std::to_string(sbytes);
                 provisionalWavByContentHash[hkey].push_back(smpId);
@@ -1283,13 +1231,12 @@ inline DryRunExportPlan collectSelectiveExport(
         for (const auto& id : sortedIds) dg.members.push_back(id.str());
         dg.occurrenceCount = sortedIds.size();
         dg.savedBytes = extra;
-        dg.appliedInExport = false; // advisory only: never mutates signed TXPROG/SF2 packages!
+        dg.appliedInExport = false;
         plan.dedupGroups.push_back(std::move(dg));
     }
 
-    // 6. Honest Memory & Sample RAM Projection (§4.4)
-    MemoryProjection& mp = plan.memoryProjection;
-    mp.hardwareVerified = false;
+    // 6. Honest Memory & Sample RAM Projection (M2a MemoryProjectionReport + P2-3 saturating math)
+    MemoryProjectionReport& mp = plan.memoryProjection;
     mp.rawReferencedSampleBytes = rawReferencedSampleBytes;
     mp.uniqueLogicalSampleBytes = uniqueLogicalSampleBytes;
     mp.logicalDedupSavedBytes = rawReferencedSampleBytes >= uniqueLogicalSampleBytes
@@ -1298,70 +1245,133 @@ inline DryRunExportPlan collectSelectiveExport(
     mp.identicalContentExtraBytes = identicalContentExtraBytes;
     mp.uniqueSamplesCount = plan.uniqueSamples.size();
     mp.unknownSizeSamplesCount = unknownSampleRoots.size();
+    mp.targetBaselineSampleBytes = targetValid ? optionalTargetBaselineBytes : 0;
+    mp.projectedCombinedBytes = adapter_detail::satAdd(mp.targetBaselineSampleBytes, uniqueLogicalSampleBytes);
+
+    const bool anyNativeProxy = source.isNativeKst() || optionalTargetIsNativeKst;
+    mp.sampleBytesAreNativeStoredProxy = anyNativeProxy;
+    if (mp.projectedCombinedBytes <= graph::kPa5xUserSampleBytesDecimal) mp.projectedFit = graph::Fit::Fits;
+    else if (mp.projectedCombinedBytes <= graph::kPa5xUserSampleBytesBinary) mp.projectedFit = graph::Fit::Ambiguous;
+    else if (mp.projectedCombinedBytes <= graph::kPa5xCompressedEquivalentDecimal) mp.projectedFit = graph::Fit::NeedsCompression;
+    else mp.projectedFit = graph::Fit::Exceeds;
+    plan.memoryCaveat = anyNativeProxy ? std::string(kStoredPcmProxyCaveat) : std::string(kProvisionalUncompressedCaveat);
+
+    // 7. Finalize canonical sorted tables, fail-closed executable gate, and deterministic planFingerprint
+    plan.closureNodes.assign(closureNodeSet.begin(), closureNodeSet.end());
+    plan.uniquePcmFiles.assign(pcmFileSet.begin(), pcmFileSet.end());
+
+    for (const auto& [key, agg] : diagMap) {
+        plan.diagnostics.push_back({
+            agg.category,
+            std::get<2>(key),
+            agg.severity,
+            agg.evidence,
+            std::get<3>(key),
+            agg.referencedTarget,
+            agg.summary,
+            agg.remediation,
+            std::vector<std::string>(agg.roots.begin(), agg.roots.end())
+        });
+    }
+    canonicalizeDiagnostics(plan.diagnostics);
+    canonicalizeConflicts(plan.conflicts);
+    std::sort(plan.dedupGroups.begin(), plan.dedupGroups.end());
+    plan.dedupGroups.erase(std::unique(plan.dedupGroups.begin(), plan.dedupGroups.end()), plan.dedupGroups.end());
+    std::sort(plan.nativeEquivalences.begin(), plan.nativeEquivalences.end());
+    plan.nativeEquivalences.erase(std::unique(plan.nativeEquivalences.begin(), plan.nativeEquivalences.end()),
+                                  plan.nativeEquivalences.end());
+
+    plan.ok = source.ok && targetValid;
+    plan.coverageComplete =
+        plan.ok && !selectedHasUnanalysedOrGap &&
+        (source.isProvisional() ? source.coverage.coverageComplete
+                                : (source.coverage.kmpParsed && !source.coverage.songBookPresent)) &&
+        (!optionalTargetMap || optionalTargetMap->fullyInspectable);
+    plan.coverage.coverageComplete = plan.coverageComplete;
+    plan.coverage.deleteProofAvailable = false;
+
+    plan.executable = plan.ok && !plan.cancelled &&
+                      plan.blockingDiagnosticCount() == 0 &&
+                      plan.blockingConflictCount() == 0 &&
+                      request.mode != ExportMode::NativeSoundKst_HOLD;
+    plan.planFingerprint = collector_detail::computePlanFingerprint(plan);
+    return plan;
+}
+
+// Convenience overload accepting an `M1AdapterView*` target (builds M2a TargetOccupancyMap + saturating baseline).
+inline DryRunExportPlan collectSelectiveExport(
+    const M1AdapterView& source,
+    const CollectorRequest& request,
+    const M1AdapterView* optionalTarget = nullptr,
+    const KeepGoing& keepGoing = {}) {
+    const size_t stride = adapter_detail::clampStride(request.cancelCheckStride);
+    size_t tick = 0;
+    auto makeCancelled = [&]() {
+        DryRunExportPlan c;
+        c.ok = false;
+        c.cancelled = true;
+        c.executable = false;
+        c.hardwareVerified = false;
+        c.deleteProofAvailable = false;
+        c.sourceKind = source.sourceKind;
+        c.mode = request.mode;
+        c.conflictPolicy = request.conflictPolicy;
+        return c;
+    };
+    if (source.cancelled || (optionalTarget && optionalTarget->cancelled)) return makeCancelled();
+    if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+
+    if (!optionalTarget) {
+        return collectSelectiveExportWithTargetMap(source, request, nullptr, 0, false, keepGoing);
+    }
+
+    const TargetOccupancyMap targetMap = buildTargetOccupancyFromAdapter(*optionalTarget, keepGoing, stride);
+    if (targetMap.cancelled) return makeCancelled();
 
     uint64_t targetBaselineBytes = 0;
-    if (optionalTarget && optionalTarget->ok) {
+    if (optionalTarget->ok) {
         for (const auto& [_, sr] : optionalTarget->samples) {
             if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
             if (sr.hasPcm) targetBaselineBytes = adapter_detail::satAdd(targetBaselineBytes, sr.payloadBytes);
         }
     }
-    mp.targetBaselineSampleBytes = targetBaselineBytes;
-    mp.projectedCombinedBytes = adapter_detail::satAdd(targetBaselineBytes, uniqueLogicalSampleBytes);
-
-    const bool anyNativeProxy = source.isNativeKst() || (optionalTarget && optionalTarget->isNativeKst());
-    mp.sampleBytesAreNativeStoredProxy = anyNativeProxy;
-    if (anyNativeProxy) {
-        mp.unit = "native_kst_stored_pcm_proxy_bytes";
-        mp.fitVerdict = "unverified-proxy";
-        mp.caveat = kNativeProxyCaveat;
-    } else {
-        mp.unit = "uncompressed_pcm_bytes";
-        if (mp.projectedCombinedBytes <= mp.limitDecimal4GB) mp.fitVerdict = "fits";
-        else if (mp.projectedCombinedBytes <= mp.limitBinary4GiB) mp.fitVerdict = "ambiguous";
-        else if (mp.projectedCombinedBytes <= mp.limitCompressed8GB) mp.fitVerdict = "needs-compression";
-        else mp.fitVerdict = "exceeds";
-        mp.caveat = kProvisionalUncompressedCaveat;
-    }
-
-    // 7. Finalize sorted tables, fail-closed executable gate, and deterministic planFingerprint
-    plan.closureNodes.assign(closureNodeSet.begin(), closureNodeSet.end());
-    plan.uniquePcmFiles.assign(pcmFileSet.begin(), pcmFileSet.end());
-
-    for (const auto& [key, agg] : blockerMap) {
-        plan.blockingReasons.push_back({
-            key.first, key.second, agg.summary, agg.remediation,
-            std::vector<std::string>(agg.roots.begin(), agg.roots.end())
-        });
-    }
-    for (const auto& [key, agg] : noticeMap) {
-        plan.notices.push_back({
-            std::get<0>(key), std::get<1>(key), agg.evidence, std::get<2>(key), agg.summary,
-            std::vector<std::string>(agg.roots.begin(), agg.roots.end())
-        });
-    }
-    std::sort(plan.dedupGroups.begin(), plan.dedupGroups.end());
-    std::sort(plan.nativeEquivalences.begin(), plan.nativeEquivalences.end());
-    std::sort(plan.blockingReasons.begin(), plan.blockingReasons.end());
-    std::sort(plan.notices.begin(), plan.notices.end());
-
-    const bool targetOk = (!optionalTarget || optionalTarget->ok);
-    plan.ok = source.ok && targetOk;
-    plan.coverageComplete =
-        plan.ok && !selectedHasUnanalysedOrGap &&
-        (source.isProvisional() ? source.coverage.coverageComplete
-                                : (source.coverage.kmpParsed && !source.coverage.songBookPresent));
-    plan.executable = plan.ok && !plan.cancelled && plan.blockingReasons.empty() &&
-                      request.mode != CollectorExportMode::NativeSoundKst_HOLD;
-    plan.planFingerprint = collector_detail::computePlanFingerprint(plan);
-    return plan;
+    return collectSelectiveExportWithTargetMap(
+        source, request, &targetMap, targetBaselineBytes, optionalTarget->isNativeKst(), keepGoing);
 }
 
-// ── Reproducible, Path-Free JSON Dry-Run Preview Serializer ──────────────────────────────────────────────────────────
-// Guaranteed RFC 8259 valid JSON (UTF-8-safe escaping), zero local paths, byte-identical across repeated runs
-// and shuffled selection orders.
+// ── Bridge to M2a's Canonical SelectiveExportReport (`aiarranger-selective-export-report/1`) ─────────────────────────
+inline SelectiveExportReport toSelectiveExportReport(
+    const DryRunExportPlan& p,
+    const std::string& sourceLabel = "<source>",
+    const std::string& targetLabel = "<target>") {
+    SelectiveExportReport r;
+    r.mode = p.mode;
+    r.conflictPolicy = p.conflictPolicy;
+    r.planFingerprint = p.planFingerprint;
+    r.sourceKind = adapterSourceKindName(p.sourceKind);
+    r.sourceLabel = diag_detail::canonicalPathFreeLabel(sourceLabel, "<source>");
+    r.m1ManifestSha256 = p.sourceManifestSha256;
+    r.targetPresent = p.targetPresent;
+    r.targetLabel = p.targetPresent ? diag_detail::canonicalPathFreeLabel(targetLabel, "<target>") : "";
+    r.targetLibraryKey = p.targetLibraryKey;
+    r.selection = p.selectedTargets;
+    r.soundsReferenced = p.factorySoundSelectCount + p.userSoundSelectCount;
+    r.factorySounds = p.factorySoundSelectCount;
+    r.userSounds = p.collectedSounds.size();
+    r.multisamples = p.uniqueMultisamples.size();
+    r.samples = p.uniqueSamples.size();
+    r.coverage = p.coverage;
+    r.memoryProjection = p.memoryProjection;
+    r.deduplication.reserve(p.dedupGroups.size());
+    for (const auto& dg : p.dedupGroups) r.deduplication.push_back(dg.toM2aGroup());
+    r.conflicts = p.conflicts;
+    r.diagnostics = p.diagnostics;
+    return canonicalizeReport(std::move(r));
+}
+
+// ── Reproducible, Path-Free JSON Dry-Run Preview Serializer (reusing M2a diag_detail::safeJsonEscape) ────────────────
 inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
-    auto q = [](const std::string& s) { return "\"" + graph::closure_detail::manifestJsonEscape(s) + "\""; };
+    auto q = [](const std::string& s) { return "\"" + diag_detail::safeJsonEscape(s) + "\""; };
     auto bstr = [](bool b) -> const char* { return b ? "true" : "false"; };
     auto writeStrVec = [&](std::string& o, const std::vector<std::string>& v) {
         o += "[";
@@ -1375,7 +1385,7 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
     };
 
     std::string o;
-    o.reserve(4096 + p.dedupGroups.size() * 192 + p.blockingReasons.size() * 192);
+    o.reserve(4096 + p.dedupGroups.size() * 192 + p.diagnostics.size() * 224 + p.conflicts.size() * 192);
     o += "{\n";
     o += "  \"schema\": " + q(p.schema) + ",\n";
     o += "  \"label\": " + q(p.banner) + ",\n";
@@ -1386,19 +1396,21 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
     o += "  \"executable\": " + std::string(bstr(p.executable)) + ",\n";
     o += "  \"coverageComplete\": " + std::string(bstr(p.coverageComplete)) + ",\n";
     o += "  \"sourceKind\": " + q(adapterSourceKindName(p.sourceKind)) + ",\n";
-    o += "  \"mode\": " + q(collectorExportModeName(p.mode)) + ",\n";
+    o += "  \"mode\": " + q(exportModeName(p.mode)) + ",\n";
+    o += "  \"conflictPolicy\": " + q(conflictPolicyName(p.conflictPolicy)) + ",\n";
     o += "  \"includeEmbeddedKbdSets\": " + std::string(bstr(p.includeEmbeddedKbdSets)) + ",\n";
     o += "  \"includeEmbeddedPads\": " + std::string(bstr(p.includeEmbeddedPads)) + ",\n";
     o += "  \"requireCompleteSampleClosure\": " + std::string(bstr(p.requireCompleteSampleClosure)) + ",\n";
     o += "  \"planFingerprint\": " + q(p.planFingerprint) + ",\n";
     o += "  \"sourceManifestSha256\": " + q(p.sourceManifestSha256) + ",\n";
-    o += "  \"targetManifestSha256\": " + q(p.targetManifestSha256) + ",\n";
+    o += "  \"targetLibraryKey\": " + q(p.targetLibraryKey) + ",\n";
 
     o += "  \"selection\": [";
     for (size_t i = 0; i < p.selectedTargets.size(); ++i) {
         const auto& t = p.selectedTargets[i];
         o += i ? ",\n    {" : "\n    {";
-        o += "\"relPath\": " + q(t.relPath) +
+        o += "\"kind\": " + q(selectedKindName(t.kind)) +
+             ", \"relPath\": " + q(t.relPath) +
              ", \"targetBank\": " + q(t.targetBank) +
              ", \"targetName\": " + q(t.targetName) + "}";
     }
@@ -1416,14 +1428,15 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
     o += "    \"uniquePcmFiles\": " + std::to_string(p.uniquePcmFiles.size()) + ",\n";
     o += "    \"unresolvedSlotsInAnalysed\": " + std::to_string(p.unresolvedSlotsInAnalysedCount) + ",\n";
     o += "    \"unresolvedSlotsInUnanalysed\": " + std::to_string(p.unresolvedSlotsInUnanalysedCount) + ",\n";
-    o += "    \"blockingIssues\": " + std::to_string(p.blockingReasons.size()) + ",\n";
-    o += "    \"notices\": " + std::to_string(p.notices.size()) + "\n";
+    o += "    \"blockingDiagnostics\": " + std::to_string(p.blockingDiagnosticCount()) + ",\n";
+    o += "    \"blockingConflicts\": " + std::to_string(p.blockingConflictCount()) + ",\n";
+    o += "    \"totalDiagnostics\": " + std::to_string(p.diagnostics.size()) + "\n";
     o += "  },\n";
 
     const auto& mp = p.memoryProjection;
     o += "  \"memoryProjection\": {\n";
-    o += "    \"unit\": " + q(mp.unit) + ",\n";
-    o += "    \"hardwareVerified\": " + std::string(bstr(mp.hardwareVerified)) + ",\n";
+    o += "    \"unit\": " + q(mp.unitName()) + ",\n";
+    o += "    \"hardwareVerified\": false,\n";
     o += "    \"sampleBytesAreNativeStoredProxy\": " + std::string(bstr(mp.sampleBytesAreNativeStoredProxy)) + ",\n";
     o += "    \"rawReferencedSampleBytes\": " + std::to_string(mp.rawReferencedSampleBytes) + ",\n";
     o += "    \"uniqueLogicalSampleBytes\": " + std::to_string(mp.uniqueLogicalSampleBytes) + ",\n";
@@ -1434,12 +1447,12 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
     o += "    \"targetBaselineSampleBytes\": " + std::to_string(mp.targetBaselineSampleBytes) + ",\n";
     o += "    \"projectedCombinedBytes\": " + std::to_string(mp.projectedCombinedBytes) + ",\n";
     o += "    \"pa5xLimits\": {\n";
-    o += "      \"decimal4GB\": " + std::to_string(mp.limitDecimal4GB) + ",\n";
-    o += "      \"binary4GiB\": " + std::to_string(mp.limitBinary4GiB) + ",\n";
-    o += "      \"compressedEquivalent8GB\": " + std::to_string(mp.limitCompressed8GB) + "\n";
+    o += "      \"decimal4GB\": " + std::to_string(graph::kPa5xUserSampleBytesDecimal) + ",\n";
+    o += "      \"binary4GiB\": " + std::to_string(graph::kPa5xUserSampleBytesBinary) + ",\n";
+    o += "      \"compressedEquivalent8GB\": " + std::to_string(graph::kPa5xCompressedEquivalentDecimal) + "\n";
     o += "    },\n";
-    o += "    \"fitVerdict\": " + q(mp.fitVerdict) + ",\n";
-    o += "    \"caveat\": " + q(mp.caveat) + "\n";
+    o += "    \"fitVerdict\": " + q(mp.fitVerdictName()) + ",\n";
+    o += "    \"caveat\": " + q(p.memoryCaveat) + "\n";
     o += "  },\n";
 
     o += "  \"collectedSounds\": [";
@@ -1459,8 +1472,7 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
              ", \"uniqueSampleBytes\": " + std::to_string(cs.uniqueSampleBytes) +
              ", \"satisfiedByTarget\": " + std::string(bstr(cs.satisfiedByTarget)) +
              ", \"requiresRemap\": " + std::string(bstr(cs.requiresRemap)) +
-             ", \"matchedTargetSlot\": " + q(cs.matchedTargetSlot) +
-             ", \"targetMatchSlot\": " + q(cs.targetMatchSlot) + "}";
+             ", \"matchedTargetSlot\": " + q(cs.matchedTargetSlot) + "}";
     }
     o += p.collectedSounds.empty() ? "],\n" : "\n  ],\n";
 
@@ -1493,40 +1505,43 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
         o += "\"scope\": " + q(ne.scope) +
              ", \"sourceSubject\": " + q(ne.sourceSubject) +
              ", \"targetSubject\": " + q(ne.targetSubject) +
-             ", \"verdict\": " + q(nativeEquivalenceVerdictName(ne.verdict)) +
+             ", \"verdict\": " + q(equivalenceVerdictName(ne.verdict)) +
              ", \"reason\": " + q(ne.reason) +
              ", \"mergesPa5xId8\": " + std::string(bstr(ne.mergesPa5xId8)) + "}";
     }
     o += p.nativeEquivalences.empty() ? "],\n" : "\n  ],\n";
 
-    o += "  \"blockingReasons\": [";
-    for (size_t i = 0; i < p.blockingReasons.size(); ++i) {
-        const auto& b = p.blockingReasons[i];
+    o += "  \"conflicts\": [";
+    for (size_t i = 0; i < p.conflicts.size(); ++i) {
+        const auto& c = p.conflicts[i];
         o += i ? ",\n    {" : "\n    {";
-        o += "\"code\": " + q(blockingCodeName(b.code)) +
-             ", \"subject\": " + q(b.subject) +
-             ", \"summary\": " + q(b.summary) +
-             ", \"remediation\": " + q(b.remediation) +
-             ", \"affectedRoots\": ";
-        writeStrVec(o, b.affectedRoots);
-        o += "}";
+        o += "\"kind\": " + q(slotConflictKindName(c.kind)) +
+             ", \"address\": " + q(c.address) +
+             ", \"sourceLabel\": " + q(c.sourceLabel) +
+             ", \"targetLabel\": " + q(c.targetLabel) +
+             ", \"resolution\": " + q(c.resolution) +
+             ", \"blocking\": " + std::string(bstr(c.blocking)) +
+             ", \"detail\": " + q(c.detail) + "}";
     }
-    o += p.blockingReasons.empty() ? "],\n" : "\n  ],\n";
+    o += p.conflicts.empty() ? "],\n" : "\n  ],\n";
 
-    o += "  \"notices\": [";
-    for (size_t i = 0; i < p.notices.size(); ++i) {
-        const auto& n = p.notices[i];
+    o += "  \"diagnostics\": [";
+    for (size_t i = 0; i < p.diagnostics.size(); ++i) {
+        const auto& d = p.diagnostics[i];
         o += i ? ",\n    {" : "\n    {";
-        o += "\"severity\": " + q(n.severity) +
-             ", \"code\": " + q(n.code) +
-             ", \"evidence\": " + q(n.evidence) +
-             ", \"subject\": " + q(n.subject) +
-             ", \"summary\": " + q(n.summary) +
+        o += "\"category\": " + q(diagnosticCategoryName(d.category)) +
+             ", \"code\": " + q(d.code) +
+             ", \"severity\": " + q(diagnosticSeverityName(d.severity)) +
+             ", \"evidence\": " + q(evidenceLevelName(d.evidence)) +
+             ", \"subject\": " + q(d.subject) +
+             ", \"referencedTarget\": " + q(d.referencedTarget) +
+             ", \"summary\": " + q(d.summary) +
+             ", \"remediation\": " + q(d.remediation) +
              ", \"affectedRoots\": ";
-        writeStrVec(o, n.affectedRoots);
+        writeStrVec(o, d.affectedRoots);
         o += "}";
     }
-    o += p.notices.empty() ? "],\n" : "\n  ],\n";
+    o += p.diagnostics.empty() ? "],\n" : "\n  ],\n";
 
     o += "  \"sourceFileSha256\": {";
     bool firstFile = true;
@@ -1539,61 +1554,22 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
     return o;
 }
 
-// ── Reproducible, Path-Free Markdown Dry-Run Preview Serializer ──────────────────────────────────────────────────────
-namespace collector_detail {
-
-// Escapes control bytes, newlines, backslashes (via panative::printable) and Markdown syntax characters
-// so untrusted resource names, paths, or error strings cannot inject Markdown headings/lists/links/code.
-inline std::string mdSanitizeText(const std::string& s) {
-    const std::string p = panative::printable(s);
-    std::string out;
-    out.reserve(p.size() + 8);
-    for (char c : p) {
-        switch (c) {
-            case '`': case '*': case '_': case '[': case ']':
-            case '<': case '>': case '|': case '#':
-                out += '\\';
-                out += c;
-                break;
-            default:
-                out += c;
-                break;
-        }
-    }
-    return out;
-}
-
-// Inline Markdown code span: sanitizes control chars/newlines via printable() and replaces backticks
-// with \x60 so untrusted input can never close or break out of the surrounding single-backtick span.
-inline std::string mdCodeSpan(const std::string& s) {
-    const std::string p = panative::printable(s);
-    std::string out;
-    out.reserve(p.size() + 8);
-    out += '`';
-    for (char c : p) {
-        if (c == '`') out += "\\x60";
-        else out += c;
-    }
-    out += '`';
-    return out;
-}
-
-}  // namespace collector_detail
-
+// ── Reproducible, Path-Free, Injection-Safe Markdown Dry-Run Preview Serializer ──────────────────────────────────────
 inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
     using collector_detail::mdCodeSpan;
     using collector_detail::mdSanitizeText;
     std::string o;
-    o.reserve(2048 + p.blockingReasons.size() * 128 + p.dedupGroups.size() * 96);
+    o.reserve(2048 + p.diagnostics.size() * 144 + p.conflicts.size() * 128 + p.dedupGroups.size() * 96);
     o += "# Selective Export Dry-Run Plan Preview\n\n";
-    o += "> **" + (p.banner == kStructuralOnlyBanner ? p.banner : mdSanitizeText(p.banner)) +
+    o += "> **" + (p.banner == kHardwareUnverifiedBanner ? p.banner : mdSanitizeText(p.banner)) +
          "** (`hardwareVerified: false`, `deleteProofAvailable: false`)\n\n";
     if (!p.coverageComplete) {
-        o += "> **Coverage Notice:** Partial coverage — delete safety cannot be proven.\n\n";
+        o += "> **Coverage Notice:** " + std::string(kPartialCoverageNotice) + "\n\n";
     }
     o += "- **Schema:** " + mdCodeSpan(p.schema) + "\n";
     o += "- **Source Kind:** " + mdCodeSpan(adapterSourceKindName(p.sourceKind)) + "\n";
-    o += "- **Export Mode:** " + mdCodeSpan(collectorExportModeName(p.mode)) + "\n";
+    o += "- **Export Mode:** " + mdCodeSpan(exportModeName(p.mode)) +
+         " | **Conflict Policy:** " + mdCodeSpan(conflictPolicyName(p.conflictPolicy)) + "\n";
     o += "- **Executable:** `" + std::string(p.executable ? "true" : "false") + "`\n";
     o += "- **Plan Fingerprint (SHA-256):** " + mdCodeSpan(p.planFingerprint) + "\n";
     o += "- **Selected Items:** " + std::to_string(p.selectedTargets.size()) + "\n";
@@ -1609,8 +1585,8 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
 
     const auto& mp = p.memoryProjection;
     o += "## Memory & Sample RAM Projection\n\n";
-    o += "- **Unit:** " + mdCodeSpan(mp.unit) + "\n";
-    o += "- **Fit Verdict:** " + mdCodeSpan(mp.fitVerdict) + "\n";
+    o += "- **Unit:** " + mdCodeSpan(mp.unitName()) + "\n";
+    o += "- **Fit Verdict:** " + mdCodeSpan(mp.fitVerdictName()) + "\n";
     o += "- **Pre-Dedup Referenced Sample Bytes:** " + std::to_string(mp.rawReferencedSampleBytes) + "\n";
     o += "- **Unique Logical Sample Bytes:** " + std::to_string(mp.uniqueLogicalSampleBytes) + "\n";
     o += "- **Tier-1 Logical Dedup Saved Bytes:** " + std::to_string(mp.logicalDedupSavedBytes) + "\n";
@@ -1619,15 +1595,27 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
          std::to_string(mp.unknownSizeSamplesCount) + "\n";
     o += "- **Target Baseline / Projected Combined Bytes:** " + std::to_string(mp.targetBaselineSampleBytes) +
          " / " + std::to_string(mp.projectedCombinedBytes) + "\n";
-    o += "- **Caveat:** " + mdSanitizeText(mp.caveat) + "\n\n";
+    o += "- **Caveat:** " + mdSanitizeText(p.memoryCaveat) + "\n\n";
 
-    o += "## Blocking Issues (" + std::to_string(p.blockingReasons.size()) + ")\n\n";
-    if (p.blockingReasons.empty()) {
-        o += "_None._\n\n";
-    } else {
-        for (const auto& b : p.blockingReasons) {
-            o += "- **" + mdCodeSpan(blockingCodeName(b.code)) + "** (" + mdCodeSpan(b.subject) + "): " +
-                 mdSanitizeText(b.summary) + " — _Remediation:_ " + mdSanitizeText(b.remediation) + "\n";
+    o += "## Blocking Issues (" + std::to_string(p.blockingDiagnosticCount()) + " diagnostics, " +
+         std::to_string(p.blockingConflictCount()) + " conflicts)\n\n";
+    size_t emittedBlock = 0;
+    for (const auto& d : p.diagnostics) {
+        if (d.severity != DiagnosticSeverity::Blocking) continue;
+        ++emittedBlock;
+        o += "- **[" + std::string(diagnosticCategoryName(d.category)) + "] " + mdCodeSpan(d.code) + "** (" +
+             mdCodeSpan(d.subject) + "): " + mdSanitizeText(d.summary) + " — _Remediation:_ " +
+             mdSanitizeText(d.remediation) + "\n";
+    }
+    if (emittedBlock == 0) o += "_None._\n";
+    o += "\n";
+
+    if (!p.conflicts.empty()) {
+        o += "## Target Slot & Path Conflicts (" + std::to_string(p.conflicts.size()) + ")\n\n";
+        for (const auto& c : p.conflicts) {
+            o += "- " + mdCodeSpan(slotConflictKindName(c.kind)) + " | " + mdCodeSpan(c.address) +
+                 " | resolution=" + mdCodeSpan(c.resolution) + " | blocking=" +
+                 (c.blocking ? "true" : "false") + " (" + mdSanitizeText(c.detail) + ")\n";
         }
         o += "\n";
     }
@@ -1650,7 +1638,7 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
         o += "## Tier-3 Native KST Equivalence (" + std::to_string(p.nativeEquivalences.size()) + ")\n\n";
         for (const auto& ne : p.nativeEquivalences) {
             o += "- " + mdCodeSpan(ne.scope) + " | " + mdCodeSpan(ne.sourceSubject) + " vs " +
-                 mdCodeSpan(ne.targetSubject) + " -> **" + mdCodeSpan(nativeEquivalenceVerdictName(ne.verdict)) +
+                 mdCodeSpan(ne.targetSubject) + " -> **" + mdCodeSpan(equivalenceVerdictName(ne.verdict)) +
                  "** (" + mdSanitizeText(ne.reason) + ")\n";
         }
         o += "\n";

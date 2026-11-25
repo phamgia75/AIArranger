@@ -1,7 +1,7 @@
-// Slice M2b Synthetic Regression Tests:
-//   - M1 Manifest Adapter (`src/media/sound/m1_manifest_adapter.h`)
-//   - Automatic Selective Dependency Collector, 3-Tier Deduplicator, Memory Projection & Reproducible Dry-Run Plan
-//     (`src/media/sound/selective_collector.h`)
+// Slice M2b Synthetic Regression & M2a Integration Tests:
+//   - M1 Manifest Adapter (`src/media/sound/m1_manifest_adapter.h`) reusing M2a canonical types
+//   - Automatic Selective Dependency Collector, 3-Tier Deduplicator, M2a CollisionMatrix Integration,
+//     Memory Projection & Reproducible Dry-Run Plan (`src/media/sound/selective_collector.h`)
 //
 // 100% synthetic, original fixtures only (zero owner library files, proprietary bytes, real names, or local paths).
 // Strictly read-only: zero source/target library mutations, zero OC31 encoder in production code,
@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -287,7 +288,7 @@ static std::string makeSmf(const std::vector<SmfSelSpec>& sels, bool injectMalfo
         trk.push_back(0x00);
         trk.push_back(static_cast<char>(0xB0u));
         trk.push_back(0x0B);
-        trk.push_back(static_cast<char>(0x80u)); // invalid high bit >= 0x80
+        trk.push_back(static_cast<char>(0x80u));
     }
     trk.push_back(0x00); trk.push_back(static_cast<char>(0xFFu)); trk.push_back(0x2F); trk.push_back(0x00);
 
@@ -305,16 +306,8 @@ static std::string makeSmf(const std::vector<SmfSelSpec>& sels, bool injectMalfo
     return smf;
 }
 
-static bool hasBlocker(const DryRunExportPlan& p, BlockingCode code) {
-    for (const auto& b : p.blockingReasons) if (b.code == code) return true;
-    return false;
-}
-
-static bool hasNotice(const DryRunExportPlan& p, const std::string& code, const std::string& sev = "") {
-    for (const auto& n : p.notices) {
-        if (n.code == code && (sev.empty() || n.severity == sev)) return true;
-    }
-    return false;
+static SelectionTarget selStyle(const std::string& relPath, const std::string& targetBank = "", const std::string& targetName = "") {
+    return SelectionTarget{SelectedKind::Style, relPath, targetBank, targetName};
 }
 
 static void writeFileBytes(const fs::path& p, const Bytes& data) {
@@ -333,7 +326,6 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
 
     SynthKmpSpec kmp;
     std::vector<SynthKorfItem> pcm1Items, pcm2Items;
-    // 10 synthetic Samples with distinct sizes: 2000 + 200*i bytes (all even, 16-bit proxy)
     uint64_t expectedUniqueSampleBytes = 0;
     std::vector<uint64_t> sampleSizes(10, 0);
     for (uint8_t i = 0; i < 10; ++i) {
@@ -346,9 +338,6 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
         if (i < 5) pcm1Items.push_back(std::move(pi));
         else pcm2Items.push_back(std::move(pi));
     }
-    // 2 Multisamples sharing Samples 4 and 5:
-    //   MS0 uses Samples 0..5 (6 zones)
-    //   MS1 uses Samples 4..9 (6 zones)
     for (uint32_t s = 0; s <= 5; ++s) kmp.zones.push_back({s, static_cast<uint8_t>(40 + s * 4)});
     for (uint32_t s = 4; s <= 9; ++s) kmp.zones.push_back({s, static_cast<uint8_t>(70 + (s - 4) * 4)});
     const Id8 ms0Id = makeId(0xB1, 0);
@@ -356,10 +345,6 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
     kmp.multis.push_back({ms0Id, "MsAlpha", 0, 6});
     kmp.multis.push_back({ms1Id, "MsBeta", 6, 6});
 
-    // 3 Sounds sharing MS0 & MS1:
-    //   Sound 0: osc0 -> (MS0, 0)         -> reaches Samples 0..5
-    //   Sound 1: osc0 -> (MS1, 0)         -> reaches Samples 4..9
-    //   Sound 2: osc0 -> (MS0, MS1)       -> reaches Samples 0..9
     const Bytes s0Body = buildSoundBody(L, {{ms0Id, kZeroId}});
     const Bytes s1Body = buildSoundBody(L, {{ms1Id, kZeroId}});
     const Bytes s2Body = buildSoundBody(L, {{ms0Id, ms1Id}});
@@ -376,11 +361,10 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
     in.downstream.pcmContainers.push_back({"PCM/ram02.pcm", "", buildKorfContainer(pcm2Items)});
     in.downstream.soundContainers.push_back({"SOUND/USER01.PCG", "USER01", buildKorfContainer(sndItems)});
 
-    // 5 synthetic Styles each referencing all 3 Sounds (Sound 0 in main track, Sound 1 in embedded KBD Set, Sound 2 in embedded Pad)
     for (int i = 1; i <= 5; ++i) {
-        const std::string smfMain = makeSmf({{0, 121, 64, 0}, {1, 121, 0, 0}}); // USER01/0 + Factory ROM
-        const std::string smfKbd  = makeSmf({{0, 121, 64, 1}});                  // USER01/1
-        const std::string smfPad  = makeSmf({{0, 121, 64, 2}});                  // USER01/2
+        const std::string smfMain = makeSmf({{0, 121, 64, 0}, {1, 121, 0, 0}});
+        const std::string smfKbd  = makeSmf({{0, 121, 64, 1}});
+        const std::string smfPad  = makeSmf({{0, 121, 64, 2}});
         const Bytes stg = rtSerialize({
             rtBranch("Var1.scn", {rtBranch("Track1.pdc", {rtLeaf("Main.mid", smfMain)})}),
             rtBranch("KbdSet1-4.scn", {rtBranch("KS1.ksc", {rtBranch("Main.ssn", {rtBranch("RTTracks.scn", {rtBranch("Upper1.plc", {rtLeaf("Main.mid", smfKbd)})})})})}),
@@ -398,20 +382,28 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
     TEST("adapter roots count == 5", view.roots.size() == 5);
     TEST("deleteProofAvailable == false", !view.coverage.deleteProofAvailable);
 
-    // Verify Graph::deleteCheck() NEVER returns Unreferenced on any node!
+    // M2a parity check: equivalenceDigest computed by M2b adapter MUST match M2a inspectTargetKstInput() byte-for-byte!
+    TargetInspectOptions topts;
+    topts.downstream.layouts[kKind] = L;
+    topts.downstream.allowFitLayout = false;
+    const TargetOccupancyMap m2aMap = inspectTargetKstInput(in.downstream, {}, topts);
+    const ResourceId s0Id{false, "USER01", Kind::Sound, 0};
+    const OccupiedSlotEntry* m2aS0 = m2aMap.findOccupied({false, 1, 0});
+    TEST("M2b SoundEquivalenceProfile digest matches M2a inspectTargetKstInput() byte-for-byte",
+         m2aS0 != nullptr && !m2aS0->equivalence.equivalenceDigest.empty() &&
+             view.sounds.at(s0Id).equivalence.equivalenceDigest == m2aS0->equivalence.equivalenceDigest);
+
     size_t unrefCount = 0;
     for (const auto& [nid, _] : view.graph->nodes()) {
         if (view.graph->deleteCheck(nid).verdict == DeleteVerdict::Unreferenced) ++unrefCount;
     }
     TEST("Native-KST deleteCheck() NEVER Unreferenced", unrefCount == 0);
 
-    // Collect all 5 Styles (with embedded KBD Sets & Pads enabled)
     CollectorRequest req;
-    req.mode = CollectorExportMode::AdvisoryPlan;
-    for (int i = 1; i <= 5; ++i) req.targets.push_back({"STYLE/BankA/Style0" + std::to_string(i) + ".stg", "", ""});
+    req.mode = ExportMode::AdvisoryPlan;
+    for (int i = 1; i <= 5; ++i) req.targets.push_back(selStyle("STYLE/BankA/Style0" + std::to_string(i) + ".stg"));
     const DryRunExportPlan plan = collectSelectiveExport(view, req);
 
-    // Exact pre-dedup bytes: per Style -> Sound0 (samples 0..5) + Sound1 (samples 4..9) + Sound2 (samples 0..9)
     uint64_t perStyleRaw = 0;
     for (int s = 0; s <= 5; ++s) perStyleRaw += sampleSizes[size_t(s)];
     for (int s = 4; s <= 9; ++s) perStyleRaw += sampleSizes[size_t(s)];
@@ -419,7 +411,7 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
     const uint64_t expectedRawBytes = 5u * perStyleRaw;
     const uint64_t expectedSavedBytes = expectedRawBytes - expectedUniqueSampleBytes;
 
-    TEST("5-Style plan ok & executable in AdvisoryPlan", plan.ok && plan.executable && plan.blockingReasons.empty());
+    TEST("5-Style plan ok & executable in AdvisoryPlan", plan.ok && plan.executable && plan.blockingDiagnosticCount() == 0);
     TEST("5-Style exact unique counts (3 Sounds, 2 MS, 10 Samples, 2 PCMs)",
          plan.collectedSounds.size() == 3 && plan.uniqueMultisamples.size() == 2 &&
              plan.uniqueSamples.size() == 10 && plan.uniquePcmFiles.size() == 2);
@@ -430,12 +422,11 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
              plan.memoryProjection.logicalDedupSavedBytes == expectedSavedBytes);
     TEST("5-Style native proxy caveat enforced",
          plan.memoryProjection.sampleBytesAreNativeStoredProxy &&
-             plan.memoryProjection.unit == "native_kst_stored_pcm_proxy_bytes" &&
-             plan.memoryProjection.fitVerdict == "unverified-proxy" &&
-             !plan.memoryProjection.hardwareVerified &&
-             plan.memoryProjection.caveat.find("Stored PCM size") != std::string::npos);
+             std::string(plan.memoryProjection.unitName()) == "native_kst_stored_pcm_proxy_bytes" &&
+             std::string(plan.memoryProjection.fitVerdictName()) == "unverified-proxy" &&
+             !plan.hardwareVerified &&
+             plan.memoryCaveat.find("Stored PCM size") != std::string::npos);
 
-    // Verify Tier 1 DedupGroups carry resource-id+kmp-id8 and appliedInExport=true
     size_t tier1Sound = 0, tier1Ms = 0, tier1Smp = 0;
     for (const auto& dg : plan.dedupGroups) {
         if (dg.tier == DedupTier::Tier1LogicalIdentity && dg.appliedInExport) {
@@ -446,9 +437,16 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
     }
     TEST("5-Style Tier-1 dedup groups (3 Sounds, 2 MS, 10 Samples)", tier1Sound == 3 && tier1Ms == 2 && tier1Smp == 10);
 
+    // Bridge to M2a SelectiveExportReport -> serializeSelectiveReportJson parses cleanly!
+    const SelectiveExportReport m2aRep = toSelectiveExportReport(plan, "SyntheticSource");
+    const std::string m2aJson = serializeSelectiveReportJson(m2aRep);
+    kit::Json parsedM2a;
+    TEST("toSelectiveExportReport() serializes valid M2a report JSON",
+         kit::parseJson(m2aJson, &parsedM2a).empty() && m2aJson.find(kSelectiveReportSchema) != std::string::npos);
+
     // Toggle embedded KBD Set & Pad flags on Style01
     CollectorRequest reqNoKbd;
-    reqNoKbd.targets = {{"STYLE/BankA/Style01.stg", "", ""}};
+    reqNoKbd.targets = {selStyle("STYLE/BankA/Style01.stg")};
     reqNoKbd.includeEmbeddedKbdSets = false;
     reqNoKbd.includeEmbeddedPads = true;
     const DryRunExportPlan planNoKbd = collectSelectiveExport(view, reqNoKbd);
@@ -458,7 +456,7 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
              planNoKbd.collectedSounds[1].id.number == 2);
 
     CollectorRequest reqNoPad;
-    reqNoPad.targets = {{"STYLE/BankA/Style01.stg", "", ""}};
+    reqNoPad.targets = {selStyle("STYLE/BankA/Style01.stg")};
     reqNoPad.includeEmbeddedKbdSets = true;
     reqNoPad.includeEmbeddedPads = false;
     const DryRunExportPlan planNoPad = collectSelectiveExport(view, reqNoPad);
@@ -468,7 +466,7 @@ static void testMultiStyleSharingAndEmbeddedFlags() {
              planNoPad.collectedSounds[1].id.number == 1);
 
     CollectorRequest reqMainOnly;
-    reqMainOnly.targets = {{"STYLE/BankA/Style01.stg", "", ""}};
+    reqMainOnly.targets = {selStyle("STYLE/BankA/Style01.stg")};
     reqMainOnly.includeEmbeddedKbdSets = false;
     reqMainOnly.includeEmbeddedPads = false;
     const DryRunExportPlan planMainOnly = collectSelectiveExport(view, reqMainOnly);
@@ -491,7 +489,6 @@ static void testProvisionalTier2DedupAndMemoryProjection() {
         return s;
     };
 
-    // PkgAlpha: 2 samples: S_shared (1000 frames = 2000 B), S_sameNameA (500 frames = 1000 B, seed 11)
     sound::Instrument instA;
     instA.name = "SynthAlpha";
     instA.samples.push_back(makeSample("ToneShared", 1000, 42));
@@ -503,11 +500,10 @@ static void testProvisionalTier2DedupAndMemoryProjection() {
     layA.zones.push_back(sound::Zone{61, 127, 1, 72, 0, 0});
     instA.layers.push_back(std::move(layA));
 
-    // PkgBeta: 2 samples: byte-identical audio to ToneShared (different filename!) + CommonLabel with DIFFERENT audio (seed 99)
     sound::Instrument instB;
     instB.name = "SynthBeta";
-    instB.samples.push_back(makeSample("RenamedClone", 1000, 42)); // exact same PCM as ToneShared!
-    instB.samples.push_back(makeSample("CommonLabel", 500, 99));   // same name, DIFFERENT PCM!
+    instB.samples.push_back(makeSample("RenamedClone", 1000, 42));
+    instB.samples.push_back(makeSample("CommonLabel", 500, 99));
     sound::Layer layB;
     layB.name = "Main";
     layB.velLo = 0; layB.velHi = 127;
@@ -539,7 +535,7 @@ static void testProvisionalTier2DedupAndMemoryProjection() {
     r2.relPath = "STYLES/BalladTwo.mid";
     r2.kind = RootItemKind::ProvisionalMidi;
     r2.smfBytes.assign(smfB.begin(), smfB.end());
-    r2.addressToPackageId[{121, 64, 0}] = pkgAId; // shared identical package!
+    r2.addressToPackageId[{121, 64, 0}] = pkgAId;
     r2.addressToPackageId[{121, 64, 1}] = pkgBId;
 
     ws.roots.push_back(r1);
@@ -549,21 +545,20 @@ static void testProvisionalTier2DedupAndMemoryProjection() {
     TEST("provisional view ok", view.ok && view.isProvisional() && view.packagesById.size() == 2);
 
     CollectorRequest req;
-    req.mode = CollectorExportMode::ImportKitBundle;
-    req.targets = {{"STYLES/BalladOne.mid", "", ""}, {"STYLES/BalladTwo.mid", "", ""}};
+    req.mode = ExportMode::ImportKitBundle;
+    req.targets = {selStyle("STYLES/BalladOne.mid"), selStyle("STYLES/BalladTwo.mid")};
     const DryRunExportPlan plan = collectSelectiveExport(view, req);
 
-    // Raw = PkgA (3000) + PkgA (3000) + PkgB (3000) = 9000; Unique = 6000; LogicalSaved = 3000; IdenticalExtra = 2000
     TEST("provisional plan executable", plan.ok && plan.executable && plan.coverageComplete);
     TEST("PkgAlpha included once in uniqueProvisionalPackages",
          plan.uniqueProvisionalPackages.size() == 2 &&
              plan.uniqueProvisionalPackages[0] == pkgAId &&
              plan.uniqueProvisionalPackages[1] == pkgBId);
     TEST("exact uncompressed memory math",
-         plan.memoryProjection.unit == "uncompressed_pcm_bytes" &&
+         std::string(plan.memoryProjection.unitName()) == "uncompressed_pcm_bytes" &&
              !plan.memoryProjection.sampleBytesAreNativeStoredProxy &&
-             plan.memoryProjection.fitVerdict == "fits" &&
-             !plan.memoryProjection.hardwareVerified &&
+             std::string(plan.memoryProjection.fitVerdictName()) == "fits" &&
+             !plan.hardwareVerified &&
              plan.memoryProjection.rawReferencedSampleBytes == 9000 &&
              plan.memoryProjection.uniqueLogicalSampleBytes == 6000 &&
              plan.memoryProjection.logicalDedupSavedBytes == 3000 &&
@@ -596,39 +591,29 @@ static void testProvisionalTier2DedupAndMemoryProjection() {
         badWs.roots.push_back(badRoot);
         const M1AdapterView badView = adaptProvisionalWorkspace(badWs);
         CollectorRequest badReq;
-        badReq.targets = {{"STYLES/BadSmf.mid", "", ""}};
+        badReq.targets = {selStyle("STYLES/BadSmf.mid")};
         const DryRunExportPlan badPlan = collectSelectiveExport(badView, badReq);
         TEST("malformed provisional SMF fails closed with MALFORMED_MIDI_LEAF",
-             !badPlan.executable && hasBlocker(badPlan, BlockingCode::MALFORMED_MIDI_LEAF));
+             !badPlan.executable && badPlan.hasBlockingCode(diag_code::kMalformedMidiLeaf));
     }
 
-    // Provisional source + Native KST target baseline MUST switch to native_kst_stored_pcm_proxy_bytes / unverified-proxy
+    // Provisional source + Native KST target baseline switches to native_kst_stored_pcm_proxy_bytes / unverified-proxy
     {
-        M1AdapterView synthTarget;
-        synthTarget.ok = true;
-        synthTarget.sourceKind = AdapterSourceKind::NativeKst;
-        SampleRecord tr;
-        tr.id = ResourceId{false, "KST", Kind::Sample, 0};
-        tr.hasPcm = true;
-        tr.isStoredSizeProxy = true;
-        tr.payloadBytes = 100000;
-        synthTarget.samples.emplace(tr.id, tr);
-        synthTarget.manifestSha256 = std::string(64, 'a');
-
-        const DryRunExportPlan mixedPlan = collectSelectiveExport(view, req, &synthTarget);
+        TargetOccupancyMap emptyTarget = TargetOccupancyMap::makeEmpty(true);
+        const DryRunExportPlan mixedPlan = collectSelectiveExportWithTargetMap(view, req, &emptyTarget, 100000, true);
         TEST("provisional + Native-KST target baseline switches to unverified-proxy caveat",
              mixedPlan.memoryProjection.sampleBytesAreNativeStoredProxy &&
-                 mixedPlan.memoryProjection.unit == "native_kst_stored_pcm_proxy_bytes" &&
-                 mixedPlan.memoryProjection.fitVerdict == "unverified-proxy" &&
+                 std::string(mixedPlan.memoryProjection.unitName()) == "native_kst_stored_pcm_proxy_bytes" &&
+                 std::string(mixedPlan.memoryProjection.fitVerdictName()) == "unverified-proxy" &&
                  mixedPlan.memoryProjection.targetBaselineSampleBytes == 100000 &&
                  mixedPlan.memoryProjection.projectedCombinedBytes == 106000);
     }
 }
 
-// ── Test 3: Tier-3 Native KST Content Equivalence (Identical vs Different vs InsufficientEvidence) & HOLD Gates ───────
+// ── Test 3: Tier-3 Native KST Equivalence (via M2a compareSoundEquivalence) & HOLD Gates ─────────────────────────────
 
 static void testTier3NativeEquivalenceAndHoldGates() {
-    std::printf("[Test 3] Tier-3 Native KST 3-way equivalence (Identical/Different/InsufficientEvidence) & HOLD gates\n");
+    std::printf("[Test 3] Tier-3 Native KST 3-way equivalence (M2a single source of truth) & HOLD gates\n");
 
     const RecordLayout L{12, 24, 8};
     const uint32_t kKind = 0x10050038u;
@@ -638,11 +623,11 @@ static void testTier3NativeEquivalenceAndHoldGates() {
     const Id8 smpIdB = makeId(0xD1, 2);
     const Id8 unknownSlotId = makeId(0xEE, 9);
 
-    auto makeKst = [&](uint32_t smpABytes, uint8_t s1Fill, bool includeUnanalysedDk, bool addUnresolvedToS2) {
+    auto makeKst = [&](uint32_t smpABytes, uint8_t s1Fill, bool includeUnanalysedDk, bool addUnresolvedToS2, uint8_t zone0TopKey = 60) {
         SynthKmpSpec kmp;
         kmp.samples.push_back({smpIdA, "SmpA", 48000});
         kmp.samples.push_back({smpIdB, "SmpB", 48000});
-        kmp.zones.push_back({0, 60});
+        kmp.zones.push_back({0, zone0TopKey});
         kmp.zones.push_back({1, 127});
         kmp.multis.push_back({msIdA, "MsA", 0, 1});
         kmp.multis.push_back({msIdB, "MsB", 1, 1});
@@ -650,7 +635,7 @@ static void testTier3NativeEquivalenceAndHoldGates() {
         const Bytes s0Body = buildSoundBody(L, {{msIdA, kZeroId}}, 0x5Au);
         const Bytes s1Body = buildSoundBody(L, {{msIdB, kZeroId}}, s1Fill);
         const Bytes s2Body = buildSoundBody(L, {{msIdA, addUnresolvedToS2 ? unknownSlotId : kZeroId}}, 0x5Au);
-        const Bytes noRefBody = buildSoundBody(L, {{kZeroId, kZeroId}}, 0x33u); // Gap::NoKnownReference
+        const Bytes noRefBody = buildSoundBody(L, {{kZeroId, kZeroId}}, 0x33u);
 
         std::vector<SynthKorfItem> user01{
             {kKind, 0, 0, 0, "SharedPiano",  makeOcLiteralFrame("OC31", s0Body), ""},
@@ -667,12 +652,11 @@ static void testTier3NativeEquivalenceAndHoldGates() {
         })});
         in.downstream.soundContainers.push_back({"SOUND/USER01.PCG", "USER01", buildKorfContainer(user01)});
         if (includeUnanalysedDk) {
-            Bytes dkBody(19, 0x77u); // does not fit layout -> SizeDoesNotFit
+            Bytes dkBody(19, 0x77u);
             in.downstream.soundContainers.push_back({"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
                 {kKind, 0, 0, 0, "KitOne", makeOcLiteralFrame("OC31", dkBody), ""}
             })});
         }
-        // Styles
         in.upstreamRoots.push_back({"STYLE/BankA/FactoryOnly.stg", rtSerialize({rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, 121, 0, 5}}))})})})});
         in.upstreamRoots.push_back({"STYLE/BankA/TargetMatched.stg", rtSerialize({rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, 121, 64, 0}}))})})})});
         in.upstreamRoots.push_back({"STYLE/BankA/SameNameDiff.stg", rtSerialize({rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, 121, 64, 1}}))})})})});
@@ -683,9 +667,10 @@ static void testTier3NativeEquivalenceAndHoldGates() {
     aopts.closureOptions.downstream.layouts[kKind] = L;
     aopts.closureOptions.downstream.allowFitLayout = false;
 
-    const M1AdapterView srcView = adaptNativeKstInput(makeKst(3000, 0x5Au, true, true), aopts);
-    const M1AdapterView dstViewSame = adaptNativeKstInput(makeKst(3000, 0x6Bu, true, true), aopts);
-    const M1AdapterView dstViewDiffPcmSize = adaptNativeKstInput(makeKst(3200, 0x5Au, true, false), aopts);
+    const M1AdapterView srcView = adaptNativeKstInput(makeKst(3000, 0x5Au, true, true, 60), aopts);
+    const M1AdapterView dstViewSame = adaptNativeKstInput(makeKst(3000, 0x6Bu, true, true, 60), aopts);
+    const M1AdapterView dstViewDiffPcmSize = adaptNativeKstInput(makeKst(3200, 0x5Au, true, false, 60), aopts);
+    const M1AdapterView dstViewDiffTopKey = adaptNativeKstInput(makeKst(3000, 0x5Au, true, false, 72), aopts);
 
     const ResourceId s0{false, "USER01", Kind::Sound, 0};
     const ResourceId s1{false, "USER01", Kind::Sound, 1};
@@ -696,54 +681,59 @@ static void testTier3NativeEquivalenceAndHoldGates() {
     const auto eqIdentical = classifyNativeSoundEquivalence(srcView, s0, dstViewSame, s0);
     const auto eqDiffBody = classifyNativeSoundEquivalence(srcView, s1, dstViewSame, s1);
     const auto eqDiffPcm = classifyNativeSoundEquivalence(srcView, s0, dstViewDiffPcmSize, s0);
+    const auto eqDiffTopKey = classifyNativeSoundEquivalence(srcView, s0, dstViewDiffTopKey, s0);
     const auto eqUnresSlot = classifyNativeSoundEquivalence(srcView, s2, dstViewSame, s2);
     const auto eqNoRef = classifyNativeSoundEquivalence(srcView, s3, dstViewSame, s3);
     const auto eqDk = classifyNativeSoundEquivalence(srcView, dk0, dstViewSame, dk0);
 
-    TEST("Tier-3 Identical proven (SHA-256 + Analysed + Id8/size match)",
-         eqIdentical.verdict == NativeEquivalenceVerdict::Identical && !eqIdentical.mergesPa5xId8);
+    TEST("Tier-3 Identical proven via M2a compareSoundEquivalence (SHA-256 + Analysed + Id8/topKey/size)",
+         eqIdentical.verdict == EquivalenceVerdict::Identical && !eqIdentical.mergesPa5xId8);
     TEST("Tier-3 same-name different-body -> Different (NEVER merged)",
-         eqDiffBody.verdict == NativeEquivalenceVerdict::Different);
+         eqDiffBody.verdict == EquivalenceVerdict::Different);
     TEST("Tier-3 same-body different-PCM-size -> Different",
-         eqDiffPcm.verdict == NativeEquivalenceVerdict::Different);
+         eqDiffPcm.verdict == EquivalenceVerdict::Different);
+    TEST("Tier-3 same-body different-zone-topKey -> Different (M2a zone fidelity!)",
+         eqDiffTopKey.verdict == EquivalenceVerdict::Different);
     TEST("Tier-3 unresolved slot in analysed Sound -> InsufficientEvidence",
-         eqUnresSlot.verdict == NativeEquivalenceVerdict::InsufficientEvidence);
+         eqUnresSlot.verdict == EquivalenceVerdict::InsufficientEvidence);
     TEST("Tier-3 NoKnownReference Sound -> InsufficientEvidence",
-         eqNoRef.verdict == NativeEquivalenceVerdict::InsufficientEvidence);
+         eqNoRef.verdict == EquivalenceVerdict::InsufficientEvidence);
     TEST("Tier-3 unanalysed USERDK -> InsufficientEvidence",
-         eqDk.verdict == NativeEquivalenceVerdict::InsufficientEvidence);
+         eqDk.verdict == EquivalenceVerdict::InsufficientEvidence);
 
-    // RootTreeSubKst mode: FactoryOnly -> executable; TargetMatched -> executable; SameNameDiff -> BLOCKED (HOLD)
     {
         CollectorRequest req;
-        req.mode = CollectorExportMode::RootTreeSubKst;
-        req.targets = {{"STYLE/BankA/FactoryOnly.stg", "", ""}};
+        req.mode = ExportMode::RootTreeSubKst;
+        req.targets = {selStyle("STYLE/BankA/FactoryOnly.stg")};
         const DryRunExportPlan p = collectSelectiveExport(srcView, req, &dstViewSame);
-        TEST("RootTreeSubKst FactoryOnly executable", p.ok && p.executable);
+        TEST("RootTreeSubKst FactoryOnly executable (already-present-noop non-blocking)", p.ok && p.executable);
     }
     {
         CollectorRequest req;
-        req.mode = CollectorExportMode::RootTreeSubKst;
-        req.targets = {{"STYLE/BankA/TargetMatched.stg", "", ""}};
+        req.mode = ExportMode::RootTreeSubKst;
+        req.targets = {selStyle("STYLE/BankA/TargetMatched.stg")};
         const DryRunExportPlan p = collectSelectiveExport(srcView, req, &dstViewSame);
-        TEST("RootTreeSubKst TargetMatched executable (reuses identical target)",
-             p.ok && p.executable && p.collectedSounds.size() == 1 && p.collectedSounds[0].satisfiedByTarget);
+        TEST("RootTreeSubKst TargetMatched executable (reuses exact-slot identical target)",
+             p.ok && p.executable && p.collectedSounds.size() == 1 &&
+                 p.collectedSounds[0].satisfiedByTarget && !p.collectedSounds[0].requiresRemap);
     }
     {
         CollectorRequest req;
-        req.mode = CollectorExportMode::RootTreeSubKst;
-        req.targets = {{"STYLE/BankA/SameNameDiff.stg", "", ""}};
+        req.mode = ExportMode::RootTreeSubKst;
+        req.targets = {selStyle("STYLE/BankA/SameNameDiff.stg")};
         const DryRunExportPlan p = collectSelectiveExport(srcView, req, &dstViewSame);
-        TEST("RootTreeSubKst SameNameDiff blocked with NATIVE_SOUND_WRITE_HOLD",
-             p.ok && !p.executable && hasBlocker(p, BlockingCode::NATIVE_SOUND_WRITE_HOLD));
+        TEST("RootTreeSubKst SameNameDiff blocked with NATIVE_SOUND_WRITE_HOLD & M2a SoundSlotOccupiedDifferent",
+             p.ok && !p.executable && p.hasBlockingCode(diag_code::kNativeSoundWriteHold) &&
+                 p.hasBlockingCode(diag_code::kSoundSlotOccupiedDifferent) &&
+                 p.blockingConflictCount() >= 1);
     }
     {
         CollectorRequest req;
-        req.mode = CollectorExportMode::NativeSoundKst_HOLD;
-        req.targets = {{"STYLE/BankA/FactoryOnly.stg", "", ""}};
+        req.mode = ExportMode::NativeSoundKst_HOLD;
+        req.targets = {selStyle("STYLE/BankA/FactoryOnly.stg")};
         const DryRunExportPlan p = collectSelectiveExport(srcView, req);
         TEST("NativeSoundKst_HOLD ALWAYS fails closed",
-             p.ok && !p.executable && hasBlocker(p, BlockingCode::NATIVE_SOUND_WRITE_HOLD));
+             p.ok && !p.executable && p.hasBlockingCode(diag_code::kNativeSoundWriteHold));
     }
 }
 
@@ -762,18 +752,16 @@ static void testFailClosedBlockingAndBoundaries() {
 
     SynthKmpSpec kmp;
     kmp.samples.push_back({smpGood, "SmpGood", 48000});
-    kmp.samples.push_back({smpMissingPcm, "SmpNoPcm", 48000}); // absent from PCM!
+    kmp.samples.push_back({smpMissingPcm, "SmpNoPcm", 48000});
     kmp.drums.push_back({dupDrumId, "Dr1", 0, kNoZoneSample});
-    kmp.drums.push_back({dupDrumId, "Dr2", 0, kNoZoneSample}); // duplicate DrumSample ID!
+    kmp.drums.push_back({dupDrumId, "Dr2", 0, kNoZoneSample});
     kmp.zones.push_back({0, 60});
     kmp.zones.push_back({1, 127});
     kmp.multis.push_back({msId, "MsMixed", 0, 2});
 
-    // Sound 0: analysed with 1 unresolved slot (inUnanalysedSound == false) and reaches smpMissingPcm!
-    // Sound 1: unanalysed NoKnownReference with 1 non-empty slot (inUnanalysedSound == true)!
     const Bytes s0Body = buildSoundBody(L, {{msId, badSlotId}});
     const Bytes s1Body = buildSoundBody(L, {{badSlotId, kZeroId}});
-    const Bytes dkBody(19, 0x44u); // SizeDoesNotFit -> unanalysed USERDK
+    const Bytes dkBody(19, 0x44u);
 
     NativeKstClosureInput in;
     in.downstream.kmpContainer = RawNamedBlob{"MULTISMP/RAM.KMP", "", buildKorfContainer({{kPa5xKmpChunkId, 0, 0, 0, "RAM", buildPa5xKmpPayload(kmp), ""}})};
@@ -788,24 +776,21 @@ static void testFailClosedBlockingAndBoundaries() {
         {kKind, 0, 0, 0, "UnparsedKit", makeOcLiteralFrame("OC31", dkBody), ""}
     })});
 
-    // Root 1: missing slot (USER01/99), missing bank (USER05/0), out-of-spec DK bank (120/72/0), unknown MSB (99/5/0), missing CC0/CC32
     in.upstreamRoots.push_back({"STYLE/BankA/BrokenRefs.stg", rtSerialize({
         rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({
-            {0, 121, 64, 99}, // slot empty
-            {1, 121, 68, 0},  // bank absent (USER05)
-            {2, 120, 72, 0},  // AmbiguousOrOutOfSpec (USERDK09 absent; NEVER coerced to Factory!)
-            {3, 99, 5, 0},    // UnknownOrUnanalysed (NEVER coerced to Factory!)
-            {4, -1, -1, 7}    // missing bank select
+            {0, 121, 64, 99},
+            {1, 121, 68, 0},
+            {2, 120, 72, 0},
+            {3, 99, 5, 0},
+            {4, -1, -1, 7}
         }))})})
     })});
-    // Root 2: malformed CC11 >= 0x80 leaf
     in.upstreamRoots.push_back({"PAD/BankA/BadPad.pdc", rtSerialize({rtLeaf("Main.mid", makeSmf({{0, 121, 0, 0}}, true))})});
-    // Root 3: USERDK01/0 + AnalysedWithUnres + NoRefSpeculative
     in.upstreamRoots.push_back({"STYLE/BankA/DkAndUnres.stg", rtSerialize({
         rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({
-            {0, 120, 64, 0}, // USERDK01/0
-            {1, 121, 64, 0}, // USER01/0 (analysed, unresolved slot + missing PCM!)
-            {2, 121, 64, 1}  // USER01/1 (NoKnownReference + speculative slot!)
+            {0, 120, 64, 0},
+            {1, 121, 64, 0},
+            {2, 121, 64, 1}
         }))})})
     })});
 
@@ -814,7 +799,6 @@ static void testFailClosedBlockingAndBoundaries() {
     aopts.closureOptions.downstream.allowFitLayout = false;
     const M1AdapterView view = adaptNativeKstInput(in, aopts);
 
-    // Check strict boundary classification on BrokenRefs.stg
     const RootItemRecord* br = view.findRoot("STYLE/BankA/BrokenRefs.stg");
     TEST("BrokenRefs root adapted", br != nullptr && br->soundSelections.size() == 5);
     bool sawOutOfSpec = false, sawUnknown = false, sawBankMissing = false;
@@ -828,37 +812,37 @@ static void testFailClosedBlockingAndBoundaries() {
 
     {
         CollectorRequest req;
-        req.targets = {{"STYLE/BankA/BrokenRefs.stg", "", ""}, {"PAD/BankA/BadPad.pdc", "", ""}};
+        req.targets = {selStyle("STYLE/BankA/BrokenRefs.stg"), SelectionTarget{SelectedKind::Pad, "PAD/BankA/BadPad.pdc", "", ""}};
         const DryRunExportPlan p = collectSelectiveExport(view, req);
-        TEST("BrokenRefs + BadPad fail closed with exact codes",
+        TEST("BrokenRefs + BadPad fail closed with exact M2a diagnostic codes",
              !p.executable &&
-                 hasBlocker(p, BlockingCode::MISSING_USER_SOUND_SLOT) &&
-                 hasBlocker(p, BlockingCode::MISSING_USER_SOUND_BANK) &&
-                 hasBlocker(p, BlockingCode::UNRESOLVED_MIDI_BANK_SELECT) &&
-                 hasBlocker(p, BlockingCode::UNKNOWN_ORIGIN_MIDI_ADDRESS) &&
-                 hasBlocker(p, BlockingCode::MALFORMED_MIDI_LEAF) &&
+                 p.hasBlockingCode(diag_code::kMissingUserSoundSlot) &&
+                 p.hasBlockingCode(diag_code::kMissingUserSoundBank) &&
+                 p.hasBlockingCode(diag_code::kUnresolvedMidiBankSelect) &&
+                 p.hasBlockingCode(collector_diag_code::kUnknownOriginMidiAddress) &&
+                 p.hasBlockingCode(diag_code::kMalformedMidiLeaf) &&
                  p.factorySoundSelectCount == 0);
     }
 
     {
         CollectorRequest req;
-        req.targets = {{"STYLE/BankA/DkAndUnres.stg", "", ""}};
+        req.targets = {selStyle("STYLE/BankA/DkAndUnres.stg")};
         req.requireCompleteSampleClosure = true;
         const DryRunExportPlan p = collectSelectiveExport(view, req);
         TEST("DkAndUnres blocks on USERDK & missing PCM, separates UnresolvedSlot",
              !p.executable && !p.coverageComplete &&
-                 hasBlocker(p, BlockingCode::DRUMKIT_BODY_UNPARSED) &&
-                 hasBlocker(p, BlockingCode::MISSING_PCM_FOR_KMP_SAMPLE) &&
+                 p.hasBlockingCode(diag_code::kDrumkitBodyUnparsed) &&
+                 p.hasBlockingCode(diag_code::kMissingPcmForKmpSample) &&
                  p.memoryProjection.unknownSizeSamplesCount == 1 &&
                  p.unresolvedSlotsInAnalysedCount == 1 &&
                  p.unresolvedSlotsInUnanalysedCount == 1 &&
-                 hasNotice(p, "UNRESOLVED_SOUND_SLOT_ANALYSED", "warning") &&
-                 hasNotice(p, "UNRESOLVED_SOUND_SLOT_SPECULATIVE", "info") &&
-                 hasNotice(p, "SOUND_NO_RAM_REF_INFERRED_ROM", "info") &&
-                 hasNotice(p, "DUPLICATE_KMP_DRUM_ID", "warning"));
+                 p.hasDiagnosticCode(diag_code::kUnresolvedSoundSlotAnalysed, DiagnosticSeverity::Warning) &&
+                 p.hasDiagnosticCode(diag_code::kUnresolvedSoundSlotSpeculative, DiagnosticSeverity::Info) &&
+                 p.hasDiagnosticCode(diag_code::kSoundNoRamRefInferredRom, DiagnosticSeverity::Info) &&
+                 p.hasDiagnosticCode(diag_code::kDuplicateKmpDrumId, DiagnosticSeverity::Warning));
     }
 
-    // OC31-encoded RAM.KMP -> OC31_KMP_UNSUPPORTED
+    // OC31-encoded RAM.KMP -> OC31_KMP_UNSUPPORTED (and as target -> TargetUninspectable!)
     {
         NativeKstClosureInput ocKmpIn;
         const Bytes fakeOc31 = makeOcLiteralFrame("OC31", Bytes(32, 0x22));
@@ -870,15 +854,24 @@ static void testFailClosedBlockingAndBoundaries() {
             rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, 121, 64, 0}}))})})
         })});
         const M1AdapterView ocView = adaptNativeKstInput(ocKmpIn);
-        TEST("OC31 KMP detected cleanly while Sound catalog stays populated",
-             ocView.ok && ocView.coverage.kmpIsOc31 && ocView.sounds.size() == 1);
+        TEST("OC31 KMP detected cleanly while Sound catalog & PartialNativeInspect stay populated",
+             ocView.ok && ocView.coverage.kmpIsOc31 && ocView.partialInspect.isPartial && ocView.sounds.size() == 1);
 
         CollectorRequest req;
-        req.targets = {{"STYLE/BankA/LegacyStyle.stg", "", ""}};
+        req.targets = {selStyle("STYLE/BankA/LegacyStyle.stg")};
         req.requireCompleteSampleClosure = true;
         const DryRunExportPlan p = collectSelectiveExport(ocView, req);
         TEST("OC31 KMP fails closed with OC31_KMP_UNSUPPORTED",
-             !p.executable && !p.coverageComplete && hasBlocker(p, BlockingCode::OC31_KMP_UNSUPPORTED));
+             !p.executable && !p.coverageComplete && p.hasBlockingCode(diag_code::kOc31KmpUnsupported));
+
+        // Using OC31 KST as optionalTarget -> M2a CollisionMatrix blocks with TargetUninspectable!
+        CollectorRequest reqVsOcTarget;
+        reqVsOcTarget.targets = {selStyle("STYLE/BankA/DkAndUnres.stg")};
+        reqVsOcTarget.requireCompleteSampleClosure = false;
+        const DryRunExportPlan pVsOc = collectSelectiveExport(view, reqVsOcTarget, &ocView);
+        TEST("OC31 KST used as optionalTarget fails closed via M2a TargetUninspectable",
+             !pVsOc.executable && pVsOc.hasBlockingCode(diag_code::kTargetUninspectable) &&
+                 pVsOc.blockingConflictCount() >= 1);
     }
 }
 
@@ -913,18 +906,16 @@ static void testCooperativeCancellation() {
     aopts.closureOptions.downstream.allowFitLayout = false;
     aopts.cancelCheckStride = 16;
 
-    // Cancel mid-adaptation
     size_t adaptCalls = 0;
     const M1AdapterView cancelledView = adaptNativeKstInput(in, aopts, [&]() { return ++adaptCalls <= 3; });
     TEST("mid-scan adapt cancelled cleanly with empty partial state",
          cancelledView.cancelled && !cancelledView.ok && cancelledView.roots.empty() &&
              cancelledView.sounds.empty() && cancelledView.samples.empty());
 
-    // Build full view, then cancel mid-collection (even with stride > 256, clamped to <= 256!)
     const M1AdapterView fullView = adaptNativeKstInput(in, aopts);
     CollectorRequest req;
     req.cancelCheckStride = 9999; // clamped to <= 256
-    for (const auto& r : fullView.roots) req.targets.push_back({r.relPath, "", ""});
+    for (const auto& r : fullView.roots) req.targets.push_back(selStyle(r.relPath));
 
     size_t collectCalls = 0;
     const DryRunExportPlan cancelledPlan = collectSelectiveExport(fullView, req, nullptr, [&]() { return ++collectCalls <= 2; });
@@ -972,9 +963,9 @@ static void testReproducibilityJsonAndPathFree() {
     const M1AdapterView view2 = adaptNativeKstFolder(kstDir, aopts);
 
     CollectorRequest reqA;
-    reqA.targets = {{"STYLE/BankZ/Zeta.stg", "", ""}, {"STYLE/BankA/Alpha.stg", "", ""}, {"PAD/BankM/MidPad.pdc", "", ""}};
+    reqA.targets = {selStyle("STYLE/BankZ/Zeta.stg"), selStyle("STYLE/BankA/Alpha.stg"), SelectionTarget{SelectedKind::Pad, "PAD/BankM/MidPad.pdc", "", ""}};
     CollectorRequest reqB;
-    reqB.targets = {{"PAD/BankM/MidPad.pdc", "", ""}, {"STYLE/BankZ/Zeta.stg", "", ""}, {"STYLE/BankA/Alpha.stg", "", ""}};
+    reqB.targets = {SelectionTarget{SelectedKind::Pad, "PAD/BankM/MidPad.pdc", "", ""}, selStyle("STYLE/BankZ/Zeta.stg"), selStyle("STYLE/BankA/Alpha.stg")};
 
     const DryRunExportPlan plan1 = collectSelectiveExport(view1, reqA);
     const DryRunExportPlan plan2 = collectSelectiveExport(view2, reqB);
@@ -1003,17 +994,17 @@ static void testReproducibilityJsonAndPathFree() {
              md1.find(tmpStr) == std::string::npos &&
              md1.find("/Users/") == std::string::npos);
     TEST("mandatory STRUCTURALLY VALID banner present in JSON & Markdown",
-         json1.find(kStructuralOnlyBanner) != std::string::npos &&
-             md1.find(kStructuralOnlyBanner) != std::string::npos);
+         json1.find(kHardwareUnverifiedBanner) != std::string::npos &&
+             md1.find(kHardwareUnverifiedBanner) != std::string::npos);
 
     std::error_code ec;
     fs::remove_all(tmpRoot, ec);
 }
 
-// ── Test 7: Audit Hardening Regressions (P1 Cross-Slot Remap, P2-1/P2-2/P2-3, P3-2/P3-3) ─────────────────────────────
+// ── Test 7: Audit Hardening & M2a Collision Integration Regressions (P1, P2-1/2/3, P3-2/3, FAT R-18) ──────────────────
 
-static void testAuditHardeningRegressions() {
-    std::printf("[Test 7] Audit hardening regressions (P1 cross-slot, P2-1 target fail-closed, P2-2 MD, P2-3 sat, P3-2/P3-3)\n");
+static void testAuditHardeningAndM2aIntegration() {
+    std::printf("[Test 7] Audit hardening & M2a integration (P1 cross-slot, P2-1/2/3, P3-2/3, FAT R-18)\n");
 
     const RecordLayout L{12, 24, 8};
     const uint32_t kKind = 0x10050038u;
@@ -1021,7 +1012,8 @@ static void testAuditHardeningRegressions() {
     const Id8 smpId = makeId(0x72, 1);
 
     auto makeSingleSoundKst = [&](const std::vector<std::pair<std::string, uint8_t>>& targetSlots,
-                                  const std::string& styleRel, int styleMsb, int styleLsb, uint8_t stylePc) {
+                                  const std::string& styleRel, int styleMsb, int styleLsb, uint8_t stylePc,
+                                  const std::string& extraObjectRel = "") {
         SynthKmpSpec kmp;
         kmp.samples.push_back({smpId, "SmpAud", 48000});
         kmp.zones.push_back({0, 127});
@@ -1045,6 +1037,11 @@ static void testAuditHardeningRegressions() {
                 rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, styleMsb, styleLsb, stylePc}}))})})
             })});
         }
+        if (!extraObjectRel.empty()) {
+            in.upstreamRoots.push_back({extraObjectRel, rtSerialize({
+                rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, 121, 0, 2}}))})})
+            })});
+        }
         M1AdapterOptions aopts;
         aopts.closureOptions.downstream.layouts[kKind] = L;
         aopts.closureOptions.downstream.allowFitLayout = false;
@@ -1057,11 +1054,11 @@ static void testAuditHardeningRegressions() {
         const M1AdapterView src = makeSingleSoundKst({{"USER02", 5}}, "STYLE/BankA/CrossSlot.stg", 121, 65, 5);
         const M1AdapterView dstCrossOnly = makeSingleSoundKst({{"USER01", 0}}, "", 0, 0, 0);
         CollectorRequest req;
-        req.mode = CollectorExportMode::RootTreeSubKst;
-        req.targets = {{"STYLE/BankA/CrossSlot.stg", "", ""}};
+        req.mode = ExportMode::RootTreeSubKst;
+        req.targets = {selStyle("STYLE/BankA/CrossSlot.stg")};
         const DryRunExportPlan p = collectSelectiveExport(src, req, &dstCrossOnly);
         TEST("P1(a) cross-slot identical match records requiresRemap=true and stays blocked (SMF_REMAP_REQUIRED)",
-             p.ok && !p.executable && hasBlocker(p, BlockingCode::SMF_REMAP_REQUIRED) &&
+             p.ok && !p.executable && p.hasBlockingCode(collector_diag_code::kSmfRemapRequired) &&
                  p.collectedSounds.size() == 1 && !p.collectedSounds[0].satisfiedByTarget &&
                  p.collectedSounds[0].requiresRemap &&
                  p.collectedSounds[0].matchedTargetSlot == "pa5x:USER01/Sound/0");
@@ -1080,13 +1077,59 @@ static void testAuditHardeningRegressions() {
         const M1AdapterView src = makeSingleSoundKst({{"USER02", 5}}, "STYLE/BankA/ExactSlot.stg", 121, 65, 5);
         const M1AdapterView dstBoth = makeSingleSoundKst({{"USER01", 0}, {"USER02", 5}}, "", 0, 0, 0);
         CollectorRequest req;
-        req.mode = CollectorExportMode::RootTreeSubKst;
-        req.targets = {{"STYLE/BankA/ExactSlot.stg", "", ""}};
+        req.mode = ExportMode::RootTreeSubKst;
+        req.targets = {selStyle("STYLE/BankA/ExactSlot.stg")};
         const DryRunExportPlan p = collectSelectiveExport(src, req, &dstBoth);
         TEST("P1(b) exact same-slot USER02/5 wins over lexicographically earlier USER01/0 (requiresRemap=false)",
              p.ok && p.executable && p.collectedSounds.size() == 1 &&
                  p.collectedSounds[0].satisfiedByTarget && !p.collectedSounds[0].requiresRemap &&
                  p.collectedSounds[0].matchedTargetSlot == "pa5x:USER02/Sound/5");
+    }
+
+    // M2a Integration: Target occupies USER02/5 with a DIFFERENT Sound AND holds proven-identical Sound at USER01/0:
+    // BlockWithReport blocks both M2a (SoundSlotIdenticalElsewhere) & M2b (SMF_REMAP_REQUIRED);
+    // ReuseIdenticalTargetSlot + approvedSoundRemaps lifts both cleanly!
+    {
+        const M1AdapterView src = makeSingleSoundKst({{"USER02", 5}}, "STYLE/BankA/RemapPolicy.stg", 121, 65, 5);
+        M1AdapterView dstOccupied = makeSingleSoundKst({{"USER01", 0}, {"USER02", 5}}, "", 0, 0, 0);
+        // Make target USER02/5 a genuinely DIFFERENT Sound (different decoded body SHA-256)
+        auto& occ = dstOccupied.sounds.at({false, "USER02", Kind::Sound, 5});
+        occ.decodedBodySha256 = std::string(64, 'a');
+        occ.equivalence.bodySha256 = occ.decodedBodySha256;
+        finalizeSoundEquivalenceProfile(occ.equivalence);
+
+        CollectorRequest req;
+        req.mode = ExportMode::RootTreeSubKst;
+        req.conflictPolicy = ConflictPolicy::BlockWithReport;
+        req.targets = {selStyle("STYLE/BankA/RemapPolicy.stg")};
+        const DryRunExportPlan pBlocked = collectSelectiveExport(src, req, &dstOccupied);
+        TEST("M2a+M2b cross-slot occupied target blocks under BlockWithReport",
+             pBlocked.ok && !pBlocked.executable && pBlocked.blockingConflictCount() >= 1 &&
+                 pBlocked.hasBlockingCode(collector_diag_code::kSmfRemapRequired));
+
+        req.conflictPolicy = ConflictPolicy::ReuseIdenticalTargetSlot;
+        req.approvedSoundRemaps[{false, "USER02", Kind::Sound, 5}] = {false, "USER01", Kind::Sound, 0};
+        const DryRunExportPlan pReused = collectSelectiveExport(src, req, &dstOccupied);
+        TEST("M2a+M2b ReuseIdenticalTargetSlot + approvedSoundRemaps resolves cross-slot cleanly",
+             pReused.ok && pReused.executable && pReused.blockingConflictCount() == 0 &&
+                 pReused.collectedSounds.size() == 1 &&
+                 pReused.collectedSounds[0].satisfiedByTarget &&
+                 pReused.collectedSounds[0].requiresRemap &&
+                 pReused.collectedSounds[0].matchedTargetSlot == "pa5x:USER01/Sound/0" &&
+                 pReused.hasDiagnosticCode(diag_code::kSongBookUnrewritten, DiagnosticSeverity::Warning));
+    }
+
+    // M2a Integration: FAT32/exFAT R-18 case-folded object path collision detected automatically via evaluateCollisionMatrix()
+    {
+        const M1AdapterView src = makeSingleSoundKst({{"USER01", 0}}, "STYLE/BankA/Ballad.stg", 121, 0, 1);
+        const M1AdapterView dstCase = makeSingleSoundKst({{"USER01", 0}}, "", 0, 0, 0, "STYLE/BANKA/ballad.stg");
+        CollectorRequest req;
+        req.mode = ExportMode::RootTreeSubKst;
+        req.targets = {selStyle("STYLE/BankA/Ballad.stg")};
+        const DryRunExportPlan p = collectSelectiveExport(src, req, &dstCase);
+        TEST("M2a integration: FAT32 R-18 case-folded path collision blocks via CollisionMatrix",
+             p.ok && !p.executable && p.hasBlockingCode(diag_code::kFatCaseCollisionR18) &&
+                 p.blockingConflictCount() >= 1 && p.collisionMatrix.has_value());
     }
 
     // P2-1: Failed or cancelled optionalTarget MUST fail closed (never silent 0-byte baseline / executable==true!)
@@ -1098,11 +1141,11 @@ static void testAuditHardeningRegressions() {
         failedTarget.sourceKind = AdapterSourceKind::NativeKst;
 
         CollectorRequest req;
-        req.mode = CollectorExportMode::AdvisoryPlan;
-        req.targets = {{"STYLE/BankA/Factory.stg", "", ""}};
+        req.mode = ExportMode::AdvisoryPlan;
+        req.targets = {selStyle("STYLE/BankA/Factory.stg")};
         const DryRunExportPlan pFail = collectSelectiveExport(src, req, &failedTarget);
-        TEST("P2-1 failed optionalTarget fails closed (ok=false, executable=false, TARGET_UNAVAILABLE)",
-             !pFail.ok && !pFail.executable && hasBlocker(pFail, BlockingCode::TARGET_UNAVAILABLE));
+        TEST("P2-1 failed optionalTarget fails closed (ok=false, executable=false, TARGET_UNINSPECTABLE)",
+             !pFail.ok && !pFail.executable && pFail.hasBlockingCode(diag_code::kTargetUninspectable));
 
         M1AdapterView cancelledTarget;
         cancelledTarget.ok = false;
@@ -1117,9 +1160,13 @@ static void testAuditHardeningRegressions() {
         DryRunExportPlan dirty;
         dirty.ok = true;
         dirty.planFingerprint = std::string(64, '0');
-        dirty.blockingReasons.push_back({
-            BlockingCode::SELECTED_ROOT_NOT_FOUND,
+        dirty.diagnostics.push_back({
+            DiagnosticCategory::VERIFIED_MISSING,
+            collector_diag_code::kSelectedRootNotFound,
+            DiagnosticSeverity::Blocking,
+            EvidenceLevel::Verified,
             "STYLE/Evil`Backtick\n# ForgedHeading\x01.stg",
+            "",
             "Bad summary with `code` and\n- forged bullet",
             "Fix\r\n> forged quote",
             {}
@@ -1130,7 +1177,7 @@ static void testAuditHardeningRegressions() {
         });
         dirty.nativeEquivalences.push_back({
             "source-vs-target-sound", "src`bad\nline", "dst`bad\r\x02",
-            NativeEquivalenceVerdict::Different, "reason\n# inject", false
+            EquivalenceVerdict::Different, "reason\n# inject", false
         });
         const std::string md = serializeDryRunPlanMarkdown(dirty);
         TEST("P2-2 Markdown sanitizes newlines, control chars, and backticks safely",
@@ -1162,6 +1209,7 @@ static void testAuditHardeningRegressions() {
 
         SoundClosureRecord sc;
         sc.id = snd0;
+        sc.slotAddress = SlotAddress{false, 1, 0};
         sc.bank = "USER01";
         sc.slot = 0;
         sc.decoded = true;
@@ -1185,7 +1233,7 @@ static void testAuditHardeningRegressions() {
         }
 
         CollectorRequest req;
-        req.targets = {{"STYLE/Big/S0.stg", "", ""}, {"STYLE/Big/S1.stg", "", ""}, {"STYLE/Big/S2.stg", "", ""}};
+        req.targets = {selStyle("STYLE/Big/S0.stg"), selStyle("STYLE/Big/S1.stg"), selStyle("STYLE/Big/S2.stg")};
         const DryRunExportPlan pBig = collectSelectiveExport(bigSrc, req, &bigSrc);
         TEST("P2-3 huge uint64_t byte sums & products saturate cleanly without wraparound",
              pBig.memoryProjection.rawReferencedSampleBytes == std::numeric_limits<uint64_t>::max() &&
@@ -1210,7 +1258,7 @@ static void testAuditHardeningRegressions() {
         const M1AdapterView vA = makeProvNoSmf(false);
         const M1AdapterView vB = makeProvNoSmf(true);
         CollectorRequest req;
-        req.targets = {{"STYLES/UasfOrder.uasf", "", ""}};
+        req.targets = {selStyle("STYLES/UasfOrder.uasf")};
         const DryRunExportPlan pA = collectSelectiveExport(vA, req);
         const DryRunExportPlan pB = collectSelectiveExport(vB, req);
         TEST("P3-2 shuffled provisional no-SMF inputs yield byte-identical hash & planFingerprint",
@@ -1220,14 +1268,14 @@ static void testAuditHardeningRegressions() {
 }
 
 int main() {
-    std::printf("=== Slice M2b Selective Collector & 3-Tier Deduplicator Synthetic Tests ===\n");
+    std::printf("=== Slice M2b Selective Collector & M2a Unified Integration Synthetic Tests ===\n");
     testMultiStyleSharingAndEmbeddedFlags();
     testProvisionalTier2DedupAndMemoryProjection();
     testTier3NativeEquivalenceAndHoldGates();
     testFailClosedBlockingAndBoundaries();
     testCooperativeCancellation();
     testReproducibilityJsonAndPathFree();
-    testAuditHardeningRegressions();
+    testAuditHardeningAndM2aIntegration();
     std::printf("=== Summary: %d passed, %d failed ===\n", gPasses, gFailures);
     return gFailures == 0 ? 0 : 1;
 }
