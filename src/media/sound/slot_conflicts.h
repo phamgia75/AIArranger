@@ -91,6 +91,12 @@ struct SlotAddress {
     }
 
     std::string label() const {
+        if (!isInSpec() && !isOutOfSpecDrumKitBank()) {
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "INVALID(%s bank=%u slot=%u)",
+                          isDrumKit ? "USERDK" : "USER", bank, slot);
+            return buf;
+        }
         char buf[64];
         std::snprintf(buf, sizeof buf, "%s/%u (MSB %u LSB %u PC %u)",
                       bankName().c_str(), slot,
@@ -335,39 +341,131 @@ inline bool isTrackedObjectExt(const std::string& name) {
            graph::native_detail::endsWithUpper(name, ".PDC");
 }
 
+inline bool isSafePathSegment(const std::string& seg) {
+    if (seg.empty() || seg == "." || seg == "..") return false;
+    for (unsigned char c : seg) {
+        if (c < 0x20 || c == 0x7F || c == '/' || c == '\\') return false;
+    }
+    return true;
+}
+
+// Validates a relative slash-separated path: rejects empty paths, leading/trailing '/', backslashes,
+// empty segments ('//'), '.' / '..' traversal segments, and control characters.
+inline bool validateSafeRelativePath(const std::string& p, size_t maxSegments, std::string* errOut = nullptr) {
+    if (p.empty()) {
+        if (errOut) *errOut = "path must not be empty";
+        return false;
+    }
+    if (p.front() == '/' || p.back() == '/') {
+        if (errOut) *errOut = "path must not have leading or trailing '/'";
+        return false;
+    }
+    if (p.find('\\') != std::string::npos) {
+        if (errOut) *errOut = "path must not contain '\\'";
+        return false;
+    }
+    size_t segCount = 0;
+    size_t pos = 0;
+    while (pos <= p.size()) {
+        const size_t slash = p.find('/', pos);
+        const std::string seg = (slash == std::string::npos) ? p.substr(pos) : p.substr(pos, slash - pos);
+        if (!isSafePathSegment(seg)) {
+            if (errOut) *errOut = "path contains empty, traversal ('.'/'..'), or invalid segment";
+            return false;
+        }
+        ++segCount;
+        if (maxSegments > 0 && segCount > maxSegments) {
+            if (errOut) *errOut = "path exceeds allowed segment depth";
+            return false;
+        }
+        if (slash == std::string::npos) break;
+        pos = slash + 1;
+    }
+    return true;
+}
+
+// Returns every strict parent directory prefix of a normalized relative path (e.g. "STYLE/Pop/A.stg" -> {"STYLE", "STYLE/Pop"}).
+inline std::vector<std::string> parentDirectoryPrefixes(const std::string& normRelPath) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while ((pos = normRelPath.find('/', pos)) != std::string::npos) {
+        if (pos > 0) out.push_back(normRelPath.substr(0, pos));
+        ++pos;
+    }
+    return out;
+}
+
+// Fail-closed target path override resolver: rejects '..', leading/trailing '/', empty segments,
+// backslashes, or '/' inside targetName.
+inline std::optional<std::string> resolveTargetPathOverride(const std::string& sourceRelPath,
+                                                            const std::string& targetBank,
+                                                            const std::string& targetName,
+                                                            std::string* errOut = nullptr) {
+    if (errOut) errOut->clear();
+    if (!validateSafeRelativePath(sourceRelPath, 0, errOut)) {
+        if (errOut) *errOut = "invalid sourceRelPath: " + *errOut;
+        return std::nullopt;
+    }
+    if (!targetName.empty()) {
+        if (targetName.find('/') != std::string::npos || targetName.find('\\') != std::string::npos) {
+            if (errOut) *errOut = "invalid targetName: must not contain path separators";
+            return std::nullopt;
+        }
+        if (!isSafePathSegment(targetName)) {
+            if (errOut) *errOut = "invalid targetName: traversal ('.'/'..') or control character refused";
+            return std::nullopt;
+        }
+    }
+    if (!targetBank.empty()) {
+        std::string berr;
+        if (!validateSafeRelativePath(targetBank, 2, &berr)) {
+            if (errOut) *errOut = "invalid targetBank: " + berr;
+            return std::nullopt;
+        }
+    }
+    if (targetBank.empty() && targetName.empty()) return sourceRelPath;
+
+    std::string locCat, bank, leaf;
+    const size_t firstSlash = sourceRelPath.find('/');
+    const size_t lastSlash = sourceRelPath.rfind('/');
+    if (firstSlash == std::string::npos) {
+        leaf = sourceRelPath;
+    } else if (firstSlash == lastSlash) {
+        locCat = sourceRelPath.substr(0, firstSlash);
+        leaf = sourceRelPath.substr(firstSlash + 1);
+    } else {
+        locCat = sourceRelPath.substr(0, firstSlash);
+        bank = sourceRelPath.substr(firstSlash + 1, lastSlash - firstSlash - 1);
+        leaf = sourceRelPath.substr(lastSlash + 1);
+    }
+
+    const std::string& effLeaf = targetName.empty() ? leaf : targetName;
+    std::string result;
+    if (!targetBank.empty()) {
+        if (targetBank.find('/') != std::string::npos) {
+            result = targetBank + "/" + effLeaf;
+        } else if (!locCat.empty()) {
+            result = locCat + "/" + targetBank + "/" + effLeaf;
+        } else {
+            result = targetBank + "/" + effLeaf;
+        }
+    } else if (!locCat.empty() && !bank.empty()) {
+        result = locCat + "/" + bank + "/" + effLeaf;
+    } else if (!locCat.empty()) {
+        result = locCat + "/" + effLeaf;
+    } else {
+        result = effLeaf;
+    }
+    if (!validateSafeRelativePath(result, 0, errOut)) return std::nullopt;
+    return result;
+}
+
+// Convenience wrapper returning "" on invalid/unsafe override (fail-closed).
 inline std::string applyTargetPathOverride(const std::string& sourceRelPath,
                                            const std::string& targetBank,
                                            const std::string& targetName) {
-    const std::string norm = normalizeRelPath(sourceRelPath);
-    if (targetBank.empty() && targetName.empty()) return norm;
-
-    std::string locCat, bank, leaf;
-    const size_t firstSlash = norm.find('/');
-    const size_t lastSlash = norm.rfind('/');
-    if (firstSlash == std::string::npos) {
-        leaf = norm;
-    } else if (firstSlash == lastSlash) {
-        locCat = norm.substr(0, firstSlash);
-        leaf = norm.substr(firstSlash + 1);
-    } else {
-        locCat = norm.substr(0, firstSlash);
-        bank = norm.substr(firstSlash + 1, lastSlash - firstSlash - 1);
-        leaf = norm.substr(lastSlash + 1);
-    }
-
-    const std::string effLeaf = targetName.empty() ? leaf : normalizeRelPath(targetName);
-    if (!targetBank.empty()) {
-        const std::string tb = normalizeRelPath(targetBank);
-        if (tb.find('/') != std::string::npos) {
-            // Caller passed full "TYPE/Bank"
-            return tb + "/" + effLeaf;
-        }
-        if (!locCat.empty()) return locCat + "/" + tb + "/" + effLeaf;
-        return tb + "/" + effLeaf;
-    }
-    if (!locCat.empty() && !bank.empty()) return locCat + "/" + bank + "/" + effLeaf;
-    if (!locCat.empty()) return locCat + "/" + effLeaf;
-    return effLeaf;
+    const auto resolved = resolveTargetPathOverride(sourceRelPath, targetBank, targetName);
+    return resolved.has_value() ? *resolved : std::string{};
 }
 
 }  // namespace conflict_detail
@@ -532,6 +630,7 @@ struct TargetOccupancyMap {
 
     std::map<SlotAddress, OccupiedSlotEntry> occupiedSlots;
     std::map<std::string, std::vector<ObjectPathEntry>> objectPathsByFolded;
+    std::map<std::string, std::set<std::string>> objectDirsByFolded;   // folded dir prefix -> original-case dir prefixes (FAT R-18)
     std::map<std::string, std::vector<SlotAddress>> equivalenceIndex;  // equivalenceDigest -> sorted SlotAddresses
 
     PartialNativeInspect partialInspect;
@@ -607,7 +706,7 @@ struct TargetOccupancyMap {
         occupiedSlots[key] = std::move(entry);
     }
 
-    // Helper for synthetic/in-memory construction: registers an existing Style/KSC/Pad object path.
+    // Helper for synthetic/in-memory construction: registers an existing Style/KSC/Pad object path and its dir prefixes.
     void addObjectPath(const std::string& relPath, const std::string& sha256, uint64_t sizeBytes = 0) {
         const std::string norm = conflict_detail::normalizeRelPath(relPath);
         const std::string folded = conflict_detail::asciiLower(norm);
@@ -616,9 +715,12 @@ struct TargetOccupancyMap {
             if (existing.relPath == norm) return;
         }
         vec.push_back({norm, folded, sha256, sizeBytes});
+        for (const std::string& dir : conflict_detail::parentDirectoryPrefixes(norm)) {
+            objectDirsByFolded[conflict_detail::asciiLower(dir)].insert(dir);
+        }
     }
 
-    // Rebuilds deterministic equivalenceIndex, sorts objectPath vectors, and recomputes targetLibraryKey (SHA-256).
+    // Rebuilds deterministic equivalenceIndex, objectDirsByFolded, sorts objectPath vectors, and recomputes targetLibraryKey (SHA-256).
     void rebuildIndexesAndKey() {
         equivalenceIndex.clear();
         for (auto& [addr, entry] : occupiedSlots) {
@@ -633,9 +735,15 @@ struct TargetOccupancyMap {
             std::sort(addrs.begin(), addrs.end());
             addrs.erase(std::unique(addrs.begin(), addrs.end()), addrs.end());
         }
+        objectDirsByFolded.clear();
         for (auto& [folded, vec] : objectPathsByFolded) {
             std::sort(vec.begin(), vec.end());
             vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+            for (const auto& o : vec) {
+                for (const std::string& dir : conflict_detail::parentDirectoryPrefixes(o.relPath)) {
+                    objectDirsByFolded[conflict_detail::asciiLower(dir)].insert(dir);
+                }
+            }
         }
         canonicalizeDiagnostics(targetDiagnostics);
 
@@ -708,7 +816,7 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
                   return a.label != b.label ? a.label < b.label : a.bank < b.bank;
               });
 
-    // 2. Register object paths & detect any pre-existing FAT32 R-18 case collisions in target
+    // 2. Register object paths & detect any pre-existing FAT32 R-18 file or directory-prefix case collisions in target
     for (const auto& obj : objectPaths) {
         map.addObjectPath(obj.relPath, obj.sha256, obj.sizeBytes);
     }
@@ -723,6 +831,24 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
                 vec[0].relPath + " vs " + vec[1].relPath,
                 "Target library contains multiple paths colliding under ASCII case folding (FAT32/exFAT R-18).",
                 "Rename one colliding path in the target library before exporting.",
+                {}
+            });
+        }
+    }
+    for (const auto& [foldedDir, dirs] : map.objectDirsByFolded) {
+        if (dirs.size() > 1) {
+            auto it = dirs.begin();
+            const std::string firstDir = *it++;
+            const std::string secondDir = *it;
+            map.targetDiagnostics.push_back({
+                DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                diag_code::kFatCaseCollisionR18,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Verified,
+                foldedDir,
+                firstDir + " vs " + secondDir,
+                "Target library contains multiple bank/type directories colliding under ASCII case folding (FAT32/exFAT R-18).",
+                "Consolidate or rename colliding directories in the target library before exporting.",
                 {}
             });
         }
@@ -965,16 +1091,26 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
         if (!sm.decoded) {
             eq.analysed = false;
             eq.unanalysedReason = "DecodeFailed";
+        } else if (addr.isDrumKit) {
+            // Short-circuit USERDK before melodic layout analysis: Drum Kit -> DrumSample bodies are unparsed,
+            // so a synthetic USERDK matching a melodic stride must still count as unanalysedDrumKits (never analysedSounds).
+            eq.analysed = false;
+            const auto git = unanalysedGapById.find(sid);
+            if (git != unanalysedGapById.end()) {
+                eq.unanalysedReason = graph::gapName(git->second);
+            } else if (!kmpOk || !nativeGraph.has_value()) {
+                eq.unanalysedReason = map.partialInspect.kmpIsOc31 ? "Oc31KmpUnsupported" : "KmpUnavailable";
+            } else {
+                eq.unanalysedReason = "DrumKitBodyUnparsed";
+            }
+            ++map.coverage.unanalysedDrumKits;
         } else if (!kmpOk || !nativeGraph.has_value()) {
             eq.analysed = false;
             eq.unanalysedReason = map.partialInspect.kmpIsOc31 ? "Oc31KmpUnsupported" : "KmpUnavailable";
-            if (addr.isDrumKit) ++map.coverage.unanalysedDrumKits;
         } else if (const auto git = unanalysedGapById.find(sid); git != unanalysedGapById.end()) {
             eq.analysed = false;
             eq.unanalysedReason = graph::gapName(git->second);
-            if (addr.isDrumKit) {
-                ++map.coverage.unanalysedDrumKits;
-            } else if (git->second == graph::Gap::NoKnownReference) {
+            if (git->second == graph::Gap::NoKnownReference) {
                 ++map.coverage.unanalysedNoKnownRef;
             } else {
                 ++map.coverage.unanalysedUnknownKind;
@@ -1622,9 +1758,12 @@ struct CollisionMatrixResult {
     }
 
     bool anyRemappedOrRenamed() const {
-        for (const auto& s : soundResolutions) if (s.remapped) return true;
+        for (const auto& s : soundResolutions) if (!s.blocking && s.remapped) return true;
         for (const auto& o : objectResolutions) {
-            if (conflict_detail::normalizeRelPath(o.sourceRelPath) != o.targetRelPath) return true;
+            if (!o.blocking && !o.targetRelPath.empty() &&
+                conflict_detail::normalizeRelPath(o.sourceRelPath) != o.targetRelPath) {
+                return true;
+            }
         }
         return false;
     }
@@ -1653,7 +1792,6 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
               });
 
     for (auto& obj : input.objectRequests) {
-        obj.sourceRelPath = conflict_detail::normalizeRelPath(obj.sourceRelPath);
         std::sort(obj.affectedRoots.begin(), obj.affectedRoots.end());
         obj.affectedRoots.erase(std::unique(obj.affectedRoots.begin(), obj.affectedRoots.end()), obj.affectedRoots.end());
     }
@@ -1663,8 +1801,8 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
                   const std::string tb = conflict_detail::applyTargetPathOverride(b.sourceRelPath, b.targetBank, b.targetName);
                   const std::string fa = conflict_detail::asciiLower(ta);
                   const std::string fb = conflict_detail::asciiLower(tb);
-                  return std::tie(fa, ta, a.sourceRelPath, a.fileSha256) <
-                         std::tie(fb, tb, b.sourceRelPath, b.fileSha256);
+                  return std::tie(fa, ta, a.sourceRelPath, a.targetBank, a.targetName, a.fileSha256) <
+                         std::tie(fb, tb, b.sourceRelPath, b.targetBank, b.targetName, b.fileSha256);
               });
 
     // Carry forward target-level diagnostics
@@ -1754,19 +1892,50 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
         const std::string addrStr = req.sourceAddress.label();
         const std::string subj = req.requestId.empty() ? req.sourceAddress.resourceId().str() : req.requestId;
 
-        // Out-of-spec User Drum Kit bank check (MSB 120 LSB 70..75 -> USERDK07..USERDK12)
+        // Fail-closed gate 1: Invalid SlotAddress (bank == 0, bank > 12, or slot >= 128) -> BLOCK under ALL 3 policies
+        if (!req.sourceAddress.isInSpec() && !req.sourceAddress.isOutOfSpecDrumKitBank()) {
+            result.conflicts.push_back({
+                SlotConflict::Kind::TargetBankAbsent,
+                addrStr,
+                req.sourceLabel,
+                "(invalid slot address)",
+                "BLOCKED",
+                true,
+                "Invalid Sound/Drum Kit slot address (bank must be 1..12 and slot 0..127); refusing fail-closed."
+            });
+            result.diagnostics.push_back({
+                DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                diag_code::kUnresolvedMidiBankSelect,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Verified,
+                subj,
+                addrStr,
+                "Invalid Sound/Drum Kit slot address " + addrStr + " (bank must be 1..12 and slot 0..127).",
+                "Supply a valid in-spec User Sound (USER01..USER12, slot 0..127) or User Drum Kit (USERDK01..USERDK06, slot 0..127) address.",
+                req.affectedRoots
+            });
+            outRes.resolvedAddress = std::nullopt;
+            outRes.remapped = false;
+            outRes.action = "blocked";
+            outRes.blocking = true;
+            outRes.detail = "invalid slot address (bank/slot out of range)";
+            continue;
+        }
+
+        // Fail-closed gate 2: Out-of-spec User Drum Kit bank (MSB 120 LSB 70..75 -> USERDK07..USERDK12)
+        // Blocked under ALL 3 policies even if the out-of-spec bank file exists & slot is free (never silently remapped!).
         if (req.sourceAddress.isOutOfSpecDrumKitBank()) {
             const bool bankPresent = target.isBankFilePresent(true, req.sourceAddress.bank);
             result.diagnostics.push_back({
                 DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
                 diag_code::kOutOfSpecDrumkitBank,
-                DiagnosticSeverity::Warning,
+                DiagnosticSeverity::Blocking,
                 EvidenceLevel::Unsupported,
                 subj,
                 addrStr,
                 "MIDI address selects out-of-spec User Drum Kit bank " + req.sourceAddress.bankName() +
                     " (MSB 120 LSB " + std::to_string(req.sourceAddress.lsb()) + ", outside documented USERDK01..USERDK06).",
-                "Verify target Drum Kit bank layout or remap track to USERDK01..USERDK06.",
+                "Verify target Drum Kit bank layout or remap track explicitly to USERDK01..USERDK06.",
                 req.affectedRoots
             });
             if (!bankPresent) {
@@ -1791,11 +1960,29 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
                     "Remap track to an occupied Drum Kit in USERDK01..USERDK06.",
                     req.affectedRoots
                 });
+                outRes.resolvedAddress = std::nullopt;
+                outRes.remapped = false;
                 outRes.action = "blocked";
                 outRes.blocking = true;
                 outRes.detail = "out-of-spec Drum Kit bank absent in target";
                 continue;
             }
+            result.conflicts.push_back({
+                SlotConflict::Kind::TargetBankAbsent,
+                addrStr,
+                req.sourceLabel,
+                "(out-of-spec USERDK07..USERDK12 bank)",
+                "BLOCKED",
+                true,
+                "Out-of-spec Drum Kit bank " + req.sourceAddress.bankName() + " (MSB 120 LSB " +
+                    std::to_string(req.sourceAddress.lsb()) + ") is outside documented USERDK01..USERDK06 grid; refusing fail-closed."
+            });
+            outRes.resolvedAddress = std::nullopt;
+            outRes.remapped = false;
+            outRes.action = "blocked";
+            outRes.blocking = true;
+            outRes.detail = "out-of-spec Drum Kit bank (MSB 120 LSB 70..75) blocked fail-closed";
+            continue;
         }
 
         const SlotState st = target.slotState(req.sourceAddress);
@@ -2083,33 +2270,75 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
         }
     }
 
-    // Phase 3: Object Path Collisions + FAT32/exFAT R-18 Case-Folded Collision Checks
+    // Phase 3: Object Path Collisions + FAT32/exFAT R-18 File & Directory-Prefix Case-Folded Collision Checks
     std::map<std::string, std::vector<size_t>> batchByFolded;
-    std::vector<std::string> effTargetPaths(input.objectRequests.size());
+    std::map<std::string, std::set<std::string>> batchDirsByFolded;
+    std::vector<std::optional<std::string>> effTargetPaths(input.objectRequests.size());
+    std::vector<std::string> effPathErrors(input.objectRequests.size());
     std::vector<std::string> effFoldedPaths(input.objectRequests.size());
     for (size_t i = 0; i < input.objectRequests.size(); ++i) {
-        effTargetPaths[i] = conflict_detail::applyTargetPathOverride(
+        std::string perr;
+        effTargetPaths[i] = conflict_detail::resolveTargetPathOverride(
             input.objectRequests[i].sourceRelPath,
             input.objectRequests[i].targetBank,
-            input.objectRequests[i].targetName);
-        effFoldedPaths[i] = conflict_detail::asciiLower(effTargetPaths[i]);
+            input.objectRequests[i].targetName,
+            &perr);
+        if (!effTargetPaths[i].has_value()) {
+            effPathErrors[i] = perr;
+            continue;
+        }
+        effFoldedPaths[i] = conflict_detail::asciiLower(*effTargetPaths[i]);
         batchByFolded[effFoldedPaths[i]].push_back(i);
+        for (const std::string& dir : conflict_detail::parentDirectoryPrefixes(*effTargetPaths[i])) {
+            batchDirsByFolded[conflict_detail::asciiLower(dir)].insert(dir);
+        }
     }
 
     result.objectResolutions.reserve(input.objectRequests.size());
     for (size_t i = 0; i < input.objectRequests.size(); ++i) {
         const auto& obj = input.objectRequests[i];
-        const std::string& effPath = effTargetPaths[i];
-        const std::string& folded = effFoldedPaths[i];
 
         ObjectPathResolutionEntry res;
         res.kind = obj.kind;
         res.sourceRelPath = obj.sourceRelPath;
+
+        // Fail-closed invalid / traversal target path override check (P3-1)
+        if (!effTargetPaths[i].has_value()) {
+            const std::string& perr = effPathErrors[i];
+            result.conflicts.push_back({
+                SlotConflict::Kind::StyleOrObjectPathCollision,
+                obj.sourceRelPath,
+                obj.sourceRelPath,
+                "(invalid target path override)",
+                "RENAME_REQUIRED",
+                true,
+                "Invalid target path override refused fail-closed: " + perr
+            });
+            result.diagnostics.push_back({
+                DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                diag_code::kStyleOrObjectPathCollision,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Verified,
+                obj.sourceRelPath,
+                obj.targetBank + "/" + obj.targetName,
+                "Target path override is invalid (" + perr + "); refusing fail-closed.",
+                "Provide safe relative bank/file names without '..', leading/trailing '/', empty segments, or path separators in targetName.",
+                obj.affectedRoots.empty() ? std::vector<std::string>{obj.sourceRelPath} : obj.affectedRoots
+            });
+            res.action = "blocked-invalid-path";
+            res.blocking = true;
+            res.detail = perr;
+            result.objectResolutions.push_back(std::move(res));
+            continue;
+        }
+
+        const std::string& effPath = *effTargetPaths[i];
+        const std::string& folded = effFoldedPaths[i];
         res.targetRelPath = effPath;
         res.foldedTargetRelPath = folded;
 
-        // Intra-batch collision / FAT32 R-18 check
-        if (batchByFolded[folded].size() > 1) {
+        // Intra-batch file collision / file-vs-dir / FAT32 R-18 check
+        if (batchByFolded[folded].size() > 1 || batchDirsByFolded.count(folded) > 0) {
             result.conflicts.push_back({
                 SlotConflict::Kind::StyleOrObjectPathCollision,
                 effPath,
@@ -2133,6 +2362,91 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
             res.action = "blocked-fat-case-r18";
             res.blocking = true;
             res.detail = "batch FAT32/exFAT R-18 case collision";
+            result.objectResolutions.push_back(std::move(res));
+            continue;
+        }
+
+        // Bank/type directory-prefix FAT32 R-18 case-collision check (intra-batch AND vs target occupancy)
+        std::string dirCollisionTarget;
+        std::string dirCollisionDetail;
+        for (const std::string& dir : conflict_detail::parentDirectoryPrefixes(effPath)) {
+            const std::string fd = conflict_detail::asciiLower(dir);
+            if (batchByFolded.count(fd) > 0 || target.objectPathsByFolded.count(fd) > 0) {
+                dirCollisionTarget = fd;
+                dirCollisionDetail = "Directory prefix '" + dir + "' collides case-insensitively with a file path (FAT32/exFAT R-18).";
+                break;
+            }
+            if (const auto bit = batchDirsByFolded.find(fd); bit != batchDirsByFolded.end() && bit->second.size() > 1) {
+                for (const std::string& other : bit->second) {
+                    if (other != dir) { dirCollisionTarget = other; break; }
+                }
+                dirCollisionDetail = "Batch bank/type directory '" + dir + "' collides case-insensitively with '" +
+                                     dirCollisionTarget + "' (FAT32/exFAT R-18).";
+                break;
+            }
+            if (const auto tdit = target.objectDirsByFolded.find(fd); tdit != target.objectDirsByFolded.end() && !tdit->second.empty()) {
+                if (tdit->second.size() > 1 || *tdit->second.begin() != dir) {
+                    dirCollisionTarget = (*tdit->second.begin() != dir) ? *tdit->second.begin() : *std::next(tdit->second.begin());
+                    dirCollisionDetail = "Bank/type directory '" + dir + "' collides case-insensitively with target directory '" +
+                                         dirCollisionTarget + "' (FAT32/exFAT R-18).";
+                    break;
+                }
+            }
+        }
+        if (!dirCollisionDetail.empty()) {
+            result.conflicts.push_back({
+                SlotConflict::Kind::StyleOrObjectPathCollision,
+                effPath,
+                obj.sourceRelPath,
+                dirCollisionTarget,
+                "RENAME_REQUIRED",
+                true,
+                dirCollisionDetail
+            });
+            result.diagnostics.push_back({
+                DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                diag_code::kFatCaseCollisionR18,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Verified,
+                effPath,
+                dirCollisionTarget,
+                dirCollisionDetail,
+                "Match exact target bank directory casing or rename targetBank to eliminate the FAT32/exFAT R-18 collision.",
+                obj.affectedRoots.empty() ? std::vector<std::string>{obj.sourceRelPath} : obj.affectedRoots
+            });
+            res.action = "blocked-fat-case-r18";
+            res.blocking = true;
+            res.detail = dirCollisionDetail;
+            result.objectResolutions.push_back(std::move(res));
+            continue;
+        }
+
+        // Target file-vs-directory case collision check
+        if (target.objectDirsByFolded.count(folded) > 0) {
+            const std::string& tDir = *target.objectDirsByFolded.at(folded).begin();
+            result.conflicts.push_back({
+                SlotConflict::Kind::StyleOrObjectPathCollision,
+                effPath,
+                obj.sourceRelPath,
+                tDir,
+                "RENAME_REQUIRED",
+                true,
+                "Output path '" + effPath + "' collides case-insensitively with target directory '" + tDir + "' (FAT32/exFAT R-18)."
+            });
+            result.diagnostics.push_back({
+                DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                diag_code::kFatCaseCollisionR18,
+                DiagnosticSeverity::Blocking,
+                EvidenceLevel::Verified,
+                effPath,
+                tDir,
+                "Output path '" + effPath + "' collides case-insensitively with target directory '" + tDir + "' (FAT32/exFAT R-18).",
+                "Rename targetBank or targetName to avoid colliding with an existing target directory.",
+                obj.affectedRoots.empty() ? std::vector<std::string>{obj.sourceRelPath} : obj.affectedRoots
+            });
+            res.action = "blocked-fat-case-r18";
+            res.blocking = true;
+            res.detail = "FAT32/exFAT R-18 file-vs-directory collision with " + tDir;
             result.objectResolutions.push_back(std::move(res));
             continue;
         }

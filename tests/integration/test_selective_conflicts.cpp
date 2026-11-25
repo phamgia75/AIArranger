@@ -951,6 +951,181 @@ static void testSerializationAndDeterminism() {
     TEST("CollisionMatrix + CanonicalSlotAllocator are 100% deterministic across shuffled inputs", colDeterministic);
 }
 
+// ── Test 9: Audit Hardening Regression Tests (P2-1, P2-2, P2-3, P3-1) ─────────────────────────────────────────────────
+
+static void testAuditHardeningEdgeCases() {
+    std::printf("[Test 9] Audit hardening: bank-dir R-18 (P2-1), invalid/out-of-spec slots (P2-2), USERDK stride short-circuit (P2-3), path override traversal (P3-1)\n");
+
+    const std::string sha1 = conflict_detail::sha256Bytes(reinterpret_cast<const uint8_t*>("obj-1"), 5);
+    const std::string sha2 = conflict_detail::sha256Bytes(reinterpret_cast<const uint8_t*>("obj-2"), 5);
+
+    // P2-1: Bank-directory prefix FAT32 R-18 case collisions (target & intra-batch)
+    {
+        TargetOccupancyMap target = TargetOccupancyMap::makeEmpty(true);
+        target.addObjectPath("STYLE/Pop/A.stg", sha1, 5);
+        target.rebuildIndexesAndKey();
+
+        // Target has STYLE/Pop/A.stg; request wants STYLE/POP/B.stg -> different leaf, colliding bank dir!
+        for (ConflictPolicy pol : {ConflictPolicy::BlockWithReport, ConflictPolicy::ReuseIdenticalTargetSlot, ConflictPolicy::RemapToFreeSlotInNewLib}) {
+            CollisionMatrixInput in;
+            in.policy = pol;
+            in.objectRequests.push_back({SelectedKind::Style, "STYLE/POP/B.stg", "", "", sha2, {}});
+            const auto r = evaluateCollisionMatrix(target, in);
+            bool hasR18 = false;
+            for (const auto& d : r.diagnostics) if (d.code == diag_code::kFatCaseCollisionR18 && d.severity == DiagnosticSeverity::Blocking) hasR18 = true;
+            TEST("P2-1: bank-dir case collision vs target (STYLE/Pop/A.stg vs STYLE/POP/B.stg) blocked",
+                 r.hasBlockingConflicts() && hasR18 && r.objectResolutions.size() == 1 &&
+                 r.objectResolutions[0].action == "blocked-fat-case-r18");
+        }
+
+        // Exact matching bank dir casing (STYLE/Pop/B.stg) -> allowed!
+        {
+            CollisionMatrixInput in;
+            in.policy = ConflictPolicy::BlockWithReport;
+            in.objectRequests.push_back({SelectedKind::Style, "STYLE/Pop/B.stg", "", "", sha2, {}});
+            const auto r = evaluateCollisionMatrix(target, in);
+            TEST("P2-1: exact matching bank dir casing (STYLE/Pop/B.stg) allowed cleanly",
+                 !r.hasBlockingConflicts() && r.objectResolutions.size() == 1 &&
+                 r.objectResolutions[0].action == "allow-new");
+        }
+
+        // Intra-batch bank-directory case collision (STYLE/Rock/A.stg vs STYLE/ROCK/B.stg)
+        {
+            CollisionMatrixInput in;
+            in.policy = ConflictPolicy::RemapToFreeSlotInNewLib;
+            in.objectRequests.push_back({SelectedKind::Style, "STYLE/Rock/A.stg", "", "", sha1, {}});
+            in.objectRequests.push_back({SelectedKind::Style, "STYLE/ROCK/B.stg", "", "", sha2, {}});
+            const auto r = evaluateCollisionMatrix(target, in);
+            bool hasR18 = false;
+            for (const auto& d : r.diagnostics) if (d.code == diag_code::kFatCaseCollisionR18 && d.severity == DiagnosticSeverity::Blocking) hasR18 = true;
+            TEST("P2-1: intra-batch bank-dir case collision (STYLE/Rock/A.stg vs STYLE/ROCK/B.stg) blocked",
+                 r.hasBlockingConflicts() && hasR18 && r.objectResolutions.size() == 2 &&
+                 r.objectResolutions[0].blocking && r.objectResolutions[1].blocking &&
+                 r.objectResolutions[0].action == "blocked-fat-case-r18" &&
+                 r.objectResolutions[1].action == "blocked-fat-case-r18");
+        }
+
+        // Pre-existing target bank-dir case collision detected by inspectTargetKstInput
+        {
+            NativeKstInput emptyKst;
+            const TargetOccupancyMap badTarget = inspectTargetKstInput(
+                emptyKst,
+                {{"STYLE/Pop/A.stg", "style/pop/a.stg", sha1, 5},
+                 {"STYLE/POP/B.stg", "style/pop/b.stg", sha2, 5}});
+            bool hasTargetDirR18 = false;
+            for (const auto& d : badTarget.targetDiagnostics) {
+                if (d.code == diag_code::kFatCaseCollisionR18 && d.severity == DiagnosticSeverity::Blocking) {
+                    hasTargetDirR18 = true;
+                }
+            }
+            TEST("P2-1: target occupancy map detects pre-existing bank-dir R-18 collision", hasTargetDirR18);
+        }
+    }
+
+    // P2-2: Out-of-spec USERDK07 (bank present & slot free) + invalid bank=0 / bank=13 / slot=128 blocked fail-closed under ALL 3 policies
+    {
+        TargetOccupancyMap target = TargetOccupancyMap::makeEmpty(true);
+        target.extraOutOfSpecDrumKitBanksPresent.insert("USERDK07");  // bank file exists, slot 5 is FREE!
+        target.rebuildIndexesAndKey();
+
+        SoundEquivalenceProfile dummy;
+        dummy.isDrumKit = true;
+        for (ConflictPolicy pol : {ConflictPolicy::BlockWithReport, ConflictPolicy::ReuseIdenticalTargetSlot, ConflictPolicy::RemapToFreeSlotInNewLib}) {
+            CollisionMatrixInput in;
+            in.policy = pol;
+            in.soundRequests.push_back({"out-of-spec-dk7", {true, 7, 5}, "OutOfSpecFree", dummy, false, {}});
+            in.soundRequests.push_back({"invalid-bank-0",  {false, 0, 0}, "InvalidBank0", makeAnalysedProfile(0x10050038u, "b0", 1, 60, 1, 1024), false, {}});
+            in.soundRequests.push_back({"invalid-bank-13", {false, 13, 0}, "InvalidBank13", makeAnalysedProfile(0x10050038u, "b13", 2, 60, 2, 1024), false, {}});
+            in.soundRequests.push_back({"invalid-slot-128",{false, 1, 128}, "InvalidSlot128", makeAnalysedProfile(0x10050038u, "s128", 3, 60, 3, 1024), false, {}});
+            const auto r = evaluateCollisionMatrix(target, in);
+
+            bool allBlockedNoRemapNoMisleading = (r.soundResolutions.size() == 4);
+            for (const auto& sr : r.soundResolutions) {
+                if (!sr.blocking || sr.action != "blocked" || sr.resolvedAddress.has_value() || sr.remapped) {
+                    allBlockedNoRemapNoMisleading = false;
+                }
+                if (sr.detail.find("reserved by another request") != std::string::npos) {
+                    allBlockedNoRemapNoMisleading = false;
+                }
+            }
+            bool noMisleadingConflict = true;
+            for (const auto& c : r.conflicts) {
+                if (c.detail.find("Multiple source requests") != std::string::npos) noMisleadingConflict = false;
+            }
+            TEST("P2-2: out-of-spec USERDK07 free slot & invalid bank=0/13/slot=128 blocked fail-closed under policy",
+                 r.hasBlockingConflicts() && allBlockedNoRemapNoMisleading && noMisleadingConflict);
+        }
+    }
+
+    // P2-3: Synthetic USERDK matching melodic stride + valid Multisample ID still counts as unanalysedDrumKits (NEVER analysedSounds!)
+    {
+        const Id8 smpId = makeId(0xC0, 1);
+        const Id8 msId1 = makeId(0xD0, 1);
+        const Id8 msId2 = makeId(0xD0, 2);
+        const Bytes pcmBytes = buildKorfContainer({
+            {0x09000018u, 0, 0, 0, "Smp", Bytes(2048, 0x11), idAsStr(smpId)}
+        });
+        const Bytes rawKmp = buildKorfContainer({
+            {kPa5xKmpChunkId, 0, 0, 0, "RAM.KMP",
+             buildRawPa5xKmpPayload({{smpId, "Smp", 48000}}, {}, {{0, 72}},
+                                    {{msId1, "Ms1", 0, 1}, {msId2, "Ms2", 0, 1}}),
+             ""}
+        });
+        std::vector<SynthKorfItem> melodicItems;
+        for (uint8_t s = 0; s < 8; ++s) {
+            melodicItems.push_back({0x10050038u, 1, 0, s, "Mel_" + std::to_string(s),
+                                    makeOcLiteralFrame("OC31", buildSoundBody(static_cast<uint8_t>(0x40 + s), msId1, msId2)), ""});
+        }
+        // Synthetic USERDK item whose decoded body intentionally matches the EXACT melodic stride (40 bytes) & carries msId1/msId2!
+        const Bytes dkMatchesStridePcg = buildKorfContainer({
+            {0x10050038u, 1, 0, 0, "StrideMatchingDK",
+             makeOcLiteralFrame("OC31", buildSoundBody(0x77, msId1, msId2)), ""}
+        });
+
+        NativeKstInput in;
+        in.kmpContainer = RawNamedBlob{"MULTISMP/RAM.KMP", "", rawKmp};
+        in.pcmContainers = {{"PCM/ram01.pcm", "", pcmBytes}};
+        in.soundContainers = {
+            {"SOUND/USER01.PCG", "USER01", buildKorfContainer(melodicItems)},
+            {"SOUND/USERDK01.PCG", "USERDK01", dkMatchesStridePcg}
+        };
+        const TargetOccupancyMap map = inspectTargetKstInput(in);
+        const OccupiedSlotEntry* dkSlot = map.findOccupied({true, 1, 0});
+        TEST("P2-3: synthetic USERDK matching melodic stride counted as unanalysedDrumKits (not analysedSounds)",
+             map.fullyInspectable &&
+             map.coverage.analysedSounds == 8 &&
+             map.coverage.unanalysedDrumKits == 1 &&
+             !map.coverage.coverageComplete &&
+             dkSlot != nullptr && !dkSlot->equivalence.analysed && !dkSlot->equivalence.provablyComparable());
+    }
+
+    // P3-1: applyTargetPathOverride / resolveTargetPathOverride & CollisionMatrix reject '..' traversal, '/' in targetName, leading/trailing '/', empty segments
+    {
+        std::string err;
+        TEST("P3-1: '..' in targetBank rejected", !conflict_detail::resolveTargetPathOverride("STYLE/Pop/A.stg", "../Evil", "", &err).has_value());
+        TEST("P3-1: '..' in targetName rejected", !conflict_detail::resolveTargetPathOverride("STYLE/Pop/A.stg", "", "..", &err).has_value());
+        TEST("P3-1: '/' in targetName rejected", !conflict_detail::resolveTargetPathOverride("STYLE/Pop/A.stg", "", "Sub/Evil.stg", &err).has_value());
+        TEST("P3-1: leading '/' in targetBank rejected", !conflict_detail::resolveTargetPathOverride("STYLE/Pop/A.stg", "/STYLE/Pop", "", &err).has_value());
+        TEST("P3-1: trailing '/' in targetBank rejected", !conflict_detail::resolveTargetPathOverride("STYLE/Pop/A.stg", "STYLE/Pop/", "", &err).has_value());
+        TEST("P3-1: empty segment '//' in targetBank rejected", !conflict_detail::resolveTargetPathOverride("STYLE/Pop/A.stg", "STYLE//Pop", "", &err).has_value());
+        TEST("P3-1: '..' in sourceRelPath rejected", !conflict_detail::resolveTargetPathOverride("STYLE/../Evil.stg", "", "", &err).has_value());
+        TEST("P3-1: valid override succeeds",
+             conflict_detail::applyTargetPathOverride("STYLE/Pop/A.stg", "Bank2", "B.stg") == "STYLE/Bank2/B.stg");
+
+        // End-to-end CollisionMatrix check: traversal override blocked fail-closed!
+        TargetOccupancyMap target = TargetOccupancyMap::makeEmpty(true);
+        CollisionMatrixInput in;
+        in.policy = ConflictPolicy::RemapToFreeSlotInNewLib;
+        in.objectRequests.push_back({SelectedKind::Style, "STYLE/Pop/A.stg", "../Escape", "A.stg", sha1, {}});
+        in.objectRequests.push_back({SelectedKind::Style, "STYLE/Pop/B.stg", "", "Sub/B.stg", sha2, {}});
+        const auto r = evaluateCollisionMatrix(target, in);
+        TEST("P3-1: CollisionMatrix blocks traversal & slash-in-targetName overrides fail-closed",
+             r.hasBlockingConflicts() && r.objectResolutions.size() == 2 &&
+             r.objectResolutions[0].blocking && r.objectResolutions[0].action == "blocked-invalid-path" &&
+             r.objectResolutions[1].blocking && r.objectResolutions[1].action == "blocked-invalid-path");
+    }
+}
+
 int main() {
     testDiagnosticCatalog();
     testSoundEquivalence();
@@ -960,6 +1135,7 @@ int main() {
     testFatCaseCollisionsR18();
     testFolderInspectionAndPartialDegradation();
     testSerializationAndDeterminism();
+    testAuditHardeningEdgeCases();
 
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
