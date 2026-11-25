@@ -265,6 +265,11 @@ foreach(test_file ${STYLE_EDIT_TEST_SRC})
     add_dependencies(${test_name} aiarranger-style)   # the CLI test runs it
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+if(TARGET test_selective_import_kit)
+    target_compile_options(test_selective_import_kit PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
+endif()
 # SET -> KST phase 1 private oracle: a local copy of an owner SET vs the Pa5X's own conversion of it
 # (AIARR_SET_ORACLE_SET / AIARR_SET_ORACLE_KST); counts only, Skipped (77) without them.
 add_test(NAME test_set_to_kst_oracle COMMAND test_set_to_kst --oracle)

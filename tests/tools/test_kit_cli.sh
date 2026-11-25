@@ -24,5 +24,74 @@ check "refused kit wrote nothing" "[ ! -e '$T/K2' ] && [ ! -e '$T/K2.INCOMPLETE'
 printf x >> "$T/AIA Kit/STYLES/Waltz.mid"
 expect 1 "$B/aiarranger-kit" verify "$T/AIA Kit"
 expect 1 "$B/aiarranger-kit" build --out "$T/K3"
+
+# ── M2c selective CLI checks (`select-plan` & `select-build`) ──
+printf 'bass 121 0 33\ndrum 120 64 0\nacc1 121 64 3\n' > "$T/map_user.txt"
+"$B/aiarranger-convert" --input "$R/fixtures/synthetic/SYNTH_WALTZ_68.sty" --target pa5x --output "$T/out/WaltzUser.mid" --sound-map "$T/map_user.txt" >/dev/null ||
+    { echo "  FAIL: selective user style fixture"; fails=$((fails+1)); }
+printf 'bass 121 0 33\ndrum 120 0 0\nacc1 121 74 40\n' > "$T/map_missing.txt"
+"$B/aiarranger-convert" --input "$R/fixtures/synthetic/SYNTH_WALTZ_68.sty" --target pa5x --output "$T/out/WaltzMissing.mid" --sound-map "$T/map_missing.txt" >/dev/null ||
+    { echo "  FAIL: selective missing style fixture"; fails=$((fails+1)); }
+
+# select-plan executable (exit 0) + JSON schema check
+"$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" --json > "$T/plan.json"
+rc=$?
+if [ "$rc" -eq 0 ]; then echo "  PASS: exit 0: select-plan --json"; else echo "  FAIL: exit $rc (want 0): select-plan --json"; fails=$((fails+1)); fi
+check "select-plan JSON schema and hardwareVerified false" \
+    "grep -q '\"schema\": \"aiarranger-selective-export-report/1\"' '$T/plan.json' && grep -q '\"hardwareVerified\": false' '$T/plan.json' && grep -q '\"executable\": true' '$T/plan.json'"
+FP=$(sed -n 's/.*"planFingerprint": "\([0-9a-f]\{64\}\)".*/\1/p' "$T/plan.json" | head -n 1)
+check "select-plan emitted 64-hex fingerprint" "[ '${#FP}' -eq 64 ]"
+
+# select-plan blocked by missing User Sound (exit 3)
+expect 3 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzMissing.mid --json
+
+# select-build blocked refuses and writes nothing (exit 3)
+expect 3 "$B/aiarranger-kit" select-build --workspace "$T/out" --style WaltzMissing.mid --out "$T/BlockedSelKit"
+check "blocked select-build wrote nothing" "[ ! -e '$T/BlockedSelKit' ] && [ ! -e '$T/BlockedSelKit.INCOMPLETE' ]"
+
+# select-build with pinned --expect-fingerprint succeeds (exit 0) and verifies via verifyKit
+expect 0 "$B/aiarranger-kit" select-build --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --expect-fingerprint "$FP" --out "$T/SelKit"
+expect 0 "$B/aiarranger-kit" verify "$T/SelKit"
+check "selective kit verifies with shasum and has SELECTIVE_MANIFEST.json + DIAGNOSTICS.json" \
+    "cd '$T/SelKit' && shasum -a 256 -c PACKAGE.sha256 && test -f SELECTIVE_MANIFEST.json && test -f DIAGNOSTICS.json && test ! -e KMP"
+
+# select-build with mismatched --expect-fingerprint fails (exit 1) and writes nothing
+BAD_FP="0000000000000000000000000000000000000000000000000000000000000000"
+expect 1 "$B/aiarranger-kit" select-build --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --expect-fingerprint "$BAD_FP" --out "$T/BadFpKit"
+check "bad fingerprint select-build wrote nothing" "[ ! -e '$T/BadFpKit' ] && [ ! -e '$T/BadFpKit.INCOMPLETE' ]"
+
+# select-build D18 overlap inside workspace refused (exit 1)
+expect 1 "$B/aiarranger-kit" select-build --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --out "$T/out/OverlapKit"
+check "overlap select-build wrote nothing" "[ ! -e '$T/out/OverlapKit' ]"
+
+# [P2-2] duplicate --bind slot, duplicate --sound-map key, repeated --policy rejected (exit 1)
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit"
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --sound-map "$T/map_user.txt" --sound-map "$T/map_user.txt"
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --policy block --policy remap
+
+# [P2-3] missing or invalid explicit --in rejected (exit 1)
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --in "$T/does_not_exist_pkg"
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USER01/3=AIA Demo Organ" --bind "USERDK01/0=AIA Demo Kit" \
+    --in "$T/map_user.txt"
+
+# [P3-2] out-of-spec --bind USERDK07/0 rejected at parse time (exit 1)
+expect 1 "$B/aiarranger-kit" select-plan --workspace "$T/out" --style WaltzUser.mid \
+    --bind "USERDK07/0=AIA Demo Kit"
+
 rm -rf "$T"
 [ "$fails" -eq 0 ]
