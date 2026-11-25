@@ -848,6 +848,15 @@ struct NativeKstOptions {
     size_t maxDirEntries = 1000000;     // entry cap for folder reads (matches kst_inventory.h ListLimits::entries)
 };
 
+struct SoundSlotMeta {
+    std::string bank;
+    uint32_t number = 0;
+    uint32_t kind = 0;
+    std::string name;
+    std::string source;
+    bool decoded = false;
+};
+
 struct NativeKstReport {
     bool kmpPresent = false;
     bool kmpParsed = false;
@@ -862,6 +871,7 @@ struct NativeKstReport {
     size_t bytesRead = 0;               // total disk bytes read by resolveNativeKstFolder()
     LayoutTable usedLayouts;
     NativeRefReport refs;
+    std::vector<SoundSlotMeta> soundCatalog;   // occupied SOUND/*.pcg slots (sorted by bank, number), populated even if KMP fails
     std::vector<SoundDecodeFailure> decodeFailures;
     std::vector<std::string> containerErrors;
     std::vector<std::string> skippedPaths;
@@ -905,6 +915,7 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
     // 2. Sound containers (KORF parse + OC31/OC32 decode)
     std::vector<DecodedSound> sounds;
     std::set<std::pair<std::string, uint32_t>> seenSoundKeys;
+    std::set<std::pair<std::string, uint32_t>> catalogKeys;
     for (const RawNamedBlob& blob : in.soundContainers) {
         const std::string bank = blob.bank.empty() ? native_detail::bankFromLabel(blob.label) : blob.bank;
         SoundExtractResult ex = extractSoundsFromPcgBytes(blob.bytes.data(), blob.bytes.size(), bank, blob.label, opts.soundMode);
@@ -916,11 +927,6 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
         ++res.report.soundContainers;
         res.report.soundsDecodedOc31 += ex.oc31Decoded;
         res.report.soundsLoadedRaw += ex.rawLoaded;
-        for (const SoundDecodeFailure& f : ex.failures) {
-            res.report.decodeFailures.push_back(f);
-            res.report.diagnostics.push_back("sound decode failed: " + f.bank + "/" + std::to_string(f.number) +
-                                             " (" + panative::printable(f.name) + ") in " + f.source + ": " + f.reason);
-        }
         for (DecodedSound& s : ex.sounds) {
             if (!seenSoundKeys.emplace(s.bank, s.number).second) {
                 res.report.containerErrors.push_back(blob.label + ": duplicate Sound identity " + s.bank + "/" + std::to_string(s.number));
@@ -928,9 +934,21 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
                 res.report.diagnostics.push_back("duplicate sound: " + s.bank + "/" + std::to_string(s.number) + " in " + blob.label);
                 continue;
             }
+            if (catalogKeys.emplace(s.bank, s.number).second)
+                res.report.soundCatalog.push_back({s.bank, s.number, s.kind, s.name, blob.label, true});
             sounds.push_back(std::move(s));
         }
+        for (const SoundDecodeFailure& f : ex.failures) {
+            res.report.decodeFailures.push_back(f);
+            res.report.diagnostics.push_back("sound decode failed: " + f.bank + "/" + std::to_string(f.number) +
+                                             " (" + panative::printable(f.name) + ") in " + f.source + ": " + f.reason);
+            if (catalogKeys.emplace(f.bank, f.number).second)
+                res.report.soundCatalog.push_back({f.bank, f.number, f.kind, f.name, f.source, false});
+        }
     }
+    std::sort(res.report.soundCatalog.begin(), res.report.soundCatalog.end(), [](const SoundSlotMeta& a, const SoundSlotMeta& b) {
+        return a.bank != b.bank ? a.bank < b.bank : a.number < b.number;
+    });
 
     // 3. Pa5X RAM.KMP -> KmpIndex
     if (!in.kmpContainer.has_value()) {
