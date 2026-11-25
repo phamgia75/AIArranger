@@ -200,6 +200,7 @@ struct SoundClosureRecord {
     SoundEquivalenceProfile equivalence;
     std::vector<graph::ResourceId> oscillatorIds;     // sorted unique
     std::vector<graph::ResourceId> multisampleIds;    // sorted unique
+    std::vector<graph::ResourceId> drumSampleIds;     // sorted unique
     std::vector<graph::ResourceId> sampleIds;         // sorted unique
     std::vector<std::string> pcmFiles;                // sorted unique KST-relative PCM paths
     uint64_t storedPcmBytesProxy = 0;
@@ -796,7 +797,7 @@ inline M1AdapterView adaptFromM1Closure(
     view.coverage.kmpIsOc31 = !M.coverage.downstreamKmpParsed && conflict_detail::isOc31KmpError(M.coverage.kmpError);
     view.coverage.kmpError = M.coverage.kmpError;
     view.coverage.songBookPresent = M.coverage.songBookPresent;
-    view.coverage.drumKitBodyEdgesSupported = false;
+    view.coverage.drumKitBodyEdgesSupported = M.coverage.drumKitBodyEdgesSupported;
     view.coverage.coverageComplete = M.coverage.coverageComplete;
     view.coverage.bytesReadDownstream = M.coverage.bytesReadDownstream;
     view.coverage.bytesReadUpstream = M.coverage.bytesReadUpstream;
@@ -915,6 +916,11 @@ inline M1AdapterView adaptFromM1Closure(
         msFingerprints.push_back(std::move(fp));
     }
 
+    std::vector<DrumSampleFingerprint> drumFingerprints;
+    drumFingerprints.reserve(kmp.drums.size());
+    std::set<graph::Id8> duplicateDrumIdSet;
+    for (const auto& dup : M.duplicateDrumIds) duplicateDrumIdSet.insert(dup.id);
+
     for (uint32_t i = 0; i < kmp.drums.size(); ++i) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const auto& dr = kmp.drums[i];
@@ -927,12 +933,38 @@ inline M1AdapterView adaptFromM1Closure(
         rec.rightSample = dr.rightSample;
         rec.confidence = EdgeConfidence::Confirmed;
         std::set<graph::ResourceId> sids;
-        if (dr.leftSample != graph::kNoZoneSample)
-            sids.insert(graph::ResourceId{false, "KST", graph::Kind::Sample, dr.leftSample});
-        if (dr.rightSample != graph::kNoZoneSample)
-            sids.insert(graph::ResourceId{false, "KST", graph::Kind::Sample, dr.rightSample});
+        DrumSampleFingerprint df;
+        df.drumSampleId = dr.id;
+        if (dr.leftSample != graph::kNoZoneSample) {
+            const graph::ResourceId lId{false, "KST", graph::Kind::Sample, dr.leftSample};
+            sids.insert(lId);
+            if (const auto spIt = view.samples.find(lId); spIt != view.samples.end()) {
+                df.leftSampleId = spIt->second.id8;
+                if (spIt->second.hasPcm && spIt->second.payloadBytes > 0) {
+                    df.leftPcmPresent = true;
+                    df.leftPcmPayloadBytes = spIt->second.payloadBytes > 0xFFFFFFFFull
+                                                 ? 0xFFFFFFFFu
+                                                 : static_cast<uint32_t>(spIt->second.payloadBytes);
+                }
+            }
+        }
+        if (dr.rightSample != graph::kNoZoneSample) {
+            const graph::ResourceId rId{false, "KST", graph::Kind::Sample, dr.rightSample};
+            sids.insert(rId);
+            df.hasRight = true;
+            if (const auto spIt = view.samples.find(rId); spIt != view.samples.end()) {
+                df.rightSampleId = spIt->second.id8;
+                if (spIt->second.hasPcm && spIt->second.payloadBytes > 0) {
+                    df.rightPcmPresent = true;
+                    df.rightPcmPayloadBytes = spIt->second.payloadBytes > 0xFFFFFFFFull
+                                                  ? 0xFFFFFFFFu
+                                                  : static_cast<uint32_t>(spIt->second.payloadBytes);
+                }
+            }
+        }
         rec.sampleIds.assign(sids.begin(), sids.end());
         view.drumSamples.emplace(rec.id, std::move(rec));
+        drumFingerprints.push_back(df);
     }
 
     // Group UnresolvedSlots per Sound with explicit separation of inUnanalysedSound == false vs true
@@ -959,8 +991,8 @@ inline M1AdapterView adaptFromM1Closure(
         sc.sourceFile = use.sourceFile;
         sc.isDrumKit = use.isDrumKit;
         sc.decoded = use.decoded;
-        sc.analysed = use.analysed && !use.isDrumKit; // M2a invariant: USERDK bodies are always unparsed
-        sc.unanalysedGap = use.isDrumKit ? (use.gap.empty() ? std::string("DrumKitBodyUnparsed") : use.gap) : use.gap;
+        sc.analysed = use.analysed;
+        sc.unanalysedGap = (!sc.analysed && use.isDrumKit && use.gap.empty()) ? std::string("DrumKitBodyUnparsed") : use.gap;
         sc.soundToMsConfidence = sc.analysed ? EdgeConfidence::Inferred : EdgeConfidence::Unsupported;
         sc.msToSampleConfidence = M.coverage.downstreamKmpParsed ? EdgeConfidence::Confirmed : EdgeConfidence::Unsupported;
 
@@ -991,20 +1023,31 @@ inline M1AdapterView adaptFromM1Closure(
         eq.analysed = sc.analysed;
         eq.unanalysedReason = sc.unanalysedGap;
         eq.unresolvedSlotCount = sc.unresolvedSlotsInAnalysed.size() + sc.unresolvedSlotsInUnanalysed.size();
-        // KMP equivalence requires parsed KMP + exact zone topKeys (if adapted without raw KMP, stay InsufficientEvidence)
-        eq.kmpComplete = M.coverage.downstreamKmpParsed && (kmp.multisamples.empty() || hasExactZoneTopKeys);
+        // KMP equivalence requires parsed KMP + exact zone topKeys for melodic Sounds (if adapted without raw KMP, stay InsufficientEvidence)
+        eq.kmpComplete = use.isDrumKit
+                             ? M.coverage.downstreamKmpParsed
+                             : (M.coverage.downstreamKmpParsed && (kmp.multisamples.empty() || hasExactZoneTopKeys));
 
         if (sc.analysed && M.coverage.downstreamKmpParsed) {
             const auto cl = g.closure({use.id});
-            std::set<graph::ResourceId> oscs, mss, smps;
+            std::set<graph::ResourceId> oscs, mss, dss, smps;
             std::set<std::string> pcms;
             uint64_t bytesProxy = 0;
             for (const graph::ResourceId& dep : cl) {
                 if (dep.kind == graph::Kind::Oscillator) oscs.insert(dep);
                 else if (dep.kind == graph::Kind::Multisample) {
                     mss.insert(dep);
-                    if (dep.number < msFingerprints.size()) {
+                    if (!use.isDrumKit && dep.number < msFingerprints.size()) {
                         eq.referencedMultisamples.push_back(msFingerprints[dep.number]);
+                    }
+                } else if (dep.kind == graph::Kind::DrumSample) {
+                    dss.insert(dep);
+                    if (use.isDrumKit && dep.number < drumFingerprints.size()) {
+                        const auto& df = drumFingerprints[dep.number];
+                        if (duplicateDrumIdSet.count(df.drumSampleId) > 0) {
+                            eq.hasDuplicateDrumSampleId = true;
+                        }
+                        eq.referencedDrumSamples.push_back(df);
                     }
                 } else if (dep.kind == graph::Kind::Sample) {
                     smps.insert(dep);
@@ -1016,6 +1059,7 @@ inline M1AdapterView adaptFromM1Closure(
             }
             sc.oscillatorIds.assign(oscs.begin(), oscs.end());
             sc.multisampleIds.assign(mss.begin(), mss.end());
+            sc.drumSampleIds.assign(dss.begin(), dss.end());
             sc.sampleIds.assign(smps.begin(), smps.end());
             sc.pcmFiles.assign(pcms.begin(), pcms.end());
             sc.storedPcmBytesProxy = bytesProxy;

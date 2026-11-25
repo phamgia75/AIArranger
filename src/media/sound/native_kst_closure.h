@@ -14,8 +14,10 @@
 //                      User Sound/DK bank addressing (MSB 121/120, LSB 64..75 -> USER01..12 / USERDK01..12),
 //                      KORF/OC31/OC32 container & codec, raw Pa5X RAM.KMP (0x11080018 v0x0103) -> Zone -> Sample -> PCM.
 //      - INFERRED    : Factory/GM2 ROM classification (MSB 121/120, LSB 0..63; ROM bank table not hardware-verified),
-//                      Sound -> Oscillator -> High/Low Multisample layout (fitLayout), stored PCM byte proxy.
-//      - UNSUPPORTED : OC31 Pa700/Pa4X RAM.KMP (0x11050038), User Drum Kit Sound -> DrumSample body edges,
+//                      Sound -> Oscillator -> High/Low Multisample layout (fitLayout),
+//                      User Drum Kit Sound -> DrumSample body edges (read-only variable-layer USERDK parser),
+//                      stored PCM byte proxy.
+//      - UNSUPPORTED : OC31 Pa700/Pa4X RAM.KMP (0x11050038), OC32 USERDK without 0x8000 ID8 sentinel / legacy fixed 4,322 B USERDK,
 //                      SongBook (.SBD), Global (SETUP.GBL), malformed SMF leaves (e.g. CC11 >= 0x80),
 //                      and unknown-origin MIDI bank addresses (MSB outside {120,121}, LSB > 75, or missing CC0/CC32).
 //  * Determinism: every input, node ID, edge, manifest collection, and JSON output is canonically sorted;
@@ -210,6 +212,7 @@ struct RootClosureEntry {
     std::vector<ResourceId> userSoundIds;             // sorted unique resolved User Sound / DK IDs
     std::vector<ResourceId> missingUserSoundIds;      // sorted unique dangling User Sound / DK IDs
     std::vector<ResourceId> multisampleIds;           // sorted unique reachable RAM Multisample IDs
+    std::vector<ResourceId> drumSampleIds;            // sorted unique reachable RAM DrumSample IDs
     std::vector<ResourceId> sampleIds;                // sorted unique reachable RAM Sample IDs
     std::vector<std::string> pcmFiles;                // sorted unique reachable PCM/*.pcm relative paths
     uint64_t storedPcmBytesProxy = 0;                 // sum of SampleInfo::bytes() across reachable samples (INFERRED proxy)
@@ -235,6 +238,7 @@ struct UserSoundManifestEntry {
     std::vector<ResourceId> referencingRootIds;       // sorted unique upstream roots referencing this Sound
     size_t totalRefOccurrences = 0;
     size_t multisampleCount = 0;
+    size_t drumSampleCount = 0;
     size_t sampleCount = 0;
     size_t pcmFileCount = 0;
     bool orphanFromScannedRoots = false;              // true when referencingRootIds.empty() (NOT provably deletable)
@@ -268,7 +272,7 @@ struct ManifestCoverageFlags {
     std::string kmpError;
     bool songBookPresent = false;
     bool songBookScanned = false;                     // ALWAYS false (OC31 SBD unsupported)
-    bool drumKitBodyEdgesSupported = false;           // ALWAYS false (USERDK -> DrumSample unsupported)
+    bool drumKitBodyEdgesSupported = false;           // true when read-only USERDK layout analysis ran on raw Pa5X RAM.KMP
     bool coverageComplete = false;
     size_t bytesReadDownstream = 0;
     size_t bytesReadUpstream = 0;
@@ -302,6 +306,8 @@ struct ManifestSummary {
     size_t multisamplesReachableFromRoots = 0;
     size_t multisamplesReachableFromAnalysedSounds = 0;
     size_t drumSamplesTotal = 0;
+    size_t drumSamplesReachableFromRoots = 0;
+    size_t drumSamplesReachableFromAnalysedSounds = 0;
     size_t duplicateDrumIdGroups = 0;
     size_t samplesTotal = 0;
     size_t samplesReachableFromRoots = 0;
@@ -317,6 +323,8 @@ struct ManifestSummary {
     size_t sharedUserSoundsAcrossRoots = 0;
     size_t sharedMultisamplesAcrossRoots = 0;
     size_t sharedMultisamplesAcrossSounds = 0;
+    size_t sharedDrumSamplesAcrossRoots = 0;
+    size_t sharedDrumSamplesAcrossSounds = 0;
     size_t sharedSamplesAcrossRoots = 0;
     size_t sharedSamplesAcrossSounds = 0;
     size_t sharedPcmFilesAcrossRoots = 0;
@@ -324,6 +332,7 @@ struct ManifestSummary {
     size_t orphanMultisamplesFromRoots = 0;
     size_t orphanMultisamplesFromAnalysedSounds = 0;
     size_t orphanDrumSamples = 0;
+    size_t orphanDrumSamplesFromAnalysedSounds = 0;
     size_t orphanSamplesFromRoots = 0;
     size_t orphanPcmEntries = 0;
     size_t orphanPcmFilesFromRoots = 0;
@@ -337,12 +346,14 @@ struct NativeKstDependencyManifest {
     std::vector<UserSoundManifestEntry> userSounds;       // sorted by ResourceId
     std::vector<SharedResourceEntry> sharedUserSounds;    // sorted by id
     std::vector<SharedResourceEntry> sharedMultisamples;  // sorted by id
+    std::vector<SharedResourceEntry> sharedDrumSamples;   // sorted by id
     std::vector<SharedResourceEntry> sharedSamples;       // sorted by id
     std::vector<SharedResourceEntry> sharedPcmFiles;      // sorted by id
     std::vector<MissingUserSoundEntry> missingUserSounds; // sorted by targetId
     std::vector<MissingPcmSample> missingPcmSamples;      // sorted by sampleIndex
     std::vector<ResourceId> orphanUserSounds;             // sorted by ResourceId (NOT provably deletable)
     std::vector<ResourceId> orphanMultisamples;           // sorted by ResourceId (NOT provably deletable)
+    std::vector<ResourceId> orphanDrumSamples;            // sorted by ResourceId (NOT provably deletable)
     std::vector<ResourceId> orphanSamples;                // sorted by ResourceId (NOT provably deletable)
     std::vector<std::string> orphanPcmFiles;              // sorted by file path (NOT provably deletable)
     std::vector<PcmEntry> orphanPcmEntries;               // sorted by (file, hexId) (NOT provably deletable)
@@ -664,16 +675,19 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         unanalysedGapById[u.sound] = gapName(u.why);
     }
 
-    // 3. Precompute downstream closure once per Sound (Sound -> Oscillator -> Multisample -> Zone -> Sample -> PCM)
+    // 3. Precompute downstream closure once per Sound (Sound -> Oscillator -> Multisample -> Zone -> Sample -> PCM
+    //    and USERDK -> DrumSample -> L/R Sample -> PCM)
     struct SoundDownstreamInfo {
         bool analysed = false;
         std::vector<uint32_t> multisampleIndices;
+        std::vector<uint32_t> drumSampleIndices;
         std::vector<uint32_t> sampleIndices;
         std::vector<std::string> pcmFiles;
         uint64_t storedPcmBytesProxy = 0;
     };
     std::map<ResourceId, SoundDownstreamInfo> soundDownstream;
     std::map<uint32_t, std::set<ResourceId>> msAnalysedSoundUsers;
+    std::map<uint32_t, std::set<ResourceId>> dsAnalysedSoundUsers;
     std::map<uint32_t, std::set<ResourceId>> sampleAnalysedSoundUsers;
 
     // Collect all PCM files present in KMP/PCM inventory (for total & orphan PCM file tracking)
@@ -690,13 +704,16 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
             if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             SoundDownstreamInfo sdi;
             sdi.analysed = (unanalysedGapById.find(sid) == unanalysedGapById.end()) && sm.decoded;
-            std::set<uint32_t> msSet, smpSet;
+            std::set<uint32_t> msSet, dsSet, smpSet;
             std::set<std::string> pcmSet;
             const auto cl = g.closure({sid});
             for (const ResourceId& dep : cl) {
                 if (dep.kind == Kind::Multisample) {
                     msSet.insert(dep.number);
                     if (sdi.analysed) msAnalysedSoundUsers[dep.number].insert(sid);
+                } else if (dep.kind == Kind::DrumSample) {
+                    dsSet.insert(dep.number);
+                    if (sdi.analysed) dsAnalysedSoundUsers[dep.number].insert(sid);
                 } else if (dep.kind == Kind::Sample) {
                     smpSet.insert(dep.number);
                     if (sdi.analysed) sampleAnalysedSoundUsers[dep.number].insert(sid);
@@ -707,6 +724,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
                 }
             }
             sdi.multisampleIndices.assign(msSet.begin(), msSet.end());
+            sdi.drumSampleIndices.assign(dsSet.begin(), dsSet.end());
             sdi.sampleIndices.assign(smpSet.begin(), smpSet.end());
             sdi.pcmFiles.assign(pcmSet.begin(), pcmSet.end());
             soundDownstream.emplace(sid, std::move(sdi));
@@ -723,7 +741,9 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
     M.coverage.kmpError = out.downstream.report.kmpError;
     M.coverage.songBookPresent = songBookPresent;
     M.coverage.songBookScanned = false;
-    M.coverage.drumKitBodyEdgesSupported = false;
+    M.coverage.drumKitBodyEdgesSupported =
+        out.downstream.report.kmpParsed &&
+        (!out.downstream.report.usedDrumLayouts.empty() || out.downstream.report.refs.drumKitsAnalysed > 0);
     M.coverage.bytesReadDownstream = out.downstream.report.bytesRead;
     M.coverage.bytesReadUpstream = bytesReadUpstream;
     M.coverage.metadirJsonFiles = metadirJsonFiles;
@@ -732,6 +752,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
     std::map<ResourceId, std::set<ResourceId>> soundRootUsers;
     std::map<ResourceId, size_t> soundRefOccurrences;
     std::map<uint32_t, std::set<ResourceId>> msRootUsers;
+    std::map<uint32_t, std::set<ResourceId>> dsRootUsers;
     std::map<uint32_t, std::set<ResourceId>> sampleRootUsers;
     std::map<std::string, std::set<ResourceId>> pcmFileRootUsers;
     std::map<std::string, std::set<ResourceId>> pcmFileSoundUsers;
@@ -893,7 +914,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         entry.userSoundIds.assign(resolvedSoundsSet.begin(), resolvedSoundsSet.end());
         entry.missingUserSoundIds.assign(missingSoundsSet.begin(), missingSoundsSet.end());
 
-        std::set<uint32_t> rootMs, rootSamples;
+        std::set<uint32_t> rootMs, rootDs, rootSamples;
         std::set<std::string> rootPcmFiles;
         for (const ResourceId& sid : entry.userSoundIds) {
             const auto sdiIt = soundDownstream.find(sid);
@@ -906,6 +927,10 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
                 rootMs.insert(mi);
                 msRootUsers[mi].insert(rootId);
             }
+            for (uint32_t di : sdi.drumSampleIndices) {
+                rootDs.insert(di);
+                dsRootUsers[di].insert(rootId);
+            }
             for (uint32_t si : sdi.sampleIndices) {
                 rootSamples.insert(si);
                 sampleRootUsers[si].insert(rootId);
@@ -917,6 +942,8 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         }
         entry.multisampleIds.reserve(rootMs.size());
         for (uint32_t mi : rootMs) entry.multisampleIds.push_back({false, "KST", Kind::Multisample, mi});
+        entry.drumSampleIds.reserve(rootDs.size());
+        for (uint32_t di : rootDs) entry.drumSampleIds.push_back({false, "KST", Kind::DrumSample, di});
         entry.sampleIds.reserve(rootSamples.size());
         uint64_t rootBytesProxy = 0;
         for (uint32_t si : rootSamples) {
@@ -967,6 +994,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         }
         if (const auto sdiIt = soundDownstream.find(sid); sdiIt != soundDownstream.end()) {
             use.multisampleCount = sdiIt->second.multisampleIndices.size();
+            use.drumSampleCount = sdiIt->second.drumSampleIndices.size();
             use.sampleCount = sdiIt->second.sampleIndices.size();
             use.pcmFileCount = sdiIt->second.pcmFiles.size();
         }
@@ -1012,7 +1040,24 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
                 M.sharedMultisamples.push_back({mid.str(), "Multisample", ResourceOrigin::Ram, rc, sc, {}});
             }
         }
-        M.summary.orphanDrumSamples = out.downstream.kmpIndex.drums.size();   // DK Sound -> DrumSample edges UNSUPPORTED
+        for (uint32_t di = 0; di < out.downstream.kmpIndex.drums.size(); ++di) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
+            const ResourceId did{false, "KST", Kind::DrumSample, di};
+            const auto rit = dsRootUsers.find(di);
+            const auto sit = dsAnalysedSoundUsers.find(di);
+            const size_t rc = rit == dsRootUsers.end() ? 0 : rit->second.size();
+            const size_t sc = sit == dsAnalysedSoundUsers.end() ? 0 : sit->second.size();
+            if (rc > 0) ++M.summary.drumSamplesReachableFromRoots;
+            else M.orphanDrumSamples.push_back(did);
+            if (sc > 0) ++M.summary.drumSamplesReachableFromAnalysedSounds;
+            else ++M.summary.orphanDrumSamplesFromAnalysedSounds;
+            if (sc > 1) ++M.summary.sharedDrumSamplesAcrossSounds;
+            if (rc > 1) {
+                M.sharedDrumSamples.push_back({did.str(), "DrumSample", ResourceOrigin::Ram, rc, sc, {}});
+            }
+        }
+        M.summary.sharedDrumSamplesAcrossRoots = M.sharedDrumSamples.size();
+        M.summary.orphanDrumSamples = M.orphanDrumSamples.size();
 
         for (uint32_t si = 0; si < out.downstream.kmpIndex.samples.size(); ++si) {
             if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
@@ -1473,7 +1518,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "    \"oc31LegacyKmp\": \"UNSUPPORTED\",\n";
     o += "    \"soundOscillatorLayout\": \"INFERRED\",\n";
     o += "    \"storedPcmBytesProxy\": \"INFERRED\",\n";
-    o += "    \"drumKitSoundBody\": \"UNSUPPORTED\",\n";
+    o += "    \"drumKitSoundBody\": " + std::string(m.coverage.drumKitBodyEdgesSupported ? "\"INFERRED\"" : "\"UNSUPPORTED\"") + ",\n";
     o += "    \"songBookAndGlobal\": \"UNSUPPORTED\"\n";
     o += "  },\n";
 
@@ -1521,6 +1566,8 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "    \"multisamplesReachableFromRoots\": " + std::to_string(s.multisamplesReachableFromRoots) + ",\n";
     o += "    \"multisamplesReachableFromAnalysedSounds\": " + std::to_string(s.multisamplesReachableFromAnalysedSounds) + ",\n";
     o += "    \"drumSamplesTotal\": " + std::to_string(s.drumSamplesTotal) + ",\n";
+    o += "    \"drumSamplesReachableFromRoots\": " + std::to_string(s.drumSamplesReachableFromRoots) + ",\n";
+    o += "    \"drumSamplesReachableFromAnalysedSounds\": " + std::to_string(s.drumSamplesReachableFromAnalysedSounds) + ",\n";
     o += "    \"duplicateDrumIdGroups\": " + std::to_string(s.duplicateDrumIdGroups) + ",\n";
     o += "    \"samplesTotal\": " + std::to_string(s.samplesTotal) + ",\n";
     o += "    \"samplesReachableFromRoots\": " + std::to_string(s.samplesReachableFromRoots) + ",\n";
@@ -1536,6 +1583,8 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "    \"sharedUserSoundsAcrossRoots\": " + std::to_string(s.sharedUserSoundsAcrossRoots) + ",\n";
     o += "    \"sharedMultisamplesAcrossRoots\": " + std::to_string(s.sharedMultisamplesAcrossRoots) + ",\n";
     o += "    \"sharedMultisamplesAcrossSounds\": " + std::to_string(s.sharedMultisamplesAcrossSounds) + ",\n";
+    o += "    \"sharedDrumSamplesAcrossRoots\": " + std::to_string(s.sharedDrumSamplesAcrossRoots) + ",\n";
+    o += "    \"sharedDrumSamplesAcrossSounds\": " + std::to_string(s.sharedDrumSamplesAcrossSounds) + ",\n";
     o += "    \"sharedSamplesAcrossRoots\": " + std::to_string(s.sharedSamplesAcrossRoots) + ",\n";
     o += "    \"sharedSamplesAcrossSounds\": " + std::to_string(s.sharedSamplesAcrossSounds) + ",\n";
     o += "    \"sharedPcmFilesAcrossRoots\": " + std::to_string(s.sharedPcmFilesAcrossRoots) + ",\n";
@@ -1543,6 +1592,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "    \"orphanMultisamplesFromRoots\": " + std::to_string(s.orphanMultisamplesFromRoots) + ",\n";
     o += "    \"orphanMultisamplesFromAnalysedSounds\": " + std::to_string(s.orphanMultisamplesFromAnalysedSounds) + ",\n";
     o += "    \"orphanDrumSamples\": " + std::to_string(s.orphanDrumSamples) + ",\n";
+    o += "    \"orphanDrumSamplesFromAnalysedSounds\": " + std::to_string(s.orphanDrumSamplesFromAnalysedSounds) + ",\n";
     o += "    \"orphanSamplesFromRoots\": " + std::to_string(s.orphanSamplesFromRoots) + ",\n";
     o += "    \"orphanPcmEntries\": " + std::to_string(s.orphanPcmEntries) + ",\n";
     o += "    \"orphanPcmFilesFromRoots\": " + std::to_string(s.orphanPcmFilesFromRoots) + "\n";
@@ -1591,6 +1641,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
         o += "        \"userSoundIds\": "; writeIdVec(o, r.userSoundIds); o += ",\n";
         o += "        \"missingUserSoundIds\": "; writeIdVec(o, r.missingUserSoundIds); o += ",\n";
         o += "        \"multisampleIds\": "; writeIdVec(o, r.multisampleIds); o += ",\n";
+        o += "        \"drumSampleIds\": "; writeIdVec(o, r.drumSampleIds); o += ",\n";
         o += "        \"sampleCount\": " + std::to_string(r.sampleIds.size()) + ",\n";
         if (jopts.includePerRootSampleIds) {
             o += "        \"sampleIds\": "; writeIdVec(o, r.sampleIds); o += ",\n";
@@ -1626,6 +1677,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
              ", \"referencingRootCount\": " + std::to_string(u.referencingRootIds.size()) +
              ", \"totalRefOccurrences\": " + std::to_string(u.totalRefOccurrences) +
              ", \"multisampleCount\": " + std::to_string(u.multisampleCount) +
+             ", \"drumSampleCount\": " + std::to_string(u.drumSampleCount) +
              ", \"sampleCount\": " + std::to_string(u.sampleCount) +
              ", \"pcmFileCount\": " + std::to_string(u.pcmFileCount) +
              ", \"orphanFromScannedRoots\": " + std::string(bstr(u.orphanFromScannedRoots)) + "}";
@@ -1653,6 +1705,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "  \"shared\": {\n";
     writeSharedVec("userSounds", m.sharedUserSounds, true, true);
     writeSharedVec("multisamples", m.sharedMultisamples, false, true);
+    writeSharedVec("drumSamples", m.sharedDrumSamples, false, true);
     writeSharedVec("pcmFiles", m.sharedPcmFiles, true, true);
     o += "    \"sharedSampleCount\": " + std::to_string(m.sharedSamples.size());
     if (jopts.includeSampleLists) {
@@ -1697,6 +1750,7 @@ inline std::string serializeManifestJson(const NativeKstDependencyManifest& m,
     o += "    \"notProvablyDeletable\": true,\n";
     o += "    \"userSounds\": "; writeIdVec(o, m.orphanUserSounds); o += ",\n";
     o += "    \"multisamples\": "; writeIdVec(o, m.orphanMultisamples); o += ",\n";
+    o += "    \"drumSamples\": "; writeIdVec(o, m.orphanDrumSamples); o += ",\n";
     o += "    \"pcmFiles\": "; writeStrVec(o, m.orphanPcmFiles); o += ",\n";
     o += "    \"unmatchedPcmEntries\": [";
     for (size_t i = 0; i < m.orphanPcmEntries.size(); ++i) {
