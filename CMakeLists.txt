@@ -232,6 +232,14 @@ if(TARGET test_selective_plan_cli)
         RESOURCES_BIN="$<TARGET_FILE:aiarranger-resources>")
     add_dependencies(test_selective_plan_cli aiarranger-resources)
 endif()
+if(TARGET test_selective_sub_kst)
+    target_compile_options(test_selective_sub_kst PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
+    target_compile_definitions(test_selective_sub_kst PRIVATE
+        RESOURCES_BIN="$<TARGET_FILE:aiarranger-resources>")
+    add_dependencies(test_selective_sub_kst aiarranger-resources)
+endif()
 
 # ── Korg exporter tests (format, mapper, Genos corpus conversion) ─────
 file(GLOB EXPORTER_TEST_SRC tests/exporters/*.cpp)
