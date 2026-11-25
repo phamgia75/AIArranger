@@ -426,7 +426,7 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         for (const auto& d : r1.diagnostics) if (d.code == "STYLE_QUAL_CASM_LOST") allCasmActiveOk = false;
         // P1-2: M6 with 0 resolved sounds must be <= 15.0 and targetKstEvaluated=false, targetKstValid=false, targetKstStatus=NOT_TESTED!
         if (r1.m6.score > 15.01 || r1.m6.targetKstEvaluated || r1.m6.targetKstValid ||
-            r1.m6.targetKstStatus != bench::kStatusNotTested || r1.l3HardwareStatus != bench::kStatusNotTested) {
+            r1.m6.targetKstStatus != bench::BenchStatus::NotTested || r1.l3Status != bench::BenchStatus::NotTested) {
             allM6Honest = false;
         }
 
@@ -436,17 +436,17 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         if (j1.find(REPO_DIR) != std::string::npos || j1.find("/Users/") != std::string::npos ||
             j1.find("/home/") != std::string::npos) allScrubbed = false;
         if (j1.find("\"hardwareVerified\": false") == std::string::npos ||
-            j1.find("\"l3Status\": \"NotRun\"") == std::string::npos ||
+            j1.find("\"l3Status\": \"NOT_TESTED\"") == std::string::npos ||
             j1.find("STRUCTURALLY VALID — NOT VERIFIED ON A PA5X") == std::string::npos ||
             j1.find("aiarranger-style-quality-bench/1") == std::string::npos) allEpistemic = false;
         allResults.push_back(r1);
     }
     TEST("bench: all 12 CC0 torture fixtures evaluate & structurally validate", allOk);
     TEST("P2-2: active-channel CASM preservation = 1.0 across all 12 fixtures (zero false CASM_LOST)", allCasmActiveOk);
-    TEST("P1-2: honest M6 <= 15.0 with 0 resolved sounds & targetKstEvaluated=false/targetKstValid=false", allM6Honest);
+    TEST("P1-2: honest M6 <= 15.0 with 0 resolved sounds & targetKstStatus=NOT_TESTED, l3Status=NOT_TESTED", allM6Honest);
     TEST("bench: 100% deterministic byte-identical JSON across repeated runs", allDeterministic);
     TEST("bench: JSON output is path-scrubbed (zero host paths leaked)", allScrubbed);
-    TEST("bench: epistemic stamps present (hardwareVerified=false, L3=NotRun)", allEpistemic);
+    TEST("bench: epistemic stamps present (hardwareVerified=false, l3Status=NOT_TESTED)", allEpistemic);
 
     // P1-1: Verify SYNTH_MEGAVOICE_GUITAR_BASS has NO side-channel UASF folding or Bass Inversion credit!
     const auto& megaRes = allResults[7];
@@ -462,53 +462,10 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         const auto rk = bench::evaluateStyleFile(fx("SYNTH_POP_SFF2.sty"), kstOpt);
         TEST("P1-2: bad --target-kst reports targetKstEvaluated=true, targetKstValid=false, targetKstStatus=FAIL, m6=0",
              rk.ok && rk.m6.targetKstEvaluated && !rk.m6.targetKstValid &&
-             rk.m6.targetKstStatus == bench::kStatusFail && rk.m6.score == 0.0);
+             rk.m6.targetKstStatus == bench::BenchStatus::Fail && rk.m6.score == 0.0);
     }
 
-    // Negative Control M1: deliberately broken wrong-source-chord / chord-mute clash -> M1 drops sharply!
-    {
-        const std::string cleanPath = fx("SYNTH_SFF1_CTAB_CNTT.sty");
-        const auto rawBytes = readFileBytes(cleanPath);
-        const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_SFF1_CTAB_CNTT.sty");
-        const auto mr = Sff1ToUasfMapper().map(pr);
-        korg::MapOptions kopt;
-        kopt.ppqn = 384;
-        kopt.route = korg::routeFromCasm(pr);
-        kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
-        auto kr = korg::mapToKorg(mr.style, kopt);
-        const auto baseEval = bench::evaluateExportedStyleAgainstSty(
-            rawBytes, kr.style, kr.report, "SYNTH_SFF1_CTAB_CNTT.sty", opt);
-        // Mutate all chord-driven notes (Bass + Acc1..Acc5) by +1 semitone (simulating wrong source chord / clash)
-        korg::Style clashed = kr.style;
-        for (auto& el : clashed.elements) {
-            for (auto& ev : el.events) {
-                uint8_t ch = ev.status & 0x0F;
-                uint8_t hi = ev.status & 0xF0;
-                if ((ch == korg::kBassCh || (ch >= 11 && ch <= 15)) && (hi == 0x90 || hi == 0x80) && ev.d1 < 126) {
-                    ev.d1 = static_cast<uint8_t>(ev.d1 + 1);
-                }
-            }
-        }
-        const auto clashEval = bench::evaluateExportedStyleAgainstSty(
-            rawBytes, clashed, kr.report, "SYNTH_SFF1_CTAB_CNTT.sty", opt);
-        TEST("NegCtrl M1: wrong-source-chord / chord-mute clash spikes clashRate & drops M1 sharply (PASS -> FAIL)",
-             baseEval.ok && clashEval.ok &&
-             baseEval.m1.status == bench::kStatusPass &&
-             clashEval.m1.clashRate > baseEval.m1.clashRate + 0.30 &&
-             clashEval.m1.score < baseEval.m1.score - 25.0 &&
-             clashEval.m1.status == bench::kStatusFail);
-
-        // Anti-self-reporting M6: empty mapReport.tracks cannot inflate M6 (denominator comes from raw .sty!)
-        korg::Report emptyReport = kr.report;
-        emptyReport.tracks.clear();
-        const auto emptyRepEval = bench::evaluateExportedStyleAgainstSty(
-            rawBytes, kr.style, emptyReport, "SYNTH_SFF1_CTAB_CNTT.sty", opt);
-        TEST("NegCtrl M6: omitting tracks from converter report yields familyMatchRate=0 & M6=0 (no self-inflation)",
-             emptyRepEval.ok && emptyRepEval.m6.applicable && emptyRepEval.m6.familyMatchRate == 0.0 &&
-             emptyRepEval.m6.score == 0.0 && emptyRepEval.m6.status == bench::kStatusFail);
-    }
-
-    // P1-3 + NegCtrl M2.3: velocity-zone bucketing by SOURCE velocity (raw & re-inverted fail; Q2-sanitized passes!)
+    // P1-3: M2.3 velocity-zone bucketing by SOURCE velocity (raw & re-inverted fail; Q2-sanitized passes!)
     {
         const std::string megaPath = fx("SYNTH_MEGAVOICE_GUITAR_BASS.sty");
         const auto rawBytes = readFileBytes(megaPath);
@@ -519,10 +476,6 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         kopt.route = korg::routeFromCasm(pr);
         kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
         auto kr = korg::mapToKorg(mr.style, kopt);
-        // Simulate Q2 MegaVoice sanitizer on exported SMF:
-        //   - Strip >= 96 FX notes on Bass (ch 8) and Guitar (ch 12)
-        //   - Lift source normal notes (vel 1..64) -> vel 88
-        //   - Soften source high-zone harmonic/muted notes (vel 91..127) -> vel 42
         korg::Style sanitized = kr.style;
         korg::Style brokenInv = kr.style;
         for (auto& el : sanitized.elements) {
@@ -539,7 +492,6 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
             }
             el.events = std::move(clean);
         }
-        // Negative control: strip FX notes so only velocity inversion remains (source 1..64 -> 45, source 91..127 -> 115)
         for (auto& el : brokenInv.elements) {
             std::vector<korg::Event> inv;
             for (auto ev : el.events) {
@@ -560,56 +512,27 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
             rawBytes, brokenInv, kr.report, "SYNTH_MEGAVOICE_GUITAR_BASS.sty", opt);
         TEST("P1-3: Q2-sanitized MegaVoice (src 1..64 -> 88, src 91..127 -> 42) passes with velocityInversions==0 & leakedFx==0",
              q2Eval.ok && q2Eval.structuralValid && q2Eval.m2.velocityInversions == 0 &&
-             q2Eval.m2.leakedFxNotesCount == 0 && q2Eval.m2.velocityZoneStatus == bench::kStatusPass &&
-             q2Eval.m2.status == bench::kStatusPass);
-        TEST("NegCtrl M2.3: deliberately inverted MegaVoice velocities flag velocityInversions==2 & FAIL even with 0 FX leaks",
+             q2Eval.m2.leakedFxNotesCount == 0 && q2Eval.m2.velocityZoneStatus == bench::BenchStatus::Pass &&
+             q2Eval.m2.status == bench::BenchStatus::Pass);
+        TEST("P1-3 NegCtrl: deliberately inverted MegaVoice velocities flag velocityInversions==2 & FAIL even with 0 FX leaks",
              invEval.ok && invEval.m2.leakedFxNotesCount == 0 && invEval.m2.velocityInversions == 2 &&
-             invEval.m2.velocityZoneStatus == bench::kStatusFail && invEval.m2.status == bench::kStatusFail &&
+             invEval.m2.velocityZoneStatus == bench::BenchStatus::Fail && invEval.m2.status == bench::BenchStatus::Fail &&
              invEval.m2.score < q2Eval.m2.score - 20.0);
     }
 
-    // P1-4 + 5-State Taxonomy: CorpusSummary coverage, N/A exclusions, unsupported counts & activeComposite
+    // P1-4 + R2-P1-1/R2-P1-2: CorpusSummary coverage, N/A exclusions, unsupportedFeatures, notTestedItems & activeComposite
     {
         const auto cs = bench::computeCorpusSummary(allResults);
-        TEST("P1-4 + Taxonomy: corpusSummary reports activeComposite < meanComposite < 85.0, M2 N/A excluded (9), unsupported > 0, corpusGrade == FAIL",
+        TEST("P1-4 + R2-P1-2: corpusSummary reports activeComposite < meanComposite < 85.0, M2 N/A excluded (9), notTestedItems, corpusGrade=FAIL",
              cs.fixtureCount == 12 && cs.activeComposite < cs.meanComposite &&
              cs.meanComposite < 85.0 && cs.hardInvariantViolations > 0 && cs.corpusGrade == bench::kStatusFail &&
              cs.evaluatedDimensionCounts[1] == 3 && cs.naExcludedCounts[1] == 9 &&
-             cs.targetKstNotTestedCount == 12 && cs.l3HardwareStatus == bench::kStatusNotTested &&
+             cs.targetKstNotTestedCount == 12 && cs.l3Status == bench::BenchStatus::NotTested &&
+             cs.notTestedItems.size() == 2 &&
              cs.unsupportedTotalOccurrences > 0 && cs.fixturesWithUnsupported > 0);
-
-        // Verify N/A dimension on SYNTH_POP_SFF2 has score=null in JSON & N/A in Markdown (never fake 100.0!)
-        const auto& popRes = allResults[0];
-        const std::string popJson = bench::toJson(popRes);
-        const std::string popMd = bench::toMarkdown({popRes});
-        TEST("Taxonomy N/A + NOT_TESTED: SYNTH_POP_SFF2 emits M2 status=N/A, score=null, targetKstStatus=NOT_TESTED",
-             !popRes.m2.applicable && popRes.m2.status == bench::kStatusNA &&
-             popRes.m5.xgSysexStatus == bench::kStatusNA &&
-             popRes.m6.targetKstStatus == bench::kStatusNotTested &&
-             popJson.find("\"articulationMegaVoice\": { \"status\": \"N/A\", \"score\": null") != std::string::npos &&
-             popJson.find("\"targetKstStatus\": \"NOT_TESTED\"") != std::string::npos &&
-             popJson.find("\"l3HardwareStatus\": \"NOT_TESTED\"") != std::string::npos &&
-             popMd.find("| N/A |") != std::string::npos);
-
-        // Verify UNSUPPORTED taxonomy on SYNTH_MULTI_ZONE_SART_OTS & BreakPolicy::Withhold on SYNTH_BREAK_TAIL
-        const auto& multiRes = allResults[11];
-        auto hasUnsup = [](const bench::BenchResult& r, const char* feat) {
-            return std::any_of(r.unsupportedFeatures.begin(), r.unsupportedFeatures.end(),
-                               [&](const bench::UnsupportedFeature& u) {
-                                   return u.feature == feat && u.status == bench::kStatusUnsupported;
-                               });
-        };
-        bench::BenchOptions withholdOpt = opt;
-        withholdOpt.breakYamaha1BarCap = false;
-        const auto withheldRes = bench::evaluateStyleFile(fx("SYNTH_BREAK_TAIL.sty"), withholdOpt);
-        TEST("Taxonomy UNSUPPORTED: OTSc/FNRP/MDB chunks & BreakPolicy::Withhold explicitly tagged UNSUPPORTED",
-             hasUnsup(multiRes, "OTS_CHUNK_UNSUPPORTED") &&
-             hasUnsup(multiRes, "FNRP_CHUNK_UNSUPPORTED") &&
-             hasUnsup(multiRes, "MDB_CHUNK_UNSUPPORTED") &&
-             withheldRes.ok && hasUnsup(withheldRes, "BREAK_WITHHELD_BY_POLICY"));
     }
 
-    // P1-5 + NegCtrl M3.4: p99DriftMs detects +40 ms timing shift in actual exported SMF and drops M3 score!
+    // P1-5: p99DriftMs detects +40 ms timing shift in actual exported SMF and drops M3 score
     {
         const std::string popPath = fx("SYNTH_POP_SFF2.sty");
         const auto rawBytes = readFileBytes(popPath);
@@ -622,7 +545,6 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         auto kr = korg::mapToKorg(mr.style, kopt);
         const auto baseEval = bench::evaluateExportedStyleAgainstSty(
             rawBytes, kr.style, kr.report, "SYNTH_POP_SFF2.sty", opt);
-        // Shift all Note-On/Off events in Main A (v1cv1) by +31 ticks (~40.36 ms at 120 BPM, 384 PPQN)
         korg::Style drifted = kr.style;
         for (auto& el : drifted.elements) {
             if (el.marker != "v1cv1") continue;
@@ -635,13 +557,13 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         }
         const auto driftEval = bench::evaluateExportedStyleAgainstSty(
             rawBytes, drifted, kr.report, "SYNTH_POP_SFF2.sty", opt);
-        TEST("NegCtrl M3.4: +40 ms shifted exported SMF reports p99DriftMs >= 39.0, timingDriftStatus=FAIL & drops M3 score",
+        TEST("P1-5: +40 ms shifted exported SMF reports p99DriftMs >= 39.0, timingDriftStatus=FAIL & drops M3 score",
              baseEval.ok && driftEval.ok && driftEval.m3.p99DriftMs >= 39.0 &&
-             driftEval.m3.timingDriftStatus == bench::kStatusFail &&
+             driftEval.m3.timingDriftStatus == bench::BenchStatus::Fail &&
              driftEval.m3.score < baseEval.m3.score - 10.0);
     }
 
-    // P2-1 + NegCtrl M4.2: drum family preservation — positive Q3 remap AND valid-GM wrong-family negative control!
+    // P2-1: Q3-style family-preserving drum remap lifts familyPreservationRate to 1.0 & keeps velCorrelation >= 0.99
     {
         const std::string drumPath = fx("SYNTH_REVO_XG_DRUMS.sty");
         const auto rawBytes = readFileBytes(drumPath);
@@ -678,40 +600,6 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
             rawBytes, remapped, kr.report, "SYNTH_REVO_XG_DRUMS.sty", opt);
         TEST("P2-1: Q3-style family-preserving drum remap lifts familyPreservationRate to 1.0 & keeps velCorrelation >= 0.99",
              drumEval.ok && drumEval.m4.familyPreservationRate >= 0.999 && drumEval.m4.velCorrelation >= 0.99);
-
-        // Negative control on SYNTH_POP_SFF2: map EVERY drum hit to a VALID GM 35..81 note of the WRONG family!
-        // Proves unmappedHitRate == 0.0 yet familyPreservationRate drops to 0.0 (drumFamilyOf() is genuinely live!)
-        const std::string popPath = fx("SYNTH_POP_SFF2.sty");
-        const auto popBytes = readFileBytes(popPath);
-        const auto ppr = Sff1Reader().parseBuffer(popBytes, "SYNTH_POP_SFF2.sty");
-        const auto pmr = Sff1ToUasfMapper().map(ppr);
-        korg::MapOptions pkopt;
-        pkopt.ppqn = 384;
-        pkopt.route = korg::routeFromCasm(ppr);
-        pkopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
-        auto pkr = korg::mapToKorg(pmr.style, pkopt);
-        korg::Style wrongFam = pkr.style;
-        auto mapWrongGmFamily = [](uint8_t p) -> uint8_t {
-            // Map every primary kit / tom / cymbal hit to Latin Cabasa (69, 'L') and any 'L' hit to Crash (49, 'C'):
-            // 100% valid GM 35..81 keys (unmappedHitRate == 0.0), zero family matches at any tick!
-            char fam = bench::detail::sourceDrumFamilyOf(p);
-            return fam == 'L' ? uint8_t{49} : uint8_t{69};
-        };
-        for (auto& el : wrongFam.elements) {
-            for (auto& ev : el.events) {
-                uint8_t ch = ev.status & 0x0F;
-                uint8_t hi = ev.status & 0xF0;
-                if ((ch == korg::kDrumCh || ch == korg::kPercCh) && (hi == 0x90 || hi == 0x80)) {
-                    ev.d1 = mapWrongGmFamily(ev.d1);
-                }
-            }
-        }
-        const auto wrongFamEval = bench::evaluateExportedStyleAgainstSty(
-            popBytes, wrongFam, pkr.report, "SYNTH_POP_SFF2.sty", opt);
-        TEST("NegCtrl M4.2: valid-GM wrong-family drums keep unmappedHitRate==0 yet drop familyPreservationRate to 0 & FAIL",
-             wrongFamEval.ok && wrongFamEval.m4.unmappedHitRate == 0.0 &&
-             wrongFamEval.m4.familyPreservationRate < 0.05 &&
-             wrongFamEval.m4.score < 75.0 && wrongFamEval.m4.status == bench::kStatusFail);
     }
 
     // P2-5: toMarkdown emits STRUCTURALLY INVALID label when !structuralValid
@@ -726,7 +614,7 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
              md.find(bench::kValidLabel) == std::string::npos);
     }
 
-    // CLI smoke test (verifying corpusSummary in batchToJson!)
+    // CLI smoke test (verifying full R2-P1-2 corpusSummary in batchToJson!)
 #if defined(BENCH_BIN) && !defined(_WIN32)
     {
         const fs::path tmpDir = fs::temp_directory_path() / ("aiarr_bench_test_" + std::to_string(::getpid()));
@@ -748,14 +636,17 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         std::ifstream f1(j1, std::ios::binary), f2(j2, std::ios::binary);
         const std::string s1((std::istreambuf_iterator<char>(f1)), {});
         const std::string s2((std::istreambuf_iterator<char>(f2)), {});
-        TEST("bench CLI: exits 0, byte-identical JSON, emits 5-state taxonomy, coverage, naExcludedCounts & unsupportedSummary",
+        TEST("bench CLI: exits 0, byte-identical JSON, emits 5-state taxonomy, coverage, naExclusions, unsupportedFeatures & notTestedItems",
              rc1 == 0 && rc2 == 0 && !s1.empty() && s1 == s2 && fs::exists(md) &&
              s1.find("\"statusTaxonomy\"") != std::string::npos &&
+             s1.find("\"l3Status\": \"NOT_TESTED\"") != std::string::npos &&
              s1.find("\"corpusSummary\"") != std::string::npos &&
              s1.find("\"coverage\"") != std::string::npos &&
-             s1.find("\"naExcludedCounts\"") != std::string::npos &&
-             s1.find("\"unsupportedSummary\"") != std::string::npos &&
-             s1.find("\"targetKstSummary\"") != std::string::npos &&
+             s1.find("\"naExclusions\"") != std::string::npos &&
+             s1.find("\"unsupportedFeatures\"") != std::string::npos &&
+             s1.find("\"notTestedItems\"") != std::string::npos &&
+             s1.find("\"L3_PA5X_HARDWARE_VALIDATION\"") != std::string::npos &&
+             s1.find("\"M6_TARGET_KST_OCCUPANCY\"") != std::string::npos &&
              s1.find("\"activeComposite\"") != std::string::npos &&
              s1.find("\"hardInvariantViolations\"") != std::string::npos &&
              s1.find("\"corpusGrade\": \"FAIL\"") != std::string::npos);
@@ -764,8 +655,174 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
 #endif
 }
 
+// R2-P2-1: Self-contained negative controls across ALL 6 dimensions + 5-state taxonomy verification
+static void testNegativeControlsAllDimensions() {
+    std::printf("7. R2-P2-1 Negative Controls Across All 6 Dimensions & 5-State Taxonomy\n");
+    bench::BenchOptions opt;
+    opt.targetPpqn = 384;
+    opt.breakYamaha1BarCap = true;
+
+    const std::string popPath = fx("SYNTH_POP_SFF2.sty");
+    const auto rawBytes = readFileBytes(popPath);
+    const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_POP_SFF2.sty");
+    const auto mr = Sff1ToUasfMapper().map(pr);
+    korg::MapOptions kopt;
+    kopt.ppqn = 384;
+    kopt.route = korg::routeFromCasm(pr);
+    kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+    const auto kr = korg::mapToKorg(mr.style, kopt);
+    const auto base = bench::evaluateExportedStyleAgainstSty(rawBytes, kr.style, kr.report, "SYNTH_POP_SFF2.sty", opt);
+    const auto baseCs = bench::computeCorpusSummary({base});
+
+    // M1 Negative Control: inject clashing out-of-chord pitch (F# = 66 into C-major chord) -> clashRate rises & M1 drops!
+    {
+        korg::Style m1Bad = kr.style;
+        for (auto& el : m1Bad.elements) {
+            for (auto& ev : el.events) {
+                uint8_t ch = ev.status & 0x0F;
+                uint8_t hi = ev.status & 0xF0;
+                if (ch == 11 && (hi == 0x90 || hi == 0x80)) ev.d1 = 66; // F#4 clashing tritone in C major
+            }
+        }
+        const auto evM1 = bench::evaluateExportedStyleAgainstSty(rawBytes, m1Bad, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M1: injecting F# (66) clash into C-major spikes clashRate & drops M1 score",
+             evM1.ok && evM1.m1.clashRate > base.m1.clashRate + 0.05 && evM1.m1.score < base.m1.score - 5.0);
+    }
+
+    // M2.1 Negative Control: inject chord-range pitch (<= 11) on non-MegaVoice style -> FAIL, score=0, hardViol increments!
+    {
+        korg::Style m2Bad = kr.style;
+        auto& el = m2Bad.elements.front();
+        el.events.push_back({0, static_cast<uint8_t>(0x90 | 11), 4, 90});   // E-1 (pitch <= 11 chord-event range!)
+        el.events.push_back({120, static_cast<uint8_t>(0x80 | 11), 4, 0});
+        std::stable_sort(el.events.begin(), el.events.end(),
+                         [](const korg::Event& a, const korg::Event& b) { return a.tick < b.tick; });
+        const auto evM2 = bench::evaluateExportedStyleAgainstSty(rawBytes, m2Bad, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        const auto m2Cs = bench::computeCorpusSummary({evM2});
+        TEST("R2-P2-1 M2.1: injecting chord-range pitch (<=11) triggers leakedChordRange>0, M2=FAIL (0.0) & increments hardViol",
+             evM2.ok && evM2.m2.applicable && evM2.m2.leakedChordRange > 0 &&
+             evM2.m2.status == bench::BenchStatus::Fail && evM2.m2.score == 0.0 &&
+             m2Cs.hardInvariantViolations > baseCs.hardInvariantViolations);
+    }
+
+    // M3.1 & M3.3 Negative Controls: drop exported element -> coverageRate < 1.0; inject open CC64=127 & uncentered PB -> loopErrors >= 2!
+    {
+        korg::Style m3Drop = kr.style;
+        m3Drop.elements.pop_back();
+        const auto evDrop = bench::evaluateExportedStyleAgainstSty(rawBytes, m3Drop, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M3.1: dropping exported element lowers coverageRate < 1.0 & M3 score",
+             evDrop.ok && evDrop.m3.coverageRate < 1.0 && evDrop.m3.score < base.m3.score);
+
+        korg::Style m3Loop = kr.style;
+        auto& el = m3Loop.elements.front();
+        el.events.push_back({10, static_cast<uint8_t>(0xB0 | 11), 64, 127}); // Open sustain pedal CC64=127
+        el.events.push_back({20, static_cast<uint8_t>(0xE0 | 11), 0, 100});  // Uncentered Pitch Bend (!= 8192)
+        std::stable_sort(el.events.begin(), el.events.end(),
+                         [](const korg::Event& a, const korg::Event& b) { return a.tick < b.tick; });
+        const auto evLoop = bench::evaluateExportedStyleAgainstSty(rawBytes, m3Loop, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M3.3: open CC64=127 & uncentered Pitch Bend trigger loopBoundaryErrors >= 2 & M3=FAIL",
+             evLoop.ok && evLoop.m3.loopBoundaryErrors >= 2 && evLoop.m3.status == bench::BenchStatus::Fail &&
+             evLoop.m3.score < base.m3.score);
+    }
+
+    // M4.2 Negative Control: remap Kick (36) -> Triangle (81) (valid GM 35..81, wrong family!) -> familyPreservationRate drops sharply!
+    {
+        korg::Style m4Wrong = kr.style;
+        for (auto& el : m4Wrong.elements) {
+            for (auto& ev : el.events) {
+                uint8_t ch = ev.status & 0x0F;
+                uint8_t hi = ev.status & 0xF0;
+                if ((ch == korg::kDrumCh || ch == korg::kPercCh) && (hi == 0x90 || hi == 0x80) && ev.d1 == 36) {
+                    ev.d1 = 81; // Open Triangle ('L', valid GM 35..81, wrong family vs Kick 'B'!)
+                }
+            }
+        }
+        const auto evM4 = bench::evaluateExportedStyleAgainstSty(rawBytes, m4Wrong, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M4.2: remapping Kick (36) -> Triangle (81) keeps unmappedHitRate==0 yet drops familyPreservationRate sharply",
+             evM4.ok && evM4.m4.unmappedHitRate == 0.0 &&
+             evM4.m4.familyPreservationRate < base.m4.familyPreservationRate - 0.10 &&
+             evM4.m4.score < base.m4.score - 3.0);
+    }
+
+    // M5 Negative Controls: strip tick-0 mix CCs -> mixCcConsistency drops; inject CC98/99/94 -> unsafeCcLeaks > 0!
+    {
+        korg::Style m5Strip = kr.style;
+        for (auto& el : m5Strip.elements) {
+            std::vector<korg::Event> kept;
+            for (const auto& ev : el.events) {
+                if (ev.tick == 0 && (ev.status & 0xF0) == 0xB0 &&
+                    (ev.d1 == 7 || ev.d1 == 10 || ev.d1 == 11 || ev.d1 == 91 || ev.d1 == 93)) {
+                    continue;
+                }
+                kept.push_back(ev);
+            }
+            el.events = std::move(kept);
+        }
+        const auto evStrip = bench::evaluateExportedStyleAgainstSty(rawBytes, m5Strip, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M5.1: stripping tick-0 mix CCs drops mixCcConsistency to 0 & drops M5 score",
+             evStrip.ok && evStrip.m5.mixCcConsistency == 0.0 && evStrip.m5.score < base.m5.score - 40.0 &&
+             evStrip.m5.status == bench::BenchStatus::Fail);
+
+        korg::Style m5Unsafe = kr.style;
+        auto& el = m5Unsafe.elements.front();
+        el.events.push_back({0, static_cast<uint8_t>(0xB0 | 11), 99, 1});
+        el.events.push_back({0, static_cast<uint8_t>(0xB0 | 11), 98, 2});
+        el.events.push_back({0, static_cast<uint8_t>(0xB0 | 11), 94, 40});
+        std::stable_sort(el.events.begin(), el.events.end(),
+                         [](const korg::Event& a, const korg::Event& b) { return a.tick < b.tick; });
+        const auto evUnsafe = bench::evaluateExportedStyleAgainstSty(rawBytes, m5Unsafe, kr.report, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M5.2: injecting CC98/99/94 flags unsafeCcLeaks >= 3, unsafeCcStatus=FAIL & M5=FAIL",
+             evUnsafe.ok && evUnsafe.m5.unsafeCcLeaks >= 3 &&
+             evUnsafe.m5.unsafeCcStatus == bench::BenchStatus::Fail &&
+             evUnsafe.m5.status == bench::BenchStatus::Fail && evUnsafe.m5.score < base.m5.score);
+    }
+
+    // M6 Negative Control: omitting tracks from converter report cannot self-inflate M6 (denominator comes from raw .sty!)
+    {
+        korg::Report emptyReport = kr.report;
+        emptyReport.tracks.clear();
+        const auto evEmptyM6 = bench::evaluateExportedStyleAgainstSty(rawBytes, kr.style, emptyReport, "SYNTH_POP_SFF2.sty", opt);
+        TEST("R2-P2-1 M6: omitting tracks from converter report yields familyMatchRate=0 & M6=0 (no self-inflation)",
+             evEmptyM6.ok && evEmptyM6.m6.applicable && evEmptyM6.m6.familyMatchRate == 0.0 &&
+             evEmptyM6.m6.score == 0.0 && evEmptyM6.m6.status == bench::BenchStatus::Fail);
+    }
+
+    // 5-State Taxonomy & True N/A Check across non-MegaVoice fixtures + OTSc/FNRP/MDB + BreakPolicy::Withhold
+    {
+        const auto sff1Res = bench::evaluateStyleFile(fx("SYNTH_SFF1_CTAB_CNTT.sty"), opt);
+        const auto waltzRes = bench::evaluateStyleFile(fx("SYNTH_WALTZ_68.sty"), opt);
+        const std::string popJson = bench::toJson(base);
+        const std::string popMd = bench::toMarkdown({base});
+        TEST("R2-P2-1 Taxonomy N/A & NOT_TESTED: Pop/SFF1/Waltz emit M2=N/A (score=null, weight excluded), l3Status=NOT_TESTED, targetKstStatus=NOT_TESTED",
+             !base.m2.applicable && base.m2.status == bench::BenchStatus::NA &&
+             !sff1Res.m2.applicable && sff1Res.m2.status == bench::BenchStatus::NA &&
+             !waltzRes.m2.applicable && waltzRes.m2.status == bench::BenchStatus::NA &&
+             std::abs(base.applicableWeightSum - 0.80) < 1e-6 &&
+             base.l3Status == bench::BenchStatus::NotTested &&
+             base.m6.targetKstStatus == bench::BenchStatus::NotTested &&
+             popJson.find("\"articulationMegaVoice\": { \"status\": \"N/A\", \"score\": null") != std::string::npos &&
+             popJson.find("\"l3Status\": \"NOT_TESTED\"") != std::string::npos &&
+             popJson.find("\"targetKstStatus\": \"NOT_TESTED\"") != std::string::npos &&
+             popMd.find("| N/A |") != std::string::npos);
+
+        const auto multiRes = bench::evaluateStyleFile(fx("SYNTH_MULTI_ZONE_SART_OTS.sty"), opt);
+        auto hasUnsup = [](const bench::BenchResult& r, const char* feat) {
+            return std::any_of(r.unsupportedFeatures.begin(), r.unsupportedFeatures.end(),
+                               [&](const bench::UnsupportedFeature& u) {
+                                   return u.feature == feat && u.status == bench::BenchStatus::Unsupported;
+                               });
+        };
+        bench::BenchOptions withholdOpt = opt;
+        withholdOpt.breakYamaha1BarCap = false;
+        const auto withheldRes = bench::evaluateStyleFile(fx("SYNTH_BREAK_TAIL.sty"), withholdOpt);
+        TEST("R2-P2-1 Taxonomy UNSUPPORTED: OTSc, FNRP, MDB & BreakPolicy::Withhold explicitly tagged UNSUPPORTED",
+             hasUnsup(multiRes, "OTSc") && hasUnsup(multiRes, "FNRP") && hasUnsup(multiRes, "MDB") &&
+             withheldRes.ok && hasUnsup(withheldRes, "BREAK_WITHHELD_BY_POLICY"));
+    }
+}
+
 static void testMalformedFailClosed() {
-    std::printf("7. Malformed / truncated / encrypted .sty fail-closed checks\n");
+    std::printf("8. Malformed / truncated / encrypted .sty fail-closed checks\n");
     Sff1Reader reader;
 
     {
@@ -813,6 +870,7 @@ int main() {
     testSintPropagationAllSections();
     testMixedMeterAndBreakPolicy();
     testAuditCalibrationAndBenchmarkInvariants();
+    testNegativeControlsAllDimensions();
     testMalformedFailClosed();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

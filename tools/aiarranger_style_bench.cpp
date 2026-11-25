@@ -52,13 +52,15 @@ std::string batchToJson(const std::vector<BenchResult>& results) {
         return cnt > 0 ? fmtNum(v, 2) : "null";
     };
     static constexpr const char* kKeys[6] = {"M1", "M2", "M3", "M4", "M5", "M6"};
+    uint32_t totalNaExclusions = 0;
+    for (uint32_t c : cs.naExcludedCounts) totalNaExclusions += c;
+
     std::ostringstream o;
     o << "{\n";
     o << "  \"schema\": \"" << kSchemaId << "\",\n";
     o << "  \"statusTaxonomy\": [\"PASS\", \"FAIL\", \"UNSUPPORTED\", \"N/A\", \"NOT_TESTED\"],\n";
     o << "  \"hardwareVerified\": false,\n";
-    o << "  \"l3Status\": \"NotRun\",\n";
-    o << "  \"l3HardwareStatus\": \"" << cs.l3HardwareStatus << "\",\n";
+    o << "  \"l3Status\": \"" << benchStatusToString(cs.l3Status) << "\",\n";
     o << "  \"label\": \"" << (cs.allStructuralValid ? kValidLabel : kInvalidLabel) << "\",\n";
     o << "  \"weights\": { \"M1\": 0.25, \"M2\": 0.20, \"M3\": 0.15, \"M4\": 0.15, \"M5\": 0.12, \"M6\": 0.13 },\n";
     o << "  \"fixtureCount\": " << cs.fixtureCount << ",\n";
@@ -73,7 +75,7 @@ std::string batchToJson(const std::vector<BenchResult>& results) {
     o << "  \"corpusSummary\": {\n";
     o << "    \"fixtureCount\": " << cs.fixtureCount << ",\n";
     o << "    \"statusTaxonomy\": [\"PASS\", \"FAIL\", \"UNSUPPORTED\", \"N/A\", \"NOT_TESTED\"],\n";
-    o << "    \"l3HardwareStatus\": \"" << cs.l3HardwareStatus << "\",\n";
+    o << "    \"l3Status\": \"" << benchStatusToString(cs.l3Status) << "\",\n";
     o << "    \"targetKstSummary\": { \"pass\": " << cs.targetKstPassCount
       << ", \"fail\": " << cs.targetKstFailCount
       << ", \"notTested\": " << cs.targetKstNotTestedCount << " },\n";
@@ -81,15 +83,23 @@ std::string batchToJson(const std::vector<BenchResult>& results) {
       << ", \"warn\": " << cs.warnCount
       << ", \"fail\": " << cs.failCount << " },\n";
     o << "    \"coverage\": {\n";
+    o << "      \"fixtureCount\": " << cs.fixtureCount << ",\n";
     for (size_t i = 0; i < 6; ++i) {
         o << "      \"" << kKeys[i] << "\": { \"evaluated\": " << cs.evaluatedDimensionCounts[i]
-          << ", \"activeStress\": " << cs.activeDimensionCounts[i]
-          << ", \"naExcluded\": " << cs.naExcludedCounts[i]
+          << ", \"na\": " << cs.naExcludedCounts[i]
+          << ", \"activeTorture\": " << cs.activeDimensionCounts[i]
           << ", \"pass\": " << cs.dimPassCounts[i]
           << ", \"fail\": " << cs.dimFailCounts[i] << " }"
           << (i < 5 ? ",\n" : "\n");
     }
     o << "    },\n";
+    o << "    \"naExclusions\": { \"total\": " << totalNaExclusions
+      << ", \"M1\": " << cs.naExcludedCounts[0]
+      << ", \"M2\": " << cs.naExcludedCounts[1]
+      << ", \"M3\": " << cs.naExcludedCounts[2]
+      << ", \"M4\": " << cs.naExcludedCounts[3]
+      << ", \"M5\": " << cs.naExcludedCounts[4]
+      << ", \"M6\": " << cs.naExcludedCounts[5] << " },\n";
     o << "    \"meanComposite\": " << fmtNum(cs.meanComposite, 2) << ",\n";
     o << "    \"minComposite\": " << fmtNum(cs.minComposite, 2) << ",\n";
     o << "    \"evaluatedDimensionMeans\": { \"M1\": " << optAgg(cs.evaluatedDimensionCounts[0], cs.meanDimensions[0])
@@ -116,17 +126,21 @@ std::string batchToJson(const std::vector<BenchResult>& results) {
       << ", \"M4\": " << cs.activeDimensionCounts[3]
       << ", \"M5\": " << cs.activeDimensionCounts[4]
       << ", \"M6\": " << cs.activeDimensionCounts[5] << " },\n";
-    o << "    \"naExcludedCounts\": { \"M1\": " << cs.naExcludedCounts[0]
-      << ", \"M2\": " << cs.naExcludedCounts[1]
-      << ", \"M3\": " << cs.naExcludedCounts[2]
-      << ", \"M4\": " << cs.naExcludedCounts[3]
-      << ", \"M5\": " << cs.naExcludedCounts[4]
-      << ", \"M6\": " << cs.naExcludedCounts[5] << " },\n";
     o << "    \"activeComposite\": " << fmtNum(cs.activeComposite, 2) << ",\n";
     o << "    \"hardInvariantViolations\": " << cs.hardInvariantViolations << ",\n";
-    o << "    \"unsupportedSummary\": {\n";
-    o << "      \"totalOccurrences\": " << cs.unsupportedTotalOccurrences << ",\n";
+    o << "    \"unsupportedFeatures\": {\n";
+    o << "      \"totalCount\": " << cs.unsupportedTotalOccurrences << ",\n";
     o << "      \"fixturesWithUnsupported\": " << cs.fixturesWithUnsupported << ",\n";
+    o << "      \"uniqueTags\": [";
+    {
+        size_t idx = 0;
+        for (const auto& [feat, cnt] : cs.unsupportedByFeature) {
+            (void)cnt;
+            if (idx++ > 0) o << ", ";
+            o << "\"" << jsonEscape(feat) << "\"";
+        }
+    }
+    o << "],\n";
     o << "      \"byFeature\": {";
     if (!cs.unsupportedByFeature.empty()) {
         o << "\n";
@@ -138,6 +152,12 @@ std::string batchToJson(const std::vector<BenchResult>& results) {
     }
     o << "}\n";
     o << "    },\n";
+    o << "    \"notTestedItems\": [";
+    for (size_t i = 0; i < cs.notTestedItems.size(); ++i) {
+        if (i > 0) o << ", ";
+        o << "\"" << jsonEscape(cs.notTestedItems[i]) << "\"";
+    }
+    o << "],\n";
     o << "    \"corpusGrade\": \"" << cs.corpusGrade << "\"\n";
     o << "  },\n";
     o << "  \"fixtures\": [\n";
