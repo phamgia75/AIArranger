@@ -997,6 +997,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
 
     if (out.downstream.ok) {
         for (uint32_t mi = 0; mi < out.downstream.kmpIndex.multisamples.size(); ++mi) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             const ResourceId mid{false, "KST", Kind::Multisample, mi};
             const auto rit = msRootUsers.find(mi);
             const auto sit = msAnalysedSoundUsers.find(mi);
@@ -1014,6 +1015,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         M.summary.orphanDrumSamples = out.downstream.kmpIndex.drums.size();   // DK Sound -> DrumSample edges UNSUPPORTED
 
         for (uint32_t si = 0; si < out.downstream.kmpIndex.samples.size(); ++si) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             const ResourceId sid{false, "KST", Kind::Sample, si};
             const auto rit = sampleRootUsers.find(si);
             const auto sit = sampleAnalysedSoundUsers.find(si);
@@ -1029,6 +1031,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         }
 
         for (const std::string& pf : allPcmFiles) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             const auto rit = pcmFileRootUsers.find(pf);
             const auto sit = pcmFileSoundUsers.find(pf);
             const size_t rc = rit == pcmFileRootUsers.end() ? 0 : rit->second.size();

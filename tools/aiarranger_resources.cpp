@@ -80,6 +80,9 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
     bool jsonOut = false;
     bool hasSource = false;
     bool hasTarget = false;
+    bool hasPolicy = false;
+    bool hasTargetBankForCurrent = false;
+    bool hasTargetNameForCurrent = false;
     std::string exportPlanDir;
 
     auto inferKind = [](const std::string& rel) -> SelectedKind {
@@ -112,24 +115,30 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
             t.relPath = v;
             t.kind = inferKind(v);
             req.targets.push_back(std::move(t));
+            hasTargetBankForCurrent = false;
+            hasTargetNameForCurrent = false;
         } else if (a == "--target-bank") {
             std::string v;
-            if (req.targets.empty() || !needVal(v) || v.empty()) return usage();
+            if (req.targets.empty() || hasTargetBankForCurrent || !needVal(v) || v.empty()) return usage();
             req.targets.back().targetBank = v;
+            hasTargetBankForCurrent = true;
         } else if (a == "--target-name") {
             std::string v;
-            if (req.targets.empty() || !needVal(v) || v.empty()) return usage();
+            if (req.targets.empty() || hasTargetNameForCurrent || !needVal(v) || v.empty()) return usage();
             req.targets.back().targetName = v;
+            hasTargetNameForCurrent = true;
         } else if (a == "--policy") {
             std::string v;
-            if (!needVal(v)) return usage();
+            if (hasPolicy || !needVal(v)) return usage();
             if (v == "block") req.policy = ConflictPolicy::BlockWithReport;
             else if (v == "reuse") req.policy = ConflictPolicy::ReuseIdenticalTargetSlot;
             else if (v == "remap") req.policy = ConflictPolicy::RemapToFreeSlotInNewLib;
             else {
-                std::fprintf(stderr, "ERROR: invalid --policy '%s' (expected block|reuse|remap)\n", v.c_str());
+                std::fprintf(stderr, "ERROR: invalid --policy '%s' (expected block|reuse|remap)\n",
+                             panative::printable(v).c_str());
                 return 1;
             }
+            hasPolicy = true;
         } else if (a == "--no-embedded-kbdsets") {
             req.includeEmbeddedKbdSets = false;
         } else if (a == "--no-embedded-pads") {
@@ -155,7 +164,8 @@ static int kstNativeSelectivePlan(int argc, char** argv) {
     if (res.missingSelectionTarget) {
         for (const auto& d : res.report.diagnostics) {
             if (d.code == collector_diag_code::kSelectedRootNotFound) {
-                std::fprintf(stderr, "ERROR: selected path not found in source KST: %s\n", d.subject.c_str());
+                std::fprintf(stderr, "ERROR: selected path not found in source KST: %s\n",
+                             panative::printable(d.subject).c_str());
             }
         }
         return 1;

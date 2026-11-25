@@ -24,6 +24,7 @@
 #if defined(__clang__) || defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+#include "media/sound/m1_manifest_adapter.h"
 #include "media/sound/native_kst_closure.h"
 #include "media/sound/selective_diagnostics.h"
 #include "media/sound/slot_conflicts.h"
@@ -47,6 +48,8 @@ struct SelectiveDependencyContext {
     const media::graph::NativeKstClosureResult* closureB = nullptr;
     const media::selective::TargetOccupancyMap* occupancyA = nullptr;
     const media::selective::TargetOccupancyMap* occupancyB = nullptr;
+    const media::selective::M1AdapterView* viewA = nullptr;  // optional: enables strict compareSoundEquivalence()
+    const media::selective::M1AdapterView* viewB = nullptr;  // optional: enables strict compareSoundEquivalence()
     media::selective::ConflictPolicy policy = media::selective::ConflictPolicy::BlockWithReport;
     bool strictBlockingConflicts = false;
 };
@@ -102,11 +105,33 @@ inline Evaluation evaluateWithDependencies(
     const std::vector<Step>& plan,
     const SelectiveDependencyContext* deps,
     const std::function<bool()>& keepGoing = {}) {
-    Evaluation ev = evaluate(A, B, plan, keepGoing);
+    bool cancelled = false;
+    std::function<bool()> evalKeepGoing;
+    if (keepGoing) {
+        evalKeepGoing = [&]() -> bool {
+            if (cancelled) return false;
+            if (!keepGoing()) {
+                cancelled = true;
+                return false;
+            }
+            return true;
+        };
+    }
+
+    Evaluation ev = evaluate(A, B, plan, evalKeepGoing);
+    if (cancelled) return Evaluation{};
     if (!deps) return ev;
 
     size_t tick = 0;
-    if (!preview_detail::previewKeepGoing(keepGoing, tick)) return ev;
+    auto checkGoing = [&]() -> bool {
+        if (cancelled) return false;
+        if (!preview_detail::previewKeepGoing(keepGoing, tick)) {
+            cancelled = true;
+            return false;
+        }
+        return true;
+    };
+    if (!checkGoing()) return Evaluation{};
 
     std::map<media::graph::ResourceId, const media::graph::UserSoundManifestEntry*> soundsA, soundsB;
     if (deps->closureA && deps->closureA->ok) soundsA = preview_detail::indexUserSounds(*deps->closureA);
@@ -116,9 +141,15 @@ inline Evaluation evaluateWithDependencies(
     std::set<media::graph::ResourceId> seenPlanSoundsA, seenPlanSoundsB;
 
     for (size_t i = 0; i < plan.size() && i < ev.steps.size(); ++i) {
-        if (!preview_detail::previewKeepGoing(keepGoing, tick)) break;
+        if (!checkGoing()) return Evaluation{};
         const Step& st = plan[i];
         if (st.op != Op::Copy && st.op != Op::Move) continue;
+
+        StepCheck& sc = ev.steps[i];
+        // P3-3: Skip steps already invalidated before the Copy/Move dependency phase (e.g. item already moved/gone)
+        const bool hadOpaqueWarning = std::any_of(
+            sc.warnings.begin(), sc.warnings.end(), preview_detail::isGenericOpaqueSoundWarning);
+        if (!sc.conflicts.empty() && !hadOpaqueWarning) continue;
 
         const bool fromA = (st.side == 'A');
         const Library& srcLib = fromA ? A : B;
@@ -130,23 +161,33 @@ inline Evaluation evaluateWithDependencies(
         if (!srcClosure || !srcClosure->ok) continue;
 
         const media::selective::TargetOccupancyMap* dstOccupancy = fromA ? deps->occupancyB : deps->occupancyA;
+        const media::selective::M1AdapterView* srcView = fromA ? deps->viewA : deps->viewB;
         const auto& srcSoundIndex = fromA ? soundsA : soundsB;
         auto& seenPlanSounds = fromA ? seenPlanSoundsA : seenPlanSoundsB;
 
         const media::graph::RootClosureEntry* root = preview_detail::findRootByRelPath(*srcClosure, it.file);
         if (!root) continue;
 
-        StepCheck& sc = ev.steps[i];
-        // Remove the generic opaque warning ONLY now that we have real M1/M2 closure data for this root
-        sc.warnings.erase(
-            std::remove_if(sc.warnings.begin(), sc.warnings.end(), preview_detail::isGenericOpaqueSoundWarning),
-            sc.warnings.end());
-
         auto addWarn = [&](std::string msg) { sc.warnings.push_back(std::move(msg)); };
         auto addBlockingOrWarn = [&](std::string msg) {
             if (deps->strictBlockingConflicts) sc.conflicts.push_back(std::move(msg));
             else sc.warnings.push_back(std::move(msg));
         };
+
+        // P2-1: Fail-closed on corrupt/unparsed Root tree — never strip opaque warning to claim "0 User Sound(s)"!
+        if (!root->parseOk) {
+            sc.warnings.erase(
+                std::remove_if(sc.warnings.begin(), sc.warnings.end(), preview_detail::isGenericOpaqueSoundWarning),
+                sc.warnings.end());
+            addBlockingOrWarn("VERIFIED_MISSING [MALFORMED_ROOT_TREE]: root container failed structural parsing (" +
+                              media::panative::printable(root->parseError) + "); Sound dependencies are UNKNOWN.");
+            continue;
+        }
+
+        // Remove the generic opaque warning ONLY now that we have real parsed M1/M2 closure data for this root
+        sc.warnings.erase(
+            std::remove_if(sc.warnings.begin(), sc.warnings.end(), preview_detail::isGenericOpaqueSoundWarning),
+            sc.warnings.end());
 
         // Count Factory ROM, resolved User Sounds, missing User Sounds, USERDK, dedup hits
         size_t factoryRefs = 0;
@@ -155,12 +196,13 @@ inline Evaluation evaluateWithDependencies(
         std::vector<std::string> unanalysedDrumKits;
 
         for (const auto& sr : root->soundRefs) {
-            if (!preview_detail::previewKeepGoing(keepGoing, tick)) break;
+            if (!checkGoing()) return Evaluation{};
             if (sr.origin == media::graph::ResourceOrigin::Factory) ++factoryRefs;
             else if (sr.origin == media::graph::ResourceOrigin::Unknown) ++unknownOriginRefs;
         }
 
         for (const auto& sid : root->userSoundIds) {
+            if (!checkGoing()) return Evaluation{};
             if (!seenPlanSounds.insert(sid).second) ++dedupSharedWithEarlierStep;
             if (const auto uit = srcSoundIndex.find(sid); uit != srcSoundIndex.end()) {
                 if (uit->second->isDrumKit) unanalysedDrumKits.push_back(sid.str());
@@ -204,6 +246,7 @@ inline Evaluation evaluateWithDependencies(
 
         // Missing source User Sounds (VERIFIED_MISSING)
         for (const auto& mid : root->missingUserSoundIds) {
+            if (!checkGoing()) return Evaluation{};
             addBlockingOrWarn("VERIFIED_MISSING [MISSING_USER_SOUND_SLOT]: referenced User Sound " + mid.str() +
                               " is missing in source KST.");
         }
@@ -230,21 +273,52 @@ inline Evaluation evaluateWithDependencies(
                 addBlockingOrWarn("UNSUPPORTED_FORMAT [TARGET_UNINSPECTABLE]: " + why);
             } else {
                 for (const auto& sid : root->userSoundIds) {
-                    if (!preview_detail::previewKeepGoing(keepGoing, tick)) break;
+                    if (!checkGoing()) return Evaluation{};
                     const auto addr = media::selective::SlotAddress::fromBankAndSlot(sid.scope, sid.number);
                     if (!addr.has_value()) continue;
                     const media::selective::SlotState state = dstOccupancy->slotState(*addr);
                     if (state == media::selective::SlotState::Occupied) {
                         const auto* dstEntry = dstOccupancy->findOccupied(*addr);
                         const std::string dstName = dstEntry ? media::panative::printable(dstEntry->displayName) : "?";
-                        if (deps->policy == media::selective::ConflictPolicy::RemapToFreeSlotInNewLib) {
-                            addWarn("Sound slot conflict at " + addr->shortLabel() + " (occupied in target by \"" +
-                                    dstName + "\"): remap to free slot required (policy: remap).");
+                        // P2-2: Honest evidence-level labeling — only assert SOUND_SLOT_OCCUPIED_DIFFERENT when
+                        // compareSoundEquivalence() has real decoded body/zone profiles and proves Different!
+                        bool ranEquivalence = false;
+                        media::selective::EquivalenceResult eq;
+                        if (srcView && srcView->ok && dstEntry) {
+                            if (const auto svIt = srcView->sounds.find(sid); svIt != srcView->sounds.end()) {
+                                eq = media::selective::compareSoundEquivalence(
+                                    svIt->second.equivalence, dstEntry->equivalence);
+                                ranEquivalence = true;
+                            }
+                        }
+                        if (ranEquivalence && eq.verdict == media::selective::EquivalenceVerdict::Identical) {
+                            addWarn("Target slot " + addr->shortLabel() + " holds proven-identical Sound (\"" +
+                                    dstName + "\"): reuse-target (0 Sound bytes copied).");
+                        } else if (ranEquivalence && eq.verdict == media::selective::EquivalenceVerdict::Different) {
+                            if (deps->policy == media::selective::ConflictPolicy::RemapToFreeSlotInNewLib) {
+                                addWarn("AMBIGUOUS_OR_DUPLICATE [SOUND_SLOT_OCCUPIED_DIFFERENT]: target slot " +
+                                        addr->shortLabel() + " is occupied by a different Sound (\"" + dstName +
+                                        "\"; " + eq.reason + "): remap to free slot required (policy: remap).");
+                            } else {
+                                addBlockingOrWarn("AMBIGUOUS_OR_DUPLICATE [SOUND_SLOT_OCCUPIED_DIFFERENT]: target slot " +
+                                                  addr->shortLabel() + " is occupied by a different Sound (\"" + dstName +
+                                                  "\"; " + eq.reason + "; never overwritten; policy: " +
+                                                  std::string(media::selective::conflictPolicyName(deps->policy)) + ").");
+                            }
                         } else {
-                            addBlockingOrWarn("AMBIGUOUS_OR_DUPLICATE [SOUND_SLOT_OCCUPIED_DIFFERENT]: target slot " +
-                                              addr->shortLabel() + " is occupied by \"" + dstName +
-                                              "\" (never overwritten; policy: " +
-                                              std::string(media::selective::conflictPolicyName(deps->policy)) + ").");
+                            const std::string why = ranEquivalence
+                                                        ? eq.reason
+                                                        : std::string("M1 summary lacks decoded body/zone equivalence proof");
+                            if (deps->policy == media::selective::ConflictPolicy::RemapToFreeSlotInNewLib) {
+                                addWarn("AMBIGUOUS_OR_DUPLICATE [SOUND_SLOT_EQUIVALENCE_INSUFFICIENT]: target slot " +
+                                        addr->shortLabel() + " is occupied by \"" + dstName + "\" (" + why +
+                                        "): cannot auto-reuse; remap to free slot required (policy: remap).");
+                            } else {
+                                addBlockingOrWarn("AMBIGUOUS_OR_DUPLICATE [SOUND_SLOT_EQUIVALENCE_INSUFFICIENT]: target slot " +
+                                                  addr->shortLabel() + " is occupied by \"" + dstName + "\" (" + why +
+                                                  "; never auto-reused or overwritten; policy: " +
+                                                  std::string(media::selective::conflictPolicyName(deps->policy)) + ").");
+                            }
                         }
                     } else if (state == media::selective::SlotState::BankFileAbsent) {
                         addWarn("Target bank file SOUND/" + addr->bankName() +

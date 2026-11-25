@@ -834,6 +834,16 @@ int main() {
              resTgt.targetPartialInspect.kmpIsOc31 &&
              resTgt.targetPartialInspect.occupiedUserSounds == 2 &&
              resTgt.dryRunPlan.hasBlockingCode(diag_code::kTargetUninspectable));
+
+        // P3-1: Target-only OC31 JSON mirrors targetPartialInspect counts into top-level partialInspect shorthand
+        const std::string jTgt = serializeNativeSelectivePlanJson(resTgt);
+        kit::Json parsedTgt;
+        TEST("P3-1 target-only OC31 JSON mirrors target counts into top-level partialInspect",
+             parseStrictJson(jTgt, parsedTgt) &&
+             jBoolEq(jField2(parsedTgt, "partialInspect", "isPartial"), true) &&
+             jNumEq(jField2(parsedTgt, "partialInspect", "occupiedUserSounds"), "2") &&
+             jNumEq(jField2(parsedTgt, "partialInspect", "pcmContainerCount"), "1") &&
+             jStrEq(jField2(parsedTgt, "partialInspect", "notice"), kOc31KmpDegradedNotice));
     }
 
     // ── 4. UX Gate #4: Cooperative `keepGoing` Cancellation (native_kst_closure.h & selective_plan.h) ────────────────
@@ -1050,6 +1060,91 @@ int main() {
         TEST("CLI exit 1 on symlink source KST",
              runCli({bin, "kst-native", "selective-plan", "--source", fx.symlinkSource.string(),
                      "--select", "STYLE/Pop/CleanStyle.stg"}).exitCode == 1);
+
+        // P3-3: CLI rejects duplicate --policy, duplicate --target-bank/--target-name, and sanitizes stderr control chars
+        TEST("P3-3 CLI exit 1 on duplicate --policy",
+             runCli({bin, "kst-native", "selective-plan", "--source", fx.sourceKst.string(),
+                     "--select", "STYLE/Pop/CleanStyle.stg",
+                     "--policy", "block", "--policy", "remap"}).exitCode == 1);
+        TEST("P3-3 CLI exit 1 on duplicate --target-bank for same --select",
+             runCli({bin, "kst-native", "selective-plan", "--source", fx.sourceKst.string(),
+                     "--select", "STYLE/Pop/CleanStyle.stg",
+                     "--target-bank", "STYLE/A", "--target-bank", "STYLE/B"}).exitCode == 1);
+        TEST("P3-3 CLI exit 1 on duplicate --target-name for same --select",
+             runCli({bin, "kst-native", "selective-plan", "--source", fx.sourceKst.string(),
+                     "--select", "STYLE/Pop/CleanStyle.stg",
+                     "--target-name", "A.stg", "--target-name", "B.stg"}).exitCode == 1);
+        const auto rCtrl = runCli({
+            bin, "kst-native", "selective-plan", "--source", fx.sourceKst.string(),
+            "--select", std::string("STYLE/Pop/Bad\x1b[31mName.stg")
+        });
+        TEST("P3-3 CLI sanitizes control bytes in missing --select stderr via printable()",
+             rCtrl.exitCode == 1 &&
+             rCtrl.stderrText.find('\x1b') == std::string::npos &&
+             rCtrl.stderrText.find("\\x1B") != std::string::npos);
+    }
+
+    // ── 6g. P2-4 Hardening Tests: Invalid optionalTargetMap, No-Target FAT R-18 Collisions & Executable Parity ───────
+    {
+        const M1AdapterView srcView = adaptNativeKstFolder(fx.sourceKst);
+        TEST("P2-4 adaptNativeKstFolder succeeds for view-level tests", srcView.ok);
+
+        // (a) Failed/invalid optionalTargetMap -> blocked resolutions (NEVER "no target KST supplied"!)
+        TargetOccupancyMap badTarget;
+        badTarget.valid = false;
+        badTarget.fullyInspectable = false;
+        badTarget.uninspectableReason = "simulated target container failure";
+
+        NativeSelectivePlanRequest reqBadTgt;
+        reqBadTgt.targets = {selTarget(SelectedKind::Style, "STYLE/Pop/CleanStyle.stg")};
+        const auto resBadTgt = planNativeSelectiveExportFromViews(srcView, reqBadTgt, &badTarget, 0);
+        bool allSoundsBlockedHonest = !resBadTgt.soundResolutions.empty();
+        for (const auto& sr : resBadTgt.soundResolutions) {
+            if (!sr.blocking || sr.action != "blocked" || sr.resolvedAddress.has_value() ||
+                sr.detail.find("no target KST supplied") != std::string::npos ||
+                sr.detail.find("simulated target container failure") == std::string::npos) {
+                allSoundsBlockedHonest = false;
+            }
+        }
+        bool allObjsBlockedHonest = !resBadTgt.objectResolutions.empty();
+        for (const auto& ores : resBadTgt.objectResolutions) {
+            if (!ores.blocking || ores.action != "blocked" ||
+                ores.detail.find("no target KST supplied") != std::string::npos ||
+                ores.detail.find("simulated target container failure") == std::string::npos) {
+                allObjsBlockedHonest = false;
+            }
+        }
+        TEST("P2-4(a) invalid optionalTargetMap marks sound/object resolutions blocked with honest reason",
+             !resBadTgt.ok && !resBadTgt.executable() && !resBadTgt.dryRunPlan.executable &&
+             allSoundsBlockedHonest && allObjsBlockedHonest);
+
+        // (b) Intra-batch case-folded --target-name collision without --target -> FAT_CASE_COLLISION_R18
+        NativeSelectivePlanRequest reqFat;
+        reqFat.targets = {
+            selTarget(SelectedKind::Style, "STYLE/Pop/CleanStyle.stg", "STYLE/Out", "Same.stg"),
+            selTarget(SelectedKind::Style, "STYLE/Pop/SharedStyle.stg", "STYLE/Out", "same.stg")
+        };
+        const auto resFat = planNativeSelectiveExportFromViews(srcView, reqFat, nullptr, 0);
+        bool anyFatObjBlocked = false;
+        for (const auto& ores : resFat.objectResolutions) {
+            if (ores.blocking && ores.action == "blocked-fat-case-r18") anyFatObjBlocked = true;
+        }
+        TEST("P2-4(b) no-target intra-batch case-folded collision emits FAT_CASE_COLLISION_R18 & blocks both report and dryRunPlan",
+             resFat.ok && !resFat.report.executable() && !resFat.dryRunPlan.executable &&
+             resFat.dryRunPlan.hasBlockingCode(diag_code::kFatCaseCollisionR18) &&
+             anyFatObjBlocked);
+
+        // (c) Invalid no-target override -> dryRunPlan.executable == report.executable() == false parity
+        NativeSelectivePlanRequest reqBadPath;
+        reqBadPath.targets = {
+            selTarget(SelectedKind::Style, "STYLE/Pop/CleanStyle.stg", "", "../escape.stg")
+        };
+        const auto resBadPath = planNativeSelectiveExportFromViews(srcView, reqBadPath, nullptr, 0);
+        TEST("P2-4(c) invalid no-target override keeps dryRunPlan.executable == report.executable() == false",
+             resBadPath.ok && !resBadPath.report.executable() && !resBadPath.dryRunPlan.executable &&
+             resBadPath.dryRunPlan.hasBlockingCode(diag_code::kStyleOrObjectPathCollision) &&
+             resBadPath.objectResolutions.size() == 1 &&
+             resBadPath.objectResolutions[0].action == "blocked-invalid-path");
     }
 
     // ── 7. `library_selective_preview.h` Tests (evaluateWithDependencies, planJsonWithDependencies, whereUsedWithManifest)
@@ -1089,7 +1184,7 @@ int main() {
              evPlain.steps.size() == evNull.steps.size() &&
              evPlain.steps[0].warnings == evNull.steps[0].warnings);
 
-        // 7b. With M1 closure & TargetOccupancyMap attached
+        // 7b. With M1 closure & TargetOccupancyMap attached (NO viewA -> P2-2 honest SOUND_SLOT_EQUIVALENCE_INSUFFICIENT)
         const auto closureA = resolveNativeKstClosureFolder(fx.sourceKst);
         const auto occB = inspectTargetKstFolder(fx.targetKst);
         lib::SelectiveDependencyContext ctx;
@@ -1103,24 +1198,112 @@ int main() {
             for (const auto& s : v) if (s.find(sub) != std::string::npos) return true;
             return false;
         };
-        TEST("generic opaque 'payload not decoded' warning is replaced by real M2 closure",
+        TEST("P2-2 without equivalence view: generic opaque warning replaced & occupied slot reports SOUND_SLOT_EQUIVALENCE_INSUFFICIENT (NOT OCCUPIED_DIFFERENT)",
              !stepHasSubstr(evWarnOnly.steps[0].warnings, "payload not decoded: which Sounds it uses is UNKNOWN") &&
              stepHasSubstr(evWarnOnly.steps[0].warnings, "M2 dependency closure") &&
-             stepHasSubstr(evWarnOnly.steps[0].warnings, "SOUND_SLOT_OCCUPIED_DIFFERENT"));
+             stepHasSubstr(evWarnOnly.steps[0].warnings, "SOUND_SLOT_EQUIVALENCE_INSUFFICIENT") &&
+             !stepHasSubstr(evWarnOnly.steps[0].warnings, "SOUND_SLOT_OCCUPIED_DIFFERENT"));
         TEST("second step reports cross-step deduplicated User Sounds",
              stepHasSubstr(evWarnOnly.steps[1].warnings, "deduplicated with earlier plan step"));
         TEST("dangling/USERDK step reports DRUMKIT_BODY_UNPARSED & MISSING_USER_SOUND_SLOT",
              stepHasSubstr(evWarnOnly.steps[2].warnings, "DRUMKIT_BODY_UNPARSED") &&
              stepHasSubstr(evWarnOnly.steps[2].warnings, "MISSING_USER_SOUND_SLOT"));
 
-        // 7c. strictBlockingConflicts == true promotes slot conflicts & missing sounds to StepCheck::conflicts
+        // 7c. strictBlockingConflicts == true promotes insufficient equivalence & missing sounds to StepCheck::conflicts
         ctx.strictBlockingConflicts = true;
         const auto evStrict = lib::evaluateWithDependencies(libA, libB, steps, &ctx);
-        TEST("strictBlockingConflicts=true promotes slot/missing issues to StepCheck::conflicts",
+        TEST("strictBlockingConflicts=true promotes unprovable occupied slot & missing issues to StepCheck::conflicts",
              evStrict.blocked() &&
              evStrict.conflicts > evWarnOnly.conflicts &&
-             stepHasSubstr(evStrict.steps[0].conflicts, "SOUND_SLOT_OCCUPIED_DIFFERENT") &&
+             stepHasSubstr(evStrict.steps[0].conflicts, "SOUND_SLOT_EQUIVALENCE_INSUFFICIENT") &&
+             !stepHasSubstr(evStrict.steps[0].conflicts, "SOUND_SLOT_OCCUPIED_DIFFERENT") &&
              stepHasSubstr(evStrict.steps[2].conflicts, "MISSING_USER_SOUND_SLOT"));
+
+        // 7c-2. P2-2 WITH viewA attached: real compareSoundEquivalence() proves USER01/0 Different & USER01/1 Identical (reuse-target)!
+        const M1AdapterView viewA = adaptNativeKstFolder(fx.sourceKst);
+        lib::SelectiveDependencyContext ctxWithView = ctx;
+        ctxWithView.viewA = &viewA;
+        const auto evStrictWithView = lib::evaluateWithDependencies(libA, libB, steps, &ctxWithView);
+        TEST("P2-2 with viewA attached: compareSoundEquivalence() proves USER01/0 OCCUPIED_DIFFERENT and USER01/1 reuse-target",
+             evStrictWithView.blocked() &&
+             stepHasSubstr(evStrictWithView.steps[0].conflicts, "SOUND_SLOT_OCCUPIED_DIFFERENT") &&
+             stepHasSubstr(evStrictWithView.steps[0].warnings, "USER01/1") &&
+             stepHasSubstr(evStrictWithView.steps[0].warnings, "reuse-target"));
+
+        // 7c-3. P2-1 Fail-closed on corrupt .stg (parseOk == false) — NEVER reports "0 User Sound(s)"!
+        {
+            const fs::path corruptKst = fx.tmpRoot / "SynthCorrupt.KST";
+            writeBytesFile(corruptKst / "STYLE" / "Pop" / "Broken.stg", Bytes{'B', 'A', 'D', '!'});
+            const lib::Library libCorrupt = lib::load(corruptKst);
+            const auto closureCorrupt = resolveNativeKstClosureFolder(corruptKst);
+            const size_t idxBroken = findItem(libCorrupt, "STYLE/Pop/Broken.stg");
+            lib::SelectiveDependencyContext cCtx;
+            cCtx.closureA = &closureCorrupt;
+            cCtx.strictBlockingConflicts = true;
+            const std::vector<lib::Step> cSteps = {{lib::Op::Copy, 'A', idxBroken, "", -1, "", false}};
+            const auto evCorrupt = lib::evaluateWithDependencies(libCorrupt, libB, cSteps, &cCtx);
+            TEST("P2-1 corrupt .stg (parseOk==false) emits MALFORMED_ROOT_TREE and NEVER claims '0 User Sound(s)'",
+                 idxBroken < libCorrupt.items.size() &&
+                 evCorrupt.blocked() &&
+                 stepHasSubstr(evCorrupt.steps[0].conflicts, "MALFORMED_ROOT_TREE") &&
+                 !stepHasSubstr(evCorrupt.steps[0].warnings, "0 User Sound(s)"));
+        }
+
+        // 7c-4. P2-3 Mid-inner-loop cancellation inside root->soundRefs returns clean empty Evaluation{} (zero partial leak!)
+        {
+            const fs::path manyKst = fx.tmpRoot / "SynthManyRefs.KST";
+            std::vector<SmfSelSpec> manySels;
+            manySels.reserve(80);
+            for (int i = 0; i < 80; ++i) {
+                manySels.push_back({static_cast<uint8_t>(i % 16), 121, 0, static_cast<uint8_t>(i)});
+            }
+            const Bytes manyStyle = rtSerialize({
+                rtBranch("Var1.scn", {rtBranch("Track.pdc", {rtLeaf("Main.mid", makeSmf(manySels))})})
+            });
+            writeBytesFile(manyKst / "STYLE" / "Pop" / "ManyRefs.stg", manyStyle);
+            const lib::Library libMany = lib::load(manyKst);
+            const auto closureMany = resolveNativeKstClosureFolder(manyKst);
+            const size_t idxMany = findItem(libMany, "STYLE/Pop/ManyRefs.stg");
+            lib::SelectiveDependencyContext mCtx;
+            mCtx.closureA = &closureMany;
+            const std::vector<lib::Step> mSteps = {{lib::Op::Copy, 'A', idxMany, "", -1, "", false}};
+            // Call 1 = inside evaluate() step 0; Call 2 = tick 0 before outer loop; Call 3 = tick 64 inside root->soundRefs!
+            int keepCalls = 0;
+            const auto evMidCancel = lib::evaluateWithDependencies(
+                libMany, libB, mSteps, &mCtx, [&keepCalls]() { return (++keepCalls) <= 2; });
+            TEST("P2-3 mid-inner-loop keepGoing cancel in evaluateWithDependencies returns empty Evaluation{} (zero partial leak)",
+                 keepCalls >= 3 &&
+                 evMidCancel.steps.empty() &&
+                 evMidCancel.warnings == 0 &&
+                 evMidCancel.conflicts == 0);
+        }
+
+        // 7c-5. P3-3 Op::Move + 'B' -> 'A' direction + skipping already-invalidated (moved/gone) step
+        {
+            const auto closureB = resolveNativeKstClosureFolder(fx.targetKst);
+            const auto occA = inspectTargetKstFolder(fx.sourceKst);
+            const size_t idxTargetStyle = findItem(libB, "STYLE/Pop/ExistingOther.stg");
+            lib::SelectiveDependencyContext dirCtx;
+            dirCtx.closureA = &closureA;
+            dirCtx.closureB = &closureB;
+            dirCtx.occupancyA = &occA;
+            dirCtx.occupancyB = &occB;
+            dirCtx.strictBlockingConflicts = false;
+
+            const std::vector<lib::Step> moveAndRevSteps = {
+                {lib::Op::Move, 'A', idxClean, "", -1, "", false},        // valid Move A->B
+                {lib::Op::Copy, 'A', idxClean, "", -1, "", false},        // invalidated: idxClean already moved (gone)!
+                {lib::Op::Move, 'B', idxTargetStyle, "", -1, "", false}   // valid Move B->A
+            };
+            const auto evDir = lib::evaluateWithDependencies(libA, libB, moveAndRevSteps, &dirCtx);
+            TEST("P3-3 Op::Move A->B & B->A enriched cleanly and already-moved (invalidated) step skipped",
+                 idxTargetStyle < libB.items.size() &&
+                 evDir.steps.size() == 3 &&
+                 stepHasSubstr(evDir.steps[0].warnings, "M2 dependency closure") &&
+                 !evDir.steps[1].conflicts.empty() &&
+                 !stepHasSubstr(evDir.steps[1].warnings, "M2 dependency closure") &&
+                 stepHasSubstr(evDir.steps[2].warnings, "M2 dependency closure"));
+        }
 
         // 7d. planJsonWithDependencies preserves v1 format + adds selectiveDependencies
         const std::string pjson = lib::planJsonWithDependencies(libA, libB, steps, evStrict, &ctx);

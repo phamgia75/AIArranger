@@ -372,10 +372,50 @@ inline NativeSelectivePlanResult planNativeSelectiveExportFromViews(
     rep.coverage.deleteProofAvailable = false;
     rep.memoryProjection.sampleBytesAreNativeStoredProxy = true;
 
-    // Populate Sound & Object resolutions from M2a CollisionMatrix (or clean advisory defaults without target)
+    // Populate Sound & Object resolutions from M2a CollisionMatrix (or fail-closed invalid target / no-target checks)
     if (dry.collisionMatrix.has_value()) {
         out.soundResolutions = dry.collisionMatrix->soundResolutions;
         out.objectResolutions = dry.collisionMatrix->objectResolutions;
+    } else if (optionalTargetMap != nullptr && !optionalTargetMap->valid) {
+        // P2-4: Explicit fail-closed branch when target inspection failed (NEVER claim "no target KST supplied"!)
+        const std::string reason = optionalTargetMap->uninspectableReason.empty()
+                                       ? std::string("target KST inspection failed; refusing fail-closed")
+                                       : optionalTargetMap->uninspectableReason;
+        for (const CollectedSoundSummary& cs : dry.collectedSounds) {
+            if (!adapter_detail::tickCancel(req.keepGoing, tick, stride)) return makeCancelled();
+            const auto sit = source.sounds.find(cs.id);
+            std::optional<SlotAddress> addr =
+                (sit != source.sounds.end() && sit->second.slotAddress.has_value())
+                    ? sit->second.slotAddress
+                    : SlotAddress::fromBankAndSlot(cs.id.scope, cs.id.number);
+            if (!addr.has_value()) continue;
+            SoundResolutionEntry sr;
+            sr.requestId = cs.id.str();
+            sr.sourceAddress = *addr;
+            sr.resolvedAddress = std::nullopt;
+            sr.remapped = false;
+            sr.action = "blocked";
+            sr.equivalence = EquivalenceVerdict::InsufficientEvidence;
+            sr.blocking = true;
+            sr.detail = reason;
+            out.soundResolutions.push_back(std::move(sr));
+        }
+        std::sort(out.soundResolutions.begin(), out.soundResolutions.end());
+
+        for (const SelectionTarget& sel : dry.selectedTargets) {
+            if (!adapter_detail::tickCancel(req.keepGoing, tick, stride)) return makeCancelled();
+            const std::string eff = conflict_detail::applyTargetPathOverride(sel.relPath, sel.targetBank, sel.targetName);
+            ObjectPathResolutionEntry ores;
+            ores.kind = sel.kind;
+            ores.sourceRelPath = sel.relPath;
+            ores.targetRelPath = eff;
+            ores.foldedTargetRelPath = conflict_detail::asciiLower(eff);
+            ores.action = "blocked";
+            ores.blocking = true;
+            ores.detail = reason;
+            out.objectResolutions.push_back(std::move(ores));
+        }
+        std::sort(out.objectResolutions.begin(), out.objectResolutions.end());
     } else {
         for (const CollectedSoundSummary& cs : dry.collectedSounds) {
             if (!adapter_detail::tickCancel(req.keepGoing, tick, stride)) return makeCancelled();
@@ -398,42 +438,144 @@ inline NativeSelectivePlanResult planNativeSelectiveExportFromViews(
         }
         std::sort(out.soundResolutions.begin(), out.soundResolutions.end());
 
-        for (const SelectionTarget& sel : dry.selectedTargets) {
+        // P2-4: Two-pass intra-batch path validation + FAT32/exFAT ASCII case-folded R-18 collision detection
+        // even when no target KST is supplied, mirroring every added conflict/diagnostic into `dry` so
+        // `out.dryRunPlan.executable` and `out.report.executable()` NEVER diverge!
+        std::vector<std::optional<std::string>> effPaths(dry.selectedTargets.size());
+        std::vector<std::string> effErrs(dry.selectedTargets.size());
+        std::vector<std::string> effFolded(dry.selectedTargets.size());
+        std::map<std::string, std::vector<size_t>> batchByFolded;
+        std::map<std::string, std::set<std::string>> batchDirsByFolded;
+
+        for (size_t i = 0; i < dry.selectedTargets.size(); ++i) {
             if (!adapter_detail::tickCancel(req.keepGoing, tick, stride)) return makeCancelled();
+            const SelectionTarget& sel = dry.selectedTargets[i];
             std::string perr;
-            const auto eff = conflict_detail::resolveTargetPathOverride(sel.relPath, sel.targetBank, sel.targetName, &perr);
+            effPaths[i] = conflict_detail::resolveTargetPathOverride(sel.relPath, sel.targetBank, sel.targetName, &perr);
+            if (!effPaths[i].has_value()) {
+                effErrs[i] = std::move(perr);
+                continue;
+            }
+            effFolded[i] = conflict_detail::asciiLower(*effPaths[i]);
+            batchByFolded[effFolded[i]].push_back(i);
+            for (const std::string& dir : conflict_detail::parentDirectoryPrefixes(*effPaths[i])) {
+                batchDirsByFolded[conflict_detail::asciiLower(dir)].insert(dir);
+            }
+        }
+
+        bool anyNoTargetPathFinding = false;
+        auto recordFinding = [&](SlotConflict sc, Diagnostic dg) {
+            anyNoTargetPathFinding = true;
+            rep.conflicts.push_back(sc);
+            rep.diagnostics.push_back(dg);
+            dry.conflicts.push_back(std::move(sc));
+            dry.diagnostics.push_back(std::move(dg));
+        };
+
+        for (size_t i = 0; i < dry.selectedTargets.size(); ++i) {
+            if (!adapter_detail::tickCancel(req.keepGoing, tick, stride)) return makeCancelled();
+            const SelectionTarget& sel = dry.selectedTargets[i];
             ObjectPathResolutionEntry ores;
             ores.kind = sel.kind;
             ores.sourceRelPath = sel.relPath;
-            if (!eff.has_value()) {
+            if (!effPaths[i].has_value()) {
                 ores.action = "blocked-invalid-path";
                 ores.blocking = true;
-                ores.detail = perr;
-                rep.conflicts.push_back({
-                    SlotConflict::Kind::StyleOrObjectPathCollision,
-                    sel.relPath, sel.relPath, "(invalid target path override)",
-                    "RENAME_REQUIRED", true, "Invalid target path override refused fail-closed: " + perr
-                });
-                rep.diagnostics.push_back({
-                    DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
-                    diag_code::kStyleOrObjectPathCollision,
-                    DiagnosticSeverity::Blocking,
-                    EvidenceLevel::Verified,
-                    sel.relPath, sel.targetBank + "/" + sel.targetName,
-                    "Target path override is invalid (" + perr + "); refusing fail-closed.",
-                    "Provide safe relative bank/file names without '..', leading/trailing '/', or path separators in targetName.",
-                    {sel.relPath}
-                });
-            } else {
-                ores.targetRelPath = *eff;
-                ores.foldedTargetRelPath = conflict_detail::asciiLower(*eff);
-                ores.action = "allow-new";
-                ores.blocking = false;
-                ores.detail = "no target KST supplied; advisory target path";
+                ores.detail = effErrs[i];
+                recordFinding(
+                    {SlotConflict::Kind::StyleOrObjectPathCollision,
+                     sel.relPath, sel.relPath, "(invalid target path override)",
+                     "RENAME_REQUIRED", true, "Invalid target path override refused fail-closed: " + effErrs[i]},
+                    {DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                     diag_code::kStyleOrObjectPathCollision,
+                     DiagnosticSeverity::Blocking,
+                     EvidenceLevel::Verified,
+                     sel.relPath, sel.targetBank + "/" + sel.targetName,
+                     "Target path override is invalid (" + effErrs[i] + "); refusing fail-closed.",
+                     "Provide safe relative bank/file names without '..', leading/trailing '/', or path separators in targetName.",
+                     {sel.relPath}});
+                out.objectResolutions.push_back(std::move(ores));
+                continue;
             }
+
+            const std::string& eff = *effPaths[i];
+            const std::string& folded = effFolded[i];
+            ores.targetRelPath = eff;
+            ores.foldedTargetRelPath = folded;
+
+            if (batchByFolded[folded].size() > 1 || batchDirsByFolded.count(folded) > 0) {
+                ores.action = "blocked-fat-case-r18";
+                ores.blocking = true;
+                ores.detail = "batch FAT32/exFAT R-18 case collision";
+                recordFinding(
+                    {SlotConflict::Kind::StyleOrObjectPathCollision,
+                     eff, sel.relPath, "(batch case-folded collision)",
+                     "RENAME_REQUIRED", true,
+                     "Multiple selected objects collide under ASCII case-folding (FAT32/exFAT R-18)."},
+                    {DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                     diag_code::kFatCaseCollisionR18,
+                     DiagnosticSeverity::Blocking,
+                     EvidenceLevel::Verified,
+                     eff, folded,
+                     "Output path collides with another selected item under ASCII case-folding (FAT32/exFAT R-18).",
+                     "Provide distinct targetBank or targetName overrides before export.",
+                     {sel.relPath}});
+                out.objectResolutions.push_back(std::move(ores));
+                continue;
+            }
+
+            std::string dirCollisionTarget;
+            std::string dirCollisionDetail;
+            for (const std::string& dir : conflict_detail::parentDirectoryPrefixes(eff)) {
+                const std::string fd = conflict_detail::asciiLower(dir);
+                if (batchByFolded.count(fd) > 0) {
+                    dirCollisionTarget = fd;
+                    dirCollisionDetail = "Directory prefix '" + dir + "' collides case-insensitively with a selected file path (FAT32/exFAT R-18).";
+                    break;
+                }
+                if (const auto bit = batchDirsByFolded.find(fd); bit != batchDirsByFolded.end() && bit->second.size() > 1) {
+                    for (const std::string& other : bit->second) {
+                        if (other != dir) { dirCollisionTarget = other; break; }
+                    }
+                    dirCollisionDetail = "Batch bank/type directory '" + dir + "' collides case-insensitively with '" +
+                                         dirCollisionTarget + "' (FAT32/exFAT R-18).";
+                    break;
+                }
+            }
+            if (!dirCollisionDetail.empty()) {
+                ores.action = "blocked-fat-case-r18";
+                ores.blocking = true;
+                ores.detail = dirCollisionDetail;
+                recordFinding(
+                    {SlotConflict::Kind::StyleOrObjectPathCollision,
+                     eff, sel.relPath, dirCollisionTarget,
+                     "RENAME_REQUIRED", true, dirCollisionDetail},
+                    {DiagnosticCategory::AMBIGUOUS_OR_DUPLICATE,
+                     diag_code::kFatCaseCollisionR18,
+                     DiagnosticSeverity::Blocking,
+                     EvidenceLevel::Verified,
+                     eff, dirCollisionTarget, dirCollisionDetail,
+                     "Use consistent bank directory casing or distinct targetBank values to eliminate the FAT32/exFAT R-18 collision.",
+                     {sel.relPath}});
+                out.objectResolutions.push_back(std::move(ores));
+                continue;
+            }
+
+            ores.action = "allow-new";
+            ores.blocking = false;
+            ores.detail = "no target KST supplied; advisory target path";
             out.objectResolutions.push_back(std::move(ores));
         }
         std::sort(out.objectResolutions.begin(), out.objectResolutions.end());
+        if (anyNoTargetPathFinding) {
+            canonicalizeConflicts(dry.conflicts);
+            canonicalizeDiagnostics(dry.diagnostics);
+            dry.executable = dry.ok && !dry.cancelled &&
+                             dry.blockingDiagnosticCount() == 0 &&
+                             dry.blockingConflictCount() == 0 &&
+                             req.mode != ExportMode::NativeSoundKst_HOLD;
+            dry.planFingerprint = collector_detail::computePlanFingerprint(dry);
+        }
         rep = canonicalizeReport(std::move(rep));
     }
 
@@ -562,15 +704,22 @@ inline std::string serializeNativeSelectivePlanJson(const NativeSelectivePlanRes
     ext.reserve(2048 + res.soundResolutions.size() * 160 + res.pa5xSingleSoundSteps.size() * 256);
 
     // UX Gate #2: structured PartialNativeInspect for source & target
+    // P3-1: when only target is partial (e.g. target OC31 KMP), mirror target counts in top-level shorthand fields
+    const PartialNativeInspect& primaryPartial =
+        (!res.sourcePartialInspect.isPartial && res.targetPartialInspect.isPartial)
+            ? res.targetPartialInspect
+            : res.sourcePartialInspect;
     ext += ",\n  \"partialInspect\": {\n";
     ext += "    \"isPartial\": " + std::string(bstr(res.sourcePartialInspect.isPartial || res.targetPartialInspect.isPartial)) + ",\n";
-    ext += "    \"occupiedUserSounds\": " + std::to_string(res.sourcePartialInspect.occupiedUserSounds) + ",\n";
-    ext += "    \"occupiedUserDrumKits\": " + std::to_string(res.sourcePartialInspect.occupiedUserDrumKits) + ",\n";
-    ext += "    \"pcmContainerCount\": " + std::to_string(res.sourcePartialInspect.pcmContainerCount) + ",\n";
-    ext += "    \"pcmSampleCount\": " + std::to_string(res.sourcePartialInspect.pcmSampleCount) + ",\n";
-    ext += "    \"notice\": " + q(!res.sourcePartialInspect.notice.empty()
-                                      ? res.sourcePartialInspect.notice
-                                      : res.targetPartialInspect.notice) + ",\n";
+    ext += "    \"occupiedUserSounds\": " + std::to_string(primaryPartial.occupiedUserSounds) + ",\n";
+    ext += "    \"occupiedUserDrumKits\": " + std::to_string(primaryPartial.occupiedUserDrumKits) + ",\n";
+    ext += "    \"pcmContainerCount\": " + std::to_string(primaryPartial.pcmContainerCount) + ",\n";
+    ext += "    \"pcmSampleCount\": " + std::to_string(primaryPartial.pcmSampleCount) + ",\n";
+    ext += "    \"notice\": " + q(!primaryPartial.notice.empty()
+                                      ? primaryPartial.notice
+                                      : (!res.sourcePartialInspect.notice.empty()
+                                             ? res.sourcePartialInspect.notice
+                                             : res.targetPartialInspect.notice)) + ",\n";
     ext += "    \"source\": " + plan_detail::serializePartialInspectJson(res.sourcePartialInspect) + ",\n";
     ext += "    \"target\": " + plan_detail::serializePartialInspectJson(res.targetPartialInspect) + "\n";
     ext += "  },\n";
