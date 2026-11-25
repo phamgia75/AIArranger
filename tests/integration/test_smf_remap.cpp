@@ -368,16 +368,39 @@ static void testRunningStatusHandling() {
          rCcRun.ok && rCcRun.modified && rCcRun.bytes.size() == smfCcRun.size() && selOk &&
          selCcRun.size() == 1 && selCcRun[0].msb == 121 && selCcRun[0].lsb == 69 && selCcRun[0].program == 30 &&
          hasSubseq(rCcRun.bytes, {0x00, 0xB0, 0x07, 100}));
+
+    // Running-status remapped PC (omitted 0xC0 status byte on the remapped PC itself),
+    // followed by a running-status PC-only remapped PC and a running-status unremapped PC!
+    Bytes trkRsRemap;
+    pushBytes(trkRsRemap, {0x00, 0xB0, 0x00, 121, 0x00, 0xB0, 0x20, 64});
+    pushBytes(trkRsRemap, {0x00, 0xC0, 1});  // explicit 0xC0, unremapped
+    pushBytes(trkRsRemap, {0x08, 2});        // running status 0xC0 -> remapped (bank changes + restore!)
+    pushBytes(trkRsRemap, {0x08, 3});        // running status 0xC0 -> PC-only remapped (needs explicit 0xC0 after restore!)
+    pushBytes(trkRsRemap, {0x08, 4});        // running status 0xC0 -> unremapped (inherits restored 0xC0!)
+    pushEot(trkRsRemap);
+    const Bytes smfRsRemap = buildSmf(0, {trkRsRemap});
+    const auto rRsRemap = remapSmf(smfRsRemap.data(), smfRsRemap.size(), {
+        {{121, 64, 2}, {121, 70, 22}},
+        {{121, 64, 3}, {121, 64, 33}}
+    });
+    const auto selRsRemap = readSelects(rRsRemap.bytes, &selOk);
+    TEST("Running-status remapped PC + following running-status PC-only remap + trailing unremapped PC",
+         rRsRemap.ok && rRsRemap.modified && rRsRemap.remappedEvents == 2 && rRsRemap.unchangedEvents == 2 &&
+         selOk && selRsRemap.size() == 4 &&
+         selRsRemap[0].msb == 121 && selRsRemap[0].lsb == 64 && selRsRemap[0].program == 1 &&
+         selRsRemap[1].msb == 121 && selRsRemap[1].lsb == 70 && selRsRemap[1].program == 22 &&
+         selRsRemap[2].msb == 121 && selRsRemap[2].lsb == 64 && selRsRemap[2].program == 33 &&
+         selRsRemap[3].msb == 121 && selRsRemap[3].lsb == 64 && selRsRemap[3].program == 4);
 }
 
 static void testSimultaneousSwapAndIdentityRules() {
-    std::printf("Section 5: Simultaneous swap (A <-> B), 3-cycle, and identity rules\n");
+    std::printf("Section 5: Simultaneous swap (A <-> B), shared-bank swap, chain, 3-cycle, and identity rules\n");
 
     const MidiTriple A{121, 64, 1};
     const MidiTriple B{121, 65, 2};
     const MidiTriple C{121, 66, 3};
 
-    // Simultaneous swap A -> B and B -> A in one SMF (both shared-bank and separate-bank)
+    // Separate-bank simultaneous swap A -> B and B -> A in one SMF
     Bytes trk;
     pushBytes(trk, {0x00, 0xB0, 0x00, A.msb, 0x00, 0xB0, 0x20, A.lsb, 0x00, 0xC0, A.pc});
     pushBytes(trk, {0x10, 0xB0, 0x00, B.msb, 0x00, 0xB0, 0x20, B.lsb, 0x00, 0xC0, B.pc});
@@ -386,11 +409,44 @@ static void testSimultaneousSwapAndIdentityRules() {
     const auto rSwap = remapSmf(smfSwap.data(), smfSwap.size(), {{A, B}, {B, A}});
     bool selOk = false;
     const auto selSwap = readSelects(rSwap.bytes, &selOk);
-    TEST("Simultaneous swap A <-> B executes in single pass with zero double-remap",
+    TEST("Separate-bank simultaneous swap A <-> B executes in single pass with zero double-remap",
          rSwap.ok && rSwap.modified && rSwap.remappedEvents == 2 && rSwap.unchangedEvents == 0 &&
          selOk && selSwap.size() == 2 &&
          selSwap[0].msb == B.msb && selSwap[0].lsb == B.lsb && selSwap[0].program == B.pc &&
          selSwap[1].msb == A.msb && selSwap[1].lsb == A.lsb && selSwap[1].program == A.pc);
+
+    // Shared-bank simultaneous swap on a single (CC0=121, CC32=64) run + trailing unremapped PC
+    const MidiTriple S1{121, 64, 1};
+    const MidiTriple S2{121, 64, 2};
+    Bytes trkSharedSwap;
+    pushBytes(trkSharedSwap, {0x00, 0xB0, 0x00, 121, 0x00, 0xB0, 0x20, 64});
+    pushBytes(trkSharedSwap, {0x00, 0xC0, 1, 0x10, 0xC0, 2, 0x10, 0xC0, 3});
+    pushEot(trkSharedSwap);
+    const Bytes smfSharedSwap = buildSmf(0, {trkSharedSwap});
+    const auto rSharedSwap = remapSmf(smfSharedSwap.data(), smfSharedSwap.size(), {
+        {S1, S2},
+        {S2, {121, 67, 9}}
+    });
+    const auto selSharedSwap = readSelects(rSharedSwap.bytes, &selOk);
+    TEST("Shared-bank swap/chain (S1 -> S2, S2 -> (121,67,9)) + unremapped S3 has zero double-remap",
+         rSharedSwap.ok && rSharedSwap.modified && rSharedSwap.remappedEvents == 2 &&
+         rSharedSwap.unchangedEvents == 1 && selOk && selSharedSwap.size() == 3 &&
+         selSharedSwap[0].msb == 121 && selSharedSwap[0].lsb == 64 && selSharedSwap[0].program == 2 &&
+         selSharedSwap[1].msb == 121 && selSharedSwap[1].lsb == 67 && selSharedSwap[1].program == 9 &&
+         selSharedSwap[2].msb == 121 && selSharedSwap[2].lsb == 64 && selSharedSwap[2].program == 3);
+
+    // Non-cyclic chain A -> B, B -> C (verifies A becomes B, NOT C!)
+    Bytes trkChain;
+    pushBytes(trkChain, {0x00, 0xB0, 0x00, A.msb, 0x00, 0xB0, 0x20, A.lsb, 0x00, 0xC0, A.pc});
+    pushBytes(trkChain, {0x10, 0xB0, 0x00, B.msb, 0x00, 0xB0, 0x20, B.lsb, 0x00, 0xC0, B.pc});
+    pushEot(trkChain);
+    const Bytes smfChain = buildSmf(0, {trkChain});
+    const auto rChain = remapSmf(smfChain.data(), smfChain.size(), {{A, B}, {B, C}});
+    const auto selChain = readSelects(rChain.bytes, &selOk);
+    TEST("Non-cyclic chain A -> B, B -> C maps A->B and B->C without double-remapping A->C",
+         rChain.ok && rChain.modified && rChain.remappedEvents == 2 && selOk && selChain.size() == 2 &&
+         selChain[0].msb == B.msb && selChain[0].lsb == B.lsb && selChain[0].program == B.pc &&
+         selChain[1].msb == C.msb && selChain[1].lsb == C.lsb && selChain[1].program == C.pc);
 
     // 3-way cycle A -> B -> C -> A on same channel
     Bytes trkCycle;
@@ -868,6 +924,90 @@ static void testRootTreeRemap() {
     TEST("Determinism: repeated remapSmf and remapRootTree calls produce byte-identical outputs",
          rDet1.ok && rDet2.ok && rDet1.bytes == rDet2.bytes &&
          rSmfDet1.ok && rSmfDet2.ok && rSmfDet1.bytes == rSmfDet2.bytes);
+
+    // P2-2: Failure after a prior remapped leaf MUST reset modifiedMidiLeaves & remappedEvents to 0
+    // while keeping inspectedMidiLeaves and failedLeafPath for diagnostics.
+    const Bytes partialFailTree = makeRoot({
+        makeLeaf("Good1.mid", bassMid),               // leaf 1: valid & matches rules (121/64/5 -> 121/68/14)
+        makeLeaf("Bad2.mid", buildSmf(0, {badLeafTrk})) // leaf 2: malformed CC11 >= 0x80
+    });
+    const auto rPartialFail = remapRootTree(partialFailTree.data(), partialFailTree.size(), rules);
+    TEST("P2-2: remapRootTree failure after a modified leaf resets modifiedMidiLeaves & remappedEvents to 0",
+         !rPartialFail.ok && !rPartialFail.modified && rPartialFail.bytes.empty() &&
+         rPartialFail.modifiedMidiLeaves == 0 && rPartialFail.remappedEvents == 0 &&
+         rPartialFail.inspectedMidiLeaves == 2 && rPartialFail.failedLeafPath == "Bad2.mid" &&
+         rPartialFail.error.find("MALFORMED_MIDI_LEAF") != std::string::npos);
+
+    // P3-1: verifyRoundTrip = false produces identical output bytes for both remapSmf and remapRootTree
+    RemapOptions noVerify;
+    noVerify.verifyRoundTrip = false;
+    const auto rSmfNoVerify = remapSmf(padMid.data(), padMid.size(), rules, noVerify);
+    const auto rTreeNoVerify = remapRootTree(synthStg.data(), synthStg.size(), rules, noVerify);
+    TEST("P3-1: verifyRoundTrip=false succeeds and matches verifyRoundTrip=true byte-for-byte",
+         rSmfNoVerify.ok && rSmfNoVerify.bytes == rSmfDet1.bytes &&
+         rTreeNoVerify.ok && rTreeNoVerify.bytes == rStg.bytes);
+
+    // P3-1: Duplicate sibling leaf names in Root tree remap cleanly & pass round-trip verification
+    const Bytes dupSiblingTree = makeRoot({
+        makeBranch("Dup.scn", {
+            makeLeaf("Main.mid", bassMid),
+            makeLeaf("Main.mid", upper1Mid),
+            makeLeafStr("ClipDescription.xml", clipXml)
+        })
+    });
+    const auto rDupSib = remapRootTree(dupSiblingTree.data(), dupSiblingTree.size(), rules);
+    TEST("P3-1: duplicate sibling Main.mid leaves remap independently and round-trip cleanly",
+         rDupSib.ok && rDupSib.modified && rDupSib.inspectedMidiLeaves == 2 &&
+         rDupSib.modifiedMidiLeaves == 2 && rDupSib.remappedEvents == 2);
+
+    // P3-1: Empty 0-byte .mid leaf in Root tree fails closed with MALFORMED_MIDI_LEAF and resets counters
+    const Bytes emptyMidLeafTree = makeRoot({
+        makeLeaf("Good.mid", bassMid),
+        makeLeaf("Empty.mid", {})
+    });
+    const auto rEmptyMidLeaf = remapRootTree(emptyMidLeafTree.data(), emptyMidLeafTree.size(), rules);
+    TEST("P3-1: empty 0-byte .mid leaf fails closed with MALFORMED_MIDI_LEAF and reset counters",
+         !rEmptyMidLeaf.ok && !rEmptyMidLeaf.modified && rEmptyMidLeaf.bytes.empty() &&
+         rEmptyMidLeaf.inspectedMidiLeaves == 2 && rEmptyMidLeaf.modifiedMidiLeaves == 0 &&
+         rEmptyMidLeaf.remappedEvents == 0 && rEmptyMidLeaf.failedLeafPath == "Empty.mid" &&
+         rEmptyMidLeaf.error.find("MALFORMED_MIDI_LEAF") != std::string::npos);
+
+    // P3-1: Format 1, declared == 0 header-only SMF succeeds unmodified
+    const Bytes smfFmt1Zero = buildSmf(1, {});
+    const auto rFmt1Zero = remapSmf(smfFmt1Zero.data(), smfFmt1Zero.size(), rules);
+    TEST("P3-1: Format 1 header-only SMF (declared=0) succeeds unmodified byte-for-byte",
+         rFmt1Zero.ok && !rFmt1Zero.modified && rFmt1Zero.remappedEvents == 0 &&
+         rFmt1Zero.unchangedEvents == 0 && rFmt1Zero.bytes == smfFmt1Zero);
+
+    // P2-1: Hostile 14-byte header declaring 65535 tracks fails cleanly without over-reservation
+    Bytes hostileHdr{'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 1, 0xFF, 0xFF, 0x01, 0x80};
+    const auto rHostileHdr = remapSmf(hostileHdr.data(), hostileHdr.size(), rules);
+    TEST("P2-1: tiny SMF header declaring 65535 tracks fails closed cleanly",
+         !rHostileHdr.ok && rHostileHdr.bytes.empty() &&
+         rHostileHdr.error.find("MALFORMED_MIDI_LEAF") != std::string::npos);
+
+    // P2-1: Large untouched note run (10,000 notes) alongside a remapped PC remaps cleanly
+    // in O(selects) memory and preserves the entire note block byte-for-byte
+    Bytes bigTrk;
+    pushBytes(bigTrk, {0x00, 0xB0, 0x00, 121, 0x00, 0xB0, 0x20, 64, 0x00, 0xC0, 5});
+    Bytes notePayload;
+    notePayload.reserve(10000u * 6u);
+    pushBytes(notePayload, {0x00, 0x90, 0x3C, 0x64});
+    for (int i = 0; i < 9999; ++i) {
+        pushBytes(notePayload, {0x04, 0x3C, 0x00, 0x04, 0x3C, 0x64});  // running-status 0x90 run
+    }
+    pushBytes(notePayload, {0x04, 0x3C, 0x00});
+    bigTrk.insert(bigTrk.end(), notePayload.begin(), notePayload.end());
+    pushEot(bigTrk);
+    const Bytes smfBig = buildSmf(0, {bigTrk});
+    const auto rBig = remapSmf(smfBig.data(), smfBig.size(), rules);
+    bool bigSelOk = false;
+    const auto selBig = readSelects(rBig.bytes, &bigSelOk);
+    TEST("P2-1: large 10,000-note running-status track remaps cleanly and preserves note block verbatim",
+         rBig.ok && rBig.modified && rBig.remappedEvents == 1 && rBig.bytes.size() == smfBig.size() &&
+         bigSelOk && selBig.size() == 1 &&
+         selBig[0].msb == 121 && selBig[0].lsb == 68 && selBig[0].program == 14 &&
+         hasSubseq(rBig.bytes, notePayload));
 }
 
 int main() {

@@ -8,6 +8,9 @@
 //    format == 0 => ntrks == 1), MTrk chunks only, exact track count, zero trailing bytes,
 //    End-of-Track (FF 2F 00) exactly at end of every track, all channel data bytes < 0x80,
 //    Meta/SysEx cancel running status, max kMaxSelectEvents (4096) select events.
+//  * Bounded O(selects) memory in Pass 1: validates every byte of every MTrk without storing
+//    non-select events; Pass 2 bulk-copies untouched byte spans and rewrites only affected
+//    select event spans.
 //  * Cross-track (CC0, CC32, PC) bank state in Format 1 merged by (tick, track, orderInTrack).
 //  * Simultaneous rule application: rules map original (MSB, LSB, PC) -> target (MSB, LSB, PC)
 //    in a single pass (A -> B and B -> A swap cleanly without double-remapping).
@@ -134,21 +137,34 @@ inline bool isLowercaseMidiLeafName(const std::string& name) {
     return name.size() > 4 && name.compare(name.size() - 4, 4, ".mid") == 0;
 }
 
-struct ParsedEvent {
-    enum class Kind { Meta, SysEx, Channel } kind = Kind::Channel;
+struct TrackSpan {
+    size_t bodyStart = 0;
+    size_t bodyEnd = 0;
+    size_t selBegin = 0;
+    size_t selEnd = 0;
+    size_t matchedCount = 0;
+};
+
+// O(selects) metadata stored per CC0/CC32/PC event (bounded by closure::kMaxSelectEvents = 4096).
+struct SelectEvent {
     uint64_t tick = 0;
+    unsigned track = 0;
+    size_t trackEventSeq = 0;
     size_t deltaStart = 0;
     size_t deltaEnd = 0;
-    size_t msgStart = 0;
-    size_t msgEnd = 0;
+    size_t evEnd = 0;
 
     uint8_t status = 0;
-    bool hadExplicitStatus = false;
-    uint8_t dataLen = 0;
-    uint8_t d0 = 0;
-    uint8_t d1 = 0;
+    uint8_t ch0 = 0;   // 0..15
+    int cc = -1;       // 0, 32, or -1 (PC)
+    uint8_t value = 0;
 
-    bool isSelectEvent = false;
+    // Immediate next event on the same track, if it omitted its status byte via running status.
+    bool nextReliesOnRunningStatus = false;
+    size_t nextMsgStart = 0;
+    uint8_t nextStatus = 0;
+
+    // Resolved bank & rewrite plan
     int resolvedMsb = -1;
     int resolvedLsb = -1;
     bool matched = false;
@@ -163,15 +179,6 @@ struct ParsedEvent {
     uint8_t newCcVal = 0;
 };
 
-struct SelectRef {
-    uint64_t tick = 0;
-    unsigned track = 0;
-    size_t evIdx = 0;
-    uint8_t ch0 = 0;   // 0..15
-    int cc = -1;       // 0, 32, or -1 (PC)
-    uint8_t value = 0;
-};
-
 inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                                         const std::map<MidiTriple, MidiTriple>& effectiveRules,
                                         RemapOptions opts,
@@ -180,6 +187,8 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
     auto fail = [&](std::string e) {
         res.ok = false;
         res.modified = false;
+        res.remappedEvents = 0;
+        res.unchangedEvents = 0;
         res.bytes.clear();
         res.error = std::move(e);
         return res;
@@ -204,10 +213,11 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
         return fail("MALFORMED_MIDI_LEAF: format 0 must have exactly one track");
     }
 
-    // Pass 1: strict full parse matching closure::selects() 1:1.
-    std::vector<std::vector<ParsedEvent>> tracks;
-    tracks.reserve(declared);
-    std::vector<SelectRef> selectRefs;
+    // Pass 1: strict full validation matching closure::selects() 1:1 while storing only O(selects) metadata.
+    const size_t maxPossibleTracks = (size - 8u - size_t(hl)) / 8u;
+    std::vector<TrackSpan> tracks;
+    tracks.reserve(std::min<size_t>(declared, maxPossibleTracks));
+    std::vector<SelectEvent> selectEvents;
 
     unsigned found = 0;
     size_t o = 8 + size_t(hl);
@@ -220,12 +230,17 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
         if (len > size - o) {
             return fail("MALFORMED_MIDI_LEAF: chunk runs past the file");
         }
+        const size_t bodyStart = o;
         const size_t end = o + size_t(len);
         const unsigned track = found++;
-        std::vector<ParsedEvent> evs;
+        const size_t selBegin = selectEvents.size();
+
         bool endOfTrack = false;
         uint8_t status = 0;
         uint64_t tick = 0;
+        size_t trackEventSeq = 0;
+        bool prevWasSelect = false;
+        size_t prevSelectIdx = 0;
 
         while (o < end) {
             if (endOfTrack) {
@@ -241,7 +256,6 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
             const uint8_t b = data[o];
 
             if (b == 0xFFu) {
-                const size_t msgStart = o;
                 if (end - o < 2) {
                     return fail("MALFORMED_MIDI_LEAF: meta event runs past its track");
                 }
@@ -254,19 +268,11 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                 endOfTrack = (type == 0x2Fu && metaLen == 0u);
                 o += size_t(metaLen);
                 status = 0;
-
-                ParsedEvent ev;
-                ev.kind = ParsedEvent::Kind::Meta;
-                ev.tick = tick;
-                ev.deltaStart = deltaStart;
-                ev.deltaEnd = deltaEnd;
-                ev.msgStart = msgStart;
-                ev.msgEnd = o;
-                evs.push_back(ev);
+                prevWasSelect = false;
+                ++trackEventSeq;
                 continue;
             }
             if (b == 0xF0u || b == 0xF7u) {
-                const size_t msgStart = o;
                 ++o;
                 uint32_t syxLen = 0;
                 if (!readVlq(data, o, end, syxLen) || syxLen > end - o) {
@@ -274,15 +280,8 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                 }
                 o += size_t(syxLen);
                 status = 0;
-
-                ParsedEvent ev;
-                ev.kind = ParsedEvent::Kind::SysEx;
-                ev.tick = tick;
-                ev.deltaStart = deltaStart;
-                ev.deltaEnd = deltaEnd;
-                ev.msgStart = msgStart;
-                ev.msgEnd = o;
-                evs.push_back(ev);
+                prevWasSelect = false;
+                ++trackEventSeq;
                 continue;
             }
 
@@ -306,42 +305,47 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                     return fail("MALFORMED_MIDI_LEAF: channel message data byte with the high bit set");
                 }
             }
-
-            ParsedEvent ev;
-            ev.kind = ParsedEvent::Kind::Channel;
-            ev.tick = tick;
-            ev.deltaStart = deltaStart;
-            ev.deltaEnd = deltaEnd;
-            ev.status = status;
-            ev.hadExplicitStatus = hadExplicitStatus;
-            ev.dataLen = k;
-            ev.d0 = data[o];
-            ev.d1 = (k == 2u) ? data[o + 1] : 0u;
+            const uint8_t d0 = data[o];
+            const uint8_t d1 = (k == 2u) ? data[o + 1] : 0u;
             o += size_t(k);
 
-            const bool isBankCc = (hi == 0xB0u && (ev.d0 == 0u || ev.d0 == 32u));
+            if (prevWasSelect) {
+                if (!hadExplicitStatus) {
+                    selectEvents[prevSelectIdx].nextReliesOnRunningStatus = true;
+                    selectEvents[prevSelectIdx].nextMsgStart = deltaEnd;
+                    selectEvents[prevSelectIdx].nextStatus = status;
+                }
+                prevWasSelect = false;
+            }
+
+            const bool isBankCc = (hi == 0xB0u && (d0 == 0u || d0 == 32u));
             const bool isPc = (hi == 0xC0u);
             if (isBankCc || isPc) {
-                if (selectRefs.size() >= closure::kMaxSelectEvents) {
+                if (selectEvents.size() >= closure::kMaxSelectEvents) {
                     return fail("EVENT_LIMIT_EXCEEDED: more than " + std::to_string(closure::kMaxSelectEvents) +
                                 " bank-select/Program Change events");
                 }
-                ev.isSelectEvent = true;
-                selectRefs.push_back(SelectRef{
-                    tick,
-                    track,
-                    evs.size(),
-                    ch0,
-                    isBankCc ? int(ev.d0) : -1,
-                    isBankCc ? ev.d1 : ev.d0
-                });
+                SelectEvent se;
+                se.tick = tick;
+                se.track = track;
+                se.trackEventSeq = trackEventSeq;
+                se.deltaStart = deltaStart;
+                se.deltaEnd = deltaEnd;
+                se.evEnd = o;
+                se.status = status;
+                se.ch0 = ch0;
+                se.cc = isBankCc ? int(d0) : -1;
+                se.value = isBankCc ? d1 : d0;
+                prevSelectIdx = selectEvents.size();
+                prevWasSelect = true;
+                selectEvents.push_back(se);
             }
-            evs.push_back(ev);
+            ++trackEventSeq;
         }
         if (!endOfTrack) {
             return fail("MALFORMED_MIDI_LEAF: track does not end with End of Track");
         }
-        tracks.push_back(std::move(evs));
+        tracks.push_back(TrackSpan{bodyStart, end, selBegin, selectEvents.size(), 0u});
     }
     if (o != size) {
         return fail("MALFORMED_MIDI_LEAF: trailing bytes after the last track");
@@ -351,8 +355,12 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                     " tracks, file has " + std::to_string(found));
     }
 
-    // Merge select events across all tracks identically to closure::selects().
-    std::stable_sort(selectRefs.begin(), selectRefs.end(), [](const SelectRef& a, const SelectRef& b) {
+    // Build global (tick, track, orderInTrack) timeline identically to closure::selects().
+    std::vector<size_t> timeline(selectEvents.size());
+    for (size_t i = 0; i < timeline.size(); ++i) timeline[i] = i;
+    std::stable_sort(timeline.begin(), timeline.end(), [&](size_t ia, size_t ib) {
+        const auto& a = selectEvents[ia];
+        const auto& b = selectEvents[ib];
         return a.tick != b.tick ? a.tick < b.tick : a.track < b.track;
     });
 
@@ -363,42 +371,43 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
     size_t matchedCount = 0;
     size_t unchangedCount = 0;
 
-    for (const auto& r : selectRefs) {
-        if (r.cc == 0) {
-            bank[r.ch0][0] = int(r.value);
+    for (size_t sIdx : timeline) {
+        auto& ev = selectEvents[sIdx];
+        if (ev.cc == 0) {
+            bank[ev.ch0][0] = int(ev.value);
             continue;
         }
-        if (r.cc == 32) {
-            bank[r.ch0][1] = int(r.value);
+        if (ev.cc == 32) {
+            bank[ev.ch0][1] = int(ev.value);
             continue;
         }
-        auto& ev = tracks[r.track][r.evIdx];
-        ev.resolvedMsb = bank[r.ch0][0];
-        ev.resolvedLsb = bank[r.ch0][1];
+        ev.resolvedMsb = bank[ev.ch0][0];
+        ev.resolvedLsb = bank[ev.ch0][1];
         if (ev.resolvedMsb < 0 || ev.resolvedLsb < 0) {
             if (opts.strictUnresolved) {
                 return fail("UNRESOLVED_MIDI_BANK_SELECT: Program Change on channel " +
-                            std::to_string(int(r.ch0) + 1) + " has unset CC0/CC32");
+                            std::to_string(int(ev.ch0) + 1) + " has unset CC0/CC32");
             }
             ++unchangedCount;
-            expectedSelects.push_back(closure::Select{int(r.ch0) + 1, ev.resolvedMsb, ev.resolvedLsb, int(r.value)});
+            expectedSelects.push_back(closure::Select{int(ev.ch0) + 1, ev.resolvedMsb, ev.resolvedLsb, int(ev.value)});
             continue;
         }
-        const MidiTriple src{uint8_t(ev.resolvedMsb), uint8_t(ev.resolvedLsb), r.value};
+        const MidiTriple src{uint8_t(ev.resolvedMsb), uint8_t(ev.resolvedLsb), ev.value};
         const auto it = effectiveRules.find(src);
         if (it != effectiveRules.end()) {
             ev.matched = true;
             ev.target = it->second;
             ++matchedCount;
+            ++tracks[ev.track].matchedCount;
             expectedSelects.push_back(closure::Select{
-                int(r.ch0) + 1,
+                int(ev.ch0) + 1,
                 int(it->second.msb),
                 int(it->second.lsb),
                 int(it->second.pc)
             });
         } else {
             ++unchangedCount;
-            expectedSelects.push_back(closure::Select{int(r.ch0) + 1, ev.resolvedMsb, ev.resolvedLsb, int(r.value)});
+            expectedSelects.push_back(closure::Select{int(ev.ch0) + 1, ev.resolvedMsb, ev.resolvedLsb, int(ev.value)});
         }
     }
 
@@ -424,11 +433,10 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
     }
 
     // Plan per-PC rewrite strategy (PC-only in-place, Bank+PC in-place, or General with bank restore).
-    for (size_t idx = 0; idx < selectRefs.size(); ++idx) {
-        const auto& r = selectRefs[idx];
-        if (r.cc != -1) continue;
-        auto& ev = tracks[r.track][r.evIdx];
-        if (!ev.matched) continue;
+    for (size_t tPos = 0; tPos < timeline.size(); ++tPos) {
+        const size_t sIdx = timeline[tPos];
+        auto& ev = selectEvents[sIdx];
+        if (ev.cc != -1 || !ev.matched) continue;
 
         const bool msbChanged = (int(ev.target.msb) != ev.resolvedMsb);
         const bool lsbChanged = (int(ev.target.lsb) != ev.resolvedLsb);
@@ -443,11 +451,12 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
         bool sawCc32 = false;
         bool laterPcBeforeNextCc0 = false;
         bool laterPcBeforeNextCc32 = false;
-        for (size_t j = idx + 1; j < selectRefs.size(); ++j) {
-            if (selectRefs[j].ch0 != r.ch0) continue;
-            if (selectRefs[j].cc == 0) {
+        for (size_t j = tPos + 1; j < timeline.size(); ++j) {
+            const auto& later = selectEvents[timeline[j]];
+            if (later.ch0 != ev.ch0) continue;
+            if (later.cc == 0) {
                 sawCc0 = true;
-            } else if (selectRefs[j].cc == 32) {
+            } else if (later.cc == 32) {
                 sawCc32 = true;
             } else {
                 if (!sawCc0) laterPcBeforeNextCc0 = true;
@@ -461,19 +470,20 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
 
         // Fast-path in-place bank+PC rewrite when dedicated CC0 & CC32 immediately precede
         // this PC on the same track at the exact same tick and no later PC depends on them.
-        if (!needRestoreMsb && !needRestoreLsb && r.evIdx >= 2) {
-            auto& trk = tracks[r.track];
-            auto& prev2 = trk[r.evIdx - 2];
-            auto& prev1 = trk[r.evIdx - 1];
-            const uint8_t ccStatus = uint8_t(0xB0u | r.ch0);
+        const auto& trk = tracks[ev.track];
+        if (!needRestoreMsb && !needRestoreLsb && sIdx >= trk.selBegin + 2u) {
+            auto& prev2 = selectEvents[sIdx - 2u];
+            auto& prev1 = selectEvents[sIdx - 1u];
+            const uint8_t ccStatus = uint8_t(0xB0u | ev.ch0);
+            const bool immediatelyAdjacent =
+                (prev2.trackEventSeq + 2u == ev.trackEventSeq &&
+                 prev1.trackEventSeq + 1u == ev.trackEventSeq);
             const bool sameTick = (prev2.tick == ev.tick && prev1.tick == ev.tick);
-            const bool bothCcOnCh = (prev2.kind == ParsedEvent::Kind::Channel &&
-                                     prev1.kind == ParsedEvent::Kind::Channel &&
-                                     prev2.status == ccStatus && prev1.status == ccStatus &&
+            const bool bothCcOnCh = (prev2.status == ccStatus && prev1.status == ccStatus &&
                                      !prev2.overwrittenInPlace && !prev1.overwrittenInPlace);
-            const bool pairCc0Cc32 = (prev2.d0 == 0u && prev1.d0 == 32u);
-            const bool pairCc32Cc0 = (prev2.d0 == 32u && prev1.d0 == 0u);
-            if (sameTick && bothCcOnCh && (pairCc0Cc32 || pairCc32Cc0)) {
+            const bool pairCc0Cc32 = (prev2.cc == 0 && prev1.cc == 32);
+            const bool pairCc32Cc0 = (prev2.cc == 32 && prev1.cc == 0);
+            if (immediatelyAdjacent && sameTick && bothCcOnCh && (pairCc0Cc32 || pairCc32Cc0)) {
                 ev.inPlaceWithBank = true;
                 prev2.overwrittenInPlace = true;
                 prev1.overwrittenInPlace = true;
@@ -492,33 +502,56 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
         ev.restoreLsbAfter = needRestoreLsb;
     }
 
-    // Pass 2: emit rewritten SMF preserving MThd, Meta, SysEx, delta times, and running status safely.
+    // Pass 2: copy untouched byte spans verbatim and rewrite only affected select event spans.
     std::vector<uint8_t> out;
-    out.reserve(size + matchedCount * 16u);
+    out.reserve(std::min<size_t>(panative::kMaxFileBytes, size + matchedCount * 18u));
     out.insert(out.end(), data, data + 8 + size_t(hl));
 
     size_t postSelectEvents = 0;
     for (const auto& trk : tracks) {
+        const size_t origTrackLen = trk.bodyEnd - trk.bodyStart;
+        if (trk.matchedCount == 0) {
+            const size_t trackSelects = trk.selEnd - trk.selBegin;
+            if (postSelectEvents + trackSelects > closure::kMaxSelectEvents) {
+                return fail("EVENT_LIMIT_EXCEEDED: remapped SMF exceeds " +
+                            std::to_string(closure::kMaxSelectEvents) + " bank-select/Program Change events");
+            }
+            postSelectEvents += trackSelects;
+            if (origTrackLen > panative::kMaxFileBytes ||
+                out.size() + 8u + origTrackLen > panative::kMaxFileBytes) {
+                return fail("SIZE_LIMIT_EXCEEDED: remapped SMF exceeds kMaxFileBytes");
+            }
+            out.push_back('M');
+            out.push_back('T');
+            out.push_back('r');
+            out.push_back('k');
+            appendBe32(out, uint32_t(origTrackLen));
+            out.insert(out.end(), data + trk.bodyStart, data + trk.bodyEnd);
+            continue;
+        }
+
         std::vector<uint8_t> trackOut;
-        trackOut.reserve(trk.size() * 4u);
-        uint8_t outRunningStatus = 0;
+        trackOut.reserve(std::min<size_t>(panative::kMaxFileBytes, origTrackLen + trk.matchedCount * 18u));
 
-        auto appendDelta = [&](const ParsedEvent& ev) {
-            trackOut.insert(trackOut.end(), data + ev.deltaStart, data + ev.deltaEnd);
-        };
+        size_t cursor = trk.bodyStart;
+        uint8_t pendingBrokenStatus = 0;
+        size_t pendingExpandAt = 0;
 
-        for (const auto& ev : trk) {
-            if (ev.kind == ParsedEvent::Kind::Meta || ev.kind == ParsedEvent::Kind::SysEx) {
-                appendDelta(ev);
-                trackOut.insert(trackOut.end(), data + ev.msgStart, data + ev.msgEnd);
-                outRunningStatus = 0;
-                continue;
+        for (size_t sIdx = trk.selBegin; sIdx < trk.selEnd; ++sIdx) {
+            const auto& ev = selectEvents[sIdx];
+            const bool isPendingEvent = (pendingBrokenStatus != 0u && ev.deltaEnd == pendingExpandAt);
+
+            if (pendingBrokenStatus != 0u && !isPendingEvent) {
+                // The immediately following running-status event was a non-select event; expand its status.
+                trackOut.insert(trackOut.end(), data + cursor, data + pendingExpandAt);
+                trackOut.push_back(pendingBrokenStatus);
+                cursor = pendingExpandAt;
+                pendingBrokenStatus = 0u;
             }
 
             if (ev.matched && !ev.inPlacePcOnly && !ev.inPlaceWithBank) {
-                const uint8_t ch0 = uint8_t(ev.status & 0x0Fu);
-                const uint8_t ccStatus = uint8_t(0xB0u | ch0);
-                const uint8_t pcStatus = uint8_t(0xC0u | ch0);
+                const uint8_t ccStatus = uint8_t(0xB0u | ev.ch0);
+                const uint8_t pcStatus = uint8_t(0xC0u | ev.ch0);
                 const size_t addedSelects =
                     3u + (ev.restoreMsbAfter ? 1u : 0u) + (ev.restoreLsbAfter ? 1u : 0u);
                 if (postSelectEvents + addedSelects > closure::kMaxSelectEvents) {
@@ -526,9 +559,12 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                                 std::to_string(closure::kMaxSelectEvents) + " bank-select/Program Change events");
                 }
                 postSelectEvents += addedSelects;
+                pendingBrokenStatus = 0u;
+
+                // Copy untouched span + this PC's original delta VLQ.
+                trackOut.insert(trackOut.end(), data + cursor, data + ev.deltaEnd);
 
                 // Explicit CC0 = dstMsb (inherits original PC delta time)
-                appendDelta(ev);
                 trackOut.push_back(ccStatus);
                 trackOut.push_back(0u);
                 trackOut.push_back(ev.target.msb);
@@ -543,47 +579,70 @@ inline SmfRemapResult remapSmfValidated(const uint8_t* data, size_t size,
                 trackOut.push_back(0u);
                 trackOut.push_back(pcStatus);
                 trackOut.push_back(ev.target.pc);
-                outRunningStatus = pcStatus;
 
-                // Restore prior bank state if any later PC across any track depends on it.
+                uint8_t endedStatus = pcStatus;
                 if (ev.restoreMsbAfter) {
                     trackOut.push_back(0u);
                     trackOut.push_back(ccStatus);
                     trackOut.push_back(0u);
                     trackOut.push_back(uint8_t(ev.resolvedMsb));
-                    outRunningStatus = ccStatus;
+                    endedStatus = ccStatus;
                 }
                 if (ev.restoreLsbAfter) {
                     trackOut.push_back(0u);
                     trackOut.push_back(ccStatus);
                     trackOut.push_back(32u);
                     trackOut.push_back(uint8_t(ev.resolvedLsb));
-                    outRunningStatus = ccStatus;
+                    endedStatus = ccStatus;
+                }
+
+                cursor = ev.evEnd;
+                if (endedStatus != ev.status && ev.nextReliesOnRunningStatus) {
+                    pendingBrokenStatus = ev.nextStatus;
+                    pendingExpandAt = ev.nextMsgStart;
                 }
                 continue;
             }
 
-            if (ev.isSelectEvent) {
-                if (++postSelectEvents > closure::kMaxSelectEvents) {
-                    return fail("EVENT_LIMIT_EXCEEDED: remapped SMF exceeds " +
-                                std::to_string(closure::kMaxSelectEvents) + " bank-select/Program Change events");
-                }
+            if (++postSelectEvents > closure::kMaxSelectEvents) {
+                return fail("EVENT_LIMIT_EXCEEDED: remapped SMF exceeds " +
+                            std::to_string(closure::kMaxSelectEvents) + " bank-select/Program Change events");
             }
-            appendDelta(ev);
-            if (ev.hadExplicitStatus || outRunningStatus != ev.status) {
-                trackOut.push_back(ev.status);
-                outRunningStatus = ev.status;
-            }
+
             if (ev.matched) {
-                trackOut.push_back(ev.target.pc);
+                // PC-only in-place or Bank+PC in-place.
+                if (isPendingEvent) {
+                    trackOut.insert(trackOut.end(), data + cursor, data + ev.deltaEnd);
+                    trackOut.push_back(ev.status);
+                    trackOut.push_back(ev.target.pc);
+                    pendingBrokenStatus = 0u;
+                } else {
+                    trackOut.insert(trackOut.end(), data + cursor, data + ev.evEnd - 1u);
+                    trackOut.push_back(ev.target.pc);
+                }
+                cursor = ev.evEnd;
             } else if (ev.overwrittenInPlace) {
-                trackOut.push_back(ev.d0);
+                // Dedicated CC0/CC32 rewritten in-place (preserves delta, status, and controller number).
+                trackOut.insert(trackOut.end(), data + cursor, data + ev.evEnd - 1u);
                 trackOut.push_back(ev.newCcVal);
-            } else {
-                trackOut.push_back(ev.d0);
-                if (ev.dataLen == 2u) trackOut.push_back(ev.d1);
+                cursor = ev.evEnd;
+            } else if (isPendingEvent) {
+                // Untouched select event whose running status was broken by the previous rewrite.
+                trackOut.insert(trackOut.end(), data + cursor, data + ev.deltaEnd);
+                trackOut.push_back(pendingBrokenStatus);
+                trackOut.insert(trackOut.end(), data + ev.deltaEnd, data + ev.evEnd);
+                cursor = ev.evEnd;
+                pendingBrokenStatus = 0u;
             }
+            // Otherwise: completely untouched select event; copied as part of the next untouched span.
         }
+
+        if (pendingBrokenStatus != 0u) {
+            trackOut.insert(trackOut.end(), data + cursor, data + pendingExpandAt);
+            trackOut.push_back(pendingBrokenStatus);
+            cursor = pendingExpandAt;
+        }
+        trackOut.insert(trackOut.end(), data + cursor, data + trk.bodyEnd);
 
         if (trackOut.size() > panative::kMaxFileBytes ||
             out.size() + 8u + trackOut.size() > panative::kMaxFileBytes) {
@@ -745,6 +804,8 @@ inline RootTreeRemapResult remapRootTree(const uint8_t* data, size_t size,
     auto fail = [&](std::string e, std::string leafPath = {}) {
         res.ok = false;
         res.modified = false;
+        res.modifiedMidiLeaves = 0;
+        res.remappedEvents = 0;
         res.bytes.clear();
         res.error = std::move(e);
         if (!leafPath.empty()) res.failedLeafPath = std::move(leafPath);
@@ -773,6 +834,8 @@ inline RootTreeRemapResult remapRootTree(const uint8_t* data, size_t size,
     if (!detail::remapTreeNodes(workingRoot, "", effectiveRules, opts, res, expectedLeafSelects)) {
         res.ok = false;
         res.modified = false;
+        res.modifiedMidiLeaves = 0;
+        res.remappedEvents = 0;
         res.bytes.clear();
         return res;
     }
