@@ -209,6 +209,11 @@ if(TARGET test_native_kst_closure_manifest)
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
         $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
 endif()
+if(TARGET test_selective_conflicts)
+    target_compile_options(test_selective_conflicts PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
+endif()
 if(TARGET test_selective_collector)
     target_compile_options(test_selective_collector PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
