@@ -182,10 +182,17 @@ inline InstrumentClass inferInstrumentClass(
         return InstrumentClass::BassPlucked;
     }
 
-    // 2. Track name keywords (ordered to resolve compounds like "synth bass" & "tbn bs").
+    // 2. Track name keywords (ordered to resolve compounds like "synth bass", "harpsi" vs "harp",
+    // "organ" vs "reed", and "tbn bs").
     if (!lower_name.empty()) {
         if (containsAny(lower_name, {"synth bass", "synbs", "syn bs"})) {
             return InstrumentClass::SynthLeadPad;
+        }
+        if (containsAny(lower_name, {"harpsi", "piano", "pno", "grand", "e.p", "ep ", "ep.",
+                                     "rhodes", "wurli", "clav", "organ", "org",
+                                     "accord", "celesta", "glock", "vibraph",
+                                     "marimba", "xyloph", "keys", "kbd"})) {
+            return InstrumentClass::PianoKeyboard;
         }
         if (containsAny(lower_name, {"brass", "trumpet", "trp", "tpt", "tp ",
                                      "trombone", "tbn", "trb", "horn", "tuba",
@@ -201,11 +208,6 @@ inline InstrumentClass inferInstrumentClass(
         if (containsAny(lower_name, {"bass", "fingbs", "pickbs", "slapbs",
                                      "acbs", "fretless", "upright"})) {
             return InstrumentClass::BassPlucked;
-        }
-        if (containsAny(lower_name, {"piano", "pno", "grand", "e.p", "ep ", "ep.",
-                                     "rhodes", "wurli", "clav", "organ", "org",
-                                     "accord", "harpsi", "celesta", "keys", "kbd"})) {
-            return InstrumentClass::PianoKeyboard;
         }
         if (containsAny(lower_name, {"string", "str", "violin", "viola",
                                      "cello", "fiddle", "orch", "pizz"})) {
@@ -226,7 +228,8 @@ inline InstrumentClass inferInstrumentClass(
     const bool is_non_gm_bank = (yamaha_msb == 63 || yamaha_msb == 62 ||
                                  yamaha_msb == 127 || yamaha_msb == 126);
     if (!is_non_gm_bank && yamaha_pc >= 0 && yamaha_pc <= 127) {
-        if ((yamaha_pc >= 0 && yamaha_pc <= 7) || (yamaha_pc >= 16 && yamaha_pc <= 23)) {
+        // 0..7 Piano, 8..15 Chromatic Percussion (Celesta/Glockenspiel/Vibes/Marimba/Bells), 16..23 Organ
+        if (yamaha_pc >= 0 && yamaha_pc <= 23) {
             return InstrumentClass::PianoKeyboard;
         }
         if ((yamaha_pc >= 24 && yamaha_pc <= 31) || yamaha_pc == 46 ||
@@ -241,6 +244,10 @@ inline InstrumentClass inferInstrumentClass(
         }
         if ((yamaha_pc >= 40 && yamaha_pc <= 45) || (yamaha_pc >= 48 && yamaha_pc <= 51)) {
             return InstrumentClass::StringsOrchestral;
+        }
+        // 52..55 Choir Aahs, Voice Oohs, Synth Voice, Orchestra Hit
+        if (yamaha_pc >= 52 && yamaha_pc <= 55) {
+            return InstrumentClass::SynthLeadPad;
         }
         if (yamaha_pc >= 56 && yamaha_pc <= 79) {
             return InstrumentClass::BrassWoodwind;
@@ -410,10 +417,14 @@ inline void applySff2GuitarTranslator(std::vector<TrackedNote>& items,
     }
     clusters.push_back({c_start, items.size()});
 
-    // 2. Per-cluster fretboard span folding (<= 24 st inside [40, 88]) & Stroke stagger.
+    // 2. Per-cluster: (a) fretboard span folding (<= 24 st inside [40, 88]),
+    //                 (b) same-pitch deduplication & 6-string cap (<= 6 voices),
+    //                 (c) Stroke (NTT == 1) collapsed-chord down-strum stagger on surviving <= 6 voices.
     constexpr int kGuitarMin = 40; // E2
     constexpr int kGuitarMax = 88; // E6
     constexpr int kMaxSpan   = 24; // 2 octaves playable fretboard span
+
+    std::vector<bool> keep(items.size(), true);
 
     for (const auto& cr : clusters) {
         const size_t count = cr.end - cr.begin;
@@ -470,75 +481,14 @@ inline void applySff2GuitarTranslator(std::vector<TrackedNote>& items,
             }
         }
 
-        // 2b. Strum monotonicity preservation / Stroke (NTT == 1) collapsed-chord stagger.
-        const uint32_t first_on = items[cr.begin].note.on_tick;
-        const uint32_t last_on = items[cr.end - 1].note.on_tick;
-        const uint32_t spread = last_on - first_on;
-
-        if (casm.ntt == 1 && spread == 0 && count >= 2) {
-            // Sort cluster ascending by pitch for natural down-strum (bass string first).
-            std::stable_sort(items.begin() + static_cast<std::ptrdiff_t>(cr.begin),
-                             items.begin() + static_cast<std::ptrdiff_t>(cr.end),
-                             [](const TrackedNote& a, const TrackedNote& b) {
-                                 return a.note.pitch < b.note.pitch;
-                             });
-
-            const uint32_t max_steps = static_cast<uint32_t>(count - 1);
-            // Keep total spread <= 60 ms and within available end tick budget.
-            uint32_t step = std::min<uint32_t>(stagger_step, strum_window / max_steps);
-            if (max_end_tick > first_on + 1u) {
-                const uint32_t end_budget = max_end_tick - 1u - first_on;
-                step = std::min<uint32_t>(step, end_budget / max_steps);
-            } else {
-                step = 0;
-            }
-
-            if (step > 0) {
-                for (size_t k = 0; k < count; ++k) {
-                    auto& n = items[cr.begin + k].note;
-                    const uint32_t delta = static_cast<uint32_t>(k) * step;
-                    const uint32_t desired_on = first_on + delta;
-                    if (desired_on < n.off_tick) {
-                        n.on_tick = desired_on;
-                    } else if (n.off_tick > first_on + 1u) {
-                        n.on_tick = n.off_tick - 1u;
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Re-sort deterministically before 6-string polyphony cap.
-    std::stable_sort(items.begin(), items.end(), [](const TrackedNote& a, const TrackedNote& b) {
-        if (a.note.on_tick != b.note.on_tick) return a.note.on_tick < b.note.on_tick;
-        if (a.note.pitch != b.note.pitch)     return a.note.pitch < b.note.pitch;
-        return a.note.off_tick < b.note.off_tick;
-    });
-
-    // 4. Enforce <= 6 simultaneous distinct-pitch voices across the entire track.
-    // Within each strum cluster, prefer keeping the lowest bass string + top 5 upper strings.
-    std::vector<bool> keep(items.size(), true);
-
-    // Recompute clusters after potential stagger so simultaneous/cluster voice trims are exact.
-    std::vector<ClusterRange> post_clusters;
-    c_start = 0;
-    for (size_t i = 1; i < items.size(); ++i) {
-        if (items[i].note.on_tick - items[i - 1].note.on_tick > strum_window) {
-            post_clusters.push_back({c_start, i});
-            c_start = i;
-        }
-    }
-    post_clusters.push_back({c_start, items.size()});
-
-    for (const auto& cr : post_clusters) {
-        // First deduplicate identical pitches inside the same cluster (keep most recent).
+        // 2b. Per-cluster same-pitch deduplication (keep most recent) & 6-string cap
+        //     BEFORE Stroke stagger so step budget & spacing reflect the <= 6 surviving strings.
         std::vector<size_t> unique_idx;
-        unique_idx.reserve(cr.end - cr.begin);
+        unique_idx.reserve(count);
         for (size_t i = cr.begin; i < cr.end; ++i) {
             bool dup = false;
             for (size_t& u : unique_idx) {
                 if (items[u].note.pitch == items[i].note.pitch) {
-                    // Replace older duplicate with the more recent trigger.
                     keep[u] = false;
                     ++stats.guitar_voices_trimmed;
                     u = i;
@@ -549,7 +499,6 @@ inline void applySff2GuitarTranslator(std::vector<TrackedNote>& items,
             if (!dup) unique_idx.push_back(i);
         }
 
-        // If > 6 distinct pitches inside the cluster, keep lowest bass string + top 5 upper strings.
         if (unique_idx.size() > 6) {
             std::vector<size_t> by_pitch = unique_idx;
             std::stable_sort(by_pitch.begin(), by_pitch.end(), [&](size_t a, size_t b) {
@@ -572,17 +521,71 @@ inline void applySff2GuitarTranslator(std::vector<TrackedNote>& items,
                 }
             }
         }
+
+        // Collect surviving indices for this cluster (<= 6 distinct pitches).
+        std::vector<size_t> surv;
+        surv.reserve(6);
+        for (size_t i = cr.begin; i < cr.end; ++i) {
+            if (keep[i]) surv.push_back(i);
+        }
+
+        // 2c. Strum monotonicity preservation / Stroke (NTT == 1) collapsed-chord stagger.
+        if (casm.ntt == 1 && surv.size() >= 2) {
+            uint32_t first_on = items[surv.front()].note.on_tick;
+            uint32_t last_on = items[surv.front()].note.on_tick;
+            for (size_t idx : surv) {
+                if (items[idx].note.on_tick < first_on) first_on = items[idx].note.on_tick;
+                if (items[idx].note.on_tick > last_on)  last_on  = items[idx].note.on_tick;
+            }
+            const uint32_t spread = last_on - first_on;
+
+            if (spread == 0) {
+                // Sort surviving strings ascending by pitch for even down-strum (bass string first).
+                std::stable_sort(surv.begin(), surv.end(), [&](size_t a, size_t b) {
+                    return items[a].note.pitch < items[b].note.pitch;
+                });
+
+                const uint32_t max_steps = static_cast<uint32_t>(surv.size() - 1);
+                // Keep total spread <= 60 ms and within available end tick budget.
+                uint32_t step = std::min<uint32_t>(stagger_step, strum_window / max_steps);
+                if (max_end_tick > first_on + 1u) {
+                    const uint32_t end_budget = max_end_tick - 1u - first_on;
+                    step = std::min<uint32_t>(step, end_budget / max_steps);
+                } else {
+                    step = 0;
+                }
+
+                if (step > 0) {
+                    for (size_t k = 0; k < surv.size(); ++k) {
+                        auto& n = items[surv[k]].note;
+                        const uint32_t delta = static_cast<uint32_t>(k) * step;
+                        const uint32_t desired_on = first_on + delta;
+                        if (desired_on < n.off_tick) {
+                            n.on_tick = desired_on;
+                        } else if (n.off_tick > first_on + 1u) {
+                            n.on_tick = n.off_tick - 1u;
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // Compact cluster-filtered notes.
+    // 3. Compact cluster-filtered notes and re-sort deterministically before cross-cluster sweep.
     std::vector<TrackedNote> filtered;
     filtered.reserve(items.size());
     for (size_t i = 0; i < items.size(); ++i) {
         if (keep[i]) filtered.push_back(items[i]);
     }
 
-    // Cross-cluster active overlap sweep: ensure <= 6 simultaneous notes at every tick
-    // and zero same-pitch overlap.
+    std::stable_sort(filtered.begin(), filtered.end(), [](const TrackedNote& a, const TrackedNote& b) {
+        if (a.note.on_tick != b.note.on_tick) return a.note.on_tick < b.note.on_tick;
+        if (a.note.pitch != b.note.pitch)     return a.note.pitch < b.note.pitch;
+        return a.note.off_tick < b.note.off_tick;
+    });
+
+    // 4. Cross-cluster active overlap sweep: ensure <= 6 simultaneous notes at every tick
+    //    and zero same-pitch overlap.
     std::vector<size_t> active; // indices into `filtered`
     std::vector<bool> final_keep(filtered.size(), true);
     for (size_t i = 0; i < filtered.size(); ++i) {
@@ -671,7 +674,10 @@ inline MegaVoiceClassification classifyTrackArticulation(
     uint32_t z34_ct = 0;
 
     for (const auto& n : notes) {
-        if (n.pitch > 127 || n.vel == 0 || n.vel > 127) continue;
+        if (n.pitch > 127 || n.vel == 0 || n.vel > 127 ||
+            n.on_tick == std::numeric_limits<uint32_t>::max()) {
+            continue;
+        }
         ++valid_notes;
         ++vel_hist[n.vel];
 
@@ -730,7 +736,7 @@ inline MegaVoiceClassification classifyTrackArticulation(
     if (has_s6) score_mega += 20;
     if (score_mega > 100) score_mega = 100;
 
-    out.is_megavoice = !out.vetoed && (score_mega >= 60);
+    out.is_megavoice = !out.vetoed && !(has_s2 && !has_s1) && (score_mega >= 60);
 
     const bool sart_family = (out.family == InstrumentClass::BrassWoodwind ||
                               out.family == InstrumentClass::StringsOrchestral ||

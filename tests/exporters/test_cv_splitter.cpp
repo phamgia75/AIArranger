@@ -409,6 +409,86 @@ int main() {
         TEST("CV splitter output is 100% deterministic across repeated calls", same);
     }
 
+    // ── 13. Audit Round 1 Regression Tests (P1-1, P3-2) ─────────────────
+    {
+        constexpr uint8_t kAcc4 = kAcc1Ch + 3; // ch 14
+        constexpr uint8_t kAcc5 = kAcc1Ch + 4; // ch 15
+
+        // P1-1 Repro 1: Main1 with non-colliding Acc5(Dom7) alongside colliding Acc4(Maj/Min)
+        // MUST activate v1cv3 and preserve Acc5(Dom7) with 0 silent drops!
+        const std::vector<SectionTrackInput> main_dom7 = {
+            makeTrack(9,  kDrumCh, kMaskAllChords),
+            makeTrack(3,  kAcc4,   kMaskMajor),
+            makeTrack(14, kAcc4,   kMaskMinor),
+            makeTrack(15, kAcc5,   kMaskDom7)
+        };
+        const auto p_main_dom7 = planSectionCvs(SectionType::Main1, "Main A", main_dom7);
+        bool has_v1cv3_with_acc5 = false;
+        for (const auto& b : p_main_dom7.buckets) {
+            if (b.marker == "v1cv3" && b.reference_chord == ChordType::Dom7 &&
+                bucketContainsSrc(b, 15) && bucketContainsSrc(b, 9)) {
+                has_v1cv3_with_acc5 = true;
+            }
+        }
+        TEST("P1-1 Repro 1: Main1 activates v1cv3 for non-colliding Acc5(Dom7) (0 silent drops)",
+             verifyPlanInvariants(p_main_dom7) &&
+             p_main_dom7.buckets.size() == 3 &&
+             has_v1cv3_with_acc5 &&
+             p_main_dom7.shadowed_tracks_dropped == 0);
+
+        // P1-1 Repro 2: Intro1 (2-CV) with non-colliding Acc5(Dom7) alongside colliding Acc4(Maj/Min)
+        // MUST preserve Acc5(Dom7) by folding to i1cv1 (never silently dropped!).
+        const auto p_intro_dom7 = planSectionCvs(SectionType::Intro1, "Intro A", main_dom7);
+        bool acc5_present_in_intro = false;
+        for (const auto& b : p_intro_dom7.buckets) {
+            if (bucketContainsSrc(b, 15)) acc5_present_in_intro = true;
+        }
+        TEST("P1-1 Repro 2: Intro1 (2-CV) preserves non-colliding Acc5(Dom7) via cv1 fold (0 silent drops)",
+             verifyPlanInvariants(p_intro_dom7) &&
+             p_intro_dom7.buckets.size() == 2 &&
+             p_intro_dom7.buckets[0].marker == "i1cv1" &&
+             p_intro_dom7.buckets[1].marker == "i1cv2" &&
+             acc5_present_in_intro &&
+             bucketContainsSrc(p_intro_dom7.buckets[0], 15) &&
+             p_intro_dom7.shadowed_tracks_dropped == 0);
+
+        // P1-1 bonus: Intro1 (2-CV) with non-colliding Acc5(Dim) folds Dim -> i1cv2 cleanly
+        const std::vector<SectionTrackInput> intro_dim = {
+            makeTrack(9,  kDrumCh, kMaskAllChords),
+            makeTrack(15, kAcc5,   kMaskDim)
+        };
+        const auto p_intro_dim = planSectionCvs(SectionType::Intro1, "Intro A", intro_dim);
+        TEST("P1-1: Intro1 (2-CV) folds non-colliding Acc5(Dim) into i1cv2 (0 silent drops)",
+             verifyPlanInvariants(p_intro_dim) &&
+             p_intro_dim.buckets.size() == 2 &&
+             p_intro_dim.buckets[1].marker == "i1cv2" &&
+             bucketContainsSrc(p_intro_dim.buckets[1], 15) &&
+             p_intro_dim.shadowed_tracks_dropped == 0);
+
+        // P3-2: Residual placement preserves compatible all-chords/all-notes layer on same korg_ch
+        const std::vector<SectionTrackInput> res_compat = {
+            makeTrack(9,  kDrumCh, kMaskAllChords, kMaskAllNotes),
+            makeTrack(4,  kAcc4,   kMaskAllChords, 0x003FU),       // note-split A
+            makeTrack(14, kAcc4,   kMaskAllChords, 0x0FC0U),       // note-split B (exclusive with A)
+            makeTrack(6,  kAcc4,   kMaskAllChords, kMaskAllNotes)  // compatible shared layer on Acc4!
+        };
+        const auto p_res = planSectionCvs(SectionType::Main1, "Main A", res_compat);
+        bool layer_preserved_in_cv6 = false;
+        for (const auto& b : p_res.buckets) {
+            if (b.marker == "v1cv6" && bucketContainsSrc(b, 14) &&
+                bucketContainsSrc(b, 6) && !bucketContainsSrc(b, 4)) {
+                layer_preserved_in_cv6 = true;
+            }
+        }
+        TEST("P3-2: Residual note-mute placement preserves compatible all-chords/all-notes layer on same korg_ch",
+             verifyPlanInvariants(p_res) &&
+             p_res.buckets.size() == 2 &&
+             bucketContainsSrc(p_res.buckets[0], 4) &&
+             bucketContainsSrc(p_res.buckets[0], 6) &&
+             layer_preserved_in_cv6 &&
+             p_res.shadowed_tracks_dropped == 0);
+    }
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

@@ -509,6 +509,137 @@ int main() {
              all_valid);
         TEST("Sanitizer output is 100% deterministic across repeated calls",
              deterministic);
+
+        // P3-3: UINT32_MAX on_tick skipped consistently in classifyTrackArticulation()
+        const std::vector<NoteSpan> u32max_only = {
+            {std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(), 5, 60, false},
+            {std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(), 100, 120, false},
+            {std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(), 102, 120, false}
+        };
+        const auto c_u32max = classifyTrackArticulation(u32max_only, -1, -1, -1, "Chord1", TrackRole::Chord, plain_casm);
+        TEST("P3-3: classifyTrackArticulation skips on_tick==UINT32_MAX consistently",
+             c_u32max.chord_range_ct == 0 && c_u32max.high_fx_ct == 0 &&
+             c_u32max.zone_mask == 0 && !c_u32max.is_megavoice);
+    }
+
+    // ── 8. Audit Round 1 Regression Tests (P1-2, P2-1, P2-2) ────────────
+    {
+        // P1-2: Confirmed S.Art/S.Art2 track with NTR=2 + high notes stays S.Art (never MegaVoice!)
+        CasmTrackView sart_gtr_casm{};
+        sart_gtr_casm.has_casm = true;
+        sart_gtr_casm.ntr = 2;
+        sart_gtr_casm.ntt = 1;
+        const std::vector<NoteSpan> sart_gtr_notes = {
+            {0,    120, 20, 80, false},   // low S.Art key-switch (< 36) -> stripped
+            {240,  720, 52, 45, false},   // melodic note vel 45
+            {720,  1200, 55, 85, false},  // melodic note vel 85
+            {1200, 1680, 59, 118, false}, // melodic note vel 118 (must NOT be dropped/inverted!)
+            {1920, 2160, 96, 90, false},  // high note 1 (S3 trigger)
+            {2160, 2400, 98, 92, false}   // high note 2 (S3 trigger)
+        };
+        const auto r_sart_gtr = sanitizeMegaVoiceTrack(
+            sart_gtr_notes, 8, 96, 25, "S.Art SteelGtr", TrackRole::Chord, sart_gtr_casm);
+        bool melodic_vels_preserved = false;
+        {
+            bool v45 = false, v85 = false, v118 = false;
+            for (const auto& n : r_sart_gtr.notes) {
+                if (n.pitch == 52 && n.vel == 45)  v45 = true;
+                if (n.pitch == 55 && n.vel == 85)  v85 = true;
+                if (n.pitch == 59 && n.vel == 118) v118 = true;
+            }
+            melodic_vels_preserved = v45 && v85 && v118;
+        }
+        TEST("P1-2: Explicit S.Art Guitar with S3+S6 classifies as is_sart (not MegaVoice) and preserves melodic velocities (45,85,118)",
+             r_sart_gtr.classification.is_sart &&
+             !r_sart_gtr.classification.is_megavoice &&
+             r_sart_gtr.stats.fx_keys_stripped == 1 &&
+             r_sart_gtr.stats.vel_reshaped_notes == 0 &&
+             r_sart_gtr.stats.noise_zone_stripped == 0 &&
+             melodic_vels_preserved);
+
+        // P2-1a: Glockenspiel (GM PC 9, "Phrase1") with 13 C7..E7 notes & stepped vels -> PianoKeyboard + Hard Veto
+        const CasmTrackView plain_casm{};
+        std::vector<NoteSpan> glock_notes;
+        const uint8_t glock_vels[3] = {50, 80, 110};
+        for (uint32_t i = 0; i < 13; ++i) {
+            glock_notes.push_back({i * 240, i * 240 + 200,
+                                   static_cast<uint8_t>(96 + (i % 5)),
+                                   glock_vels[i % 3], false});
+        }
+        const auto r_glock = sanitizeMegaVoiceTrack(
+            glock_notes, 0, 0, 9, "Phrase1", TrackRole::Phrase1, plain_casm);
+        TEST("P2-1: Glockenspiel (PC=9) classifies PianoKeyboard with Hard Veto (0 stripped, 13/13 kept)",
+             r_glock.classification.family == InstrumentClass::PianoKeyboard &&
+             r_glock.classification.vetoed &&
+             !r_glock.classification.is_megavoice &&
+             r_glock.notes.size() == 13 &&
+             r_glock.stats.fx_keys_stripped == 0 &&
+             r_glock.stats.vel_reshaped_notes == 0);
+
+        // P2-1b: Harpsichord ("harpsi" checked before "harp") & Reed Organ ("organ" before "reed") & Choir (PC 52)
+        const std::vector<NoteSpan> key_notes = {
+            {0, 240, 60, 50, false}, {240, 480, 72, 95, false}, {480, 720, 96, 115, false}, {720, 960, 98, 120, false}
+        };
+        const auto c_harpsi = classifyTrackArticulation(key_notes, 0, 0, 6, "Harpsichord", TrackRole::Chord, plain_casm);
+        TEST("P2-1: 'Harpsichord' classifies PianoKeyboard (not Harp/GuitarPlucked) with Hard Veto",
+             c_harpsi.family == InstrumentClass::PianoKeyboard && c_harpsi.vetoed && !c_harpsi.is_megavoice);
+
+        const auto c_reed_org = classifyTrackArticulation(key_notes, 0, 0, 20, "Reed Organ", TrackRole::Chord, plain_casm);
+        TEST("P2-1: 'Reed Organ' classifies PianoKeyboard (not BrassWoodwind) with Hard Veto",
+             c_reed_org.family == InstrumentClass::PianoKeyboard && c_reed_org.vetoed);
+
+        const auto c_choir = classifyTrackArticulation(key_notes, 0, 0, 52, "Phrase2", TrackRole::Pad, plain_casm);
+        TEST("P2-1: Choir (PC=52) classifies SynthLeadPad with Hard Veto",
+             c_choir.family == InstrumentClass::SynthLeadPad && c_choir.vetoed && !c_choir.is_megavoice);
+
+        // P2-2a: 64-note simultaneous chord at tick 0 on Stroke (NTT==1) -> 6 voices with non-zero even spread!
+        CasmTrackView stroke_casm{};
+        stroke_casm.has_casm = true;
+        stroke_casm.ntr = 2;
+        stroke_casm.ntt = 1;
+        SanitizeOptions gopt{};
+        gopt.ppqn = 480;
+        gopt.tempo_mpqn = 500000;
+
+        std::vector<NoteSpan> chord64;
+        chord64.reserve(64);
+        for (uint32_t i = 0; i < 64; ++i) {
+            chord64.push_back({0, 480, static_cast<uint8_t>(40 + (i % 24)), 55, false});
+        }
+        const auto r_64 = sanitizeMegaVoiceTrack(chord64, 63, 120, 21, "AcGuitar", TrackRole::Chord, stroke_casm, gopt);
+        bool even64 = (r_64.notes.size() == 6);
+        uint32_t step64 = 0;
+        if (even64) {
+            step64 = r_64.notes[1].on_tick - r_64.notes[0].on_tick;
+            if (step64 == 0) even64 = false;
+            for (size_t i = 2; even64 && i < r_64.notes.size(); ++i) {
+                if (r_64.notes[i].on_tick - r_64.notes[i - 1].on_tick != step64) even64 = false;
+            }
+        }
+        TEST("P2-2: 64-note Stroke chord caps to 6 voices BEFORE stagger -> non-zero uniform step",
+             even64 && (r_64.notes.back().on_tick - r_64.notes.front().on_tick) > 0 &&
+             (r_64.notes.back().on_tick - r_64.notes.front().on_tick) <= 57);
+
+        // P2-2b: 8-note simultaneous chord (40,43,47,50,52,55,59,64) on Stroke -> 6 voices with even spacing!
+        const std::vector<NoteSpan> chord8_stroke = {
+            {0, 480, 40, 55, false}, {0, 480, 43, 55, false}, {0, 480, 47, 55, false},
+            {0, 480, 50, 55, false}, {0, 480, 52, 55, false}, {0, 480, 55, 55, false},
+            {0, 480, 59, 55, false}, {0, 480, 64, 55, false}
+        };
+        const auto r_8s = sanitizeMegaVoiceTrack(chord8_stroke, 63, 120, 21, "AcGuitar", TrackRole::Chord, stroke_casm, gopt);
+        bool even8 = (r_8s.notes.size() == 6);
+        uint32_t step8 = 0;
+        if (even8) {
+            step8 = r_8s.notes[1].on_tick - r_8s.notes[0].on_tick;
+            if (step8 == 0) even8 = false;
+            for (size_t i = 2; even8 && i < r_8s.notes.size(); ++i) {
+                if (r_8s.notes[i].on_tick - r_8s.notes[i - 1].on_tick != step8) even8 = false;
+            }
+        }
+        TEST("P2-2: 8-note Stroke chord caps to 6 voices BEFORE stagger -> uniform consecutive spacing",
+             even8 && r_8s.stats.guitar_voices_trimmed == 2 &&
+             r_8s.notes[0].pitch == 40 && r_8s.notes[1].pitch == 50 &&
+             r_8s.notes[5].pitch == 64);
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

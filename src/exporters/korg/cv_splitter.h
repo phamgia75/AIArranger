@@ -351,15 +351,21 @@ inline CvSplitPlan planSectionCvs(
         return plan;
     }
 
-    // 2. Collision & Minor-only detection per Korg channel.
+    // 2. Collision & non-Major-only detection per Korg channel.
     bool any_collision = false;
-    bool any_minor_only = false;
+    bool any_non_cv1_only = false;
     for (const auto& [kch, group] : by_ch) {
         (void)kch;
         for (size_t a = 0; a < group.size(); ++a) {
             const uint64_t cm = cv_detail::effectiveChordMask(*group[a].ptr);
-            if ((cm & kMaskMajor) == 0 && (cm & kMaskMinor) != 0) {
-                any_minor_only = true;
+            if ((cm & kMaskMajor) == 0) {
+                if (max_cv > 2) {
+                    any_non_cv1_only = true;
+                } else if ((cm & (kMaskMinor | kMaskDim)) != 0) {
+                    // On 2-CV sections (Intro/Fill/End), Minor & Dim map to cv2;
+                    // Dom7/Sus/Other fold into cv1 without needing an empty cv2.
+                    any_non_cv1_only = true;
+                }
             }
             for (size_t b = a + 1; b < group.size(); ++b) {
                 if (cv_detail::areMutuallyExclusive(*group[a].ptr, *group[b].ptr)) {
@@ -369,8 +375,8 @@ inline CvSplitPlan planSectionCvs(
         }
     }
 
-    // Single cv1 fast-path: zero bloat when no clashes and no Minor-only track exist.
-    if (!any_collision && !any_minor_only) {
+    // Single cv1 fast-path: zero bloat when no clashes and no non-cv1-only track exist.
+    if (!any_collision && !any_non_cv1_only) {
         CvBucket cv1;
         cv1.cv_index = 1;
         cv1.marker = korgMarkerForCv(section_type, 1);
@@ -381,13 +387,18 @@ inline CvSplitPlan planSectionCvs(
         return plan;
     }
 
+    auto trackSetOf = [](const std::vector<cv_detail::RankedEntry>& vec) {
+        std::set<const SectionTrackInput*> s;
+        for (const auto& e : vec) s.insert(e.ptr);
+        return s;
+    };
+
     // 3. Deterministic per-channel assignment into candidate slots 0 .. max_cv-1.
     // slot_picks[s][kch] holds the mutually compatible track entries for slot s on channel kch.
     struct ChannelPlan {
         std::array<std::vector<cv_detail::RankedEntry>, 6> slot_tracks;
         std::array<bool, 6>                                slot_has_dedicated{};
         bool                                               had_collision = false;
-        bool                                               had_minor_only = false;
     };
     std::map<uint8_t, ChannelPlan> ch_plans;
 
@@ -395,10 +406,6 @@ inline CvSplitPlan planSectionCvs(
         ChannelPlan cp;
 
         for (size_t a = 0; a < group.size(); ++a) {
-            const uint64_t cm = cv_detail::effectiveChordMask(*group[a].ptr);
-            if ((cm & kMaskMajor) == 0 && (cm & kMaskMinor) != 0) {
-                cp.had_minor_only = true;
-            }
             for (size_t b = a + 1; b < group.size(); ++b) {
                 if (cv_detail::areMutuallyExclusive(*group[a].ptr, *group[b].ptr)) {
                     cp.had_collision = true;
@@ -408,20 +415,65 @@ inline CvSplitPlan planSectionCvs(
 
         if (!cp.had_collision) {
             // Non-colliding channel: include each track in every slot whose chord family it covers.
+            std::set<const SectionTrackInput*> placed_non_colliding;
             for (uint8_t s = 0; s < max_cv; ++s) {
                 const uint64_t fmask = cv_detail::kCvSlots[s].family_mask;
                 for (const auto& e : group) {
                     if ((cv_detail::effectiveChordMask(*e.ptr) & fmask) != 0) {
                         cp.slot_tracks[s].push_back(e);
+                        placed_non_colliding.insert(e.ptr);
                     }
                 }
             }
-            if (cp.had_minor_only) {
+
+            // On 2-CV sections (Intro/Fill/Ending), never silently drop non-Major/Minor chord-only
+            // tracks: fold Dom7/Sus/Other -> cv1 (s=0) and Dim -> cv2 (s=1) when compatible,
+            // or explicitly report STYLE_QUAL_CV_SLOTS_EXHAUSTED if a clash prevents placement.
+            for (const auto& e : group) {
+                if (placed_non_colliding.count(e.ptr) != 0) continue;
+                const uint64_t cm = cv_detail::effectiveChordMask(*e.ptr);
+                const bool dim_only_fold = ((cm & kMaskDim) != 0) &&
+                                           ((cm & (kMaskDom7 | kMaskSus | kMaskOther)) == 0);
+                const uint8_t target_s = (dim_only_fold && max_cv >= 2) ? 1 : 0;
+
+                std::vector<const SectionTrackInput*> existing_ptrs;
+                existing_ptrs.reserve(cp.slot_tracks[target_s].size());
+                for (const auto& ex : cp.slot_tracks[target_s]) existing_ptrs.push_back(ex.ptr);
+
+                if (cv_detail::compatibleWithAll(*e.ptr, existing_ptrs)) {
+                    cp.slot_tracks[target_s].push_back(e);
+                    placed_non_colliding.insert(e.ptr);
+                } else {
+                    ++plan.shadowed_tracks_dropped;
+                    ++plan.clashes_prevented;
+                    plan.diagnostics.push_back({
+                        "STYLE_QUAL_CV_SLOTS_EXHAUSTED",
+                        section_name,
+                        kch,
+                        "2-CV section could not fold src_ch " +
+                            std::to_string(e.ptr->casm.src_ch) + " without clash"
+                    });
+                }
+            }
+
+            // Mark non-cv1 slots as dedicated whenever their track set differs from cv1
+            // so cv2..cv6 (e.g. non-colliding Dom7/Dim/Sus/Alt-only tracks) are activated.
+            const auto cv1_set = trackSetOf(cp.slot_tracks[0]);
+            bool activated_non_cv1 = false;
+            for (uint8_t s = 1; s < max_cv; ++s) {
+                if (cp.slot_tracks[s].empty()) continue;
+                if (trackSetOf(cp.slot_tracks[s]) != cv1_set) {
+                    cp.slot_has_dedicated[s] = true;
+                    activated_non_cv1 = true;
+                }
+            }
+            if (activated_non_cv1) {
                 plan.diagnostics.push_back({
                     "STYLE_QUAL_CHORD_MUTE_SPLIT",
                     section_name,
                     kch,
-                    "Routed Minor-only track on Korg ch " + std::to_string(kch) + " to cv2"
+                    "Routed chord-specific track(s) on Korg ch " + std::to_string(kch) +
+                        " to dedicated Pa5X CV slot(s)"
                 });
             }
             ch_plans.emplace(kch, std::move(cp));
@@ -479,7 +531,6 @@ inline CvSplitPlan planSectionCvs(
             spare_order = {1};             // Use cv2 on Intro/Fill/Ending if free
         }
 
-        uint32_t split_count_on_ch = 0;
         for (const auto& e : group) {
             if (placed.count(e.ptr) != 0) continue;
 
@@ -494,12 +545,18 @@ inline CvSplitPlan planSectionCvs(
                     (s == 5) || ((cm & cv_detail::kCvSlots[s].family_mask) != 0);
                 if (!slot_compatible) continue;
 
-                cp.slot_tracks[s].clear();
-                cp.slot_tracks[s].push_back(e);
+                // Erase only mutually exclusive entries in slot s, preserving any compatible
+                // all-chords/all-notes layer already residing on this channel.
+                auto& dst_slot = cp.slot_tracks[s];
+                dst_slot.erase(
+                    std::remove_if(dst_slot.begin(), dst_slot.end(), [&](const cv_detail::RankedEntry& existing) {
+                        return cv_detail::areMutuallyExclusive(*existing.ptr, *e.ptr);
+                    }),
+                    dst_slot.end());
+                dst_slot.push_back(e);
                 cp.slot_has_dedicated[s] = true;
                 placed.insert(e.ptr);
                 assigned_residual = true;
-                ++split_count_on_ch;
                 break;
             }
 
@@ -515,13 +572,6 @@ inline CvSplitPlan planSectionCvs(
                         " CV slot(s); dropped shadowed src_ch " +
                         std::to_string(e.ptr->casm.src_ch)
                 });
-            }
-        }
-
-        // Count clashes prevented by separating mutually exclusive variants into distinct CVs.
-        for (uint8_t s = 1; s < max_cv; ++s) {
-            if (cp.slot_has_dedicated[s]) {
-                ++split_count_on_ch;
             }
         }
 
@@ -546,7 +596,6 @@ inline CvSplitPlan planSectionCvs(
                     " across Pa5X CVs"
             });
         }
-        (void)split_count_on_ch;
 
         ch_plans.emplace(kch, std::move(cp));
     }
@@ -555,12 +604,6 @@ inline CvSplitPlan planSectionCvs(
     // distinct tracks relative to cv1 and earlier active CVs).
     std::array<bool, 6> slot_active{};
     slot_active[0] = true; // cv1 is always created.
-
-    auto trackSetOf = [](const std::vector<cv_detail::RankedEntry>& vec) {
-        std::set<const SectionTrackInput*> s;
-        for (const auto& e : vec) s.insert(e.ptr);
-        return s;
-    };
 
     for (uint8_t s = 1; s < max_cv; ++s) {
         bool needed = false;
