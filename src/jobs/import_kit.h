@@ -628,6 +628,27 @@ inline std::string verifyKit(const fs::path& dir, const std::vector<Item>* expec
     for (fs::directory_iterator top(dir, ec), end; !ec && top != end; top.increment(ec)) {
         const std::string n = top->path().filename().string();
         if (n == "KIT.md" || n == "manifest.json" || n == "PACKAGE.sha256" || detail::finderLitter(n)) continue;
+        if (n == "SELECTIVE_MANIFEST.json" || n == "DIAGNOSTICS.json") {
+            std::error_code sec;
+            const auto sz = fs::file_size(top->path(), sec);
+            if (sec || !top->is_regular_file(sec) || top->is_symlink(sec) || sz > (4u << 20))
+                return n + " is not a regular file of at most 4 MiB";
+            std::FILE* sf = media::detail::openRegular(AT_FDCWD, top->path().c_str());
+            if (!sf) return n + " is not a regular file";
+            std::string stext(sz, '\0');
+            const size_t got = std::fread(stext.data(), 1, stext.size(), sf);
+            std::fclose(sf);
+            if (got != stext.size()) return "cannot read " + n;
+            Json sj;
+            if (const auto pe = parseJson(stext, &sj); !pe.empty()) return n + " is not valid JSON: " + pe;
+            const Json* sc = sj.t == Json::T::Obj ? sj.get("schema") : nullptr;
+            const Json* hv = sj.t == Json::T::Obj ? sj.get("hardwareVerified") : nullptr;
+            if (!sc || sc->t != Json::T::Str || sc->s != "aiarranger-selective-export-report/1")
+                return n + ": schema is not aiarranger-selective-export-report/1";
+            if (!hv || hv->t != Json::T::Bool || hv->b)
+                return n + ": hardwareVerified must be false";
+            continue;
+        }
         Kind want = Kind::Unknown;
         for (Kind k : {Kind::Sound, Kind::DrumKit, Kind::Kmp, Kind::Style}) if (n == typeFolder(k)) want = k;
         if (want == Kind::Unknown || !top->is_directory(ec) || top->is_symlink(ec)) return "unexpected " + n + " at the top of the kit";
