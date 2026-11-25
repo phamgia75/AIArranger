@@ -39,10 +39,14 @@ uint8_t korgChannelFor(uint8_t g) noexcept {
 }
 
 const char* korgMarkerFor(SectionType t) noexcept {
+    return korgMarkerFor(t, BreakPolicy::Withhold);
+}
+
+const char* korgMarkerFor(SectionType t, BreakPolicy policy) noexcept {
     // One Chord Variation per element: Genos sections have no chord variations.
     // Codes per Pa5X User Manual v1.4 p.1035. Break ("br", no number, no CV) is
-    // documented but held back: the exact form is unconfirmed by a Pa5X export,
-    // and Genos break import is known to be wrong (#26). It is reported instead.
+    // emitted under BreakPolicy::Yamaha1BarCap (1-bar cap per Wierzba/Bedesem
+    // v2.1 §5.1.1.2) and withheld under BreakPolicy::Withhold.
     switch (t) {
         case SectionType::Main1:   return "v1cv1";
         case SectionType::Main2:   return "v2cv1";
@@ -58,6 +62,7 @@ const char* korgMarkerFor(SectionType t) noexcept {
         case SectionType::Ending1: return "e1cv1";
         case SectionType::Ending2: return "e2cv1";
         case SectionType::Ending3: return "e3cv1";
+        case SectionType::Break:   return policy == BreakPolicy::Yamaha1BarCap ? "br" : nullptr;
         default: return nullptr;
     }
 }
@@ -119,7 +124,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
 
     for (const auto& sec : style.sections) {
         SectionRow row{sec.name, "", sec.bars, ""};
-        const char* marker = korgMarkerFor(sec.type);
+        const char* marker = korgMarkerFor(sec.type, opt.break_policy);
         size_t secEvents = 0;
         for (const auto& t : sec.tracks) secEvents += t.events.size();
         if (!marker) {
@@ -142,6 +147,19 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             continue;
         }
 
+        const bool breakTruncated = (sec.type == SectionType::Break &&
+                                     opt.break_policy == BreakPolicy::Yamaha1BarCap &&
+                                     sec.bars > 1);
+        const uint32_t effectiveBars = breakTruncated ? 1u : sec.bars;
+        if (breakTruncated) {
+            row.bars = 1;
+            row.note = std::string(kDiagBreakTailTruncated) + ": truncated " +
+                       std::to_string(sec.bars) + "-bar Break to Yamaha 1-bar cap";
+            rep.warnings.push_back(std::string(kDiagBreakTailTruncated) +
+                                   ": Fill In BA truncated from " +
+                                   std::to_string(sec.bars) + " bars to 1 bar");
+        }
+
         const uint32_t src = sec.resolution ? sec.resolution : style.resolution;
         const uint8_t num = static_cast<uint8_t>(sec.beats_per_bar ? sec.beats_per_bar : 4);
         const uint8_t den = static_cast<uint8_t>(sec.beat_note ? sec.beat_note : 4);
@@ -149,7 +167,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         const uint64_t barNum = uint64_t{dst} * 4 * num;
         if (barNum % den) { r.error = "meter " + std::to_string(num) + "/" + std::to_string(den) +
                                       " has no whole-tick bar at " + std::to_string(dst) + " PPQN"; return r; }
-        const uint64_t len64 = uint64_t{sec.bars} * (barNum / den);
+        const uint64_t len64 = uint64_t{effectiveBars} * (barNum / den);
         if (len64 > 0x0FFFFFFF) { r.error = "section '" + sec.name + "' too long"; return r; }
         const uint32_t len = static_cast<uint32_t>(len64);
         // Exact rational rescale of each absolute tick: no cumulative drift.
@@ -165,7 +183,11 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         for (const auto& tr : sec.tracks) {
             const uint8_t srcCh = tr.midi_channel;
             auto rit = opt.route.find(srcCh);
-            const uint8_t routed = rit != opt.route.end() ? rit->second : srcCh;
+            const uint8_t routed = (rit != opt.route.end())
+                                       ? rit->second
+                                       : ((tr.articulation.has_casm_meta && tr.articulation.dest_channel <= 15)
+                                              ? tr.articulation.dest_channel
+                                              : srcCh);
             const uint8_t kch = korgChannelFor(routed);
 
             auto [rowIt, fresh] = rows.try_emplace(srcCh);
@@ -200,11 +222,19 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 const bool isOff = e->type == MidiEventType::NoteOff ||
                                    (e->type == MidiEventType::NoteOn && e->data2 == 0);
                 if (isOn) {
+                    if (breakTruncated && t >= len) {
+                        ++rep.dropped[kDropBreakTail];
+                        continue;
+                    }
                     open[e->data1].push_back(notes.size());
                     notes.push_back({static_cast<uint32_t>(std::min<uint64_t>(t, len)), UINT32_MAX, e->data1, e->data2});
                 } else if (isOff) {
                     auto& q = open[e->data1];
-                    if (q.empty()) { ++rep.dropped[kDropOrphanOff]; continue; }
+                    if (q.empty()) {
+                        if (breakTruncated && t >= len) { ++rep.dropped[kDropBreakTail]; continue; }
+                        ++rep.dropped[kDropOrphanOff];
+                        continue;
+                    }
                     notes[q.front()].off = static_cast<uint32_t>(std::min<uint64_t>(t, len));
                     q.pop_front();
                 } else if (e->type == MidiEventType::ProgramChange ||
@@ -215,7 +245,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                     else if (tr_row.lsb < 0) tr_row.lsb = e->data2;
                     ++rep.dropped[kDropVoiceSelect];
                 } else if (t >= len) {
-                    ++rep.dropped[kDropPastEnd];
+                    ++rep.dropped[breakTruncated ? kDropBreakTail : kDropPastEnd];
                 } else {
                     el.events.push_back({static_cast<uint32_t>(t),
                                          static_cast<uint8_t>(static_cast<uint8_t>(e->type) | kch),

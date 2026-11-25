@@ -93,6 +93,14 @@ constexpr uint32_t kExtKorgExport = 0x5058454B;
 // 'SNAM': section names set in the Studio (SectionDefinition::keep_name), payload =
 // N x {u8 section index (ascending, unique), u8 length 1-64, name bytes}. Absent = defaults, as before.
 constexpr uint32_t kExtSectionNames = 0x4D414E53;
+// 'CASM': per-section, per-track Yamaha CASM metadata (ArticulationMetadata::has_casm_meta),
+// payload = u8 version (1) + N x 20-byte records:
+//   {u8 si, u8 ti, u8 ntr, u8 ntt (0-127), u8 ntt_bass (0/1), u8 rtr,
+//    u8 src_root (0-11), u8 src_type, u16 LE note_mute (0-0x0FFF),
+//    u8[5] LE chord_mute (34-bit), u8 zone_low (0-127), u8 zone_high (0-127),
+//    u8 dest_channel (0-15 or 0xFF), u16 reserved (0)}.
+// Written only when at least one track has has_casm_meta == true; absent in v1.0/v1.1 files.
+constexpr uint32_t kExtCasm = 0x4D534143;
 
 // ── Validation constants ───────────────────────────────────────────
 

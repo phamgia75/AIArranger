@@ -109,6 +109,19 @@ struct ArticulationMetadata {
     static bool registerLimitsValid(uint8_t hk, uint8_t lo, uint8_t hi) noexcept {
         return hk <= 11 && hi <= 127 && lo <= hi && hi - lo >= 11;
     }
+    // Extended per-track CASM metadata persisted in additive UASF extension 'CASM' (v1.2).
+    // Absent in v1.0/v1.1 files (has_casm_meta == false -> zero 'CASM' bytes written).
+    bool     has_casm_meta = false;
+    bool     ntt_bass = false;
+    uint8_t  rtr = 0;
+    uint8_t  source_chord_root = 0;
+    uint8_t  source_chord_type = 0;
+    uint16_t note_mute_mask = 0x0FFF;
+    uint64_t chord_mute_mask = 0x3FFFFFFFFull;
+    uint8_t  zone_low = 0;
+    uint8_t  zone_high = 127;
+    uint8_t  dest_channel = 0xFF;     // 0..15 or 0xFF = unset
+    bool hasCasmMetadata() const noexcept { return has_casm_meta; }
     std::string vendor;
     std::string vendor_articulation;
     bool has_keyswitch = false;

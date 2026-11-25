@@ -76,7 +76,41 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
             kexp.insert(kexp.end(), {static_cast<uint8_t>(key.first), key.second, s.msb, s.lsb, s.pc});
         }
     }
-    header.flags = (style.tempo_bpm != 0 || !trns.empty() || !kexp.empty() || !snam.empty() || !style.unknown_extensions.empty())
+    std::vector<uint8_t> casm;   // 'CASM' payload (v1.2 additive extension)
+    for (size_t si = 0; si < style.sections.size() && si < format::kMaxSections; ++si) {
+        const auto& tracks = style.sections[si].tracks;
+        for (size_t ti = 0; ti < tracks.size() && ti < format::kMaxTracksPerSection; ++ti) {
+            const auto& a = tracks[ti].articulation;
+            if (!a.hasCasmMetadata()) continue;
+            if (a.ntt > 127 || a.source_chord_root > 11 || a.note_mute_mask > 0x0FFF ||
+                (a.chord_mute_mask >> 34) != 0 || a.zone_low > 127 || a.zone_high > 127 ||
+                a.zone_low > a.zone_high || (a.dest_channel > 15 && a.dest_channel != 0xFF)) {
+                return {false, {}, "Section " + std::to_string(si) + " track " + std::to_string(ti) +
+                                       ": invalid CASM metadata"};
+            }
+            if (casm.empty()) casm.push_back(1);  // version = 1
+            casm.push_back(static_cast<uint8_t>(si));
+            casm.push_back(static_cast<uint8_t>(ti));
+            casm.push_back(a.ntr);
+            casm.push_back(a.ntt);
+            casm.push_back(a.ntt_bass ? 1 : 0);
+            casm.push_back(a.rtr);
+            casm.push_back(a.source_chord_root);
+            casm.push_back(a.source_chord_type);
+            casm.push_back(static_cast<uint8_t>(a.note_mute_mask & 0xFF));
+            casm.push_back(static_cast<uint8_t>((a.note_mute_mask >> 8) & 0xFF));
+            for (int b = 0; b < 5; ++b) {
+                casm.push_back(static_cast<uint8_t>((a.chord_mute_mask >> (8 * b)) & 0xFF));
+            }
+            casm.push_back(a.zone_low);
+            casm.push_back(a.zone_high);
+            casm.push_back(a.dest_channel);
+            casm.push_back(0);
+            casm.push_back(0);
+        }
+    }
+    header.flags = (style.tempo_bpm != 0 || !trns.empty() || !kexp.empty() || !snam.empty() ||
+                    !casm.empty() || !style.unknown_extensions.empty())
                        ? format::kFlagExtensions : 0;
     header.section_count = static_cast<uint32_t>(std::min(style.sections.size(),
                                                          size_t(format::kMaxSections)));
@@ -180,6 +214,11 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
         writeU32(format::kExtKorgExport);
         writeU32(static_cast<uint32_t>(kexp.size()));
         writeBytes(kexp.data(), kexp.size());
+    }
+    if (!casm.empty()) {
+        writeU32(format::kExtCasm);
+        writeU32(static_cast<uint32_t>(casm.size()));
+        writeBytes(casm.data(), casm.size());
     }
     // Blocks a reader kept but did not understand, re-emitted verbatim.
     if (!style.unknown_extensions.empty())

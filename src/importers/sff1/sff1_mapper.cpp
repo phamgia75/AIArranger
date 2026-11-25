@@ -19,6 +19,26 @@ void setRegisterLimits(uasf::ArticulationMetadata& a, const CasmTrackConfig& c) 
     a.note_low  = limitsOk ? c.note_low : 0;
     a.note_high = limitsOk ? c.note_high : 127;
 }
+void setCasmArticulation(uasf::ArticulationMetadata& a, const CasmTrackConfig& c) noexcept {
+    a.has_casm_meta = true;
+    a.ntr = c.ntr;
+    a.ntt = c.ntt & 0x7F;
+    a.ntt_bass = c.ntt_bass;
+    a.rtr = c.rtr;
+    a.source_chord_root = (c.source_chord_root <= 11) ? c.source_chord_root : 0;
+    a.source_chord_type = c.source_chord_type;
+    a.note_mute_mask = c.note_mute_mask & 0x0FFF;
+    a.chord_mute_mask = c.chord_mute_mask & 0x3FFFFFFFFull;
+    a.zone_low = (c.zone_low <= 127) ? c.zone_low : 0;
+    a.zone_high = (c.zone_high <= 127 && c.zone_high >= a.zone_low) ? c.zone_high : 127;
+    a.dest_channel = (c.dest_channel <= 15) ? c.dest_channel : 0xFF;
+    setRegisterLimits(a, c);
+}
+
+bool isSintMixCc(uint8_t cc) noexcept {
+    return cc == 7 || cc == 10 || cc == 11 || cc == 91 || cc == 93;
+}
+
 // UASF SectionHeader::bars is uint16.
 constexpr uint64_t kMaxSectionBars = 0xFFFF;
 
@@ -135,9 +155,7 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         if (cfg) {
             track.name = cfg->name;
             track.role = mapCasmTrackRole(*cfg);
-            track.articulation.ntr = cfg->ntr;
-            track.articulation.ntt = cfg->ntt;
-            setRegisterLimits(track.articulation, *cfg);
+            setCasmArticulation(track.articulation, *cfg);
         } else {
             // No CASM metadata for this channel: fall back to the
             // GM drum convention, else treat as a melodic phrase.
@@ -233,6 +251,18 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         ranges.push_back({type, marks[i].name, marks[i].tick, end});
     }
 
+    // Helper: resolve active meter at tick from all parsed FF 58 time signatures.
+    auto meterAt = [&](uint32_t tick) -> std::pair<uint8_t, uint8_t> {
+        uint8_t num = tsNum, den = tsDen;
+        for (const auto& ts : parseResult.time_signatures) {
+            if (ts.tick <= tick) {
+                if (ts.num > 0) num = ts.num;
+                if (ts.den == 2 || ts.den == 4 || ts.den == 8 || ts.den == 16) den = ts.den;
+            }
+        }
+        return {num, den};
+    };
+
     if (!ranges.empty()) {
         // Canonical order (enum order): Intros, Mains, Fills, Endings, Break —
         // so section 0 is Intro A when present (Start plays section 0).
@@ -241,21 +271,55 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         const bool anyIntro = std::any_of(ranges.begin(), ranges.end(), [](const Range& r) {
             return r.type >= uasf::SectionType::Intro1 && r.type <= uasf::SectionType::Intro3;
         });
-        const uint64_t barTicks = static_cast<uint64_t>(style.resolution) * 4 * tsNum / tsDen;
 
         for (size_t ri = 0; ri < ranges.size(); ++ri) {
             const Range& r = ranges[ri];
             const uint32_t len = r.end - r.start;
+            const auto [secNum, secDen] = meterAt(r.start);
+            const uint64_t barTicks = static_cast<uint64_t>(style.resolution) * 4 * secNum / secDen;
+            if (barTicks == 0) {
+                result.error = "Unplayable grid: " + std::to_string(style.resolution) + " PPQN in " +
+                               std::to_string(secNum) + "/" + std::to_string(secDen) +
+                               " gives a bar of 0 ticks";
+                return result;
+            }
             std::vector<std::pair<const SffMidiEvent*, uint64_t>> evs;
+
+            // Collect channels that appear in this section and tick-0 CCs already present.
+            std::set<uint8_t> secActiveChannels;
+            std::set<std::pair<uint8_t, uint8_t>> secTick0Ccs;
+            for (const auto* e : allEvents) {
+                const uint8_t hi = e->status & 0xF0;
+                const bool isOff = hi == 0x80 || (hi == 0x90 && e->data2 == 0);
+                if ((e->tick >= r.start && e->tick < r.end) || (isOff && e->tick == r.end)) {
+                    const uint8_t ch = e->status & 0x0F;
+                    secActiveChannels.insert(ch);
+                    if (hi == 0xB0 && e->tick == r.start) secTick0Ccs.emplace(ch, e->data1);
+                }
+            }
 
             const bool isIntro = r.type >= uasf::SectionType::Intro1 &&
                                  r.type <= uasf::SectionType::Intro3;
-            if (haveSInt && (isIntro || (!anyIntro && ri == 0))) {
-                for (const auto* e : allEvents) {
-                    if (e->tick < sintStart || e->tick >= sintEnd) continue;
-                    const uint8_t hi = e->status & 0xF0;
-                    if (hi == 0x80 || hi == 0x90 || hi == 0xA0) continue;   // not notes
-                    evs.emplace_back(e, 0);
+            if (haveSInt) {
+                if (isIntro || (!anyIntro && ri == 0)) {
+                    for (const auto* e : allEvents) {
+                        if (e->tick < sintStart || e->tick >= sintEnd) continue;
+                        const uint8_t hi = e->status & 0xF0;
+                        if (hi == 0x80 || hi == 0x90 || hi == 0xA0) continue;   // not notes
+                        evs.emplace_back(e, 0);
+                    }
+                } else {
+                    // Propagate SInt mix CCs (CC7, CC10, CC11, CC91, CC93; excluding Bank/PC)
+                    // to Main/Fill/Break/Ending sections for channels active in that section!
+                    for (const auto* e : allEvents) {
+                        if (e->tick < sintStart || e->tick >= sintEnd) continue;
+                        const uint8_t hi = e->status & 0xF0;
+                        const uint8_t ch = e->status & 0x0F;
+                        if (hi != 0xB0 || !isSintMixCc(e->data1)) continue;
+                        if (!secActiveChannels.count(ch)) continue;
+                        if (secTick0Ccs.count({ch, e->data1})) continue;
+                        evs.emplace_back(e, 0);
+                    }
                 }
             }
             for (const auto* e : allEvents) {
@@ -277,9 +341,10 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             uasf::SectionDefinition section;
             section.type = r.type;
             section.name = r.name;
+            section.keep_name = !section.name.empty();
             section.resolution = style.resolution;
-            section.beats_per_bar = tsNum;
-            section.beat_note = tsDen;
+            section.beats_per_bar = secNum;
+            section.beat_note = secDen;
             const uint64_t bars = std::max<uint64_t>(1, (len + barTicks - 1) / barTicks);
             if (bars > kMaxSectionBars) {   // UASF stores bars as uint16
                 result.error = "Section '" + r.name + "' is " + std::to_string(bars) +
@@ -298,6 +363,7 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             uasf::SectionDefinition section;
             section.type = mapSectionType(sffSection.type);
             section.name = sffSection.name;
+            section.keep_name = !section.name.empty();
             section.bars = sffSection.bars;
             section.resolution = sffSection.resolution;
             section.beats_per_bar = tsNum;
@@ -359,12 +425,8 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             track.articulation.profile = uasf::ArticulationProfile::Generic;
             track.articulation.fidelity = uasf::FidelityRequirement::High;
 
-            // NTR/NTT come from this section's own Ctb2 entry: the same track
-            // name can carry a different rule in another section (C_WHISPER's
-            // Strings), so never look it up by name across the whole file.
-            track.articulation.ntr = t.ntr;
-            track.articulation.ntt = t.ntt;
-            setRegisterLimits(track.articulation, t);
+            // Full per-section CASM metadata from this section's own Ctb2/Ctab entry.
+            setCasmArticulation(track.articulation, t);
 
             sec.tracks.push_back(std::move(track));
         }

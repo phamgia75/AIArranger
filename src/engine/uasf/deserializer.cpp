@@ -147,7 +147,7 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
     // ── Extension blocks (v1.1): only when flagged; v1.0 files never set the
     // flag, and trailing bytes without it are ignored as before. ─────────────
     if (header.flags & format::kFlagExtensions) {
-        bool haveTempo = false, haveTrns = false, haveKexp = false, haveSnam = false;
+        bool haveTempo = false, haveTrns = false, haveKexp = false, haveSnam = false, haveCasm = false;
         while (pos_ < size_) {
             if (!ensure(sizeof(format::ExtensionHeader))) {
                 result.error = "Truncated extension header";
@@ -227,6 +227,62 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                 }
                 if (pos_ != end) return bad("trailing bytes");
                 haveKexp = true;
+                continue;
+            }
+            if (ext.tag == format::kExtCasm) {
+                auto badCasm = [&](const char* why) {
+                    result.error = std::string("Malformed CASM block: ") + why;
+                    return result;
+                };
+                if (haveCasm) return badCasm("duplicate");
+                if (ext.length < 1 || (ext.length - 1) % 20 != 0) return badCasm("length");
+                const uint8_t ver = readU8();
+                if (ver != 1) return badCasm("version");
+                const uint32_t count = (ext.length - 1) / 20;
+                int lastKey = -1;
+                for (uint32_t k = 0; k < count; ++k) {
+                    const uint8_t si = readU8();
+                    const uint8_t ti = readU8();
+                    const uint8_t ntr = readU8();
+                    const uint8_t ntt = readU8();
+                    const uint8_t nttBass = readU8();
+                    const uint8_t rtr = readU8();
+                    const uint8_t srcRoot = readU8();
+                    const uint8_t srcType = readU8();
+                    const uint16_t noteMute = readU16();
+                    uint64_t chordMute = 0;
+                    for (int b = 0; b < 5; ++b) {
+                        chordMute |= static_cast<uint64_t>(readU8()) << (8 * b);
+                    }
+                    const uint8_t zLo = readU8();
+                    const uint8_t zHi = readU8();
+                    const uint8_t destCh = readU8();
+                    (void)readU16(); // reserved
+                    const int key = (static_cast<int>(si) << 8) | static_cast<int>(ti);
+                    if (key <= lastKey || si >= style.sections.size() ||
+                        ti >= style.sections[si].tracks.size() ||
+                        ntt > 127 || nttBass > 1 || srcRoot > 11 ||
+                        noteMute > 0x0FFF || (chordMute >> 34) != 0 ||
+                        zLo > 127 || zHi > 127 || zLo > zHi ||
+                        (destCh > 15 && destCh != 0xFF)) {
+                        return badCasm("entry out of range");
+                    }
+                    lastKey = key;
+                    auto& a = style.sections[si].tracks[ti].articulation;
+                    a.has_casm_meta = true;
+                    a.ntr = ntr;
+                    a.ntt = ntt;
+                    a.ntt_bass = nttBass != 0;
+                    a.rtr = rtr;
+                    a.source_chord_root = srcRoot;
+                    a.source_chord_type = srcType;
+                    a.note_mute_mask = noteMute;
+                    a.chord_mute_mask = chordMute;
+                    a.zone_low = zLo;
+                    a.zone_high = zHi;
+                    a.dest_channel = destCh;
+                }
+                haveCasm = true;
                 continue;
             }
             if (ext.tag != format::kExtTempo) {   // unknown: keep verbatim for the writer
