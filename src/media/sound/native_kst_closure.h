@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -144,6 +145,7 @@ struct NativeKstClosureOptions {
     size_t maxUpstreamFiles = 100000;
     size_t maxDirEntries = 1000000;
     size_t maxLeafOriginsPerRef = 16;   // bounds per-(via,address) leaf origin list in manifest; exact total kept in occurrences
+    std::function<bool()> keepGoing = {}; // UX Gate #4 cooperative cancellation (checked every <= 256 roots/entries)
 };
 
 struct MalformedTreeEntry {
@@ -363,6 +365,7 @@ struct ManifestJsonOptions {
 
 struct NativeKstClosureResult {
     bool ok = false;                        // true when root opened/inputs accepted and unified Graph was built
+    bool cancelled = false;                 // true when cooperative opts.keepGoing returned false (partial state dropped)
     std::optional<Graph> graph;             // unified read-only Graph; deleteCheck() NEVER returns Unreferenced
     NativeKstResult downstream;
     NativeKstDependencyManifest manifest;
@@ -593,6 +596,25 @@ inline std::string hexU32(uint32_t v) {
     return b;
 }
 
+inline constexpr size_t kClosureCancelStride = 64; // strictly <= 256 per UX Gate #4
+
+inline bool checkKeepGoing(const std::function<bool()>& keepGoing, size_t& tick) {
+    if (!keepGoing) return true;
+    const size_t cur = tick++;
+    if (cur == 0 || (cur % kClosureCancelStride) == 0) return keepGoing();
+    return true;
+}
+
+inline NativeKstClosureResult makeCancelledResult() {
+    NativeKstClosureResult r;
+    r.ok = false;
+    r.cancelled = true;
+    r.manifest.coverage.readOnly = true;
+    r.manifest.coverage.deleteProofAvailable = false;
+    r.manifest.coverage.coverageComplete = false;
+    return r;
+}
+
 inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
                                               std::vector<ExtractedRoot> extractedRoots,
                                               bool songBookPresent,
@@ -602,6 +624,8 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
                                               std::vector<std::string> extraErrors,
                                               std::vector<std::string> extraDiags,
                                               const NativeKstClosureOptions& opts) {
+    size_t cancelTick = 0;
+    if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
     NativeKstClosureResult out;
     out.downstream = std::move(downstream);
 
@@ -663,6 +687,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
 
     if (out.downstream.ok && out.downstream.graph.has_value()) {
         for (const auto& [sid, sm] : soundMetaById) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             SoundDownstreamInfo sdi;
             sdi.analysed = (unanalysedGapById.find(sid) == unanalysedGapById.end()) && sm.decoded;
             std::set<uint32_t> msSet, smpSet;
@@ -745,6 +770,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
 
     M.roots.reserve(extractedRoots.size());
     for (const ExtractedRoot& er : extractedRoots) {
+        if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
         uint32_t idx = 0;
         if (er.kind == Kind::Style) { idx = nextStyle++; ++M.summary.styleCount; }
         else if (er.kind == Kind::KeyboardSet) { idx = nextKsc++; ++M.summary.keyboardSetCount; }
@@ -916,6 +942,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
 
     M.userSounds.reserve(soundMetaById.size());
     for (const auto& [sid, sm] : soundMetaById) {
+        if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
         UserSoundManifestEntry use;
         use.id = sid;
         use.bank = sm.bank;
@@ -970,6 +997,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
 
     if (out.downstream.ok) {
         for (uint32_t mi = 0; mi < out.downstream.kmpIndex.multisamples.size(); ++mi) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             const ResourceId mid{false, "KST", Kind::Multisample, mi};
             const auto rit = msRootUsers.find(mi);
             const auto sit = msAnalysedSoundUsers.find(mi);
@@ -987,6 +1015,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         M.summary.orphanDrumSamples = out.downstream.kmpIndex.drums.size();   // DK Sound -> DrumSample edges UNSUPPORTED
 
         for (uint32_t si = 0; si < out.downstream.kmpIndex.samples.size(); ++si) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             const ResourceId sid{false, "KST", Kind::Sample, si};
             const auto rit = sampleRootUsers.find(si);
             const auto sit = sampleAnalysedSoundUsers.find(si);
@@ -1002,6 +1031,7 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
         }
 
         for (const std::string& pf : allPcmFiles) {
+            if (!checkKeepGoing(opts.keepGoing, cancelTick)) return makeCancelledResult();
             const auto rit = pcmFileRootUsers.find(pf);
             const auto sit = pcmFileSoundUsers.find(pf);
             const size_t rc = rit == pcmFileRootUsers.end() ? 0 : rit->second.size();
@@ -1116,6 +1146,8 @@ inline NativeKstClosureResult finalizeClosure(NativeKstResult downstream,
 // Sorts all downstream and upstream inputs by canonical label/path so output is 100% deterministic regardless of input order.
 inline NativeKstClosureResult resolveNativeKstClosure(const NativeKstClosureInput& in,
                                                       const NativeKstClosureOptions& opts = {}) {
+    size_t cancelTick = 0;
+    if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
     // Canonicalize downstream input order for deterministic results regardless of caller vector order
     NativeKstInput sortedDownstream = in.downstream;
     std::sort(sortedDownstream.pcmContainers.begin(), sortedDownstream.pcmContainers.end(),
@@ -1140,6 +1172,7 @@ inline NativeKstClosureResult resolveNativeKstClosure(const NativeKstClosureInpu
     size_t bytesUpstream = 0;
 
     for (size_t idx : order) {
+        if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
         const UpstreamRootBlob& blob = in.upstreamRoots[idx];
         const std::string rel = closure_detail::normalizeRelPath(blob.relPath);
         Kind kind = Kind::Style;
@@ -1184,6 +1217,8 @@ inline NativeKstClosureResult resolveNativeKstClosure(const NativeKstClosureInpu
 // resolveNativeKstFolder() (MULTISMP/, PCM/, SOUND/) into one unified Graph + deterministic Manifest.
 inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesystem::path& kstDir,
                                                             const NativeKstClosureOptions& opts = {}) {
+    size_t cancelTick = 0;
+    if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
     NativeKstClosureResult earlyFail;
     const std::string rawRootPath = kstDir.string();
     const std::string rootPath = native_detail::stripTrailingSlashes(kstDir);
@@ -1210,6 +1245,7 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
     NativeKstOptions downOpts = opts.downstream;
     if (opts.maxDirEntries < downOpts.maxDirEntries) downOpts.maxDirEntries = opts.maxDirEntries;
     NativeKstResult downstream = resolveNativeKstFolder(kstDir, downOpts);
+    if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
 
     // Ensure downstream error/diagnostic strings never leak the caller's local filesystem path into manifests.
     auto scrubLocalRoot = [&](std::vector<std::string>& vec) {
@@ -1269,6 +1305,7 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
     };
 
     for (const std::string& top : topEntries) {
+        if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
         struct stat st{};
         if (::fstatat(rootFd.fd, top.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
             extraErrors.push_back("cannot stat entry " + top);
@@ -1312,6 +1349,7 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
         remainingEntries -= level1.size();
 
         for (const std::string& e1 : level1) {
+            if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
             const std::string rel1 = top + "/" + e1;
             struct stat st1{};
             if (::fstatat(subFd.fd, e1.c_str(), &st1, AT_SYMLINK_NOFOLLOW) != 0) {
@@ -1362,6 +1400,7 @@ inline NativeKstClosureResult resolveNativeKstClosureFolder(const std::filesyste
             remainingEntries -= level2.size();
 
             for (const std::string& e2 : level2) {
+                if (!closure_detail::checkKeepGoing(opts.keepGoing, cancelTick)) return closure_detail::makeCancelledResult();
                 const std::string rel2 = rel1 + "/" + e2;
                 struct stat st2{};
                 if (::fstatat(bankFd.fd, e2.c_str(), &st2, AT_SYMLINK_NOFOLLOW) != 0) {

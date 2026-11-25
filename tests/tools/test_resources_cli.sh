@@ -35,5 +35,27 @@ expect 1 "$B/aiarranger-resources" memory-compare "$T/before.txt" "$T/organ"   #
 expect 1 "$B/aiarranger-resources" check --json "$T/organ"                     # --json is budget-only
 printf 'garbage\n' > "$T/organ/RESOURCES.tsv"
 expect 1 "$B/aiarranger-resources" budget "$T/organ"
+
+# M2d: kst-native selective-plan CLI contract (exit 0 clean / 3 blocking / 1 usage or missing select or D18 overlap)
+mkdir -p "$T/demo-kst"
+"$B/aiarranger-resources" kst-native demo "$T/demo-kst" >/dev/null || fails=$((fails+1))
+DEMO_KST=$(find "$T/demo-kst" -maxdepth 1 -type d -name '*style*.KST' -o -name '*Style*.KST' | head -n 1)
+if [ -z "$DEMO_KST" ]; then DEMO_KST=$(find "$T/demo-kst" -maxdepth 1 -type d -name '*.KST' | head -n 1); fi
+DEMO_REL=$(cd "$DEMO_KST" && find STYLE KEYBOARDSET PAD -type f \( -name '*.stg' -o -name '*.ksc' -o -name '*.pdc' \) 2>/dev/null | head -n 1)
+expect 1 "$B/aiarranger-resources" kst-native selective-plan
+expect 1 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST"
+expect 1 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --target-bank STYLE/X --select "$DEMO_REL"
+expect 1 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --select "$DEMO_REL" --policy bogus
+expect 1 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --select "STYLE/NoSuch/Missing.stg"
+expect 0 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --select "$DEMO_REL"
+ok sh -c "'$B/aiarranger-resources' kst-native selective-plan --source '$DEMO_KST' --select '$DEMO_REL' --json | '$PY' -I -c 'import json,sys; raw=sys.stdin.read(); assert \"$T\" not in raw; d=json.loads(raw); assert d[\"schema\"]==\"aiarranger-selective-export-report/1\" and d[\"hardwareVerified\"] is False and d[\"coverage\"][\"deleteProofAvailable\"] is False and d[\"memoryProjection\"][\"fitVerdict\"]==\"unverified-proxy\" and d[\"summary\"][\"executable\"] is True'"
+expect 0 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --select "$DEMO_REL" --export-plan "$T/advisory-out"
+ok test -f "$T/advisory-out/SELECTIVE_EXPORT_REPORT.md"
+ok test -f "$T/advisory-out/selective-plan.json"
+ok test -f "$T/advisory-out/DIAGNOSTICS.json"
+ok test -f "$T/advisory-out/PACKAGE.sha256"
+ok sh -c "test -z \"\$(find '$T/advisory-out' -type f \( -iname '*.pcg' -o -iname '*.kmp' -o -iname '*.pcm' -o -iname '*.stg' -o -iname '*.ksc' -o -iname '*.pdc' \))\""
+expect 1 "$B/aiarranger-resources" kst-native selective-plan --source "$DEMO_KST" --select "$DEMO_REL" --export-plan "$DEMO_KST/overlap-d18"
+
 rm -rf "$T"
 [ "$fails" -eq 0 ]
