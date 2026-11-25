@@ -175,6 +175,19 @@ struct MultisampleFingerprint {
     auto operator<=>(const MultisampleFingerprint&) const = default;
 };
 
+struct DrumSampleFingerprint {
+    graph::Id8 drumSampleId{};
+    graph::Id8 leftSampleId{};
+    uint32_t leftPcmPayloadBytes = 0;
+    bool leftPcmPresent = false;
+    bool hasRight = false;
+    graph::Id8 rightSampleId{};
+    uint32_t rightPcmPayloadBytes = 0;
+    bool rightPcmPresent = false;
+
+    auto operator<=>(const DrumSampleFingerprint&) const = default;
+};
+
 // Holds ONLY structural & cryptographic evidence for Sound equivalence.
 // Intentionally excludes Sound name and filename so matching by name/filename is structurally impossible.
 struct SoundEquivalenceProfile {
@@ -184,9 +197,11 @@ struct SoundEquivalenceProfile {
     bool analysed = false;          // true iff analysed by buildNativeGraph (not unanalysed)
     std::string unanalysedReason;   // "" when analysed, else Gap name / KmpUnavailable / Oc31KmpUnsupported
     size_t unresolvedSlotCount = 0; // MUST be 0 for equivalence proof
-    bool isDrumKit = false;         // USERDK bodies are unparsed -> always InsufficientEvidence
-    bool kmpComplete = false;       // true iff raw Pa5X RAM.KMP parsed and zone/PCM tables are populated
+    bool isDrumKit = false;
+    bool hasDuplicateDrumSampleId = false; // true if any referenced DrumSample Id8 appears >1x in RAM.KMP -> InsufficientEvidence
+    bool kmpComplete = false;       // true iff raw Pa5X RAM.KMP parsed and zone/drum/PCM tables are populated
     std::vector<MultisampleFingerprint> referencedMultisamples; // canonically sorted by multisampleId
+    std::vector<DrumSampleFingerprint> referencedDrumSamples;   // canonically sorted by drumSampleId
     std::string equivalenceDigest;  // deterministic 64-hex composite digest ("" unless provablyComparable())
 
     bool allReferencedSamplesHavePcm() const {
@@ -198,11 +213,24 @@ struct SoundEquivalenceProfile {
         return true;
     }
 
+    bool allReferencedDrumSamplesHavePcm() const {
+        for (const auto& ds : referencedDrumSamples) {
+            if (!ds.leftPcmPresent || ds.leftPcmPayloadBytes == 0) return false;
+            if (ds.hasRight && (!ds.rightPcmPresent || ds.rightPcmPayloadBytes == 0)) return false;
+        }
+        return true;
+    }
+
     bool provablyComparable() const {
-        return decoded && analysed && !isDrumKit && kmpComplete &&
-               unresolvedSlotCount == 0 && kindChunkId != 0 &&
-               bodySha256.size() == 64 && !referencedMultisamples.empty() &&
-               allReferencedSamplesHavePcm();
+        if (!decoded || !analysed || !kmpComplete || unresolvedSlotCount != 0 ||
+            kindChunkId == 0 || bodySha256.size() != 64) {
+            return false;
+        }
+        if (isDrumKit) {
+            return !hasDuplicateDrumSampleId && !referencedDrumSamples.empty() &&
+                   allReferencedDrumSamplesHavePcm();
+        }
+        return !referencedMultisamples.empty() && allReferencedSamplesHavePcm();
     }
 };
 
@@ -255,25 +283,41 @@ inline void hashStr(Sha256& h, const std::string& s) {
 }
 
 inline std::string insufficientEvidenceReason(const SoundEquivalenceProfile& p, const char* side) {
-    if (p.isDrumKit) return std::string(side) + " is a User Drum Kit (USERDK body unparsed)";
     if (!p.decoded) return std::string(side) + " Sound payload is undecoded";
     if (!p.kmpComplete) return std::string(side) + " RAM.KMP or PCM metadata is unavailable";
     if (!p.analysed) {
+        if (p.isDrumKit) {
+            return std::string(side) + " User Drum Kit is unanalysed" +
+                   (p.unanalysedReason.empty() ? " (USERDK body unparsed)" : " (" + p.unanalysedReason + ")");
+        }
         return std::string(side) + " Sound is unanalysed" +
                (p.unanalysedReason.empty() ? "" : " (" + p.unanalysedReason + ")");
     }
     if (p.unresolvedSlotCount > 0) {
-        return std::string(side) + " Sound has " + std::to_string(p.unresolvedSlotCount) +
-               " unresolved oscillator slot(s)";
+        return std::string(side) + (p.isDrumKit ? " User Drum Kit has " : " Sound has ") +
+               std::to_string(p.unresolvedSlotCount) +
+               (p.isDrumKit ? " unresolved drum layer(s)" : " unresolved oscillator slot(s)");
     }
     if (p.kindChunkId == 0 || p.bodySha256.size() != 64) {
         return std::string(side) + " Sound lacks chunk kind or decoded body SHA-256";
     }
-    if (p.referencedMultisamples.empty()) {
-        return std::string(side) + " Sound has no verified RAM Multisample references";
-    }
-    if (!p.allReferencedSamplesHavePcm()) {
-        return std::string(side) + " Sound references Sample(s) with missing PCM payload metadata";
+    if (p.isDrumKit) {
+        if (p.hasDuplicateDrumSampleId) {
+            return std::string(side) + " User Drum Kit references duplicate RAM.KMP DrumSample ID8";
+        }
+        if (p.referencedDrumSamples.empty()) {
+            return std::string(side) + " User Drum Kit has no verified RAM DrumSample references";
+        }
+        if (!p.allReferencedDrumSamplesHavePcm()) {
+            return std::string(side) + " User Drum Kit references DrumSample(s) with missing PCM payload metadata";
+        }
+    } else {
+        if (p.referencedMultisamples.empty()) {
+            return std::string(side) + " Sound has no verified RAM Multisample references";
+        }
+        if (!p.allReferencedSamplesHavePcm()) {
+            return std::string(side) + " Sound references Sample(s) with missing PCM payload metadata";
+        }
     }
     return std::string(side) + " Sound lacks sufficient structural evidence";
 }
@@ -470,7 +514,7 @@ inline std::string applyTargetPathOverride(const std::string& sourceRelPath,
 
 }  // namespace conflict_detail
 
-// Canonicalizes `p.referencedMultisamples` (sorted unique by multisampleId) and computes `p.equivalenceDigest`.
+// Canonicalizes `p.referencedMultisamples` / `p.referencedDrumSamples` and computes `p.equivalenceDigest`.
 // Digest is non-empty ONLY when `p.provablyComparable()` is true.
 inline std::string finalizeSoundEquivalenceProfile(SoundEquivalenceProfile& p) {
     std::sort(p.referencedMultisamples.begin(), p.referencedMultisamples.end(),
@@ -481,26 +525,50 @@ inline std::string finalizeSoundEquivalenceProfile(SoundEquivalenceProfile& p) {
         std::unique(p.referencedMultisamples.begin(), p.referencedMultisamples.end()),
         p.referencedMultisamples.end());
 
+    std::sort(p.referencedDrumSamples.begin(), p.referencedDrumSamples.end());
+    p.referencedDrumSamples.erase(
+        std::unique(p.referencedDrumSamples.begin(), p.referencedDrumSamples.end()),
+        p.referencedDrumSamples.end());
+
     if (!p.provablyComparable()) {
         p.equivalenceDigest.clear();
         return {};
     }
 
     Sha256 h;
-    const std::string domain = "aiarranger-sound-equiv/1";
-    conflict_detail::hashStr(h, domain);
-    conflict_detail::hashU32Be(h, p.kindChunkId);
-    conflict_detail::hashStr(h, p.bodySha256);
-    conflict_detail::hashU64Be(h, static_cast<uint64_t>(p.referencedMultisamples.size()));
-    for (const auto& ms : p.referencedMultisamples) {
-        h.update(ms.multisampleId.data(), ms.multisampleId.size());
-        conflict_detail::hashU64Be(h, static_cast<uint64_t>(ms.zones.size()));
-        for (const auto& z : ms.zones) {
-            const uint8_t flags[2] = {z.topKey, static_cast<uint8_t>(z.hasSample ? 1u : 0u)};
-            h.update(flags, 2);
-            if (z.hasSample) {
-                h.update(z.sampleId.data(), z.sampleId.size());
-                conflict_detail::hashU32Be(h, z.pcmPayloadBytes);
+    if (p.isDrumKit) {
+        const std::string domain = "aiarranger-drumkit-equiv/1";
+        conflict_detail::hashStr(h, domain);
+        conflict_detail::hashU32Be(h, p.kindChunkId);
+        conflict_detail::hashStr(h, p.bodySha256);
+        conflict_detail::hashU64Be(h, static_cast<uint64_t>(p.referencedDrumSamples.size()));
+        for (const auto& ds : p.referencedDrumSamples) {
+            h.update(ds.drumSampleId.data(), ds.drumSampleId.size());
+            h.update(ds.leftSampleId.data(), ds.leftSampleId.size());
+            conflict_detail::hashU32Be(h, ds.leftPcmPayloadBytes);
+            const uint8_t hasR = ds.hasRight ? 1u : 0u;
+            h.update(&hasR, 1);
+            if (ds.hasRight) {
+                h.update(ds.rightSampleId.data(), ds.rightSampleId.size());
+                conflict_detail::hashU32Be(h, ds.rightPcmPayloadBytes);
+            }
+        }
+    } else {
+        const std::string domain = "aiarranger-sound-equiv/1";
+        conflict_detail::hashStr(h, domain);
+        conflict_detail::hashU32Be(h, p.kindChunkId);
+        conflict_detail::hashStr(h, p.bodySha256);
+        conflict_detail::hashU64Be(h, static_cast<uint64_t>(p.referencedMultisamples.size()));
+        for (const auto& ms : p.referencedMultisamples) {
+            h.update(ms.multisampleId.data(), ms.multisampleId.size());
+            conflict_detail::hashU64Be(h, static_cast<uint64_t>(ms.zones.size()));
+            for (const auto& z : ms.zones) {
+                const uint8_t flags[2] = {z.topKey, static_cast<uint8_t>(z.hasSample ? 1u : 0u)};
+                h.update(flags, 2);
+                if (z.hasSample) {
+                    h.update(z.sampleId.data(), z.sampleId.size());
+                    conflict_detail::hashU32Be(h, z.pcmPayloadBytes);
+                }
             }
         }
     }
@@ -514,7 +582,8 @@ struct EquivalenceResult {
 };
 
 // Strict 3-way Sound equivalence comparison.
-// NEVER matches by Sound name or filename. Fail-closed to InsufficientEvidence whenever either side is unanalysed.
+// NEVER matches by Sound name or filename. Fail-closed to InsufficientEvidence whenever either side is unanalysed,
+// references duplicate DrumSample IDs, has unresolved slots, or lacks PCM metadata.
 inline EquivalenceResult compareSoundEquivalence(const SoundEquivalenceProfile& src,
                                                  const SoundEquivalenceProfile& dst) {
     if (!src.provablyComparable()) {
@@ -525,11 +594,36 @@ inline EquivalenceResult compareSoundEquivalence(const SoundEquivalenceProfile& 
         return {EquivalenceVerdict::InsufficientEvidence,
                 conflict_detail::insufficientEvidenceReason(dst, "target")};
     }
+    if (src.isDrumKit != dst.isDrumKit) {
+        return {EquivalenceVerdict::Different, "one side is a User Drum Kit and the other is a melodic User Sound"};
+    }
     if (src.kindChunkId != dst.kindChunkId) {
         return {EquivalenceVerdict::Different, "Sound chunk kind differs"};
     }
     if (src.bodySha256 != dst.bodySha256) {
         return {EquivalenceVerdict::Different, "decoded Sound body SHA-256 differs"};
+    }
+
+    if (src.isDrumKit) {
+        auto sortedDs = [](const SoundEquivalenceProfile& p) {
+            std::vector<DrumSampleFingerprint> v = p.referencedDrumSamples;
+            std::sort(v.begin(), v.end());
+            v.erase(std::unique(v.begin(), v.end()), v.end());
+            return v;
+        };
+        const auto sDs = sortedDs(src);
+        const auto dDs = sortedDs(dst);
+        if (sDs.size() != dDs.size()) {
+            return {EquivalenceVerdict::Different, "referenced DrumSample count differs"};
+        }
+        for (size_t i = 0; i < sDs.size(); ++i) {
+            if (sDs[i] != dDs[i]) {
+                return {EquivalenceVerdict::Different,
+                        "referenced DrumSample fingerprint (drumSampleId, L/R sampleId8, PCM payload size) differs"};
+            }
+        }
+        return {EquivalenceVerdict::Identical,
+                "proven identical (chunk kind, decoded body SHA-256, and full analysed DrumSample/Sample/PCM fingerprint match)"};
     }
 
     auto sortedMs = [](const SoundEquivalenceProfile& p) {
@@ -960,8 +1054,11 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
         map.partialInspect.kmpError = "RAM.KMP is absent";
     }
 
-    // 7. Build Multisample fingerprints from raw Pa5xKmp + PcmInventory when KMP parsed cleanly
+    // 7. Build Multisample & DrumSample fingerprints from raw Pa5xKmp + PcmInventory when KMP parsed cleanly
     std::vector<MultisampleFingerprint> msFingerprints;
+    std::vector<DrumSampleFingerprint> drumFingerprints;
+    std::set<graph::Id8> duplicateDrumIdSet;
+    for (const auto& dup : kmpDiag.duplicateDrumIds) duplicateDrumIdSet.insert(dup.id);
     if (kmpOk) {
         msFingerprints.reserve(rawKmp.multisamples.size());
         for (size_t mi = 0; mi < rawKmp.multisamples.size(); ++mi) {
@@ -986,25 +1083,65 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
             }
             msFingerprints.push_back(std::move(fp));
         }
+
+        drumFingerprints.reserve(rawKmp.drums.size());
+        for (size_t di = 0; di < rawKmp.drums.size(); ++di) {
+            const auto& dr = rawKmp.drums[di];
+            DrumSampleFingerprint df;
+            df.drumSampleId = dr.id;
+            if (dr.left != panative::kNoIndex && dr.left < rawKmp.samples.size()) {
+                df.leftSampleId = rawKmp.samples[dr.left].id;
+                const auto pit = pcm.byId.find(df.leftSampleId);
+                if (pit != pcm.byId.end() && pit->second.payloadBytes > 0) {
+                    df.leftPcmPresent = true;
+                    df.leftPcmPayloadBytes = pit->second.payloadBytes;
+                }
+            }
+            if (dr.right != panative::kNoIndex && dr.right < rawKmp.samples.size()) {
+                df.hasRight = true;
+                df.rightSampleId = rawKmp.samples[dr.right].id;
+                const auto pit = pcm.byId.find(df.rightSampleId);
+                if (pit != pcm.byId.end() && pit->second.payloadBytes > 0) {
+                    df.rightPcmPresent = true;
+                    df.rightPcmPayloadBytes = pit->second.payloadBytes;
+                }
+            }
+            drumFingerprints.push_back(df);
+        }
     }
 
-    // 8. Run layout fitting & native graph construction when KMP parsed cleanly
+    // 8. Run layout fitting (melodic + USERDK) & native graph construction when KMP parsed cleanly
     graph::NativeRefReport refRep;
     std::optional<graph::Graph> nativeGraph;
     if (kmpOk) {
         graph::LayoutTable layouts = opts.downstream.layouts;
-        if (opts.downstream.allowFitLayout) {
-            std::map<uint32_t, std::vector<const graph::DecodedSound*>> byKind;
-            for (const auto& s : decodedSounds) byKind[s.kind].push_back(&s);
-            for (const auto& [kind, items] : byKind) {
-                if (layouts.count(kind)) continue;
-                if (auto fitted = graph::fitLayout(items, kmpIndex, opts.downstream.fitMinItems)) {
-                    layouts.emplace(kind, *fitted);
+        graph::DrumKitLayoutTable drumLayouts = opts.downstream.drumLayouts;
+        if (opts.downstream.allowFitLayout || opts.downstream.allowFitDrumKitLayout) {
+            std::map<uint32_t, std::vector<const graph::DecodedSound*>> melodicByKind;
+            std::map<uint32_t, std::vector<const graph::DecodedSound*>> drumByKind;
+            for (const auto& s : decodedSounds) {
+                if (graph::isDrumKitSound(s)) drumByKind[s.kind].push_back(&s);
+                else melodicByKind[s.kind].push_back(&s);
+            }
+            if (opts.downstream.allowFitLayout) {
+                for (const auto& [kind, items] : melodicByKind) {
+                    if (layouts.count(kind)) continue;
+                    if (auto fitted = graph::fitLayout(items, kmpIndex, opts.downstream.fitMinItems)) {
+                        layouts.emplace(kind, *fitted);
+                    }
+                }
+            }
+            if (opts.downstream.allowFitDrumKitLayout) {
+                for (const auto& [kind, items] : drumByKind) {
+                    if (drumLayouts.count(kind)) continue;
+                    if (auto fitted = graph::fitDrumKitLayout(items, kmpIndex)) {
+                        drumLayouts.emplace(kind, *fitted);
+                    }
                 }
             }
         }
         std::string gerr;
-        nativeGraph = graph::buildNativeGraph(kmpIndex, decodedSounds, layouts, refRep, &gerr);
+        nativeGraph = graph::buildNativeGraph(kmpIndex, decodedSounds, layouts, drumLayouts, refRep, &gerr);
         if (!nativeGraph) {
             containerErrors.push_back("graph build failed: " + gerr);
         }
@@ -1091,26 +1228,16 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
         if (!sm.decoded) {
             eq.analysed = false;
             eq.unanalysedReason = "DecodeFailed";
-        } else if (addr.isDrumKit) {
-            // Short-circuit USERDK before melodic layout analysis: Drum Kit -> DrumSample bodies are unparsed,
-            // so a synthetic USERDK matching a melodic stride must still count as unanalysedDrumKits (never analysedSounds).
-            eq.analysed = false;
-            const auto git = unanalysedGapById.find(sid);
-            if (git != unanalysedGapById.end()) {
-                eq.unanalysedReason = graph::gapName(git->second);
-            } else if (!kmpOk || !nativeGraph.has_value()) {
-                eq.unanalysedReason = map.partialInspect.kmpIsOc31 ? "Oc31KmpUnsupported" : "KmpUnavailable";
-            } else {
-                eq.unanalysedReason = "DrumKitBodyUnparsed";
-            }
-            ++map.coverage.unanalysedDrumKits;
         } else if (!kmpOk || !nativeGraph.has_value()) {
             eq.analysed = false;
             eq.unanalysedReason = map.partialInspect.kmpIsOc31 ? "Oc31KmpUnsupported" : "KmpUnavailable";
+            if (addr.isDrumKit) ++map.coverage.unanalysedDrumKits;
         } else if (const auto git = unanalysedGapById.find(sid); git != unanalysedGapById.end()) {
             eq.analysed = false;
             eq.unanalysedReason = graph::gapName(git->second);
-            if (git->second == graph::Gap::NoKnownReference) {
+            if (addr.isDrumKit) {
+                ++map.coverage.unanalysedDrumKits;
+            } else if (git->second == graph::Gap::NoKnownReference) {
                 ++map.coverage.unanalysedNoKnownRef;
             } else {
                 ++map.coverage.unanalysedUnknownKind;
@@ -1118,11 +1245,17 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
         } else {
             eq.analysed = true;
             ++map.coverage.analysedSounds;
-            // Collect referenced Multisample fingerprints via Graph closure
+            // Collect referenced Multisample or DrumSample fingerprints via Graph closure
             const auto cl = nativeGraph->closure({sid});
             for (const auto& dep : cl) {
-                if (dep.kind == graph::Kind::Multisample && dep.number < msFingerprints.size()) {
+                if (!addr.isDrumKit && dep.kind == graph::Kind::Multisample && dep.number < msFingerprints.size()) {
                     eq.referencedMultisamples.push_back(msFingerprints[dep.number]);
+                } else if (addr.isDrumKit && dep.kind == graph::Kind::DrumSample && dep.number < drumFingerprints.size()) {
+                    const auto& df = drumFingerprints[dep.number];
+                    if (duplicateDrumIdSet.count(df.drumSampleId) > 0) {
+                        eq.hasDuplicateDrumSampleId = true;
+                    }
+                    eq.referencedDrumSamples.push_back(df);
                 }
             }
         }
@@ -2150,7 +2283,7 @@ inline CollisionMatrixResult evaluateCollisionMatrix(const TargetOccupancyMap& t
 
         // No proven-identical Sound anywhere in target (either Different or InsufficientEvidence)
         const bool isInsufficient = (eq.verdict == EquivalenceVerdict::InsufficientEvidence);
-        if (req.sourceAddress.isDrumKit || targetEntry->address.isDrumKit) {
+        if (isInsufficient && (req.sourceAddress.isDrumKit || targetEntry->address.isDrumKit)) {
             result.diagnostics.push_back({
                 DiagnosticCategory::UNSUPPORTED_FORMAT,
                 diag_code::kDrumkitBodyUnparsed,

@@ -6,7 +6,8 @@
 // Layout (all integers big-endian) OBSERVED and checked on ONE owner Pa5X backup (research: pa5x-kst/KMP_MULTISAMPLE_ANALYSIS.md):
 //   header 18 B: u16 0x0103, u32 samples, u32 drum records, u32 zones, u32 multisamples
 //   samples   122 B each: name @75 (32), ID @107 (8), rate u16 @119
-//   drum recs 126 B each: name @0 (32), L sample index u32 @32, R sample index u32 @36 (0xFFFFFFFF = none), ID @118 (8)
+//   drum recs 126 B each: name @0 (32), L sample index u32 @32, R sample index u32 @36 (0xFFFFFFFF = none),
+//                         advisory drumFamilyByte @113 (INFERRED, 0..7/0xFF; never used for edges/equivalence), ID @118 (8)
 //   zones      16 B each: sample index u32 @0 (0xFFFFFFFF = empty zone), top key @10
 //   multisamples 176 B each: name @0 (32), first zone u32 @32, zone count u8 @166, ID @168 (8)
 // The four sections must fill the item to the byte. Every index is range-checked; any inconsistency is an error, never a
@@ -25,7 +26,14 @@ constexpr uint32_t kPa5xKmpChunkId = 0x11080018u;
 constexpr uint32_t kNoIndex = 0xFFFFFFFFu;
 
 struct Pa5xSample { std::array<uint8_t, 8> id{}; std::string name; uint16_t rate = 0; };
-struct Pa5xDrumRecord { std::array<uint8_t, 8> id{}; std::string name; uint32_t left = 0, right = kNoIndex; };
+struct Pa5xDrumRecord {
+    std::array<uint8_t, 8> id{};
+    std::string name;
+    uint32_t left = 0, right = kNoIndex;
+    // INFERRED advisory metadata only (+113 in 126-byte RAM.KMP drum record: 0=B,1=S,2=H,3=T,4=C,5=L,6=E,7=X,0xFF=None).
+    // NEVER used to infer graph edges or equivalence.
+    uint8_t drumFamilyByte = 0xFF;
+};
 struct Pa5xZone { uint32_t sample = kNoIndex; uint8_t topKey = 0; };
 struct Pa5xMultisample { std::array<uint8_t, 8> id{}; std::string name; uint32_t firstZone = 0; uint8_t zoneCount = 0; };
 
@@ -83,7 +91,7 @@ inline bool parsePa5xKmp(const uint8_t* p, size_t n, Pa5xKmp& out, std::string* 
     }
     for (uint64_t i = 0; i < nd; ++i) {
         const uint8_t* q = D + kDrum * i;
-        Pa5xDrumRecord d{id8(q + 118), name32(q), be32(q + 32), be32(q + 36)};
+        Pa5xDrumRecord d{id8(q + 118), name32(q), be32(q + 32), be32(q + 36), q[113]};
         if (d.left >= ns) return fail("drum record " + std::to_string(i) + ": left sample index out of range");
         if (d.right != kNoIndex && d.right >= ns) return fail("drum record " + std::to_string(i) + ": right sample index out of range");
         r.drums.push_back(std::move(d));

@@ -49,7 +49,14 @@ static_assert(panative::kNoIndex == kNoZoneSample, "Pa5xKmp kNoIndex must match 
 struct KmpIndex {                       // filled from parsePa5xKmp() via kmpIndexFromPa5x(), or directly by caller
     struct SampleRow { Id8 id{}; std::string name; std::optional<SampleInfo> info; };   // no info -> the Sample node is absent (dangling)
     struct Multi { Id8 id{}; std::string name; std::vector<uint32_t> zoneSamples; };    // sample-table index per zone, or kNoZoneSample
-    struct Drum { Id8 id{}; std::string name; uint32_t leftSample = kNoZoneSample; uint32_t rightSample = kNoZoneSample; };
+    struct Drum {
+        Id8 id{};
+        std::string name;
+        uint32_t leftSample = kNoZoneSample;
+        uint32_t rightSample = kNoZoneSample;
+        // INFERRED advisory metadata (+113 in RAM.KMP drum record: 0=B..7=X, 0xFF=None); NEVER used for edges/equivalence.
+        uint8_t drumFamilyByte = 0xFF;
+    };
     std::vector<SampleRow> samples;
     std::vector<Multi> multisamples;
     std::set<Id8> drumIds;              // drum-sample IDs: known objects, never treated as multisample IDs
@@ -57,7 +64,7 @@ struct KmpIndex {                       // filled from parsePa5xKmp() via kmpInd
 };
 
 struct DecodedSound {
-    std::string bank;                   // e.g. "USER03": scope of the Sound
+    std::string bank;                   // e.g. "USER03" or "USERDK01": scope of the Sound
     uint32_t number = 0;                // position inside the bank
     uint32_t kind = 0;                  // chunk id, e.g. 0x10050038
     std::string name;
@@ -67,15 +74,81 @@ struct DecodedSound {
 struct RecordLayout { uint32_t base = 0, record = 0, pairOffset = 0; };   // size = base + n * record; slots at +0 and +pairOffset
 using LayoutTable = std::map<uint32_t, RecordLayout>;
 
-enum class Gap { NoLayoutForKind, SizeDoesNotFit, NoKnownReference, TooManyRecords, NumberOutOfRange, DecodeFailed };
+// Verified 3-section variable-layer USERDK Drum Kit layout:
+//   [Header (headerBytes)] + [128-Key Table (128 * keyStride)] + [Layer Array (L * layerStride)]
+// Every kit is validated against exact header mode-flag bit 7, 128-key cumEnd running sum, key[127] bit-15
+// hasId8 sentinel, 8-byte monotonic velocity top thresholds (<= 127), and exact byte-length closure.
+struct DrumKitLayout {
+    uint32_t headerBytes = 0;       // header bytes before the 128-key table
+    uint32_t keyStride = 0;         // bytes per key record (18, 20, or 22)
+    uint32_t layerCountOffset = 0;  // offset of u8 layerCount within key record (0 or 2)
+    uint32_t layerStride = 0;       // bytes per layer record (20, 30, 32, or 33 when hasId8; 22 when !hasId8)
+    uint32_t modeFlagOffset = 0;    // offset of mode flag byte in header (bit 7 == 1 for DrumKit)
+    uint32_t velOffset = 0;         // offset of 8-byte velocity top-threshold array in key record (0 => keyStride - 10)
+    bool hasId8 = true;             // true iff key[127].cumEnd bit 15 (0x8000) is set and layer ends with 8-byte ID8
+};
+using DrumKitLayoutTable = std::map<uint32_t, DrumKitLayout>;
+
+// Read-only per-layer summary for a parsed USERDK key (foundation for future Drum Mapping Engine).
+// Verified structural fields and INFERRED advisory fields are strictly separated.
+struct DrumKitLayerSummary {
+    uint8_t layerIndex = 0;
+    uint8_t sourceBank = 0;                   // VERIFIED: 0=ROM, 1=RAM; UNVERIFIED_HYPOTHESIS: 2=Bank2/Expansion
+    uint16_t tableIndex = 0;                  // VERIFIED for RAM (matches RAM.KMP drum index); INFERRED for ROM
+    uint8_t velLo = 1;                        // VERIFIED: lower velocity bound derived from monotonic velTop[]
+    uint8_t velHi = 127;                      // VERIFIED: upper velocity bound velTop[layerIndex]
+    bool isRam = false;                       // true iff sourceBank == 1
+    bool resolved = false;                    // true iff resolved to a verified RAM.KMP DrumSample
+    uint32_t drumSampleIndex = kNoZoneSample; // positional RAM.KMP DrumSample index when resolved
+    Id8 drumSampleId{};                       // trailing 8-byte DrumSample ID (all-0 for ROM/Bank2)
+    // Advisory INFERRED metadata ONLY (NEVER used to infer graph edges or equivalence):
+    uint8_t advisoryDrumFamilyByte = 0xFF;    // INFERRED: RAM.KMP DrumSample +113 (0=B..7=X, 0xFF=None)
+    std::optional<uint16_t> advisoryLayerGainRaw; // INFERRED: u16 BE layer gain in 1005..1007 (0x8000 = 0 dB)
+    std::optional<int8_t> advisoryTranspose;      // INFERRED: semitones
+    std::optional<int8_t> advisoryFineTune;       // INFERRED: cents (-99..+99)
+};
+
+// Read-only per-key summary for MIDI note 0..127 of a parsed USERDK kit.
+struct DrumKitKeySummary {
+    uint8_t midiNote = 0;                     // VERIFIED: direct 0-indexed MIDI note 0..127 (C-1..G9)
+    uint8_t layerCount = 0;                   // VERIFIED: 1..8
+    std::array<uint8_t, 8> velTop{};          // VERIFIED: 8-byte monotonic velocity top thresholds (<= 127)
+    std::vector<DrumKitLayerSummary> layers;
+    // Advisory INFERRED metadata ONLY (NEVER used to infer graph edges or equivalence):
+    std::optional<uint16_t> advisoryKeyGainRaw;   // INFERRED: u16 BE key gain in 1005..1007
+    uint8_t advisoryPan = 64;                 // INFERRED: 0..127 (64 = Center)
+    uint8_t advisoryExclusiveGroup = 0;       // INFERRED: 0 = None, 1..127 (Choke Group)
+};
+
+// Read-only 128-key map for one parsed USERDK kit.
+struct DrumKitKeyMap {
+    ResourceId sound;
+    uint32_t kindChunkId = 0;
+    uint32_t totalLayers = 0;
+    size_t ramDrumLayers = 0;
+    size_t romDrumLayers = 0;                 // sourceBank == 0 && ID8 == 0
+    size_t nonRamDrumLayers = 0;              // sourceBank == 2 && ID8 == 0 (UNVERIFIED_HYPOTHESIS Bank2)
+    size_t danglingRamLayers = 0;
+    size_t disambiguatedDuplicateLayers = 0;
+    std::array<DrumKitKeySummary, 128> keys{};
+};
+
+// Read-only interface foundation for future Drum Mapping Engine (Track B Q3).
+struct IDrumKitKeyMap {
+    virtual ~IDrumKitKeyMap() = default;
+    virtual const DrumKitKeyMap* findDrumKitKeyMap(const ResourceId& soundId) const = 0;
+};
+
+enum class Gap { NoLayoutForKind, SizeDoesNotFit, NoKnownReference, TooManyRecords, NumberOutOfRange, DecodeFailed, NoId8InDrumLayers };
 inline const char* gapName(Gap g) {
     switch (g) {
-        case Gap::NoLayoutForKind:  return "NoLayoutForKind";
-        case Gap::SizeDoesNotFit:   return "SizeDoesNotFit";
-        case Gap::NoKnownReference: return "NoKnownReference";
-        case Gap::TooManyRecords:   return "TooManyRecords";
-        case Gap::NumberOutOfRange: return "NumberOutOfRange";
-        case Gap::DecodeFailed:     return "DecodeFailed";
+        case Gap::NoLayoutForKind:   return "NoLayoutForKind";
+        case Gap::SizeDoesNotFit:    return "SizeDoesNotFit";
+        case Gap::NoKnownReference:  return "NoKnownReference";
+        case Gap::TooManyRecords:    return "TooManyRecords";
+        case Gap::NumberOutOfRange:  return "NumberOutOfRange";
+        case Gap::DecodeFailed:      return "DecodeFailed";
+        case Gap::NoId8InDrumLayers: return "NoId8InDrumLayers";
     }
     return "Unknown";
 }
@@ -83,19 +156,26 @@ struct Unanalysed { ResourceId sound; Gap why; };
 struct UnresolvedSlot {
     ResourceId sound;
     uint32_t record = 0, slot = 0;
-    bool wrongKind = false;           // ID belongs to another KMP object kind (drum/sample), not a multisample ID
+    bool wrongKind = false;           // ID belongs to another KMP object kind (drum/sample/multisample)
     bool inUnanalysedSound = false;   // true when the Sound had Gap::NoKnownReference (layout may not apply)
 };
 
 struct NativeRefReport {
     size_t sounds = 0, analysed = 0, emptySlots = 0;
+    size_t drumKitsAnalysed = 0;
+    size_t ramDrumLayers = 0;
+    size_t romDrumLayers = 0;
+    size_t nonRamDrumLayers = 0;
+    size_t disambiguatedDuplicateDrumIds = 0;
     std::vector<Unanalysed> unanalysed;
     std::vector<UnresolvedSlot> unresolved;
+    std::vector<std::string> drumDiagnostics;
     bool coverageComplete() const { return unanalysed.empty() && unresolved.empty(); }   // still no delete proof: see header note
 };
 
 namespace native_detail {
 inline Id8 id8(const uint8_t* p) { Id8 r; std::copy(p, p + 8, r.begin()); return r; }
+inline uint16_t be16(const uint8_t* p) { return static_cast<uint16_t>((uint32_t(p[0]) << 8) | uint32_t(p[1])); }
 inline bool allSame(const Id8& v, uint8_t b) { return std::all_of(v.begin(), v.end(), [b](uint8_t x) { return x == b; }); }
 inline std::string hexId(const Id8& v) {
     static const char* d = "0123456789abcdef";
@@ -107,6 +187,9 @@ inline std::string hexId(const Id8& v) {
 inline std::string upperAscii(std::string s) {
     for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     return s;
+}
+inline bool isDrumKitBank(const std::string& bank) {
+    return upperAscii(bank).rfind("USERDK", 0) == 0;
 }
 inline bool endsWithUpper(const std::string& s, const char* upperSuffix) {
     const size_t n = std::strlen(upperSuffix);
@@ -371,9 +454,277 @@ inline bool readKorfMetadataAt(int dirFd, const char* name, size_t maxFileBytes,
 }
 }  // namespace native_detail
 
-// Derive a layout for one Sound kind from the data (the research method): items holding only multisample IDs; base = modal
-// offset of the first ID; record = largest r <= min(size-base) dividing every (size-base) (limit: items that all hold >= 2
-// records give a multiple of the true size); pairOffset = most common non-zero (offset-base) % r. Needs >= minItems items.
+// Known verified variable-layer USERDK layouts across 10 chunk kinds (07000238, 07000338, 10000038..10070038).
+// Legacy single-layer 07000018/07000038 (fixed 4,322 B) and unknown/16-layer formats intentionally return nullopt.
+// Never used blindly: every candidate MUST pass validateDrumKitBody()'s 128-key running-sum, 0x8000 sentinel,
+// 8-byte monotonic velocity, mode-flag bit-7, and exact byte-length closure checks.
+inline std::optional<DrumKitLayout> knownDrumKitLayout(uint32_t kind) {
+    switch (kind) {
+        case 0x07000238u: return DrumKitLayout{250, 18, 0, 20, 16, 0, true};
+        case 0x07000338u: return DrumKitLayout{259, 18, 0, 20, 16, 0, true};
+        case 0x10000038u: return DrumKitLayout{362, 18, 0, 20, 18, 0, true};
+        case 0x10010038u: return DrumKitLayout{367, 18, 0, 20, 18, 0, true};
+        case 0x10020038u: return DrumKitLayout{518, 18, 0, 30, 18, 0, true};
+        case 0x10030038u: return DrumKitLayout{502, 18, 0, 30,  2, 0, true};
+        case 0x10040038u: return DrumKitLayout{510, 18, 0, 30,  2, 0, true};
+        case 0x10050038u: return DrumKitLayout{514, 20, 2, 32,  2, 0, true};
+        case 0x10060038u: return DrumKitLayout{516, 20, 2, 32,  2, 0, true};
+        case 0x10070038u: return DrumKitLayout{653, 22, 2, 33,  2, 0, true};
+        default: return std::nullopt;
+    }
+}
+
+// Fail-closed structural validator for one decoded USERDK body against `L`.
+// All arithmetic is done in uint64_t / size_t before any buffer access.
+// Returns true iff every structural invariant holds AND key[127].cumEnd carries the 0x8000 hasId8 sentinel.
+// On failure, sets `failGapOut`:
+//   - Gap::NoId8InDrumLayers when all 128-key invariants hold with bit-15 == 0 and exact no-ID8 layer stride (e.g. OC32 10030038)
+//   - Gap::NoLayoutForKind   when `L` itself has invalid geometry
+//   - Gap::SizeDoesNotFit    on any size, mode-flag, lc, cumEnd, sentinel, or velocity invariant violation.
+inline bool validateDrumKitBody(const std::vector<uint8_t>& body, const DrumKitLayout& L,
+                                uint32_t& totalLayersOut, bool& hasId8Out, Gap& failGapOut) {
+    totalLayersOut = 0;
+    hasId8Out = false;
+    failGapOut = Gap::SizeDoesNotFit;
+    if (L.keyStride < 12u || L.keyStride > 64u || L.layerCountOffset >= L.keyStride - 2u ||
+        L.headerBytes == 0u || L.modeFlagOffset >= L.headerBytes) {
+        failGapOut = Gap::NoLayoutForKind;
+        return false;
+    }
+    const uint32_t velOff = L.velOffset != 0u ? L.velOffset : (L.keyStride - 10u);
+    if (velOff > L.keyStride - 10u) {
+        failGapOut = Gap::NoLayoutForKind;
+        return false;
+    }
+    const uint32_t minLayerStride = L.hasId8 ? 12u : 4u;
+    if (L.layerStride < minLayerStride || L.layerStride > 256u) {
+        failGapOut = Gap::NoLayoutForKind;
+        return false;
+    }
+    const uint64_t prefix = uint64_t(L.headerBytes) + 128ull * uint64_t(L.keyStride);
+    if (body.size() < prefix) {
+        failGapOut = Gap::SizeDoesNotFit;
+        return false;
+    }
+    if ((body[L.modeFlagOffset] & 0x80u) == 0u) {
+        failGapOut = Gap::SizeDoesNotFit;
+        return false;
+    }
+    uint32_t cum = 0;
+    bool flag8000 = false;
+    for (uint32_t k = 0; k < 128u; ++k) {
+        const uint8_t* kr = body.data() + size_t(L.headerBytes) + size_t(k) * size_t(L.keyStride);
+        const uint8_t lc = kr[L.layerCountOffset];
+        if (lc == 0u || lc > 8u) {
+            failGapOut = Gap::SizeDoesNotFit;
+            return false;
+        }
+        cum += lc;
+        const uint16_t rawEnd = native_detail::be16(kr + L.keyStride - 2u);
+        if (k < 127u) {
+            if (rawEnd != cum) {
+                failGapOut = Gap::SizeDoesNotFit;
+                return false;
+            }
+        } else {
+            flag8000 = (rawEnd & 0x8000u) != 0u;
+            if ((rawEnd & 0x7FFFu) != cum) {
+                failGapOut = Gap::SizeDoesNotFit;
+                return false;
+            }
+        }
+        for (uint32_t j = 0; j < 8u; ++j) {
+            if (kr[velOff + j] > 127u) {
+                failGapOut = Gap::SizeDoesNotFit;
+                return false;
+            }
+        }
+        for (uint32_t j = 1; j < lc; ++j) {
+            if (kr[velOff + j] < kr[velOff + j - 1u]) {
+                failGapOut = Gap::SizeDoesNotFit;
+                return false;
+            }
+        }
+    }
+    const uint64_t layerBytes = uint64_t(body.size()) - prefix;
+    if (flag8000) {
+        if (!L.hasId8) {
+            failGapOut = Gap::SizeDoesNotFit;
+            return false;
+        }
+        if (uint64_t(cum) * uint64_t(L.layerStride) != layerBytes) {
+            failGapOut = Gap::SizeDoesNotFit;
+            return false;
+        }
+        totalLayersOut = cum;
+        hasId8Out = true;
+        return true;
+    }
+    // Bit 15 == 0 on key[127].cumEnd -> check if exact no-ID8 variable-layer kit (e.g. OC32 10030038).
+    const uint64_t noIdStride = L.hasId8 ? (L.layerStride > 8u ? uint64_t(L.layerStride - 8u) : 0ull)
+                                         : uint64_t(L.layerStride);
+    if (noIdStride >= 4ull && uint64_t(cum) * noIdStride == layerBytes) {
+        totalLayersOut = cum;
+        hasId8Out = false;
+        failGapOut = Gap::NoId8InDrumLayers;
+        return false;
+    }
+    failGapOut = Gap::SizeDoesNotFit;
+    return false;
+}
+
+// Strict separation of Drum Kit Sounds vs Melodic Sounds before melodic layout fitting or oscillator parsing.
+// USERDK* banks always route to the Drum Kit path; non-USERDK banks route to Drum Kit only if their decoded body
+// is large enough for a 128-key table and has header mode-flag bit 7 set for a known drum-kit kind.
+inline bool isDrumKitSound(const DecodedSound& s) {
+    if (native_detail::isDrumKitBank(s.bank)) return true;
+    if (const auto known = knownDrumKitLayout(s.kind); known.has_value()) {
+        const uint64_t prefix = uint64_t(known->headerBytes) + 128ull * uint64_t(known->keyStride);
+        if (s.body.size() >= prefix && (s.body[known->modeFlagOffset] & 0x80u) != 0u) return true;
+    }
+    return false;
+}
+
+// Data-verified / invariant-checked USERDK Drum Kit layout fitter.
+// Never guesses: every candidate layout must satisfy all 128-key cumEnd, 0x8000 sentinel, 8-byte monotonic velocity,
+// header mode-flag bit-7, exact byte-length closure, and (when RAM DrumSample ID8s are present) exact trailing ID8 alignment.
+inline std::optional<DrumKitLayout> fitDrumKitLayout(const std::vector<const DecodedSound*>& sameKind, const KmpIndex& k) {
+    if (sameKind.empty()) return std::nullopt;
+    std::set<Id8> drumIds;
+    for (const auto& d : k.drums) drumIds.insert(d.id);
+    drumIds.insert(k.drumIds.begin(), k.drumIds.end());
+
+    auto verifyAlignmentOnHits = [&](const DecodedSound& s, const DrumKitLayout& L) -> bool {
+        if (drumIds.empty()) return true;
+        const size_t prefix = size_t(L.headerBytes) + 128u * size_t(L.keyStride);
+        if (s.body.size() < prefix + L.layerStride) return false;
+        // Verify that any RAM DrumSample ID8 appearing in the layer array lands at the trailing 8 bytes
+        // of a layer record (layerStride - 8). Do not reject sourceBank != 1 here so buildNativeGraph()
+        // can surface sourceBank/ID8 contradictions (e.g. ROM bank carrying non-zero ID8) as UnresolvedSlot.
+        size_t last = prefix;
+        bool any = false;
+        for (size_t off = prefix; off + 8u <= s.body.size(); ++off) {
+            const Id8 v = native_detail::id8(&s.body[off]);
+            if (drumIds.count(v) > 0 && (!any || off >= last + 8u)) {
+                any = true;
+                last = off;
+                if ((off - prefix) % size_t(L.layerStride) != size_t(L.layerStride) - 8u) return false;
+            }
+        }
+        return true;
+    };
+
+    // 1. Check verified structural layout candidate for known variable-layer chunk kinds.
+    const uint32_t kind = sameKind[0]->kind;
+    if (const auto known = knownDrumKitLayout(kind); known.has_value()) {
+        size_t validWithId8 = 0;
+        size_t alignedValid = 0;
+        for (const DecodedSound* s : sameKind) {
+            if (!s) continue;
+            uint32_t totalL = 0;
+            bool hasId8 = false;
+            Gap fg = Gap::SizeDoesNotFit;
+            if (validateDrumKitBody(s->body, *known, totalL, hasId8, fg)) {
+                ++validWithId8;
+                if (verifyAlignmentOnHits(*s, *known)) ++alignedValid;
+            }
+        }
+        if (validWithId8 > 0 && alignedValid == validWithId8) {
+            return *known;
+        }
+        // If no valid hasId8 kit matched the known layout, fail closed (do not fit corrupt items).
+        return std::nullopt;
+    }
+
+    // 2. Pure data-driven discovery for unknown/custom variable-layer drum-kit chunk kinds (requires RAM DrumSample hits).
+    if (drumIds.empty()) return std::nullopt;
+    struct HitItem { const DecodedSound* s; std::vector<size_t> offs; };
+    std::vector<HitItem> hitItems;
+    for (const DecodedSound* s : sameKind) {
+        if (!s || s->body.size() < 256u) continue;
+        std::vector<size_t> offs;
+        size_t last = 0;
+        bool any = false;
+        for (size_t i = 0; i + 8 <= s->body.size(); ++i) {
+            const Id8 v = native_detail::id8(&s->body[i]);
+            if (drumIds.count(v) > 0 && (!any || i >= last + 8)) {
+                any = true;
+                last = i;
+                offs.push_back(i);
+            }
+        }
+        if (offs.size() >= 2) hitItems.push_back({s, std::move(offs)});
+    }
+    if (hitItems.empty()) return std::nullopt;
+
+    size_t gStride = 0;
+    for (const auto& hi : hitItems) {
+        for (size_t i = 1; i < hi.offs.size(); ++i) {
+            const size_t diff = hi.offs[i] - hi.offs[i - 1];
+            gStride = gStride == 0 ? diff : std::gcd(gStride, diff);
+        }
+    }
+    if (gStride < 12u || gStride > 256u) return std::nullopt;
+
+    // Candidate layer strides: gStride and its divisors >= 12 that satisfy (body.size() - hitOff) % lst == 8.
+    std::vector<uint32_t> candLst;
+    for (size_t lst = 12u; lst <= gStride; ++lst) {
+        if (gStride % lst != 0) continue;
+        bool okAll = true;
+        for (const auto& hi : hitItems) {
+            for (size_t off : hi.offs) {
+                if ((hi.s->body.size() - off) % lst != 8u) { okAll = false; break; }
+            }
+            if (!okAll) break;
+        }
+        if (okAll) candLst.push_back(static_cast<uint32_t>(lst));
+    }
+    // Try largest valid stride first (smallest divisor could falsely subdivide records).
+    std::reverse(candLst.begin(), candLst.end());
+
+    const uint32_t kstCands[] = {18u, 20u, 22u};
+    const uint32_t mfoCands[] = {2u, 16u, 18u};
+    const auto& ref = hitItems.front();
+    for (uint32_t lst : candLst) {
+        // prefix must be <= ref.offs.front() - (lst - 8) and satisfy (ref.s->body.size() - prefix) % lst == 0.
+        const size_t maxPrefix = ref.offs.front() >= (lst - 8u) ? (ref.offs.front() - (lst - 8u)) : 0u;
+        for (size_t prefix = maxPrefix; prefix >= 128u * 18u + 4u; ) {
+            const size_t layerBytes = ref.s->body.size() - prefix;
+            if (layerBytes % lst == 0) {
+                const size_t L = layerBytes / lst;
+                if (L >= 128u && L <= 1024u) {
+                    const uint16_t end127 = native_detail::be16(ref.s->body.data() + prefix - 2u);
+                    if (end127 == (static_cast<uint16_t>(L) | 0x8000u)) {
+                        for (uint32_t kst : kstCands) {
+                            if (prefix <= 128u * kst) continue;
+                            const uint32_t hdr = static_cast<uint32_t>(prefix - 128u * kst);
+                            const uint32_t lcOff = (kst == 18u) ? 0u : 2u;
+                            for (uint32_t mfo : mfoCands) {
+                                if (mfo >= hdr) continue;
+                                DrumKitLayout cand{hdr, kst, lcOff, lst, mfo, 0u, true};
+                                bool allOk = true;
+                                for (const auto& hi : hitItems) {
+                                    uint32_t tl = 0; bool h8 = false; Gap fg = Gap::SizeDoesNotFit;
+                                    if (!validateDrumKitBody(hi.s->body, cand, tl, h8, fg) || !verifyAlignmentOnHits(*hi.s, cand)) {
+                                        allOk = false;
+                                        break;
+                                    }
+                                }
+                                if (allOk) return cand;
+                            }
+                        }
+                    }
+                }
+            }
+            if (prefix < lst) break;
+            prefix -= lst;
+        }
+    }
+    return std::nullopt;
+}
+
+// Derive a melodic layout for one Sound kind from the data (the research method): items holding only multisample IDs;
+// excludes USERDK Drum Kits BEFORE fitting so coincidental body sizes can never pollute melodic layouts.
 inline std::optional<RecordLayout> fitLayout(const std::vector<const DecodedSound*>& sameKind, const KmpIndex& k, size_t minItems = 8) {
     std::set<Id8> multi, other;
     for (const auto& m : k.multisamples) multi.insert(m.id);
@@ -383,6 +734,7 @@ inline std::optional<RecordLayout> fitLayout(const std::vector<const DecodedSoun
     struct Item { size_t size, first; std::vector<size_t> offs; };
     std::vector<Item> items;
     for (const DecodedSound* s : sameKind) {
+        if (!s || isDrumKitSound(*s)) continue;
         std::vector<size_t> o; bool onlyMulti = true; size_t last = 0; bool any = false;
         for (size_t i = 0; i + 8 <= s->body.size(); ++i) {
             const Id8 v = native_detail::id8(&s->body[i]);
@@ -419,9 +771,12 @@ inline ResourceId soundId(const DecodedSound& s) { return {false, s.bank, Kind::
 // It never adds to a caller's graph, so scan/completeness declarations the caller made elsewhere cannot leak onto these
 // resources. Combining with other evidence is Graph::merge()'s job and that caller's responsibility.
 // Identity of KMP objects is positional inside this KST (scope "KST"), never the 8-byte ID or the name.
-inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vector<DecodedSound>& sounds, const LayoutTable& layouts,
-                                             NativeRefReport& rep, std::string* err) {
+inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vector<DecodedSound>& sounds,
+                                             const LayoutTable& layouts, const DrumKitLayoutTable& drumLayouts,
+                                             NativeRefReport& rep, std::string* err,
+                                             std::map<ResourceId, DrumKitKeyMap>* drumKeyMapsOut = nullptr) {
     Graph t; NativeRefReport r;
+    std::map<ResourceId, DrumKitKeyMap> localKeyMaps;
     const std::string kScope = "KST";
     constexpr size_t kMaxObjects = 999999999;   // ResourceId numbers are at most 9 digits
     if (k.samples.size() > kMaxObjects || k.multisamples.size() > kMaxObjects || k.drums.size() > kMaxObjects) {
@@ -429,10 +784,14 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
         return std::nullopt;
     }
     std::map<Id8, size_t> msIndex;
+    std::map<Id8, std::vector<uint32_t>> drumIdToIndices;
     std::set<Id8> drum, smp;
     for (size_t i = 0; i < k.multisamples.size(); ++i) if (!msIndex.emplace(k.multisamples[i].id, i).second) { if (err) *err = "duplicate multisample ID in KMP index"; return std::nullopt; }
     for (size_t i = 0; i < k.samples.size(); ++i) smp.insert(k.samples[i].id);
-    for (size_t i = 0; i < k.drums.size(); ++i) drum.insert(k.drums[i].id);
+    for (size_t i = 0; i < k.drums.size(); ++i) {
+        drum.insert(k.drums[i].id);
+        drumIdToIndices[k.drums[i].id].push_back(static_cast<uint32_t>(i));
+    }
     for (const Id8& d : k.drumIds) drum.insert(d);
     auto sid = [&](size_t i) { return ResourceId{false, kScope, Kind::Sample, static_cast<uint32_t>(i)}; };
     for (size_t i = 0; i < k.samples.size(); ++i)
@@ -461,6 +820,168 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
         const ResourceId sid_ = soundId(s);
         if (!t.addNode({sid_, s.name, std::nullopt}, err)) return std::nullopt;
         if (s.number > 999999) { r.unanalysed.push_back({sid_, Gap::NumberOutOfRange}); continue; }   // oscillator number = number * 1000 + record must stay below 10^9
+
+        // Route USERDK Drum Kits strictly to the Drum Kit parser (NEVER melodic oscillator fitting/parsing).
+        if (isDrumKitSound(s)) {
+            const auto dli = drumLayouts.find(s.kind);
+            if (dli == drumLayouts.end()) {
+                // Fail closed: never parse edges without an explicit/fitted layout, but distinguish OC32 no-ID8
+                // and corrupt/truncated bodies of known variable-layer kinds from unknown/legacy kinds.
+                Gap gap = Gap::NoLayoutForKind;
+                if (const auto known = knownDrumKitLayout(s.kind); known.has_value()) {
+                    uint32_t tl = 0; bool h8 = false; Gap fg = Gap::SizeDoesNotFit;
+                    if (!validateDrumKitBody(s.body, *known, tl, h8, fg)) {
+                        gap = fg;   // Gap::NoId8InDrumLayers or Gap::SizeDoesNotFit
+                    }
+                }
+                r.unanalysed.push_back({sid_, gap});
+                continue;
+            }
+            const DrumKitLayout& DL = dli->second;
+            uint32_t totalLayers = 0;
+            bool hasId8 = false;
+            Gap failGap = Gap::SizeDoesNotFit;
+            if (!validateDrumKitBody(s.body, DL, totalLayers, hasId8, failGap)) {
+                r.unanalysed.push_back({sid_, failGap});
+                continue;
+            }
+
+            const size_t prefix = size_t(DL.headerBytes) + 128u * size_t(DL.keyStride);
+            const uint32_t velOff = DL.velOffset != 0u ? DL.velOffset : (DL.keyStride - 10u);
+
+            struct DrumHit { uint32_t key; uint32_t layer; uint8_t velLo; uint8_t velHi; uint32_t drumIdx; };
+            std::vector<DrumHit> hits;
+            std::vector<UnresolvedSlot> bad;
+            std::vector<std::string> localDiags;
+            size_t romCount = 0, nonRamCount = 0, disambigCount = 0;
+
+            DrumKitKeyMap km;
+            km.sound = sid_;
+            km.kindChunkId = s.kind;
+            km.totalLayers = totalLayers;
+
+            size_t layerCursor = 0;
+            for (uint32_t keyIdx = 0; keyIdx < 128u; ++keyIdx) {
+                const uint8_t* kr = s.body.data() + size_t(DL.headerBytes) + size_t(keyIdx) * size_t(DL.keyStride);
+                const uint8_t lc = kr[DL.layerCountOffset];
+                DrumKitKeySummary& ks = km.keys[keyIdx];
+                ks.midiNote = static_cast<uint8_t>(keyIdx);
+                ks.layerCount = lc;
+                for (uint32_t j = 0; j < 8u; ++j) ks.velTop[j] = kr[velOff + j];
+                if (DL.keyStride >= 20u) ks.advisoryKeyGainRaw = native_detail::be16(kr);
+                ks.advisoryPan = kr[DL.layerCountOffset + 1u];
+                ks.advisoryExclusiveGroup = (DL.keyStride == 18u && DL.layerStride == 20u)
+                                                ? kr[5]
+                                                : kr[DL.layerCountOffset + 6u];
+                ks.layers.reserve(lc);
+
+                uint8_t prevVel = 0;
+                for (uint32_t l = 0; l < lc; ++l) {
+                    const uint8_t* lr = s.body.data() + prefix + layerCursor * size_t(DL.layerStride);
+                    ++layerCursor;
+                    const uint8_t srcBank = lr[0];
+                    const uint16_t tblIdx = native_detail::be16(lr + 2);
+                    const Id8 lid = native_detail::id8(lr + DL.layerStride - 8u);
+                    const bool idIsZero = native_detail::allSame(lid, 0u);
+                    const uint8_t velHi = ks.velTop[l];
+                    const uint8_t velLo = (l == 0u)
+                                              ? 1u
+                                              : static_cast<uint8_t>(std::min<uint32_t>(127u, uint32_t(prevVel) + 1u));
+                    prevVel = velHi;
+
+                    DrumKitLayerSummary ls;
+                    ls.layerIndex = static_cast<uint8_t>(l);
+                    ls.sourceBank = srcBank;
+                    ls.tableIndex = tblIdx;
+                    ls.velLo = velLo;
+                    ls.velHi = velHi;
+                    ls.isRam = (srcBank == 0x01u);
+                    ls.drumSampleId = lid;
+                    if (DL.layerStride >= 32u) {
+                        ls.advisoryLayerGainRaw = native_detail::be16(lr + 4);
+                        ls.advisoryTranspose = static_cast<int8_t>(lr[6]);
+                        ls.advisoryFineTune = static_cast<int8_t>(lr[7]);
+                    } else {
+                        ls.advisoryTranspose = static_cast<int8_t>(lr[5]);
+                        ls.advisoryFineTune = static_cast<int8_t>(lr[6]);
+                    }
+
+                    if (srcBank == 0x01u) {
+                        const auto dit = drumIdToIndices.find(lid);
+                        if (dit != drumIdToIndices.end()) {
+                            const auto& idxs = dit->second;
+                            if (tblIdx < k.drums.size() && k.drums[tblIdx].id == lid) {
+                                ls.resolved = true;
+                                ls.drumSampleIndex = tblIdx;
+                                ls.advisoryDrumFamilyByte = k.drums[tblIdx].drumFamilyByte;
+                                hits.push_back({keyIdx, l, velLo, velHi, tblIdx});
+                                if (idxs.size() > 1) {
+                                    ++disambigCount;
+                                    ++km.disambiguatedDuplicateLayers;
+                                    localDiags.push_back(
+                                        "disambiguated duplicate drum ID via u16 index: " + sid_.str() +
+                                        " key " + std::to_string(keyIdx) + " layer " + std::to_string(l) +
+                                        " -> DrumSample/" + std::to_string(tblIdx) +
+                                        " (id " + native_detail::hexId(lid) + ")");
+                                }
+                            } else {
+                                // Fail closed: duplicate or out-of-sync u16 index MUST NEVER guess a DrumSample node.
+                                bad.push_back({sid_, keyIdx, l, false, false});
+                                ++km.danglingRamLayers;
+                            }
+                        } else {
+                            const bool wk = (msIndex.count(lid) > 0 || smp.count(lid) > 0);
+                            bad.push_back({sid_, keyIdx, l, wk, false});
+                            ++km.danglingRamLayers;
+                        }
+                    } else if (srcBank == 0x00u || srcBank == 0x02u) {
+                        if (idIsZero) {
+                            if (srcBank == 0x00u) { ++romCount; ++km.romDrumLayers; }
+                            else { ++nonRamCount; ++km.nonRamDrumLayers; }
+                        } else {
+                            // Contradicts ROM/non-RAM zero-ID invariant -> fail-closed UnresolvedSlot.
+                            const bool wk = (msIndex.count(lid) > 0 || smp.count(lid) > 0);
+                            bad.push_back({sid_, keyIdx, l, wk, false});
+                        }
+                    } else {
+                        // Unknown source bank byte -> fail-closed UnresolvedSlot.
+                        const bool wk = (msIndex.count(lid) > 0 || smp.count(lid) > 0);
+                        bad.push_back({sid_, keyIdx, l, wk, false});
+                    }
+                    ks.layers.push_back(std::move(ls));
+                }
+            }
+
+            km.ramDrumLayers = hits.size();
+            if (drumKeyMapsOut) localKeyMaps.emplace(sid_, std::move(km));
+
+            if (hits.empty()) {
+                for (UnresolvedSlot& u : bad) u.inUnanalysedSound = true;
+                r.unresolved.insert(r.unresolved.end(), bad.begin(), bad.end());
+                r.romDrumLayers += romCount;
+                r.nonRamDrumLayers += nonRamCount;
+                r.unanalysed.push_back({sid_, Gap::NoKnownReference});
+                continue;
+            }
+            r.unresolved.insert(r.unresolved.end(), bad.begin(), bad.end());
+            ++r.analysed;
+            ++r.drumKitsAnalysed;
+            r.ramDrumLayers += hits.size();
+            r.romDrumLayers += romCount;
+            r.nonRamDrumLayers += nonRamCount;
+            r.disambiguatedDuplicateDrumIds += disambigCount;
+            r.drumDiagnostics.insert(r.drumDiagnostics.end(), localDiags.begin(), localDiags.end());
+
+            for (const DrumHit& h : hits) {
+                const ResourceId dsId{false, kScope, Kind::DrumSample, h.drumIdx};
+                const std::string detail = "key " + std::to_string(h.key) + " layer " + std::to_string(h.layer) +
+                                           " vel " + std::to_string(h.velLo) + "-" + std::to_string(h.velHi);
+                if (!t.addRef({sid_, dsId, Via::DrumKeyLayer, detail, Source::Package, Confidence::Inferred, "native-kst"}, err))
+                    return std::nullopt;
+            }
+            continue;
+        }
+
         const auto li = layouts.find(s.kind);
         if (li == layouts.end() || li->second.record < 8 || li->second.pairOffset > li->second.record - 8) { r.unanalysed.push_back({sid_, Gap::NoLayoutForKind}); continue; }
         const RecordLayout& L = li->second;
@@ -496,7 +1017,14 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
         }
     }
     rep = std::move(r);
+    if (drumKeyMapsOut) *drumKeyMapsOut = std::move(localKeyMaps);
     return t;
+}
+
+// Backward-compatible 5-argument overload (melodic layouts only).
+inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vector<DecodedSound>& sounds, const LayoutTable& layouts,
+                                             NativeRefReport& rep, std::string* err) {
+    return buildNativeGraph(k, sounds, layouts, DrumKitLayoutTable{}, rep, err, nullptr);
 }
 
 // Dependencies of a Sound: everything it reaches, present or dangling, in id order (read-only).
@@ -736,7 +1264,7 @@ inline bool kmpIndexFromPa5x(const panative::Pa5xKmp& kmp, const PcmInventory& p
     tmp.drums.reserve(kmp.drums.size());
     for (const auto& dr : kmp.drums) {
         tmp.drumIds.insert(dr.id);
-        tmp.drums.push_back({dr.id, dr.name, dr.left, dr.right});
+        tmp.drums.push_back({dr.id, dr.name, dr.left, dr.right, dr.drumFamilyByte});
     }
 
     for (const auto& [id, idxs] : drumIdIndices)
@@ -840,8 +1368,10 @@ struct NativeKstInput {
 };
 
 struct NativeKstOptions {
-    LayoutTable layouts;                // caller-supplied RecordLayouts by Sound chunk kind
-    bool allowFitLayout = true;         // fit layouts for remaining Sound kinds via fitLayout()
+    LayoutTable layouts;                // caller-supplied melodic RecordLayouts by Sound chunk kind
+    DrumKitLayoutTable drumLayouts;     // caller-supplied USERDK DrumKitLayouts by Sound chunk kind
+    bool allowFitLayout = true;         // fit melodic layouts for remaining Sound kinds via fitLayout()
+    bool allowFitDrumKitLayout = true;  // fit/verify USERDK layouts via fitDrumKitLayout()
     size_t fitMinItems = 8;
     SoundPayloadMode soundMode = SoundPayloadMode::AutoDetectOc31;
     size_t maxTotalBytes = 256u << 20;  // 256 MiB total read cap for folder reads
@@ -870,6 +1400,8 @@ struct NativeKstReport {
     size_t soundsLoadedRaw = 0;
     size_t bytesRead = 0;               // total disk bytes read by resolveNativeKstFolder()
     LayoutTable usedLayouts;
+    DrumKitLayoutTable usedDrumLayouts;
+    std::map<ResourceId, DrumKitKeyMap> drumKeyMaps;
     NativeRefReport refs;
     std::vector<SoundSlotMeta> soundCatalog;   // occupied SOUND/*.pcg slots (sorted by bank, number), populated even if KMP fails
     std::vector<SoundDecodeFailure> decodeFailures;
@@ -884,11 +1416,16 @@ struct NativeKstReport {
     }
 };
 
-struct NativeKstResult {
+struct NativeKstResult : IDrumKitKeyMap {
     bool ok = false;                    // true when a fresh Graph was built (still check report.ok()/coverageComplete() for anomalies)
     std::optional<Graph> graph;         // never declared complete/scanned: deleteCheck() never says Unreferenced
     KmpIndex kmpIndex;
     NativeKstReport report;
+
+    const DrumKitKeyMap* findDrumKitKeyMap(const ResourceId& soundId) const override {
+        const auto it = report.drumKeyMaps.find(soundId);
+        return it == report.drumKeyMaps.end() ? nullptr : &it->second;
+    }
 };
 
 // End-to-end read-only Native-KST Resource Graph resolution in memory:
@@ -991,21 +1528,36 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
                                          ", id " + native_detail::hexId(pe.id) + ") not referenced by RAM.KMP");
     }
 
-    // 4. Layout resolution (caller-supplied + optional data-fitted layouts)
+    // 4. Layout resolution (caller-supplied + optional data-fitted melodic & USERDK layouts)
     res.report.usedLayouts = opts.layouts;
-    if (opts.allowFitLayout) {
-        std::map<uint32_t, std::vector<const DecodedSound*>> byKind;
-        for (const DecodedSound& s : sounds) byKind[s.kind].push_back(&s);
-        for (const auto& [kind, items] : byKind) {
-            if (res.report.usedLayouts.count(kind)) continue;
-            if (auto fitted = fitLayout(items, res.kmpIndex, opts.fitMinItems))
-                res.report.usedLayouts.emplace(kind, *fitted);
+    res.report.usedDrumLayouts = opts.drumLayouts;
+    if (opts.allowFitLayout || opts.allowFitDrumKitLayout) {
+        std::map<uint32_t, std::vector<const DecodedSound*>> melodicByKind;
+        std::map<uint32_t, std::vector<const DecodedSound*>> drumByKind;
+        for (const DecodedSound& s : sounds) {
+            if (isDrumKitSound(s)) drumByKind[s.kind].push_back(&s);
+            else melodicByKind[s.kind].push_back(&s);
+        }
+        if (opts.allowFitLayout) {
+            for (const auto& [kind, items] : melodicByKind) {
+                if (res.report.usedLayouts.count(kind)) continue;
+                if (auto fitted = fitLayout(items, res.kmpIndex, opts.fitMinItems))
+                    res.report.usedLayouts.emplace(kind, *fitted);
+            }
+        }
+        if (opts.allowFitDrumKitLayout) {
+            for (const auto& [kind, items] : drumByKind) {
+                if (res.report.usedDrumLayouts.count(kind)) continue;
+                if (auto fitted = fitDrumKitLayout(items, res.kmpIndex))
+                    res.report.usedDrumLayouts.emplace(kind, *fitted);
+            }
         }
     }
 
     // 5. Build fresh Resource Graph
     std::string gerr;
-    auto g = buildNativeGraph(res.kmpIndex, sounds, res.report.usedLayouts, res.report.refs, &gerr);
+    auto g = buildNativeGraph(res.kmpIndex, sounds, res.report.usedLayouts, res.report.usedDrumLayouts,
+                              res.report.refs, &gerr, &res.report.drumKeyMaps);
     if (!g) {
         res.report.containerErrors.push_back("graph build failed: " + gerr);
         res.report.diagnostics.push_back("graph build failed: " + gerr);
@@ -1025,6 +1577,7 @@ inline NativeKstResult resolveNativeKst(const NativeKstInput& in, const NativeKs
     }
 
     // 7. Consolidate diagnostics
+    for (const std::string& dd : res.report.refs.drumDiagnostics) res.report.diagnostics.push_back(dd);
     for (const Unanalysed& u : res.report.refs.unanalysed) {
         if (u.why == Gap::DecodeFailed) continue;
         res.report.diagnostics.push_back("unanalysed: " + u.sound.str() + " (" + gapName(u.why) + ")");
