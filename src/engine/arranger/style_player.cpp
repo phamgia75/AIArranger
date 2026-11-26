@@ -412,17 +412,25 @@ void StylePlayer::dispatchSectionEvents(const uasf::SectionDefinition& section,
 
 uint8_t StylePlayer::transposeNote(uint8_t note, Chord chord, uasf::TrackRole role,
                                    const uasf::ArticulationMetadata& art) const noexcept {
-    // Full NTR/NTT transposition (Gate 10 Task B). The crude root/fifth rule is
-    // replaced by the table-driven transform in engine/music/ntt. The rule pair
-    // is derived from the track role, which round-trips through the UASF format
-    // (the raw CASM NTR/NTT integers do not), so the transform stays correct for
-    // a deserialised style. Drums map to Bypass and are left untouched.
+    // Drums and percussion are never chord-transposed, regardless of metadata.
+    if (role == uasf::TrackRole::Drum || role == uasf::TrackRole::Percussion) return note;
+    if (chord.type == ChordType::NoChord) return note;
+
+    // Honor persisted UASF 'CASM' metadata when present; fall back identically
+    // to role-based defaults for legacy v1.0/v1.1 and demo styles.
     music::NtrRule ntr;
     music::NttMode ntt;
-    music::defaultRuleForRole(role, ntr, ntt);
+    uint8_t srcRootMidi = 60;
+    if (art.has_casm_meta) {
+        music::fromCasmRule(art.ntr, art.ntt, art.ntt_bass, ntr, ntt);
+        if (art.source_chord_root <= 11) {
+            srcRootMidi = static_cast<uint8_t>(60 + art.source_chord_root);
+        }
+    } else {
+        music::defaultRuleForRole(role, ntr, ntt);
+    }
     if (ntr == music::NtrRule::Bypass || ntt == music::NttMode::Bypass) return note;
-    if (chord.type == ChordType::NoChord) return note;
-    return music::transpose(note, chord, ntr, ntt, 60,
+    return music::transpose(note, chord, ntr, ntt, srcRootMidi,
                             music::RegisterLimits{art.high_key, art.note_low, art.note_high});
 }
 

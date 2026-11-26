@@ -152,20 +152,22 @@ void SectionSequencer::activateSection(int index) noexcept {
 }
 
 void SectionSequencer::setCurrentChord(const Chord& chord) noexcept {
-    current_chord_.store(
-        (static_cast<uint32_t>(chord.type) & 0xFF) |
-        ((static_cast<uint32_t>(chord.root) & 0xFF) << 8),
-        std::memory_order_release
-    );
+    const uint8_t octByte = static_cast<uint8_t>(static_cast<int8_t>(chord.octave));
+    const uint32_t packed =
+        (static_cast<uint32_t>(chord.type) & 0xFFu) |
+        ((static_cast<uint32_t>(chord.root) & 0xFFu) << 8) |
+        ((static_cast<uint32_t>(chord.bass) & 0xFFu) << 16) |
+        ((static_cast<uint32_t>(octByte) & 0xFFu) << 24);
+    current_chord_.store(packed, std::memory_order_release);
 }
 
 Chord SectionSequencer::getCurrentChord() const noexcept {
-    uint32_t data = current_chord_.load(std::memory_order_acquire);
-    Chord c;
-    c.type = static_cast<ChordType>(data & 0xFF);
-    c.root = static_cast<uint8_t>((data >> 8) & 0xFF);
-    c.bass = 0;
-    c.octave = 0;
+    const uint32_t data = current_chord_.load(std::memory_order_acquire);
+    Chord c{};
+    c.type   = static_cast<ChordType>(data & 0xFFu);
+    c.root   = static_cast<uint8_t>((data >> 8) & 0xFFu);
+    c.bass   = static_cast<uint8_t>((data >> 16) & 0xFFu);
+    c.octave = static_cast<int16_t>(static_cast<int8_t>((data >> 24) & 0xFFu));
     return c;
 }
 

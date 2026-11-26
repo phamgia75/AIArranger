@@ -1,0 +1,219 @@
+// Track B Q3a — Unit tests for src/exporters/korg/source_chord_normalizer.h.
+// 100% synthetic/CC0 fixtures; zero private data; also verifies order-independent
+// inclusion with drum_remap.h (zero ODR conflicts on CasmTrackView / NoteSpan).
+
+#include "exporters/korg/source_chord_normalizer.h"
+#include "exporters/korg/drum_remap.h"
+
+#include <cstdio>
+#include <limits>
+#include <string>
+#include <vector>
+
+using namespace ai_arranger;
+using namespace ai_arranger::exporters::korg;
+using namespace ai_arranger::exporters::korg::quality;
+using arranger::ChordType;
+
+static int failures = 0;
+static int passes   = 0;
+
+#define TEST(name, expr) do { \
+    if (!(expr)) { std::fprintf(stderr, "  FAIL: %s\n", name); ++failures; } \
+    else { std::printf("  PASS: %s\n", name); ++passes; } \
+} while (0)
+
+static NoteSpan mkNote(uint32_t on, uint32_t off, uint8_t pitch, uint8_t vel = 90) {
+    NoteSpan s{};
+    s.on_tick  = on;
+    s.off_tick = off;
+    s.pitch    = pitch;
+    s.vel      = vel;
+    return s;
+}
+
+int main() {
+    std::printf("Test: Track B Q3a — Source-Chord Normalizer & Register Audit\n");
+
+    // ── 1. Yamaha Ctb2[18..19] full Table 15 decoder (0x00..0x22 + out-of-range) ──
+    {
+        bool allValidNames = true;
+        for (uint8_t code = 0x00; code <= 0x22; ++code) {
+            const auto d = decodeYamahaSourceChord(0, code);
+            if (!d.name || d.name[0] == '\0') allValidNames = false;
+        }
+        TEST("decodeYamahaSourceChord handles all 35 codes 0x00..0x22", allValidNames);
+        TEST("decode 0x02 Maj7", decodeYamahaSourceChord(0, 0x02).chord_type == ChordType::Maj7 &&
+                                 decodeYamahaSourceChord(0, 0x02).has_maj7);
+        TEST("decode 0x0A Min7", decodeYamahaSourceChord(2, 0x0A).root == 2 &&
+                                 decodeYamahaSourceChord(2, 0x0A).chord_type == ChordType::Min7 &&
+                                 decodeYamahaSourceChord(2, 0x0A).is_minor_family);
+        TEST("decode 0x13 Dom7", decodeYamahaSourceChord(7, 0x13).root == 7 &&
+                                 decodeYamahaSourceChord(7, 0x13).chord_type == ChordType::Dom7 &&
+                                 decodeYamahaSourceChord(7, 0x13).is_dominant_family);
+        TEST("decode 0x14 7sus4", decodeYamahaSourceChord(7, 0x14).chord_type == ChordType::Dom7Sus4);
+        TEST("decode 0x22 Cancel", decodeYamahaSourceChord(0, 0x22).is_cancel);
+        TEST("unset root 0x7F defaults to C (0)", decodeYamahaSourceChord(0x7F, 0x00).root == 0);
+        TEST("unknown code 0xFF falls back to Maj", decodeYamahaSourceChord(0, 0xFF).chord_type == ChordType::Major);
+    }
+
+    // ── 2. Non-C root minimal signed shift to C ──
+    {
+        CasmTrackView casm{};
+        casm.has_casm = true;
+        casm.ntr = 0; casm.ntt = 2; // RootTrans + Chord
+        casm.source_chord_root = 2; // D -> delta -2
+        casm.source_chord_type = 0x00; // Maj
+        const std::vector<NoteSpan> dMaj = {mkNote(0, 480, 62), mkNote(0, 480, 66), mkNote(0, 480, 69)};
+        const auto res = normalizeTrackToPa5xReference(dMaj, kAcc1Ch, uasf::TrackRole::Chord, casm);
+        TEST("D Maj -> C Maj minimal shift (-2 st)",
+             res.normalized_from_non_c && res.notes_transposed == 3 &&
+             res.notes[0].pitch == 60 && res.notes[1].pitch == 64 && res.notes[2].pitch == 67);
+
+        // G Maj (root 7 > 6 -> minimal signed shift +5 st up to C, not -7 down!)
+        casm.source_chord_root = 7;
+        const std::vector<NoteSpan> gMaj = {mkNote(0, 480, 55), mkNote(0, 480, 59), mkNote(0, 480, 62)};
+        const auto resG = normalizeTrackToPa5xReference(gMaj, kAcc1Ch, uasf::TrackRole::Chord, casm);
+        TEST("G Maj -> C Maj minimal shift (+5 st)",
+             resG.normalized_from_non_c && resG.notes_transposed == 3 &&
+             resG.notes[0].pitch == 60 && resG.notes[1].pitch == 64 && resG.notes[2].pitch == 67);
+    }
+
+    // ── 3. Quality normalization: CMaj7, Cm7, C7 -> C Maj (cv1) & C Maj -> C Min (cv2) ──
+    {
+        // CMaj7 (0x02) on Chord track -> B (71) snaps to C (72) to prevent C7 clash
+        CasmTrackView casmChord{};
+        casmChord.has_casm = true; casmChord.ntr = 0; casmChord.ntt = 2;
+        casmChord.source_chord_root = 0; casmChord.source_chord_type = 0x02;
+        const std::vector<NoteSpan> cmaj7 = {mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67), mkNote(0, 480, 71)};
+        const auto rChord = normalizeTrackToPa5xReference(cmaj7, kAcc1Ch, uasf::TrackRole::Chord, casmChord, ChordType::Major);
+        TEST("CMaj7 Chord -> C Maj snaps B(71) -> C(72)",
+             rChord.quality_remapped == 1 && rChord.notes[3].pitch == 72);
+
+        // CMaj7 (0x02) on Melody track -> B (71) preserved untouched!
+        CasmTrackView casmMel = casmChord;
+        casmMel.ntt = 1; // Melody
+        const auto rMel = normalizeTrackToPa5xReference(cmaj7, kAcc1Ch + 1, uasf::TrackRole::Phrase1, casmMel, ChordType::Major);
+        TEST("CMaj7 Melody -> C Maj preserves B(71)",
+             rMel.quality_remapped == 0 && rMel.notes[3].pitch == 71);
+
+        // Cm7 (0x0A) -> C Maj: Eb(63)->E(64), Bb(70)->C(72) or G(67)
+        CasmTrackView casmMin7 = casmChord;
+        casmMin7.source_chord_type = 0x0A;
+        const std::vector<NoteSpan> cm7 = {mkNote(0, 480, 60), mkNote(0, 480, 63), mkNote(0, 480, 67), mkNote(0, 480, 70)};
+        const auto rMin7 = normalizeTrackToPa5xReference(cm7, kAcc1Ch, uasf::TrackRole::Chord, casmMin7, ChordType::Major);
+        TEST("Cm7 -> C Maj remaps Eb->E and Bb->C (no Eb/Bb left)",
+             rMin7.quality_remapped == 2 && rMin7.notes[1].pitch == 64 &&
+             (rMin7.notes[3].pitch == 72 || rMin7.notes[3].pitch == 67));
+
+        // C7 (0x13) -> C Maj: Bb(70) -> C(72) (or G(67) if C(72) already occupied!)
+        CasmTrackView casmDom7 = casmChord;
+        casmDom7.source_chord_type = 0x13;
+        const std::vector<NoteSpan> c7Busy = {mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 70), mkNote(0, 480, 72)};
+        const auto rDom7 = normalizeTrackToPa5xReference(c7Busy, kAcc1Ch, uasf::TrackRole::Chord, casmDom7, ChordType::Major);
+        TEST("C7 -> C Maj avoids collision on occupied C5 (72) by mapping Bb4 (70) -> G4 (67)",
+             rDom7.quality_remapped == 1 && rDom7.notes[2].pitch == 67);
+
+        // C Maj (0x00) -> C Min (cv2): E(64) -> Eb(63)
+        CasmTrackView casmMaj = casmChord;
+        casmMaj.source_chord_type = 0x00;
+        const std::vector<NoteSpan> cmaj = {mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67)};
+        const auto rToMin = normalizeTrackToPa5xReference(cmaj, kAcc1Ch, uasf::TrackRole::Chord, casmMaj, ChordType::Minor);
+        TEST("C Maj -> C Min (cv2) maps E(64) -> Eb(63)",
+             rToMin.quality_remapped == 1 && rToMin.notes[1].pitch == 63);
+    }
+
+    // ── 4. Skip guard: Drum/Perc and CASM Bypass (NTR=1 & NTT=0) untouched ──
+    {
+        CasmTrackView casmBypass{};
+        casmBypass.has_casm = true; casmBypass.ntr = 1; casmBypass.ntt = 0;
+        casmBypass.source_chord_root = 5; casmBypass.source_chord_type = 0x0A;
+        const std::vector<NoteSpan> notes = {mkNote(0, 240, 36), mkNote(240, 480, 42)};
+
+        const auto rDrum = normalizeTrackToPa5xReference(notes, kDrumCh, uasf::TrackRole::Drum, casmBypass);
+        TEST("Drum track skipped untouched",
+             rDrum.notes[0].pitch == 36 && rDrum.notes[1].pitch == 42 &&
+             rDrum.advice.pa5x_ntt_table == "No Transpose" && !rDrum.normalized_from_non_c);
+
+        const auto rByp = normalizeTrackToPa5xReference(notes, kAcc1Ch, uasf::TrackRole::Chord, casmBypass);
+        TEST("CASM NTR=1 & NTT=0 Bypass skipped untouched",
+             rByp.notes[0].pitch == 36 && rByp.notes[1].pitch == 42 &&
+             rByp.advice.pa5x_ntt_type == "No Transpose" && rByp.notes_transposed == 0);
+    }
+
+    // ── 5. 12-Root Register Safety Audit (Bass, Chord/Pad + LIL, Guitar) ──
+    {
+        // High bass (C4=60, G4=67) -> centered down into Bass [24..55] with 0 violations across all 12 roots
+        CasmTrackView casmBass{};
+        casmBass.has_casm = true; casmBass.ntr = 0; casmBass.ntt = 1; casmBass.ntt_bass = true;
+        casmBass.high_key = 11;
+        const std::vector<NoteSpan> hiBass = {mkNote(0, 480, 60), mkNote(480, 960, 67)};
+        const auto rHiBass = normalizeTrackToPa5xReference(hiBass, kBassCh, uasf::TrackRole::Bass, casmBass);
+        const uint32_t violHi = auditRegisterSafetyAcross12Roots(rHiBass.notes, rHiBass.advice.wrap_around, 24, 55);
+        TEST("Too-high Bass centered to 0 violations across all 12 roots",
+             violHi == 0 && rHiBass.register_violations_fixed > 0 &&
+             rHiBass.advice.pa5x_ntt_table == "Root" &&
+             rHiBass.advice.wrap_around >= 1 && rHiBass.advice.wrap_around <= 12);
+
+        // Too-low bass (C0=12, G0=19) -> centered up into Bass [24..55] with 0 violations
+        const std::vector<NoteSpan> loBass = {mkNote(0, 480, 12), mkNote(480, 960, 19)};
+        const auto rLoBass = normalizeTrackToPa5xReference(loBass, kBassCh, uasf::TrackRole::Bass, casmBass);
+        const uint32_t violLo = auditRegisterSafetyAcross12Roots(rLoBass.notes, rLoBass.advice.wrap_around, 24, 55);
+        TEST("Too-low Bass centered to 0 violations across all 12 roots",
+             violLo == 0 && rLoBass.register_violations_fixed > 0);
+
+        // Chord track with muddy low interval (< 48, interval < 7 st)
+        CasmTrackView casmChord{};
+        casmChord.has_casm = true; casmChord.ntr = 0; casmChord.ntt = 2;
+        const std::vector<NoteSpan> muddy = {mkNote(0, 480, 40), mkNote(0, 480, 44), mkNote(0, 480, 47)};
+        const auto rMud = normalizeTrackToPa5xReference(muddy, kAcc1Ch, uasf::TrackRole::Chord, casmChord);
+        const uint32_t violChord = auditRegisterSafetyAcross12Roots(rMud.notes, rMud.advice.wrap_around, 36, 84);
+        TEST("Chord/Pad LIL mud guard & 0 register violations across 12 roots",
+             violChord == 0 && rMud.register_violations_fixed > 0);
+
+        // Guitar NTR=2 -> Guitar Mode advice + [40..88] safe
+        CasmTrackView casmGtr{};
+        casmGtr.has_casm = true; casmGtr.ntr = 2; casmGtr.ntt = 1;
+        const std::vector<NoteSpan> gtr = {mkNote(0, 480, 52), mkNote(10, 480, 59), mkNote(20, 480, 64)};
+        const auto rGtr = normalizeTrackToPa5xReference(gtr, kAcc1Ch + 2, uasf::TrackRole::Accompaniment, casmGtr);
+        const uint32_t violGtr = auditRegisterSafetyAcross12Roots(rGtr.notes, rGtr.advice.wrap_around, 40, 88);
+        TEST("Guitar NTR=2 emits Guitar Mode advice and 0 register violations",
+             violGtr == 0 && rGtr.advice.pa5x_ntt_type == "Guitar Mode" &&
+             rGtr.advice.pa5x_ntt_table == "Guitar");
+    }
+
+    // ── 6. Yamaha RTR 0..5 -> Pa5X Retrigger Mode ──
+    {
+        TEST("RTR 0 -> Off",       mapYamahaRtrToPa5x(0) == "Off");
+        TEST("RTR 1 -> Repitch",   mapYamahaRtrToPa5x(1) == "Repitch");
+        TEST("RTR 2 -> Repitch",   mapYamahaRtrToPa5x(2) == "Repitch");
+        TEST("RTR 3 -> Retrigger", mapYamahaRtrToPa5x(3) == "Retrigger");
+        TEST("RTR 4 -> Retrigger", mapYamahaRtrToPa5x(4) == "Retrigger");
+        TEST("RTR 5 -> Retrigger", mapYamahaRtrToPa5x(5) == "Retrigger");
+        TEST("RTR 99 -> Off",      mapYamahaRtrToPa5x(99) == "Off");
+    }
+
+    // ── 7. Extreme / malformed edge cases (zero UB, strict on < off, pitch in [0..127]) ──
+    {
+        CasmTrackView casm{};
+        casm.has_casm = true; casm.ntr = 0; casm.ntt = 2;
+        casm.source_chord_root = 6; casm.source_chord_type = 0x12;
+
+        // Empty track
+        const auto rEmpty = normalizeTrackToPa5xReference({}, kAcc1Ch, uasf::TrackRole::Chord, casm);
+        TEST("Empty input track handled cleanly", rEmpty.notes.empty());
+
+        // Malformed spans: off_tick <= on_tick, vel == 0, pitch > 127, on_tick == UINT32_MAX
+        NoteSpan bad1{500, 500, 200, 0, false};
+        NoteSpan bad2{std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(), 0, 255, false};
+        const auto rBad = normalizeTrackToPa5xReference({bad1, bad2}, kAcc1Ch, uasf::TrackRole::Chord, casm);
+        bool invOk = (rBad.notes.size() == 2);
+        for (const auto& s : rBad.notes) {
+            if (!(s.on_tick < s.off_tick && s.pitch <= 127 && s.vel >= 1 && s.vel <= 127)) invOk = false;
+        }
+        TEST("Malformed spans sanitized (strict on_tick < off_tick, pitch/vel clamped)", invOk);
+    }
+
+    std::printf("\nResults: %d passed, %d failed\n", passes, failures);
+    return failures > 0 ? 1 : 0;
+}

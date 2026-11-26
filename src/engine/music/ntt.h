@@ -3,6 +3,7 @@
 
 #include "engine/arranger/chord_input.h"  // Chord, ChordType
 #include "engine/uasf/types.h"            // uasf::TrackRole
+#include <cstddef>
 #include <cstdint>
 
 // ── Note Transposition (NTR + NTT) ───────────────────────────────────
@@ -56,12 +57,38 @@ struct RegisterLimits {
     uint8_t noteHigh = 127;   // (only when the range spans >= 12 notes)
 };
 
+// True iff `target` specifies an explicit On-Bass slash note distinct from its root.
+constexpr bool hasSlashBass(Chord target) noexcept {
+    return target.bass != 0 && (target.bass % 12) != (target.root % 12);
+}
+
+// Options for stack-only batch voicing transposition (`transposeVoicing`).
+struct VoicingOptions {
+    bool   avoid_unison_collapse = true; // shifts colliding degree to nearest unused target chord tone
+    bool   enforce_lil_mud_guard = true; // prevents intervals < 7 st below C2 (36) on Chord/Pad tracks
+    int8_t prev_centroid_midi    = -1;   // >= 0 enables smooth RootFixed voice-leading inversion
+};
+
 // Transpose one recorded note into `target`. `srcRootMidi` is the MIDI root of
 // the style's source reference chord (60 = C by convention). Returns a clamped
 // MIDI note (0..127).
 uint8_t transpose(uint8_t note, Chord target,
                   NtrRule ntr, NttMode ntt,
                   uint8_t srcRootMidi = 60, RegisterLimits limits = {}) noexcept;
+
+// Realtime-safe stack-only batch voicing transform (max 16 simultaneous notes,
+// zero heap allocations). Returns number of output notes written into `outNotes`.
+size_t transposeVoicing(const uint8_t* inNotes, size_t count,
+                        uint8_t* outNotes,
+                        Chord target, NtrRule ntr, NttMode ntt,
+                        uint8_t srcRootMidi = 60,
+                        RegisterLimits limits = {},
+                        VoicingOptions vopt = {}) noexcept;
+
+// Map persisted Yamaha CASM (Ctb2/Ctab) NTR, NTT (low 7 bits) and NTT-bass bit
+// into engine-neutral (NtrRule, NttMode).
+void fromCasmRule(uint8_t casmNtr, uint8_t casmNtt, bool nttBass,
+                  NtrRule& outNtr, NttMode& outNtt) noexcept;
 
 // Default (NTR, NTT) pair for a track role, used when a track carries no
 // explicit CASM transposition metadata. Vendor-agnostic mapping.

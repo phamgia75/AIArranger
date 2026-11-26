@@ -28,11 +28,30 @@ ChordType matchChordType(const uint8_t* notes, size_t count,
     const uint16_t m = pcMask(notes, count);
     auto is = [&](uint16_t t) { return m == t; };
 
+    // 9th chords (5 distinct pitch classes — checked before 4-note/3-note subsets)
+    if (is(bit(0)|bit(2)|bit(4)|bit(7)|bit(10))) return ChordType::Dom9;
+    if (is(bit(0)|bit(2)|bit(4)|bit(7)|bit(11))) return ChordType::Maj9;
+    if (is(bit(0)|bit(2)|bit(3)|bit(7)|bit(10))) return ChordType::Min9;
+
     // 7th chords (4 distinct pitch classes)
     if (is(bit(0)|bit(4)|bit(7)|bit(11))) return ChordType::Maj7;
     if (is(bit(0)|bit(3)|bit(7)|bit(10))) return ChordType::Min7;
     if (is(bit(0)|bit(4)|bit(7)|bit(10))) return ChordType::Dom7;
     if (is(bit(0)|bit(3)|bit(6)|bit(9)))  return ChordType::Dim7;
+
+    // Q3 extended 4-note chords
+    if (is(bit(0)|bit(3)|bit(6)|bit(10))) return ChordType::Min7b5;
+    if (is(bit(0)|bit(2)|bit(4)|bit(7)))  return ChordType::Add9;
+    if (is(bit(0)|bit(4)|bit(7)|bit(9)))  return ChordType::Maj6;
+    if (is(bit(0)|bit(3)|bit(7)|bit(9)))  return ChordType::Min6;
+    if (is(bit(0)|bit(5)|bit(7)|bit(10))) return ChordType::Dom7Sus4;
+    if (is(bit(0)|bit(3)|bit(7)|bit(11))) return ChordType::MinMaj7;
+    if (is(bit(0)|bit(4)|bit(8)|bit(10))) return ChordType::Aug7;
+
+    // Common omitted-5th 9th voicings (4 distinct pitch classes)
+    if (is(bit(0)|bit(2)|bit(4)|bit(10))) return ChordType::Dom9;
+    if (is(bit(0)|bit(2)|bit(4)|bit(11))) return ChordType::Maj9;
+    if (is(bit(0)|bit(2)|bit(3)|bit(10))) return ChordType::Min9;
 
     // triads
     if (is(bit(0)|bit(4)|bit(7))) return ChordType::Major;
