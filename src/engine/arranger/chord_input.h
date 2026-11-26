@@ -15,18 +15,29 @@ namespace ai_arranger::arranger {
  */
 
 enum class ChordType : uint8_t {
-    Major,
-    Minor,
-    Dim,
-    Aug,
-    Maj7,
-    Min7,
-    Dom7,
-    Dim7,
-    Sus4,
-    Sus2,
-    Power,
-    NoChord,
+    Major    = 0,
+    Minor    = 1,
+    Dim      = 2,
+    Aug      = 3,
+    Maj7     = 4,
+    Min7     = 5,
+    Dom7     = 6,
+    Dim7     = 7,
+    Sus4     = 8,
+    Sus2     = 9,
+    Power    = 10,
+    NoChord  = 11,   // PINNED at 11 for binary/snapshot ABI compatibility
+    // ── Q3 Extended Arranger Chords (appended safely at 12..21) ──
+    Min7b5   = 12,   // Half-diminished: {0, 3, 6, 10}
+    Add9     = 13,   // Major add9:      {0, 2, 4, 7}
+    Maj6     = 14,   // Major 6th:       {0, 4, 7, 9}
+    Min6     = 15,   // Minor 6th:       {0, 3, 7, 9}
+    Dom9     = 16,   // Dominant 9th:    {0, 2, 4, 7, 10}
+    Maj9     = 17,   // Major 9th:       {0, 2, 4, 7, 11}
+    Min9     = 18,   // Minor 9th:       {0, 2, 3, 7, 10}
+    Dom7Sus4 = 19,   // Dominant 7sus4:  {0, 5, 7, 10}
+    MinMaj7  = 20,   // Minor-Major 7th: {0, 3, 7, 11}
+    Aug7     = 21,   // Augmented 7th:   {0, 4, 8, 10}
 };
 
 struct Chord {
