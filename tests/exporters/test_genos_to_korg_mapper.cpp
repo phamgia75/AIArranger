@@ -580,6 +580,28 @@ int main() {
     // ── No section maps -> error ──
     TEST("style with only Break fails", !mapToKorg(styleOf({section(T::Break, "Fill In BA", 1, {})}), {}).ok);
 
+    // ── P1 regression: Drum/Percussion-role track routed to chord-driven Acc1 (kch=11) with pitch 0..11 ──
+    {
+        auto drumToAcc = cat(note(11, 5, 0, 240, 90), note(11, 60, 480, 960, 90));
+        auto sDrumAcc = styleOf({section(T::Main1, "Main A", 1, {
+            track(11, drumToAcc, uasf::TrackRole::Drum),
+        })});
+        auto rQual = mapToKorg(sDrumAcc, MapOptions{});
+        auto rRaw = mapToKorg(sDrumAcc, MapOptions::raw());
+        const Element* v1Qual = find(rQual.style, "v1cv1");
+        const Element* v1Raw = find(rRaw.style, "v1cv1");
+        TEST("P1 regression (quality): Drum-role track routed to Acc1 strips pitch 5, counts drop & validates",
+             rQual.ok && validate(rQual.style).empty() && v1Qual &&
+             count(*v1Qual, 0x90 | 11, 5) == 0 && count(*v1Qual, 0x90 | 11, 60) == 1 &&
+             rQual.report.dropped[kDropChordRange] == 1 &&
+             rQual.report.tracks.size() == 1 && rQual.report.tracks[0].chord_range_dropped == 1);
+        TEST("P1 regression (raw): Drum-role track routed to Acc1 strips pitch 5, counts drop & validates",
+             rRaw.ok && validate(rRaw.style).empty() && v1Raw &&
+             count(*v1Raw, 0x90 | 11, 5) == 0 && count(*v1Raw, 0x90 | 11, 60) == 1 &&
+             rRaw.report.dropped[kDropChordRange] == 1 &&
+             rRaw.report.tracks.size() == 1 && rRaw.report.tracks[0].chord_range_dropped == 1);
+    }
+
     // ── Wave-2B Q23-Wire E2E tests on real CC0 synthetic fixtures ──
     runQ23WireE2eTests();
 

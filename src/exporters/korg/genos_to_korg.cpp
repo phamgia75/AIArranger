@@ -461,6 +461,14 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
 
                 pt.notes.reserve(sr.notes.size());
                 for (auto n : sr.notes) {
+                    // Defensive chord-event-range guard for every chord-driven Korg track (!drum):
+                    // covers Drum/Percussion-role tracks routed onto Acc1..Acc5/Bass (where
+                    // sanitizeMegaVoiceTrack returns early) in both quality and raw() modes.
+                    if (n.pitch <= kChordEventNoteMax) {
+                        ++rep.dropped[kDropChordRange];
+                        ++tr_row.chord_range_dropped;
+                        continue;
+                    }
                     if (len < 2 || n.on_tick >= len - 1) continue;
                     n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
                     pt.notes.push_back(n);
