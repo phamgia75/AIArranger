@@ -275,6 +275,14 @@ if(TARGET test_selective_import_kit)
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
         $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
 endif()
+if(TARGET test_style_quality_bench)
+    target_compile_options(test_style_quality_bench PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
+    target_compile_definitions(test_style_quality_bench PRIVATE
+        BENCH_BIN="$<TARGET_FILE:aiarranger-style-bench>")
+    add_dependencies(test_style_quality_bench aiarranger-style-bench)
+endif()
 # SET -> KST phase 1 private oracle: a local copy of an owner SET vs the Pa5X's own conversion of it
 # (AIARR_SET_ORACLE_SET / AIARR_SET_ORACLE_KST); counts only, Skipped (77) without them.
 add_test(NAME test_set_to_kst_oracle COMMAND test_set_to_kst --oracle)
@@ -382,6 +390,13 @@ target_link_libraries(sff1-parser importer-sff1 arranger-engine)
 # ── Genos -> Pa5X converter CLI ───────────────────────────────────────
 add_executable(aiarranger-convert tools/aiarranger_convert.cpp)
 target_link_libraries(aiarranger-convert exporter-korg importer-sff1 arranger-engine)
+
+# ── Offline Style Quality Benchmark CLI (Track B Q1) ──────────────────
+add_executable(aiarranger-style-bench tools/aiarranger_style_bench.cpp)
+target_link_libraries(aiarranger-style-bench exporter-korg importer-sff1 arranger-engine)
+target_compile_options(aiarranger-style-bench PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+    $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
 
 # ── Style Studio CLI: inspect / edit / export-smf ──────────────────────
 add_executable(aiarranger-style tools/aiarranger_style.cpp)

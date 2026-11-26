@@ -79,25 +79,43 @@ struct CasmSectionInfo {
     uint8_t megavoice_high;  // Velocity range high
 };
 
+// ── CASM Zone Configuration (Low / Middle / High) ────────────────
+struct CasmZoneConfig {
+    uint8_t ntr = 0;            // Note Transposition Rule (0 Root Trans, 1 Root Fixed, 2 Guitar)
+    uint8_t ntt = 0;            // Note Transposition Table (bits 0-6)
+    bool    ntt_bass = false;   // NTT bit 7: bass-note conversion enabled
+    uint8_t high_key = 11;      // High Key 0-11 (C..B)
+    uint8_t note_low = 0;       // Note Limit low (MIDI note)
+    uint8_t note_high = 127;    // Note Limit high (MIDI note)
+    uint8_t rtr = 0;            // Retrigger Rule
+};
+
 // ── CASM Track Configuration ──────────────────────────────────────
-// One per Ctb2 source-channel block (47 bytes). Layout: Wierzba/Bedesem
-// "Style Files" v2.1 Tables 12-16, checked against 4 Genos files (see
-// docs/importers/casm-structure-notes.md). The transposition fields are those
-// of the MIDDLE note zone; see parseCtb2Block.
+// One per SFF2 Ctb2 block (47 bytes) or legacy SFF1 Ctab (+ optional Cntt)
+// block (33 bytes + 2 bytes). Layout: Wierzba/Bedesem "Style Files" v2.1
+// Tables 5-16, checked against 4 Genos files (docs/importers/casm-structure-notes.md).
 struct CasmTrackConfig {
-    std::string name;           // Track name (8-byte field, trimmed)
-    uint8_t     source_channel; // MIDI source channel (0-15)
-    uint8_t     dest_channel;   // MIDI destination channel (0-15)
-    uint8_t     zone_low = 0;   // middle zone lowest note; 0 = no low zone
-    uint8_t     zone_high = 127;// middle zone highest note; 127 = no high zone
-    uint8_t     ntr;            // Note Transposition Rule (0 Root Trans, 1 Root Fixed, 2 Guitar)
-    uint8_t     ntt;            // Note Transposition Table (bits 0-6; Ctb2 numbering)
-    bool        ntt_bass;       // NTT bit 7: bass-note conversion enabled
-    uint8_t     high_key = 11;  // High Key 0-11 (C..B): roots above it play an octave down (Root Trans)
-    uint8_t     note_low = 0;   // Note Limit low (MIDI note): octave-fold below
-    uint8_t     note_high = 127;// Note Limit high (MIDI note): octave-fold above
-    uint8_t     rtr = 0;        // Retrigger Rule
-    bool        is_megavoice;   // Megavoice candidate flag
+    std::string    name;                           // Track name (8-byte field, trimmed)
+    uint8_t        source_channel = 0;             // MIDI source channel (0-15)
+    uint8_t        dest_channel = 0;               // MIDI destination channel (0-15)
+    uint8_t        editable = 0;                   // [10] Editable flag
+    uint16_t       note_mute_mask = 0x0FFF;        // [11..12] 12-bit Note Mute bitfield
+    uint64_t       chord_mute_mask = 0x3FFFFFFFFull;// [13..17] 34-bit Chord Mute bitfield
+    uint8_t        source_chord_root = 0;          // [18] Source Chord Root (0=C..11=B)
+    uint8_t        source_chord_type = 0;          // [19] Source Chord Type (Yamaha table)
+    uint8_t        zone_low = 0;                   // [20] Middle zone lowest note; 0 = no low zone
+    uint8_t        zone_high = 127;                // [21] Middle zone highest note; 127 = no high zone
+    uint8_t        ntr = 0;                        // Middle zone NTR (0 Root Trans, 1 Root Fixed, 2 Guitar)
+    uint8_t        ntt = 0;                        // Middle zone NTT (bits 0-6)
+    bool           ntt_bass = false;               // Middle zone NTT bit 7: bass-note conversion
+    uint8_t        high_key = 11;                  // Middle zone High Key 0-11 (C..B)
+    uint8_t        note_low = 0;                   // Middle zone Note Limit low
+    uint8_t        note_high = 127;                // Middle zone Note Limit high
+    uint8_t        rtr = 0;                        // Middle zone Retrigger Rule
+    CasmZoneConfig low_zone{};                     // [22..27] SFF2 Low transposition zone
+    CasmZoneConfig high_zone{};                    // [34..39] SFF2 High transposition zone
+    bool           from_sff1_ctab = false;         // True if parsed from SFF1 Ctab/Cntt
+    bool           is_megavoice = false;           // Megavoice candidate flag
 };
 
 // ── CASM Section (from Sdec declaration) ──────────────────────────
@@ -148,6 +166,13 @@ struct SmfTempo {
     uint32_t mpqn;   // microseconds per quarter note (1..0xFFFFFF)
 };
 
+// ── SMF Time Signature (FF 58 04 nn dd cc bb) — per-section meter changes ──
+struct SmfTimeSignature {
+    uint32_t tick = 0;
+    uint8_t  num = 4;
+    uint8_t  den = 4;
+};
+
 // ── SFF1 Chunk ────────────────────────────────────────────────────
 struct SffChunk {
     std::string chunk_id;     // 4-char ID
@@ -177,6 +202,11 @@ struct ParseResult {
     // Every well-formed Set Tempo, in file order (MTrk by MTrk); the mapper
     // picks the earliest by tick. Raw MPQN: no rounding at the reader layer.
     std::vector<SmfTempo> tempos;
+    // Every well-formed Time Signature (FF 58), in tick order (per-section meter).
+    std::vector<SmfTimeSignature> time_signatures;
+    // Explicitly detected non-note Yamaha metadata chunks (OTSc/OTSm/OTS/FNRP/MDB).
+    std::vector<std::string> detected_metadata_chunks;
+    bool     encrypted_or_drm = false;
     uint8_t  time_sig_num = 4;
     uint8_t  time_sig_den = 4;
     uint32_t end_of_track_tick = 0;
@@ -184,7 +214,7 @@ struct ParseResult {
 
 // ── Supported Chunk IDs ───────────────────────────────────────────
 constexpr const char* kKnownChunks[] = {
-    "CASM", "OTS", "MDB", "STY", "SFF1", "SInt", "SAct", "SArt",
+    "CASM", "OTS", "OTS ", "MDB", "MDB ", "FNRP", "STY", "SFF1", "SInt", "SAct", "SArt",
     "Midi", "Sect", "Trk", "MThd", "MTrk", "OTSc", "OTSm"
 };
 
