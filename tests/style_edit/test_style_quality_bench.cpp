@@ -448,12 +448,31 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
     TEST("bench: JSON output is path-scrubbed (zero host paths leaked)", allScrubbed);
     TEST("bench: epistemic stamps present (hardwareVerified=false, l3Status=NOT_TESTED)", allEpistemic);
 
-    // P1-1: Verify SYNTH_MEGAVOICE_GUITAR_BASS has NO side-channel UASF folding or Bass Inversion credit!
-    const auto& megaRes = allResults[7];
-    TEST("P1-1: SYNTH_MEGAVOICE_GUITAR_BASS leaked FX notes keep registerViolationRate > 0.15 & bassSlash < 0.80",
-         megaRes.fixtureName == "SYNTH_MEGAVOICE_GUITAR_BASS.sty" &&
-         megaRes.m1.registerViolationRate > 0.15 && megaRes.m1.bassSlashAccuracy < 0.80 &&
-         megaRes.m2.velocityInversions == 2);
+    // P1-1: Verify raw unsanitized SYNTH_MEGAVOICE_GUITAR_BASS still triggers benchmark penalties
+    // (no side-channel UASF folding/Bass Inversion credit), AND live Q23-Wire default cleanly resolves them!
+    {
+        const std::string megaPath = fx("SYNTH_MEGAVOICE_GUITAR_BASS.sty");
+        const auto rawBytes = readFileBytes(megaPath);
+        const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_MEGAVOICE_GUITAR_BASS.sty");
+        const auto mr = Sff1ToUasfMapper().map(pr);
+        korg::MapOptions rawOpt = korg::MapOptions::raw();
+        rawOpt.ppqn = 384;
+        rawOpt.route = korg::routeFromCasm(pr);
+        rawOpt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+        const auto rawKr = korg::mapToKorg(mr.style, rawOpt);
+        const auto rawEval = bench::evaluateExportedStyleAgainstSty(
+            rawBytes, rawKr.style, rawKr.report, "SYNTH_MEGAVOICE_GUITAR_BASS.sty", opt);
+        TEST("P1-1 (raw NegCtrl): unsanitized SYNTH_MEGAVOICE_GUITAR_BASS keeps registerViolationRate > 0.15, bassSlash < 0.80 & velocityInversions == 2",
+             rawEval.ok && rawEval.m1.registerViolationRate > 0.15 &&
+             rawEval.m1.bassSlashAccuracy < 0.80 && rawEval.m2.velocityInversions == 2);
+
+        const auto& megaRes = allResults[7];
+        TEST("P1-1 (Q23-Wire live): default pipeline resolves SYNTH_MEGAVOICE_GUITAR_BASS (0 leaked FX, 0 velocity inversions, M2 PASS)",
+             megaRes.fixtureName == "SYNTH_MEGAVOICE_GUITAR_BASS.sty" &&
+             megaRes.m2.leakedChordRange == 0 && megaRes.m2.leakedFxNotesCount == 0 &&
+             megaRes.m2.velocityInversions == 0 && megaRes.m1.registerViolationRate < 0.02 &&
+             megaRes.m2.status == bench::BenchStatus::Pass);
+    }
 
     // P1-2: Explicit --target-kst nonexistent sets targetKstEvaluated=true, targetKstValid=false, targetKstStatus=FAIL, m6.score=0
     {
@@ -465,17 +484,17 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
              rk.m6.targetKstStatus == bench::BenchStatus::Fail && rk.m6.score == 0.0);
     }
 
-    // P1-3: M2.3 velocity-zone bucketing by SOURCE velocity (raw & re-inverted fail; Q2-sanitized passes!)
+    // P1-3: M2.3 velocity-zone bucketing by SOURCE velocity (raw & re-inverted fail; Q23-Wire live passes!)
     {
         const std::string megaPath = fx("SYNTH_MEGAVOICE_GUITAR_BASS.sty");
         const auto rawBytes = readFileBytes(megaPath);
         const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_MEGAVOICE_GUITAR_BASS.sty");
         const auto mr = Sff1ToUasfMapper().map(pr);
-        korg::MapOptions kopt;
-        kopt.ppqn = 384;
-        kopt.route = korg::routeFromCasm(pr);
-        kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
-        auto kr = korg::mapToKorg(mr.style, kopt);
+        korg::MapOptions rawOpt = korg::MapOptions::raw();
+        rawOpt.ppqn = 384;
+        rawOpt.route = korg::routeFromCasm(pr);
+        rawOpt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+        auto kr = korg::mapToKorg(mr.style, rawOpt);
         korg::Style sanitized = kr.style;
         korg::Style brokenInv = kr.style;
         for (auto& el : sanitized.elements) {
@@ -569,7 +588,7 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         const auto rawBytes = readFileBytes(drumPath);
         const auto pr = Sff1Reader().parseBuffer(rawBytes, "SYNTH_REVO_XG_DRUMS.sty");
         const auto mr = Sff1ToUasfMapper().map(pr);
-        korg::MapOptions kopt;
+        korg::MapOptions kopt = korg::MapOptions::raw();
         kopt.ppqn = 384;
         kopt.route = korg::routeFromCasm(pr);
         kopt.break_policy = korg::BreakPolicy::Yamaha1BarCap;

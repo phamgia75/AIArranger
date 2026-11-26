@@ -55,6 +55,19 @@ bool isSintMixCc(uint8_t cc) noexcept {
     return cc == 7 || cc == 10 || cc == 11 || cc == 91 || cc == 93;
 }
 
+bool isMegaVoiceBank(int msb, int lsb) noexcept {
+    return (msb == 63 && (lsb == 120 || lsb == 60)) || (msb == 8 && lsb == 60);
+}
+
+bool hasMegaVoiceName(const std::string& name) noexcept {
+    std::string low;
+    low.reserve(name.size());
+    for (unsigned char c : name) {
+        low.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return low.find("mega") != std::string::npos;
+}
+
 // UASF SectionHeader::bars is uint16.
 constexpr uint64_t kMaxSectionBars = 0xFFFF;
 
@@ -157,6 +170,30 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
     // emitted once per channel, not once per section.
     std::set<uint8_t> fallbackWarned;
 
+    // Pre-scan initial Yamaha Bank Select (MSB/LSB) per channel from the SMF
+    // so MegaVoice banks (63/120, 63/60, 8/60) tag ArticulationProfile::MegaLike
+    // consistently on every section (without altering non-MegaVoice tracks).
+    std::map<uint8_t, std::pair<int, int>> chInitialBank;
+    for (const auto& sffSection : parseResult.sections) {
+        for (const auto& t : sffSection.tracks) {
+            for (const auto& e : t.events) {
+                if ((e.status & 0xF0) != 0xB0) continue;
+                if (e.data1 != 0 && e.data1 != 32) continue;
+                const uint8_t ch = e.status & 0x0F;
+                auto& b = chInitialBank.try_emplace(ch, -1, -1).first->second;
+                if (e.data1 == 0 && b.first < 0) b.first = e.data2;
+                if (e.data1 == 32 && b.second < 0) b.second = e.data2;
+            }
+        }
+    }
+
+    auto isMegaVoiceChannel = [&](uint8_t ch, const std::string& name, bool isDrum) noexcept {
+        if (isDrum) return false;
+        if (hasMegaVoiceName(name)) return true;
+        auto it = chInitialBank.find(ch);
+        return it != chInitialBank.end() && isMegaVoiceBank(it->second.first, it->second.second);
+    };
+
     // One UASF track per MIDI channel; role/NTR/NTT from the CASM config for
     // that channel (section-specific `cfgs` first, then the style-wide map).
     auto makeTrack = [&](uint8_t ch, const std::map<uint8_t, const CasmTrackConfig*>* cfgs) {
@@ -187,6 +224,9 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         }
         track.is_drum = (track.role == uasf::TrackRole::Drum ||
                          track.role == uasf::TrackRole::Percussion);
+        if (isMegaVoiceChannel(ch, track.name, track.is_drum)) {
+            track.articulation.profile = uasf::ArticulationProfile::MegaLike;
+        }
         if (track.role == uasf::TrackRole::Bass ||
             track.role == uasf::TrackRole::Percussion) {
             track.articulation.fidelity = uasf::FidelityRequirement::Medium;
@@ -438,7 +478,9 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             track.role = mapCasmTrackRole(t);
             track.is_drum = (track.role == uasf::TrackRole::Drum ||
                              track.role == uasf::TrackRole::Percussion);
-            track.articulation.profile = uasf::ArticulationProfile::Generic;
+            track.articulation.profile = isMegaVoiceChannel(t.source_channel, track.name, track.is_drum)
+                                             ? uasf::ArticulationProfile::MegaLike
+                                             : uasf::ArticulationProfile::Generic;
             track.articulation.fidelity = uasf::FidelityRequirement::High;
 
             // Full per-section CASM metadata from this section's own Ctb2/Ctab entry.
