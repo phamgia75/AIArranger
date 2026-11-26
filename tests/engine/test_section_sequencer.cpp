@@ -88,6 +88,32 @@ int main() {
     TEST("Panic clears state", seq.getCurrentSectionIndex() < 0);
     TEST("Panic clears queue", !seq.isQueued());
 
+    // ── Q3a: On-Bass (bass) + signed negative octave + extended ChordType atomic round-trip ──
+    {
+        const Chord slashNeg{ChordType::Dom7, 67, 71, -2};  // G7/B, octave -2
+        seq.setCurrentChord(slashNeg);
+        const Chord got = seq.getCurrentChord();
+        TEST("SectionSequencer preserves type (Dom7)",     got.type == ChordType::Dom7);
+        TEST("SectionSequencer preserves root (67)",       got.root == 67);
+        TEST("SectionSequencer preserves On-Bass (71)",    got.bass == 71);
+        TEST("SectionSequencer preserves signed octave -2", got.octave == -2);
+
+        const Chord extPos{ChordType::Min7b5, 62, 65, +3};
+        seq.setCurrentChord(extPos);
+        const Chord gotExt = seq.getCurrentChord();
+        TEST("SectionSequencer preserves extended ChordType + bass + +3 octave",
+             gotExt.type == ChordType::Min7b5 && gotExt.root == 62 &&
+             gotExt.bass == 65 && gotExt.octave == 3);
+
+        // ChordInput negative octave sign-extension round-trip
+        ChordInput ci;
+        ci.setChord({ChordType::Add9, 60, 64, -1});
+        const Chord ciGot = ci.getChord();
+        TEST("ChordInput preserves Add9 + On-Bass 64 + signed octave -1",
+             ciGot.type == ChordType::Add9 && ciGot.root == 60 &&
+             ciGot.bass == 64 && ciGot.octave == -1);
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }
