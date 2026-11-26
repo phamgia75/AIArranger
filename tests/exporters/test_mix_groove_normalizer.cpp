@@ -4,10 +4,12 @@
 //   - src/exporters/korg/groove_normalizer.h
 // 100% synthetic fixtures, strictly offline, zero private data.
 
-// Dual-include ODR verification (groove_normalizer.h BEFORE megavoice_sanitizer.h).
+// Dual-include ODR verification (groove_normalizer.h + mix_normalizer.h BEFORE
+// megavoice_sanitizer.h + cv_splitter.h).
 #include "exporters/korg/groove_normalizer.h"
-#include "exporters/korg/megavoice_sanitizer.h"
 #include "exporters/korg/mix_normalizer.h"
+#include "exporters/korg/megavoice_sanitizer.h"
+#include "exporters/korg/cv_splitter.h"
 #include "importers/sff1/xg_sysex_parser.h"
 
 #include <algorithm>
@@ -131,8 +133,9 @@ int main() {
 #endif
         NoteSpan ns{10, 120, 60, 90, false};
         CasmTrackView cv{};
-        TEST("dual-include ODR guard defined and NoteSpan/CasmTrackView coexist",
-             guard_defined && ns.pitch == 60 && cv.high_key == 11);
+        TEST("dual-include ODR guard defined and NoteSpan/CasmTrackView/cv_splitter coexist",
+             guard_defined && ns.pitch == 60 && cv.high_key == 11 &&
+             maxCvCountFor(ai_arranger::uasf::SectionType::Main1) == 6);
     }
 
     // ── 2. XG SysEx Parser: All Documented Signatures ───────────────────

@@ -69,7 +69,7 @@ struct StyleEditSheetSoundView {
     std::string rationale;
 };
 
-namespace detail {
+namespace mix_detail {
 
 inline const char* mixTrackLabel(uint8_t korg_ch) noexcept {
     switch (korg_ch) {
@@ -137,7 +137,7 @@ inline std::string formatOptDb(const std::optional<int8_t>& v) {
     return (x > 0 ? "+" : "") + std::to_string(x) + " dB";
 }
 
-} // namespace detail
+} // namespace mix_detail
 
 // Cleans proprietary/invalid CCs, injects missing tick-0 XG mix CCs, balances
 // melodic/bass effective loudness proxy headroom into [0.20, 0.92], and appends
@@ -274,7 +274,7 @@ inline MixNormalizeStats normalizeElementMix(
             }
         }
 
-        detail::insertTick0Events(el.events, tick0_synth);
+        mix_detail::insertTick0Events(el.events, tick0_synth);
 
         // ── 3. Effective Loudness Proxy Headroom (M5.3 >= 95%) ───────────
         // Applies ONLY to active chord-driven melodic/bass channels (NEVER Drum/Perc!).
@@ -315,7 +315,7 @@ inline MixNormalizeStats normalizeElementMix(
                     // Guard against silent tick-0 CC11=0 which blocks any CC7/vel boost.
                     if (cc11 == 0u) {
                         cc11 = 100u;
-                        detail::upsertTick0Cc(el.events, ch, 11u, cc11);
+                        mix_detail::upsertTick0Cc(el.events, ch, 11u, cc11);
                     }
 
                     const double denom_no_cc7 = (static_cast<double>(cc11) / 127.0) *
@@ -327,7 +327,7 @@ inline MixNormalizeStats normalizeElementMix(
                     }
                     uint8_t new_cc7 = static_cast<uint8_t>(
                         std::clamp(needed_cc7, static_cast<int>(cc7), 120));
-                    detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
+                    mix_detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
 
                     double after_cc7_l = (static_cast<double>(new_cc7) / 127.0) * denom_no_cc7;
                     if (after_cc7_l < kTargetLowL) {
@@ -355,7 +355,7 @@ inline MixNormalizeStats normalizeElementMix(
                                 ? static_cast<int>(std::ceil(kTargetLowL * 127.0 / f))
                                 : 127;
                             new_cc7 = static_cast<uint8_t>(std::clamp(lift_cc7, static_cast<int>(new_cc7), 127));
-                            detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
+                            mix_detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
                             after_vel_l = (static_cast<double>(new_cc7) / 127.0) * f;
                         }
                         if (after_vel_l < kTargetLowL && cc11 < 127u) {
@@ -364,7 +364,7 @@ inline MixNormalizeStats normalizeElementMix(
                                 ? static_cast<int>(std::ceil(kTargetLowL * 127.0 / f))
                                 : 127;
                             cc11 = static_cast<uint8_t>(std::clamp(lift_cc11, static_cast<int>(cc11), 127));
-                            detail::upsertTick0Cc(el.events, ch, 11u, cc11);
+                            mix_detail::upsertTick0Cc(el.events, ch, 11u, cc11);
                         }
                     }
                     ++stats.tracks_gain_adjusted;
@@ -375,7 +375,7 @@ inline MixNormalizeStats normalizeElementMix(
                         ? static_cast<int>(std::floor(kTargetHighL * 127.0 / denom_no_cc7))
                         : 100;
                     const uint8_t new_cc7 = static_cast<uint8_t>(std::clamp(desired_cc7, 1, 127));
-                    detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
+                    mix_detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
                     ++stats.tracks_gain_adjusted;
                 }
             }
@@ -450,7 +450,7 @@ inline std::string formatPa5xStyleEditSheetMd(
             out << "|---:|---|---|---|---:|---|---|---:|---|---|\n";
             for (const auto& t : track_advice) {
                 const std::string label = t.track_name.empty()
-                    ? std::string(detail::mixTrackLabel(t.korg_ch))
+                    ? std::string(mix_detail::mixTrackLabel(t.korg_ch))
                     : t.track_name;
                 out << "| " << (t.korg_ch <= 15u ? std::to_string(static_cast<int>(t.korg_ch) + 1) : "-")
                     << " | " << label
@@ -461,9 +461,9 @@ inline std::string formatPa5xStyleEditSheetMd(
                     << " | " << t.retrigger_mode
                     << " | " << (t.octave_shift_applied > 0 ? "+" : "") << static_cast<int>(t.octave_shift_applied)
                     << " | " << (t.guitar_mode_candidate ? "Candidate" : "No")
-                    << " | " << detail::formatOptDb(t.eq_low_gain_db)
-                    << " / " << detail::formatOptDb(t.eq_mid_gain_db)
-                    << " / " << detail::formatOptDb(t.eq_high_gain_db)
+                    << " | " << mix_detail::formatOptDb(t.eq_low_gain_db)
+                    << " / " << mix_detail::formatOptDb(t.eq_mid_gain_db)
+                    << " / " << mix_detail::formatOptDb(t.eq_high_gain_db)
                     << " |\n";
             }
             out << "\n";
@@ -478,7 +478,7 @@ inline std::string formatPa5xStyleEditSheetMd(
             out << "|---:|---|---|---|---|---:|---|---|\n";
             for (const auto& s : sound_matches) {
                 const std::string label = s.track_name.empty()
-                    ? std::string(detail::mixTrackLabel(s.korg_ch))
+                    ? std::string(mix_detail::mixTrackLabel(s.korg_ch))
                     : s.track_name;
                 const std::string sound_col = s.selected_name.empty() ? "UNRESOLVED" : s.selected_name;
                 const std::string bank_pc = (s.msb >= 0 && s.lsb >= 0 && s.pc >= 0)
@@ -506,11 +506,11 @@ inline std::string formatPa5xStyleEditSheetMd(
         out << "- **Master Volume:** "
             << (xg.master_volume.has_value() ? std::to_string(*xg.master_volume) : "not set") << "\n";
         out << "- **Effect Types:** Reverb="
-            << (xg.reverb_type.has_value() ? detail::formatHex16(*xg.reverb_type) : "none")
+            << (xg.reverb_type.has_value() ? mix_detail::formatHex16(*xg.reverb_type) : "none")
             << ", Chorus="
-            << (xg.chorus_type.has_value() ? detail::formatHex16(*xg.chorus_type) : "none")
+            << (xg.chorus_type.has_value() ? mix_detail::formatHex16(*xg.chorus_type) : "none")
             << ", Variation="
-            << (xg.variation_type.has_value() ? detail::formatHex16(*xg.variation_type) : "none")
+            << (xg.variation_type.has_value() ? mix_detail::formatHex16(*xg.variation_type) : "none")
             << "\n";
         if (!xg.advisory_codes.empty()) {
             out << "- **Advisory Codes:** ";
@@ -537,8 +537,8 @@ inline std::string formatPa5xStyleEditSheetMd(
                     << " | " << optU8(p.reverb_send)
                     << " | " << optU8(p.chorus_send)
                     << " | " << optU8(p.variation_send)
-                    << " | " << detail::formatOptDb(p.eq_low_gain_db)
-                    << " | " << detail::formatOptDb(p.eq_high_gain_db)
+                    << " | " << mix_detail::formatOptDb(p.eq_low_gain_db)
+                    << " | " << mix_detail::formatOptDb(p.eq_high_gain_db)
                     << " |\n";
             }
             out << "\n";

@@ -47,7 +47,7 @@ struct GrooveNormalizeStats {
     uint32_t new_element_length_ticks  = 0;  // updated whole-bar element length
 };
 
-namespace detail {
+namespace groove_detail {
 
 inline bool safeMulAddU64(uint64_t a, uint64_t b, uint64_t c, uint64_t& out) noexcept {
     if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) return false;
@@ -93,7 +93,7 @@ struct GrooveNoteItem {
     uint32_t orig_dur = 0;
 };
 
-} // namespace detail
+} // namespace groove_detail
 
 // Normalizes rescaled note spans on a single channel before MIDI NoteOn/NoteOff
 // emission. Returns updated element length in stats.new_element_length_ticks.
@@ -115,7 +115,7 @@ inline GrooveNormalizeStats normalizeTrackGroove(
 
     try {
         // Filter malformed MIDI values or out-of-bounds onsets and capture original duration.
-        std::vector<detail::GrooveNoteItem> items;
+        std::vector<groove_detail::GrooveNoteItem> items;
         items.reserve(notes.size());
         for (const auto& n : notes) {
             if (n.pitch > 127u || n.vel == 0u || n.vel > 127u) continue;
@@ -147,19 +147,19 @@ inline GrooveNormalizeStats normalizeTrackGroove(
             }
 
             // Build contiguous piecewise-constant segments covering [0, element_length_ticks].
-            std::vector<detail::TempoSegment> segs;
+            std::vector<groove_detail::TempoSegment> segs;
             bool overflow = false;
             uint64_t running_acc = 0;
 
             auto pushSeg = [&](uint32_t s, uint32_t e, uint32_t mpqn) {
                 if (overflow || e <= s) return;
-                detail::TempoSegment seg;
+                groove_detail::TempoSegment seg;
                 seg.start_tick = s;
                 seg.end_tick = e;
                 seg.mpqn = mpqn;
                 seg.start_acc = running_acc;
                 uint64_t next_acc = 0;
-                if (!detail::safeMulAddU64(static_cast<uint64_t>(e - s),
+                if (!groove_detail::safeMulAddU64(static_cast<uint64_t>(e - s),
                                            static_cast<uint64_t>(mpqn),
                                            running_acc,
                                            next_acc)) {
@@ -191,20 +191,20 @@ inline GrooveNormalizeStats normalizeTrackGroove(
 
             if (!overflow && distinct_mpqns.size() >= 2u) {
                 const uint64_t base_m = static_cast<uint64_t>(opt.base_mpqn);
-                const uint64_t total_warped = detail::roundDivHalfUpU64(running_acc, base_m);
+                const uint64_t total_warped = groove_detail::roundDivHalfUpU64(running_acc, base_m);
                 const uint64_t bt = static_cast<uint64_t>(bar_ticks);
                 const uint64_t bars = (total_warped == 0ULL)
                     ? 1ULL
                     : ((total_warped - 1ULL) / bt) + 1ULL;
 
                 uint64_t new_len64 = 0;
-                const bool len_ok = detail::safeMulAddU64(bars, bt, 0ULL, new_len64) &&
+                const bool len_ok = groove_detail::safeMulAddU64(bars, bt, 0ULL, new_len64) &&
                                     new_len64 >= 2ULL &&
                                     new_len64 <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
 
                 if (len_ok) {
                     const double safe_ppqn = static_cast<double>(opt.ppqn > 0u ? opt.ppqn : 480u);
-                    std::vector<detail::GrooveNoteItem> warped_items = items;
+                    std::vector<groove_detail::GrooveNoteItem> warped_items = items;
                     double max_drift = 0.0;
                     bool note_overflow = false;
 
@@ -213,13 +213,13 @@ inline GrooveNormalizeStats normalizeTrackGroove(
                         const uint32_t clamped_off = std::min(it.note.off_tick, element_length_ticks);
                         uint64_t acc_on = 0;
                         uint64_t acc_off = 0;
-                        if (!detail::evalTempoAcc(segs, clamped_on, acc_on) ||
-                            !detail::evalTempoAcc(segs, clamped_off, acc_off)) {
+                        if (!groove_detail::evalTempoAcc(segs, clamped_on, acc_on) ||
+                            !groove_detail::evalTempoAcc(segs, clamped_off, acc_off)) {
                             note_overflow = true;
                             break;
                         }
-                        uint64_t w_on = detail::roundDivHalfUpU64(acc_on, base_m);
-                        const uint64_t w_off = detail::roundDivHalfUpU64(acc_off, base_m);
+                        uint64_t w_on = groove_detail::roundDivHalfUpU64(acc_on, base_m);
+                        const uint64_t w_off = groove_detail::roundDivHalfUpU64(acc_off, base_m);
                         if (w_on > new_len64 || w_off > new_len64) {
                             note_overflow = true;
                             break;
