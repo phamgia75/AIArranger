@@ -171,6 +171,23 @@ inline std::vector<std::string> tokenizeSafeWords(std::string_view input) {
             tokens.push_back(std::move(tok));
         }
     };
+    // For alphanumeric tokens matching [a-z]+[0-9]+ (e.g. "piano1", "organ1", "guitar1"),
+    // also emit the alphabetic prefix (len >= 2) while preserving the full token
+    // ("dx7", "b3", "acc1", "chord1", "phrase1").
+    auto pushWithAlphaPrefix = [&](std::string tok) {
+        if (tok.empty()) return;
+        size_t alpha_len = 0;
+        while (alpha_len < tok.size() && isAsciiLower(tok[alpha_len])) ++alpha_len;
+        bool trailing_digits = (alpha_len >= 2 && alpha_len < tok.size());
+        if (trailing_digits) {
+            for (size_t d = alpha_len; d < tok.size(); ++d) {
+                if (!isAsciiDigit(tok[d])) { trailing_digits = false; break; }
+            }
+        }
+        std::string alpha_prefix = trailing_digits ? tok.substr(0, alpha_len) : std::string{};
+        pushUnique(std::move(tok));
+        if (!alpha_prefix.empty()) pushUnique(std::move(alpha_prefix));
+    };
 
     // Pass 1: preserve dotted/alnum chunks separated by spaces/slashes/underscores/etc.
     size_t i = 0;
@@ -187,7 +204,7 @@ inline std::vector<std::string> tokenizeSafeWords(std::string_view input) {
         std::string lowerChunk;
         lowerChunk.reserve(rawChunk.size());
         for (char c : rawChunk) lowerChunk.push_back(lowerAsciiChar(c));
-        pushUnique(lowerChunk);
+        pushWithAlphaPrefix(std::move(lowerChunk));
 
         // Pass 2: split chunk on '.' into sub-chunks and split CamelCase words
         size_t p = 0;
@@ -201,7 +218,7 @@ inline std::vector<std::string> tokenizeSafeWords(std::string_view input) {
             std::string lowerSub;
             lowerSub.reserve(sub.size());
             for (char c : sub) lowerSub.push_back(lowerAsciiChar(c));
-            pushUnique(lowerSub);
+            pushWithAlphaPrefix(std::move(lowerSub));
 
             // Split CamelCase boundaries inside sub (e.g. "AcousticGuitar" -> "acoustic", "guitar",
             // "FingerBass" -> "finger", "bass", "BottomEnd" -> "bottom", "end").
@@ -215,7 +232,7 @@ inline std::vector<std::string> tokenizeSafeWords(std::string_view input) {
                     std::string word;
                     word.reserve(k - wStart);
                     for (size_t j = wStart; j < k; ++j) word.push_back(lowerAsciiChar(sub[j]));
-                    pushUnique(std::move(word));
+                    pushWithAlphaPrefix(std::move(word));
                     wStart = k;
                 }
             }
@@ -223,7 +240,7 @@ inline std::vector<std::string> tokenizeSafeWords(std::string_view input) {
                 std::string word;
                 word.reserve(sub.size() - wStart);
                 for (size_t j = wStart; j < sub.size(); ++j) word.push_back(lowerAsciiChar(sub[j]));
-                pushUnique(std::move(word));
+                pushWithAlphaPrefix(std::move(word));
             }
         }
     }
@@ -247,12 +264,12 @@ inline bool hasAnyToken(const std::vector<std::string>& tokens,
 
 inline bool isGenericTrackName(const std::vector<std::string>& tokens) noexcept {
     if (tokens.empty()) return true;
-    static constexpr std::array<const char*, 18> kGeneric = {
+    static constexpr std::array<const char*, 21> kGeneric = {
         "chord", "chord1", "chord2", "chord3", "chord4",
         "phrase", "phrase1", "phrase2",
         "part", "part1", "part2", "part14",
         "track", "channel", "ch",
-        "acc1", "acc2", "acc3"
+        "acc", "acc1", "acc2", "acc3", "acc4", "acc5"
     };
     for (const auto& t : tokens) {
         bool isGen = false;
@@ -260,7 +277,6 @@ inline bool isGenericTrackName(const std::vector<std::string>& tokens) noexcept 
             if (t == g) { isGen = true; break; }
         }
         if (isGen) continue;
-        if (t == "acc4" || t == "acc5") continue;
         // Pure digits (e.g. "Channel 8" -> "channel", "8") are also generic.
         bool allDigits = true;
         for (char c : t) {
@@ -462,6 +478,13 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
     const bool isDrumContext = (korg_ch == kDrumCh || korg_ch == kPercCh ||
                                 role == uasf::TrackRole::Drum || role == uasf::TrackRole::Percussion);
 
+    // ── Steel Drums (MalletPerc) checked BEFORE generic Drum/Kit block when not on drum/perc channel ──
+    if (!isDrumContext &&
+        (hasToken(tokens, "steeldrum") || hasToken(tokens, "steeldrums") ||
+         (hasToken(tokens, "steel") && hasAnyToken(tokens, {"drum", "drums"})))) {
+        return {{TimbreFamily::MalletPerc, "Steel Drums", dncHint}, 86, "keyword:steel-drum"};
+    }
+
     // ── Drum / Percussion kits (checked first in drum context or explicit kit tokens) ──
     const bool hasKitToken = hasAnyToken(tokens, {
         "kit", "drum", "drums", "drumkit", "dk", "rhythm2", "808", "909", "tr808", "tr909"
@@ -540,6 +563,30 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
         return {{TimbreFamily::ElectricPiano, "Electric Piano", dncHint}, 86, "keyword:ep"};
     }
 
+    // ── Organ (checked BEFORE generic "reed" so "Organ_Reed" & "Reed Organ" classify as Organ) ──
+    if (hasAnyToken(tokens, {"organ", "org", "b3", "hammond", "rotary", "leslie",
+                             "drawbar", "churchorg", "pipeorg", "farfisa", "voxorg", "orgel", "jimmy"})) {
+        std::string sub = "Drawbar Organ";
+        if (hasAnyToken(tokens, {"church", "churchorg", "pipe", "pipeorg"})) sub = "Church Organ";
+        else if (hasToken(tokens, "reed")) sub = "Reed Organ";
+        else if (hasAnyToken(tokens, {"rock", "overdrive", "dist"})) sub = "Rock Organ";
+        else if (hasAnyToken(tokens, {"jazz", "b3", "hammond", "rotary", "jimmy"})) sub = "Jazz / Drawbar Organ";
+        return {{TimbreFamily::Organ, std::move(sub), dncHint}, 85, "keyword:organ"};
+    }
+
+    // ── Accordion / Harmonica (NEVER bare "acc" / "acc1..5"; checked before generic "reed") ──
+    if (hasAnyToken(tokens, {"accordion", "accord", "accdn", "akkordeon", "musette",
+                             "bandoneon", "concertina", "harmonica", "bayan"})) {
+        std::string sub = hasToken(tokens, "harmonica") ? "Harmonica"
+                        : (hasToken(tokens, "bandoneon") ? "Bandoneon" : "Accordion");
+        return {{TimbreFamily::Accordion, std::move(sub), dncHint}, 86, "keyword:accordion"};
+    }
+
+    // ── English Horn (SaxReed) checked BEFORE generic "horn" -> Brass ──
+    if (hasToken(tokens, "englhorn") || (hasToken(tokens, "english") && hasToken(tokens, "horn"))) {
+        return {{TimbreFamily::SaxReed, "English Horn", dncHint}, 86, "keyword:english-horn"};
+    }
+
     // ── Brass (checked before generic "bs" suffix so "Tbn Bs" resolves as Trombone Brass!) ──
     if (hasAnyToken(tokens, {"trombone", "tbn", "trb"})) {
         return {{TimbreFamily::Brass, "Trombone", dncHint}, 86, "keyword:trombone"};
@@ -560,7 +607,8 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
         else if (hasAnyToken(tokens, {"bari", "baritone", "barisax"})) sub = "Baritone Sax";
         return {{TimbreFamily::SaxReed, std::move(sub), dncHint}, 86, "keyword:sax"};
     }
-    if (hasAnyToken(tokens, {"oboe", "clarinet", "clar", "cl", "bassoon", "reed", "woodwind", "englhorn"})) {
+    if (hasAnyToken(tokens, {"oboe", "clarinet", "clar", "cl", "bassoon", "woodwind", "englhorn"}) ||
+        (hasToken(tokens, "reed") && !hasAnyToken(tokens, {"organ", "org", "orgel", "accordion", "accord", "harmonica"}))) {
         std::string sub = "Reed / Woodwind";
         if (hasToken(tokens, "oboe")) sub = "Oboe";
         else if (hasAnyToken(tokens, {"clarinet", "clar", "cl"})) sub = "Clarinet";
@@ -578,24 +626,6 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
         return {{TimbreFamily::FlutePipe, std::move(sub), dncHint}, 85, "keyword:flute"};
     }
 
-    // ── Organ (checked before generic Piano/Pad) ──
-    if (hasAnyToken(tokens, {"organ", "org", "b3", "hammond", "rotary", "leslie",
-                             "drawbar", "churchorg", "pipeorg", "farfisa", "voxorg", "orgel", "jimmy"})) {
-        std::string sub = "Drawbar Organ";
-        if (hasAnyToken(tokens, {"church", "churchorg", "pipe", "pipeorg"})) sub = "Church Organ";
-        else if (hasAnyToken(tokens, {"rock", "overdrive", "dist"})) sub = "Rock Organ";
-        else if (hasAnyToken(tokens, {"jazz", "b3", "hammond", "rotary", "jimmy"})) sub = "Jazz / Drawbar Organ";
-        return {{TimbreFamily::Organ, std::move(sub), dncHint}, 85, "keyword:organ"};
-    }
-
-    // ── Accordion / Harmonica (NEVER bare "acc" / "acc1..5") ──
-    if (hasAnyToken(tokens, {"accordion", "accord", "accdn", "akkordeon", "musette",
-                             "bandoneon", "concertina", "harmonica", "bayan"})) {
-        std::string sub = hasToken(tokens, "harmonica") ? "Harmonica"
-                        : (hasToken(tokens, "bandoneon") ? "Bandoneon" : "Accordion");
-        return {{TimbreFamily::Accordion, std::move(sub), dncHint}, 86, "keyword:accordion"};
-    }
-
     // ── Guitars (Acoustic vs Electric) ──
     if (hasAnyToken(tokens, {"acgt", "acgtr", "agtr", "a.gtr", "nylon", "nyl", "nylgt",
                              "classicgt", "steel", "stl", "stlgt", "folkgt", "12str", "flamenco", "spanishgt"})) {
@@ -605,9 +635,12 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
         }
         return {{TimbreFamily::AcousticGuitar, std::move(sub), dncHint}, 86, "keyword:acoustic-guitar"};
     }
+    // Do not let bare "overdrive"/"dist"/"crunch" hijack "Overdrive_Lead", "Dist_Synth", or "Overdrive_Bass".
+    const bool hasNonGuitarHost = hasAnyToken(tokens, {"lead", "synth", "syn", "bass", "bs", "organ", "org"});
     if (hasAnyToken(tokens, {"elgt", "elgtr", "egtr", "e.gtr", "clngt", "strat", "tele", "lespaul",
-                             "jazzgt", "jazzgtr", "dist", "distgt", "overdrive", "odgt",
-                             "crunch", "rockgt", "mutedgt", "wahgt", "funkgt", "solidgt"})) {
+                             "jazzgt", "jazzgtr", "distgt", "odgt",
+                             "rockgt", "mutedgt", "wahgt", "funkgt", "solidgt"}) ||
+        (!hasNonGuitarHost && hasAnyToken(tokens, {"dist", "overdrive", "crunch"}))) {
         std::string sub = "Clean Electric Guitar";
         if (hasAnyToken(tokens, {"dist", "distgt", "overdrive", "odgt", "crunch", "rockgt", "metal"})) {
             sub = "Distortion Electric Guitar";
@@ -759,7 +792,9 @@ inline SignalFeatures computeSignalFeatures(const std::vector<NoteSpan>& notes,
 
     const uint32_t ppqn = opt.ppqn ? opt.ppqn : 480u;
     const uint32_t tempo_mpqn = opt.tempo_mpqn ? opt.tempo_mpqn : 500000u;
-    const uint32_t bar_ticks = opt.bar_ticks ? opt.bar_ticks : (ppqn * 4u);
+    const uint64_t bar_ticks = opt.bar_ticks
+                                   ? uint64_t{opt.bar_ticks}
+                                   : std::max<uint64_t>(1u, uint64_t{ppqn} * 4u);
 
     f.note_count = static_cast<uint32_t>(notes.size());
 
@@ -767,7 +802,7 @@ inline SignalFeatures computeSignalFeatures(const std::vector<NoteSpan>& notes,
     pitches.reserve(notes.size());
 
     struct SweepPoint {
-        uint32_t tick;
+        uint64_t tick;
         int8_t   delta; // -1 for NoteOff (ordered BEFORE +1 NoteOn at equal tick)
     };
     std::vector<SweepPoint> sweep;
@@ -777,19 +812,20 @@ inline SignalFeatures computeSignalFeatures(const std::vector<NoteSpan>& notes,
     sorted_notes.reserve(notes.size());
 
     double sum_dur_beats = 0.0;
-    uint32_t max_end_tick = 0;
+    uint64_t max_end_tick = 0;
 
     for (const auto& n : notes) {
         const uint8_t p = std::min<uint8_t>(n.pitch, 127u);
-        const uint32_t off = (n.off_tick > n.on_tick) ? n.off_tick : (n.on_tick + 1u);
+        const uint64_t on64  = uint64_t{n.on_tick};
+        const uint64_t off64 = (n.off_tick > n.on_tick) ? uint64_t{n.off_tick} : (on64 + 1u);
         pitches.push_back(p);
-        sweep.push_back({n.on_tick, +1});
-        sweep.push_back({off, -1});
-        sum_dur_beats += static_cast<double>(off - n.on_tick) / static_cast<double>(ppqn);
-        if (off > max_end_tick) max_end_tick = off;
+        sweep.push_back({on64, +1});
+        sweep.push_back({off64, -1});
+        sum_dur_beats += static_cast<double>(off64 - on64) / static_cast<double>(ppqn);
+        if (off64 > max_end_tick) max_end_tick = off64;
         NoteSpan clean = n;
         clean.pitch = p;
-        clean.off_tick = off;
+        clean.off_tick = static_cast<uint32_t>(std::min<uint64_t>(off64, UINT32_MAX));
         sorted_notes.push_back(clean);
     }
 
@@ -811,17 +847,21 @@ inline SignalFeatures computeSignalFeatures(const std::vector<NoteSpan>& notes,
     f.max_polyphony = static_cast<uint8_t>(std::clamp(max_poly, 0, 255));
     f.mean_duration_beats = sum_dur_beats / static_cast<double>(notes.size());
 
-    const uint32_t bars = opt.bars
-                              ? opt.bars
-                              : std::max<uint32_t>(1u, (max_end_tick + bar_ticks - 1u) / bar_ticks);
+    const uint64_t bars = opt.bars
+                              ? uint64_t{opt.bars}
+                              : std::max<uint64_t>(1u, (max_end_tick / bar_ticks) +
+                                                           ((max_end_tick % bar_ticks) ? 1u : 0u));
     f.notes_per_bar = static_cast<double>(notes.size()) / static_cast<double>(bars);
 
     // Detect guitar-like strum offsets: consecutive onset deltas in [5 ms, 60 ms]
     // forming >= 3-note clusters with consistent pitch direction.
     const double ticks_per_ms = (static_cast<double>(ppqn) * 1000.0) / static_cast<double>(tempo_mpqn);
-    const uint32_t min_strum_ticks = std::max<uint32_t>(1u, static_cast<uint32_t>(std::floor(5.0 * ticks_per_ms)));
+    const double max_u32_d    = static_cast<double>(UINT32_MAX - 1u);
+    const double min_strum_d  = std::clamp(std::floor(5.0 * ticks_per_ms), 1.0, max_u32_d);
+    const double max_strum_d  = std::clamp(std::ceil(60.0 * ticks_per_ms), 1.0, max_u32_d);
+    const uint32_t min_strum_ticks = static_cast<uint32_t>(min_strum_d);
     const uint32_t max_strum_ticks = std::max<uint32_t>(min_strum_ticks + 1u,
-                                                        static_cast<uint32_t>(std::ceil(60.0 * ticks_per_ms)));
+                                                        static_cast<uint32_t>(max_strum_d));
 
     std::sort(sorted_notes.begin(), sorted_notes.end(), [](const NoteSpan& a, const NoteSpan& b) {
         if (a.on_tick != b.on_tick) return a.on_tick < b.on_tick;
@@ -1319,22 +1359,26 @@ inline std::vector<TrackTimbreProfile> profileStyleTracks(
         std::map<std::tuple<int, int, int>, uint32_t> voice_freq;
         std::map<uasf::SectionType, std::tuple<int, int, int>> element_voices;
         std::vector<NoteSpan> notes;
-        uint32_t total_bars = 0;
+        uint64_t total_bars = 0;
         uint32_t ppqn = 480;
-        uint32_t bar_ticks = 1920;
+        uint64_t bar_ticks = 1920;
     };
 
     const uint32_t tempo_mpqn = style.tempo_bpm
-                                    ? ((60'000'000u + style.tempo_bpm / 2u) / style.tempo_bpm)
+                                    ? static_cast<uint32_t>(std::max<uint64_t>(
+                                          1u, (60'000'000ULL + uint64_t{style.tempo_bpm} / 2u) / uint64_t{style.tempo_bpm}))
                                     : 500000u;
 
     std::map<uint8_t, Accum> by_src;
     for (const auto& sec : style.sections) {
         const uint32_t ppqn = sec.resolution ? sec.resolution : (style.resolution ? style.resolution : 480u);
-        const uint32_t num  = sec.beats_per_bar ? sec.beats_per_bar : 4u;
-        const uint32_t den  = sec.beat_note ? sec.beat_note : 4u;
-        const uint32_t bar_ticks = std::max<uint32_t>(1u, (ppqn * 4u * num) / den);
-        const uint32_t sec_end   = std::max<uint32_t>(1u, sec.bars) * bar_ticks;
+        const uint64_t num  = sec.beats_per_bar ? uint64_t{sec.beats_per_bar} : 4u;
+        const uint64_t den  = sec.beat_note ? uint64_t{sec.beat_note} : 4u;
+        const uint64_t bar_ticks64 = std::max<uint64_t>(1u, (uint64_t{ppqn} * 4u * num) / den);
+        const uint64_t sec_bars64  = std::max<uint64_t>(1u, uint64_t{sec.bars});
+        const uint64_t sec_end64   = (sec_bars64 > uint64_t{UINT32_MAX} / bar_ticks64)
+                                         ? uint64_t{UINT32_MAX}
+                                         : (sec_bars64 * bar_ticks64);
 
         for (const auto& tr : sec.tracks) {
             const uint8_t src_ch = tr.midi_channel;
@@ -1354,7 +1398,7 @@ inline std::vector<TrackTimbreProfile> profileStyleTracks(
                 acc.name = tr.name;
                 acc.role = tr.role;
                 acc.ppqn = ppqn;
-                acc.bar_ticks = bar_ticks;
+                acc.bar_ticks = bar_ticks64;
             } else if (acc.name.empty() && !tr.name.empty()) {
                 acc.name = tr.name;
             }
@@ -1373,14 +1417,26 @@ inline std::vector<TrackTimbreProfile> profileStyleTracks(
                 }
             }
 
-            const auto spans = extractNoteSpansFromEvents(tr.events, sec_end);
-            const uint32_t offset = acc.total_bars * acc.bar_ticks;
+            const auto spans = extractNoteSpansFromEvents(tr.events, static_cast<uint32_t>(sec_end64));
+            const uint64_t offset64 = (acc.bar_ticks > 0 && acc.total_bars > UINT64_MAX / acc.bar_ticks)
+                                          ? UINT64_MAX
+                                          : (acc.total_bars * acc.bar_ticks);
             for (auto ns : spans) {
-                ns.on_tick  += offset;
-                ns.off_tick += offset;
+                const uint64_t on64  = (offset64 >= uint64_t{UINT32_MAX} - ns.on_tick)
+                                           ? uint64_t{UINT32_MAX}
+                                           : (offset64 + uint64_t{ns.on_tick});
+                const uint64_t off64 = (offset64 >= uint64_t{UINT32_MAX} - ns.off_tick)
+                                           ? uint64_t{UINT32_MAX}
+                                           : (offset64 + uint64_t{ns.off_tick});
+                ns.on_tick  = static_cast<uint32_t>(on64);
+                ns.off_tick = static_cast<uint32_t>(off64);
                 acc.notes.push_back(ns);
             }
-            acc.total_bars += std::max<uint32_t>(1u, sec.bars);
+            if (acc.total_bars <= UINT64_MAX - sec_bars64) {
+                acc.total_bars += sec_bars64;
+            } else {
+                acc.total_bars = UINT64_MAX;
+            }
         }
     }
 
@@ -1401,8 +1457,8 @@ inline std::vector<TrackTimbreProfile> profileStyleTracks(
         TimbreProfileOptions topt{};
         topt.ppqn       = acc.ppqn;
         topt.tempo_mpqn = tempo_mpqn;
-        topt.bar_ticks  = acc.bar_ticks;
-        topt.bars       = acc.total_bars;
+        topt.bar_ticks  = static_cast<uint32_t>(std::min<uint64_t>(acc.bar_ticks, UINT32_MAX));
+        topt.bars       = static_cast<uint32_t>(std::min<uint64_t>(acc.total_bars, UINT32_MAX));
 
         result.push_back(profileTrackTimbre(
             best_msb, best_lsb, best_pc,

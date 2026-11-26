@@ -451,6 +451,76 @@ int main() {
              oob_p.note_count == 2 && oob_p.pitch_max <= 127 && oob_p.max_polyphony >= 1);
     }
 
+    // ── 9. Audit Round 1 Regression Tests (P1-1, P1-2, P2-2) ──
+    {
+        // P1-1: UBSan div-by-zero, float-cast-overflow, and uint32_t tick wraparound
+        {
+            TimbreProfileOptions opt_div0{};
+            opt_div0.ppqn = 0x40000000u; // 0x40000000u * 4u == 0 in uint32_t!
+            opt_div0.bar_ticks = 0;
+            const auto p_div0 = profileTrackTimbre(-1, -1, -1, "Chord1", TrackRole::Chord,
+                                                   {makeNote(0, 100, 60)}, {}, 11, 11, opt_div0);
+            TEST("P1-1: ppqn=0x40000000u, bar_ticks=0 avoids uint32_t div-by-zero",
+                 p_div0.note_count == 1 && p_div0.notes_per_bar > 0.0);
+
+            TimbreProfileOptions opt_fco{};
+            opt_fco.ppqn = 1000000u;
+            opt_fco.tempo_mpqn = 1u; // 60 * 1e9 overflows uint32_t without clamp!
+            const auto p_fco = profileTrackTimbre(-1, -1, -1, "Chord1", TrackRole::Chord,
+                                                  {makeNote(0, 100, 60), makeNote(10, 110, 64), makeNote(20, 120, 67)},
+                                                  {}, 11, 11, opt_fco);
+            TEST("P1-1: ppqn=1000000u, tempo_mpqn=1u avoids float-cast-overflow UB",
+                 p_fco.note_count == 3 && p_fco.max_polyphony == 3);
+
+            const auto p_max = profileTrackTimbre(-1, -1, -1, "Chord1", TrackRole::Chord,
+                                                  {makeNote(UINT32_MAX, UINT32_MAX, 60)}, {}, 11, 11);
+            TEST("P1-1: NoteSpan{UINT32_MAX, UINT32_MAX} preserves max_polyphony == 1 without wraparound",
+                 p_max.note_count == 1 && p_max.max_polyphony == 1 && p_max.notes_per_bar > 0.0);
+
+            const auto p_near = profileTrackTimbre(-1, -1, -1, "Chord1", TrackRole::Chord,
+                                                   {makeNote(0xFFFFFE00u, 0xFFFFFF00u, 60)}, {}, 11, 11);
+            TEST("P1-1: NoteSpan{0xFFFFFE00u, 0xFFFFFF00u} computes bars in uint64_t without wraparound",
+                 p_near.note_count == 1 && p_near.max_polyphony == 1 && p_near.notes_per_bar > 0.0);
+        }
+
+        // P1-2: Keyword precedence fixes
+        {
+            auto kwProf = [](const char* name, TrackRole role = TrackRole::Chord, uint8_t kch = 11) {
+                return profileTrackTimbre(-1, -1, -1, name, role, {}, {}, kch, kch);
+            };
+            TEST("P1-2: 'Organ_Reed' and 'Reed Organ' classify as Organ (not SaxReed)",
+                 kwProf("Organ_Reed").inferred.family == TimbreFamily::Organ &&
+                 kwProf("Reed Organ").inferred.family == TimbreFamily::Organ);
+            TEST("P1-2: 'SteelDrum' and 'Steel Drums' classify as MalletPerc (not DrumKit)",
+                 kwProf("SteelDrum").inferred.family == TimbreFamily::MalletPerc &&
+                 kwProf("Steel Drums").inferred.family == TimbreFamily::MalletPerc);
+            TEST("P1-2: 'English Horn' classifies as SaxReed (not Brass)",
+                 kwProf("English Horn").inferred.family == TimbreFamily::SaxReed &&
+                 kwProf("English Horn").inferred.sub_family == "English Horn");
+            TEST("P1-2: 'Overdrive_Lead' classifies as SynthLead (not ElectricGuitar)",
+                 kwProf("Overdrive_Lead").inferred.family == TimbreFamily::SynthLead);
+        }
+
+        // P2-2: Numbered instrument names [A-Za-z]+[0-9]+ emit alphabetic prefix safely
+        {
+            auto kwProf = [](const char* name) {
+                return profileTrackTimbre(-1, -1, -1, name, TrackRole::Chord, {}, {}, 11, 11);
+            };
+            TEST("P2-2: 'Piano1' -> Piano, 'Organ1' -> Organ, 'Guitar1' -> AcousticGuitar",
+                 kwProf("Piano1").inferred.family == TimbreFamily::Piano &&
+                 kwProf("Organ1").inferred.family == TimbreFamily::Organ &&
+                 kwProf("Guitar1").inferred.family == TimbreFamily::AcousticGuitar);
+            TEST("P2-2: 'Chord1', 'Phrase1', 'Acc1', 'Part14' remain generic Unknown",
+                 kwProf("Chord1").inferred.family == TimbreFamily::Unknown &&
+                 kwProf("Phrase1").inferred.family == TimbreFamily::Unknown &&
+                 kwProf("Acc1").inferred.family == TimbreFamily::Unknown &&
+                 kwProf("Part14").inferred.family == TimbreFamily::Unknown);
+            TEST("P2-2: 'DX7' and 'B3' still resolve to ElectricPiano and Organ",
+                 kwProf("DX7").inferred.family == TimbreFamily::ElectricPiano &&
+                 kwProf("B3").inferred.family == TimbreFamily::Organ);
+        }
+    }
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

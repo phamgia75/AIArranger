@@ -455,6 +455,157 @@ int main() {
         TEST("matcher & template output are 100% deterministic", tpl_on == tpl_on_2);
     }
 
+    // ── 9. Audit Round 1 Regression Tests (P0-1, P1-3, P1-4, P1-5, P2-1) ──
+    {
+        // P0-1: Comment-framing newline/CR/NUL/control injection sanitization in template output
+        {
+            Report evil_rep{};
+            TrackRow evil_row{};
+            evil_row.src_ch = 11;
+            evil_row.korg_ch = 11;
+            evil_row.name = "Track\r\nacc1 0 0 0";
+            evil_row.family = "Piano\nacc2 1 2 3";
+            evil_row.megavoice = true;
+            evil_row.megavoice_why = "zones\nacc3 4 5 6";
+            evil_rep.tracks.push_back(evil_row);
+
+            TargetSoundCatalogView evil_target{};
+            evil_target.is_partial_inspect = true;
+            evil_target.partial_notice = "Notice\nmalicious";
+            TargetSoundEntry evil_entry{};
+            evil_entry.msb = 121; evil_entry.lsb = 64; evil_entry.pc = 7;
+            evil_entry.is_drum_kit = false; evil_entry.in_spec = true;
+            evil_entry.display_name = std::string("Evil Grand Piano\nacc5 121 0 33\n# tail") + '\0' + "nulltail";
+            evil_target.entries.push_back(evil_entry);
+
+            TrackTimbreProfile pno_prof = makeProfile(TimbreFamily::Piano, "Acoustic Grand Piano\nacc4 9 9 9", 11, 92);
+            pno_prof.rationale = "test\r\nperc 120 0 1";
+
+            SoundMatchOptions opt_off{};
+            const auto evil_matches = matchStyleSounds({pno_prof}, {}, &evil_target, opt_off);
+            const std::string evil_tpl = formatSoundMapTemplateWithRecommendations(
+                evil_rep, evil_matches, "Evil\nbass 121 0 33", opt_off);
+
+            std::istringstream ss(evil_tpl);
+            const auto parsed = parseSoundMap(ss, "evil.soundmap");
+            TEST("P0-1: newline/CR/NUL payloads in display_name/style_name/notice/row.name cannot hijack .soundmap",
+                 parsed.ok && parsed.sounds.empty() && parsed.unresolved.size() == 8);
+        }
+
+        // P1-3: Strict fail-closed ceiling <= 65 whenever profile.confidence < 40 (Factory & Target KST)
+        {
+            SoundMatchOptions opt{};
+            opt.enable_factory_catalog = true;
+            opt.prefer_target_user_sounds = true;
+            opt.target_user_bonus = 10;
+
+            const auto low_gtr = makeProfile(TimbreFamily::AcousticGuitar, "Nylon Acoustic Guitar", 11, 10, true);
+            const auto m_low_gtr = matchTrackSound(low_gtr, {}, nullptr, opt);
+            TEST("P1-3: Factory low-confidence (conf=10, Nylon + DNC) strictly <= 65 and UNRESOLVED",
+                 !m_low_gtr.top_candidates.empty() &&
+                 m_low_gtr.top_candidates[0].score <= 65 &&
+                 !m_low_gtr.selected.has_value());
+
+            TargetSoundCatalogView target{};
+            TargetSoundEntry tp{};
+            tp.msb = 121; tp.lsb = 64; tp.pc = 0;
+            tp.is_drum_kit = false; tp.in_spec = true;
+            tp.display_name = "Synthetic Acoustic Grand Piano";
+            tp.gm_alignment_score = 90;
+            target.entries.push_back(tp);
+
+            const auto low_pno = makeProfile(TimbreFamily::Piano, "Acoustic Grand Piano", 11, 10, false);
+            const auto m_low_pno = matchTrackSound(low_pno, {}, &target, opt);
+            bool all_under_65 = !m_low_pno.top_candidates.empty();
+            for (const auto& c : m_low_pno.top_candidates) {
+                if (c.score > 65) all_under_65 = false;
+            }
+            TEST("P1-3: Target KST low-confidence (conf=10, gm_alignment=90, prefer_target=true) strictly <= 65 and UNRESOLVED",
+                 all_under_65 && !m_low_pno.selected.has_value());
+        }
+
+        // P1-4: Target-only opt-in (enable_factory_catalog=false, prefer_target_user_sounds=true)
+        {
+            TargetSoundCatalogView target{};
+            TargetSoundEntry th{};
+            th.msb = 121; th.lsb = 64; th.pc = 6;
+            th.is_drum_kit = false; th.in_spec = true;
+            th.display_name = "Harpsichord";
+            target.entries.push_back(th);
+
+            SoundMatchOptions opt{};
+            opt.enable_factory_catalog = false;
+            opt.prefer_target_user_sounds = true;
+            opt.target_user_bonus = 0; // Ensure Factory "Austrian Grand" outscores Target "Harpsichord"
+
+            const auto pno = makeProfile(TimbreFamily::Piano, "Acoustic Grand Piano", 11, 92);
+            const auto m = matchTrackSound(pno, {}, &target, opt);
+            bool sel_visible = false;
+            for (const auto& c : m.top_candidates) {
+                if (c.origin == MatchOrigin::TargetKstUserSound &&
+                    c.ref.msb == 121 && c.ref.lsb == 64 && c.ref.pc == 6) {
+                    sel_visible = true;
+                }
+            }
+            TEST("P1-4: Target-only opt-in selects allowed Target KST candidate even when Factory scores higher",
+                 m.selected.has_value() &&
+                 m.selected_origin == MatchOrigin::TargetKstUserSound &&
+                 m.selected->msb == 121 && m.selected->lsb == 64 && m.selected->pc == 6 &&
+                 sel_visible);
+        }
+
+        // P1-5: Objective Target KST drum classification (no query-channel kPercCh bias)
+        {
+            TargetSoundCatalogView target{};
+            TargetSoundEntry dk{};
+            dk.msb = 120; dk.lsb = 64; dk.pc = 0;
+            dk.is_drum_kit = true; dk.in_spec = true;
+            dk.display_name = "Pop Studio Kit";
+            target.entries.push_back(dk);
+
+            SoundMatchOptions opt{};
+            opt.enable_factory_catalog = false;
+            opt.prefer_target_user_sounds = true;
+
+            const auto perc = makeProfile(TimbreFamily::PercussionKit, "Standard Percussion Kit", kPercCh, 92);
+            const auto m_perc = matchTrackSound(perc, {}, &target, opt);
+            TEST("P1-5: kPercCh query MUST NOT auto-select DrumKit 'Pop Studio Kit' onto Percussion",
+                 !m_perc.selected.has_value());
+
+            SoundMatchOptions opt_both{};
+            opt_both.enable_factory_catalog = true;
+            opt_both.prefer_target_user_sounds = true;
+            const auto m_perc_both = matchTrackSound(perc, {}, &target, opt_both);
+            TEST("P1-5: kPercCh with factory+target picks Factory Standard Perc Kit, never 'Pop Studio Kit'",
+                 m_perc_both.selected.has_value() &&
+                 m_perc_both.selected_origin == MatchOrigin::Pa5xFactoryCatalog &&
+                 m_perc_both.selected->pc == 69);
+        }
+
+        // P2-1: Template emission prefers resolved merged track & falls back to user_sounds for unprofiled channels
+        {
+            Report empty_rep{};
+            std::vector<TrackTimbreProfile> merged_profs = {
+                makeProfile(TimbreFamily::Unknown, "Unidentified", 11, 0),
+                makeProfile(TimbreFamily::Piano, "Acoustic Grand Piano", 11, 92)
+            };
+            std::map<uint8_t, SoundRef> user_map;
+            user_map[15] = SoundRef{121, 13, 49}; // Acc5 has no TrackTimbreProfile in merged_profs
+
+            SoundMatchOptions opt{};
+            opt.enable_factory_catalog = true;
+            const auto res = matchStyleSounds(merged_profs, user_map, nullptr, opt);
+            const std::string tpl = formatSoundMapTemplateWithRecommendations(empty_rep, res, "MERGED.sty", opt);
+            std::istringstream ss(tpl);
+            const auto parsed = parseSoundMap(ss, "merged.soundmap");
+            TEST("P2-1: merged channel emits resolved track (Acc1) & unprofiled user_sounds fallback (Acc5)",
+                 parsed.ok &&
+                 parsed.sounds.count(11) == 1 && parsed.sounds.at(11).pc == 0 &&
+                 parsed.sounds.count(15) == 1 && parsed.sounds.at(15).msb == 121 &&
+                 parsed.sounds.at(15).lsb == 13 && parsed.sounds.at(15).pc == 49);
+        }
+    }
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

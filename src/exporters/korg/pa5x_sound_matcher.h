@@ -411,9 +411,112 @@ inline int originSortRank(MatchOrigin origin, bool prefer_target) noexcept {
     return origin == MatchOrigin::Pa5xFactoryCatalog ? 1 : 2;
 }
 
-inline void sortAndTruncateCandidates(std::vector<SoundCandidate>& candidates,
-                                      bool prefer_target,
-                                      size_t max_candidates) {
+inline std::string sanitizeCommentLine(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    bool prev_space = false;
+    for (const char ch : s) {
+        const unsigned char uc = static_cast<unsigned char>(ch);
+        if (uc < 0x20u || uc == 0x7Fu || ch == ' ') {
+            if (!out.empty() && !prev_space) {
+                out.push_back(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push_back(ch);
+            prev_space = false;
+        }
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+inline bool isOriginAllowed(MatchOrigin origin, const SoundMatchOptions& opt) noexcept {
+    if (origin == MatchOrigin::UserSoundMap) return true;
+    if (origin == MatchOrigin::Pa5xFactoryCatalog) return opt.enable_factory_catalog;
+    if (origin == MatchOrigin::TargetKstUserSound) {
+        return opt.enable_factory_catalog || opt.prefer_target_user_sounds;
+    }
+    return false;
+}
+
+// Classifies a Target KST sound entry objectively from its own `display_name`
+// and `is_drum_kit` flag, NEVER inheriting the query track's Korg channel or role
+// (so "Pop Studio Kit" always classifies as DrumKit, never PercussionKit on kPercCh).
+inline timbre_detail::KeywordMatch classifyTargetEntryObjective(const TargetSoundEntry& entry) {
+    if (!entry.is_drum_kit) {
+        return timbre_detail::classifyByKeywords(entry.display_name, uasf::TrackRole::Accompaniment, 0xFF);
+    }
+
+    const auto tokens = timbre_detail::tokenizeSafeWords(entry.display_name);
+    if (tokens.empty() || timbre_detail::isGenericTrackName(tokens)) {
+        return {};
+    }
+
+    const bool dncHint = timbre_detail::nameSuggestsDncOrArticulation(tokens);
+    const bool hasExplicitPercToken = timbre_detail::hasAnyToken(tokens, {
+        "perc", "percussion", "rhythm1", "latin", "latinperc", "salsa", "samba", "cuban",
+        "bossa", "brazil", "conga", "congas", "bongo", "bongos", "shaker", "tambourine",
+        "timbale", "timbales", "darbuka", "tabla", "cajon", "cabasa", "claves", "surdo",
+        "agogo", "sfx", "fx"
+    });
+    const bool hasEthnicToken = timbre_detail::hasAnyToken(tokens, {
+        "arab", "arabic", "orient", "oriental", "ethnic", "indian", "turkish"
+    });
+    const bool hasExplicitDrumToken = timbre_detail::hasAnyToken(tokens, {
+        "drum", "drums", "drumkit", "rhythm2", "brush", "brushes", "brushkit",
+        "jazzkit", "rockkit", "popkit", "808", "909", "tr808", "tr909"
+    });
+    const bool hasGenericKitToken = timbre_detail::hasAnyToken(tokens, {"kit", "dk"});
+
+    // Explicit percussion / Latin / SFX tokens -> PercussionKit.
+    if (hasExplicitPercToken) {
+        if (timbre_detail::hasAnyToken(tokens, {"sfx", "fx"})) {
+            return {{TimbreFamily::PercussionKit, "SFX Percussion Kit", dncHint}, 84, "target-dk:sfx-perc"};
+        }
+        if (hasEthnicToken || timbre_detail::hasAnyToken(tokens, {"darbuka", "tabla"})) {
+            return {{TimbreFamily::PercussionKit, "Ethnic / Oriental Percussion Kit", dncHint}, 85, "target-dk:ethnic-perc"};
+        }
+        if (timbre_detail::hasAnyToken(tokens, {"latin", "latinperc", "salsa", "samba", "cuban", "bossa", "brazil"})) {
+            return {{TimbreFamily::PercussionKit, "Latin Percussion Kit", dncHint}, 85, "target-dk:latin-perc"};
+        }
+        return {{TimbreFamily::PercussionKit, "Standard Percussion Kit", dncHint}, 84, "target-dk:perc"};
+    }
+
+    // Ethnic/Oriental without explicit drum-kit tokens -> PercussionKit; with drum tokens -> Ethnic DrumKit.
+    if (hasEthnicToken) {
+        if (hasExplicitDrumToken) {
+            return {{TimbreFamily::DrumKit, "Ethnic / Oriental Drum Kit", dncHint}, 84, "target-dk:ethnic-drum"};
+        }
+        return {{TimbreFamily::PercussionKit, "Ethnic / Oriental Percussion Kit", dncHint}, 84, "target-dk:ethnic-perc"};
+    }
+
+    // Explicit drum / kit tokens -> DrumKit (NEVER PercussionKit!).
+    if (hasExplicitDrumToken || hasGenericKitToken) {
+        if (timbre_detail::hasAnyToken(tokens, {"brush", "brushes", "brushkit"})) {
+            return {{TimbreFamily::DrumKit, "Brush Drum Kit", dncHint}, 85, "target-dk:brush-kit"};
+        }
+        if (timbre_detail::hasAnyToken(tokens, {"jazz", "jazzkit"})) {
+            return {{TimbreFamily::DrumKit, "Jazz Drum Kit", dncHint}, 85, "target-dk:jazz-kit"};
+        }
+        if (timbre_detail::hasAnyToken(tokens, {"808", "909", "tr808", "tr909", "electro", "electronic",
+                                                "edm", "dance", "techno", "house", "hiphop", "analog"})) {
+            return {{TimbreFamily::DrumKit, "Electronic Drum Kit", dncHint}, 85, "target-dk:electronic-kit"};
+        }
+        if (timbre_detail::hasAnyToken(tokens, {"rock", "power", "metal", "heavy", "stadium", "rockkit"})) {
+            return {{TimbreFamily::DrumKit, "Rock Drum Kit", dncHint}, 85, "target-dk:rock-kit"};
+        }
+        const std::string sub = timbre_detail::hasAnyToken(tokens, {"pop", "studio", "standard", "std", "acoustic", "live"})
+                                    ? "Standard Pop Drum Kit"
+                                    : "Drum Kit";
+        return {{TimbreFamily::DrumKit, sub, dncHint}, 82, "target-dk:drum-kit"};
+    }
+
+    return {};
+}
+
+inline void sortCandidates(std::vector<SoundCandidate>& candidates,
+                           bool prefer_target) {
     std::sort(candidates.begin(), candidates.end(), [&](const SoundCandidate& a, const SoundCandidate& b) {
         // UserSoundMap ALWAYS ranks #1 unconditionally.
         if (a.origin == MatchOrigin::UserSoundMap && b.origin != MatchOrigin::UserSoundMap) return true;
@@ -427,6 +530,12 @@ inline void sortAndTruncateCandidates(std::vector<SoundCandidate>& candidates,
         if (ta != tb) return ta < tb;
         return a.display_name < b.display_name;
     });
+}
+
+inline void sortAndTruncateCandidates(std::vector<SoundCandidate>& candidates,
+                                      bool prefer_target,
+                                      size_t max_candidates) {
+    sortCandidates(candidates, prefer_target);
     if (max_candidates > 0 && candidates.size() > max_candidates) {
         candidates.resize(max_candidates);
     }
@@ -463,7 +572,7 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
         int raw_score = 0;
         std::string why;
         if (entry.family == fam) {
-            // Scale base cleanly when profile confidence is very low (< 40 fails closed < 70).
+            // Scale base cleanly when profile confidence is very low (< 40 strictly capped <= 65).
             const int base = (profile.confidence >= 40) ? 74 : 52;
             const int sub_bonus = static_cast<int>(
                 computeSubFamilyOverlapBonus(profile.inferred.sub_family, entry.sub_tags, entry.display_name));
@@ -472,6 +581,9 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
                                       : ((!profile.inferred.prefers_dnc && !entry.is_dnc) ? 1 : 0);
             const int conf_bonus = (profile.confidence >= 85) ? 4 : (profile.confidence >= 70 ? 2 : 0);
             raw_score = std::clamp(base + sub_bonus + dnc_bonus + conf_bonus, 0, 98);
+            if (profile.confidence < 40) {
+                raw_score = std::min<int>(raw_score, 65);
+            }
             why = std::string("exact-family:") + timbreFamilyName(fam) +
                   " (" + entry.man5_ref + ", sub=+" + std::to_string(sub_bonus) +
                   (dnc_bonus > 0 ? ", dnc=+" + std::to_string(dnc_bonus) : "") + ")";
@@ -510,10 +622,8 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
             // Strict drum vs melodic separation
             if (entry.is_drum_kit != want_drum) continue;
 
-            const uasf::TrackRole entry_role = entry.is_drum_kit
-                                                   ? (profile.korg_ch == kPercCh ? uasf::TrackRole::Percussion : uasf::TrackRole::Drum)
-                                                   : uasf::TrackRole::Accompaniment;
-            const auto kw = timbre_detail::classifyByKeywords(entry.display_name, entry_role, profile.korg_ch);
+            // Classify Target entry objectively WITHOUT query-channel bias.
+            const auto kw = classifyTargetEntryObjective(entry);
 
             bool exact_family = false;
             bool related_family = false;
@@ -534,19 +644,26 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
                 const int gm_bonus = (entry.gm_alignment_score.has_value() && *entry.gm_alignment_score >= 80u) ? 4 : 0;
                 const int dnc_bonus = (profile.inferred.prefers_dnc && kw.sub.prefers_dnc) ? 4 : 0;
                 base_score = std::clamp(base + sub_bonus + gm_bonus + dnc_bonus, 0, 96);
+                if (profile.confidence < 40) {
+                    base_score = std::min<int>(base_score, 65);
+                }
             } else {
                 // Related Target sound stays strictly below threshold (never falsely nominated).
                 base_score = 54;
             }
 
-            // Apply `target_user_bonus` ONLY when base match is already high-confidence (>= min_auto_select_score)
-            // so the bonus acts purely as a tie-breaker favoring Target KST sounds, never lifting weak matches.
+            // Apply `target_user_bonus` ONLY when profile confidence >= 40 AND base match is already
+            // high-confidence (>= min_auto_select_score) so the bonus acts purely as a tie-breaker.
             int final_score = base_score;
             const bool bonus_applied = opt.prefer_target_user_sounds &&
                                        exact_family &&
+                                       profile.confidence >= 40 &&
                                        base_score >= static_cast<int>(opt.min_auto_select_score);
             if (bonus_applied) {
                 final_score = std::min<int>(99, base_score + static_cast<int>(opt.target_user_bonus));
+            }
+            if (profile.confidence < 40) {
+                final_score = std::min<int>(final_score, 65);
             }
 
             std::optional<TargetSlotAddress> slot = entry.slot_address;
@@ -612,29 +729,39 @@ inline TrackSoundMatch matchTrackSound(
         candidates.push_back(std::move(user_cand));
     }
 
-    matcher_detail::sortAndTruncateCandidates(
-        candidates, opt.prefer_target_user_sounds, opt.max_candidates);
-    result.top_candidates = std::move(candidates);
+    // Sort BEFORE truncating so opt-in selection can see allowed candidates even if
+    // disallowed higher-scoring advisory candidates precede them (e.g. Target-only opt-in).
+    matcher_detail::sortCandidates(candidates, opt.prefer_target_user_sounds);
 
     // Selection gate:
     //   - UserSoundMap ALWAYS wins unconditionally.
-    //   - Otherwise strictly opt-in AND fail-closed >= min_auto_select_score.
+    //   - Otherwise scan sorted candidates for the highest-ranked candidate whose
+    //     origin is allowed by `opt` AND `score >= min_auto_select_score`.
     if (has_user_override) {
         result.selected               = user_it->second;
         result.selected_origin        = MatchOrigin::UserSoundMap;
         result.selected_epistemic_tag = kEpistemicUserVerified;
-    } else if (!result.top_candidates.empty()) {
-        const auto& best = result.top_candidates.front();
-        const bool origin_allowed =
-            (best.origin == MatchOrigin::Pa5xFactoryCatalog && opt.enable_factory_catalog) ||
-            (best.origin == MatchOrigin::TargetKstUserSound &&
-             (opt.enable_factory_catalog || opt.prefer_target_user_sounds));
-        if (origin_allowed && best.score >= opt.min_auto_select_score) {
-            result.selected               = best.ref;
-            result.selected_origin        = best.origin;
-            result.selected_epistemic_tag = best.epistemic_tag;
+    } else {
+        for (size_t idx = 0; idx < candidates.size(); ++idx) {
+            const auto& cand = candidates[idx];
+            if (matcher_detail::isOriginAllowed(cand.origin, opt) &&
+                cand.score >= opt.min_auto_select_score) {
+                result.selected               = cand.ref;
+                result.selected_origin        = cand.origin;
+                result.selected_epistemic_tag = cand.epistemic_tag;
+                // Ensure the selected candidate stays visible inside `top_candidates` after truncation.
+                if (opt.max_candidates > 0 && idx >= opt.max_candidates) {
+                    std::swap(candidates[opt.max_candidates - 1], candidates[idx]);
+                }
+                break;
+            }
         }
     }
+
+    if (opt.max_candidates > 0 && candidates.size() > opt.max_candidates) {
+        candidates.resize(opt.max_candidates);
+    }
+    result.top_candidates = std::move(candidates);
 
     // ── Per-Element Mid-Style Voice Change Matching ──
     const auto dominant_voice = std::make_tuple(profile.yamaha_msb, profile.yamaha_lsb, profile.yamaha_pc);
@@ -673,22 +800,26 @@ inline TrackSoundMatch matchTrackSound(
 
         auto el_cands = matcher_detail::scoreCandidatesForProfile(
             el_prof, target_catalog, opt, nullptr, nullptr);
-        matcher_detail::sortAndTruncateCandidates(el_cands, opt.prefer_target_user_sounds, 1);
+        matcher_detail::sortCandidates(el_cands, opt.prefer_target_user_sounds);
         if (el_cands.empty()) continue;
 
-        const auto& best_el = el_cands.front();
-        result.element_candidates[sec_type] = best_el;
+        const SoundCandidate* chosen_el = nullptr;
+        if (!has_user_override) {
+            for (const auto& c : el_cands) {
+                if (matcher_detail::isOriginAllowed(c.origin, opt) &&
+                    c.score >= opt.min_auto_select_score) {
+                    chosen_el = &c;
+                    break;
+                }
+            }
+        }
+
+        result.element_candidates[sec_type] = chosen_el ? *chosen_el : el_cands.front();
 
         // Do not overwrite an explicit user track-level sound unless user supplied element override.
-        if (has_user_override) continue;
-
-        const bool origin_allowed =
-            (best_el.origin == MatchOrigin::Pa5xFactoryCatalog && opt.enable_factory_catalog) ||
-            (best_el.origin == MatchOrigin::TargetKstUserSound &&
-             (opt.enable_factory_catalog || opt.prefer_target_user_sounds));
-        if (origin_allowed && best_el.score >= opt.min_auto_select_score) {
-            if (!result.selected.has_value() || !matcher_detail::soundRefEquals(*result.selected, best_el.ref)) {
-                result.element_selected[sec_type] = best_el.ref;
+        if (chosen_el) {
+            if (!result.selected.has_value() || !matcher_detail::soundRefEquals(*result.selected, chosen_el->ref)) {
+                result.element_selected[sec_type] = chosen_el->ref;
             }
         }
     }
@@ -780,15 +911,16 @@ inline std::string formatSoundMapTemplateWithRecommendations(
     };
 
     const bool auto_emit = opt.enable_factory_catalog || opt.prefer_target_user_sounds;
+    auto clean = [](std::string_view sv) { return matcher_detail::sanitizeCommentLine(sv); };
 
     std::string out;
-    out += "# Pa5X sound map for " + style_name + "\n";
+    out += "# Pa5X sound map for " + clean(style_name) + "\n";
     out += "# Status: hardwareVerified=false | L3=NOT_TESTED\n";
     out += std::string("# ") + kPa5xK8K9Caveat + "\n";
     out += "# Replace 'unresolved' with '<msb> <lsb> <pc>' confirmed on the Pa5X Sound\n";
     out += "# Select window. Never copy the Yamaha numbers below.\n";
     if (matches.target_partial_inspect && !matches.target_partial_notice.empty()) {
-        out += "# Target KST partial inspect notice: " + matches.target_partial_notice + "\n";
+        out += "# Target KST partial inspect notice: " + clean(matches.target_partial_notice) + "\n";
     }
 
     for (const auto& t : kTracks) {
@@ -797,48 +929,59 @@ inline std::string formatSoundMapTemplateWithRecommendations(
         for (const auto& row : report.tracks) {
             if (row.korg_ch != t.ch) continue;
             any_row = true;
-            out += "# Genos ch " + std::to_string(row.src_ch + 1) + " '" + row.name + "'  family: " + row.family +
+            out += "# Genos ch " + std::to_string(row.src_ch + 1) + " '" + clean(row.name) +
+                   "'  family: " + clean(row.family) +
                    "  Yamaha MSB/LSB/PC " + std::to_string(row.msb) + "/" + std::to_string(row.lsb) + "/" +
                    std::to_string(row.pc) +
-                   (row.megavoice ? ("  MEGAVOICE CANDIDATE: " + row.megavoice_why) : "") + "\n";
+                   (row.megavoice ? ("  MEGAVOICE CANDIDATE: " + clean(row.megavoice_why)) : "") + "\n";
         }
 
+        // Prefer UserSoundMap track, then first track with `selected.has_value()`, then first track for `t.ch`.
         const TrackSoundMatch* primary_match = nullptr;
         for (const auto& m : matches.tracks) {
             if (m.korg_ch != t.ch) continue;
-            if (!primary_match) primary_match = &m;
+            if (!primary_match) {
+                primary_match = &m;
+            } else if (m.selected.has_value() && m.selected_origin == MatchOrigin::UserSoundMap &&
+                       !(primary_match->selected.has_value() &&
+                         primary_match->selected_origin == MatchOrigin::UserSoundMap)) {
+                primary_match = &m;
+            } else if (m.selected.has_value() && !primary_match->selected.has_value()) {
+                primary_match = &m;
+            }
+
             if (!any_row) {
                 any_row = true;
                 out += "# Genos ch " + std::to_string(m.profile.src_ch + 1) +
                        "  inferred: " + std::string(timbreFamilyName(m.profile.inferred.family)) +
-                       " (" + m.profile.inferred.sub_family + ", conf=" +
+                       " (" + clean(m.profile.inferred.sub_family) + ", conf=" +
                        std::to_string(m.profile.confidence) + ")" +
                        "  Yamaha MSB/LSB/PC " + std::to_string(m.profile.yamaha_msb) + "/" +
                        std::to_string(m.profile.yamaha_lsb) + "/" +
                        std::to_string(m.profile.yamaha_pc) + "\n";
             } else {
                 out += "# Timbre profile: " + std::string(timbreFamilyName(m.profile.inferred.family)) +
-                       " (" + m.profile.inferred.sub_family + ", conf=" +
-                       std::to_string(m.profile.confidence) + ", " + m.profile.rationale + ")\n";
+                       " (" + clean(m.profile.inferred.sub_family) + ", conf=" +
+                       std::to_string(m.profile.confidence) + ", " + clean(m.profile.rationale) + ")\n";
             }
             for (size_t rank_idx = 0; rank_idx < m.top_candidates.size(); ++rank_idx) {
                 const auto& c = m.top_candidates[rank_idx];
                 out += "# Suggested #" + std::to_string(rank_idx + 1) + ": " +
                        std::to_string(c.ref.msb) + " " + std::to_string(c.ref.lsb) + " " +
-                       std::to_string(c.ref.pc) + "  \"" + c.display_name + "\"" +
+                       std::to_string(c.ref.pc) + "  \"" + clean(c.display_name) + "\"" +
                        "  score=" + std::to_string(c.score) +
                        "  origin=" + matchOriginName(c.origin);
                 if (c.target_slot.has_value()) {
                     out += "  slot=" + c.target_slot->shortLabel();
                 }
-                out += "  [" + c.epistemic_tag + "]\n";
+                out += "  [" + clean(c.epistemic_tag) + "]\n";
             }
             for (const auto& [sec_type, el_cand] : m.element_candidates) {
                 out += "# Element voice change (" + std::string(matcher_detail::sectionShortName(sec_type)) + "): " +
                        std::to_string(el_cand.ref.msb) + " " + std::to_string(el_cand.ref.lsb) + " " +
-                       std::to_string(el_cand.ref.pc) + "  \"" + el_cand.display_name + "\"" +
+                       std::to_string(el_cand.ref.pc) + "  \"" + clean(el_cand.display_name) + "\"" +
                        "  score=" + std::to_string(el_cand.score) +
-                       "  [" + el_cand.epistemic_tag + "]\n";
+                       "  [" + clean(el_cand.epistemic_tag) + "]\n";
             }
         }
 
@@ -850,17 +993,35 @@ inline std::string formatSoundMapTemplateWithRecommendations(
         if (primary_match && primary_match->selected.has_value() &&
             (primary_match->selected_origin == MatchOrigin::UserSoundMap || auto_emit)) {
             const auto& ref = *primary_match->selected;
-            const uint8_t top_score = primary_match->top_candidates.empty()
-                                          ? uint8_t{100}
-                                          : primary_match->top_candidates.front().score;
+            uint8_t sel_score = primary_match->top_candidates.empty()
+                                    ? uint8_t{100}
+                                    : primary_match->top_candidates.front().score;
+            for (const auto& c : primary_match->top_candidates) {
+                if (c.origin == primary_match->selected_origin &&
+                    matcher_detail::soundRefEquals(c.ref, ref)) {
+                    sel_score = c.score;
+                    break;
+                }
+            }
             const char* mode_tag = (primary_match->selected_origin == MatchOrigin::UserSoundMap)
                                        ? "user"
                                        : "auto";
             out += std::string(t.key) + " " +
                    std::to_string(ref.msb) + " " + std::to_string(ref.lsb) + " " +
                    std::to_string(ref.pc) + "  # " + mode_tag +
-                   " score=" + std::to_string(top_score) + " " +
-                   primary_match->selected_epistemic_tag + "\n";
+                   " score=" + std::to_string(sel_score) + " " +
+                   clean(primary_match->selected_epistemic_tag) + "\n";
+        } else if (!primary_match) {
+            if (const auto res_it = matches.resolved_sounds.find(t.ch);
+                res_it != matches.resolved_sounds.end()) {
+                const auto& ref = res_it->second;
+                out += std::string(t.key) + " " +
+                       std::to_string(ref.msb) + " " + std::to_string(ref.lsb) + " " +
+                       std::to_string(ref.pc) + "  # user score=100 " +
+                       kEpistemicUserVerified + "\n";
+            } else {
+                out += std::string(t.key) + " unresolved\n";
+            }
         } else {
             out += std::string(t.key) + " unresolved\n";
         }
