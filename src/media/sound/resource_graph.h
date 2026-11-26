@@ -121,7 +121,7 @@ inline bool edgeAllowed(Kind from, Via v, Kind to) {
         case Via::OscillatorOf:    return from == Kind::Sound && to == Kind::Oscillator;
         case Via::OscHigh: case Via::OscLow: return from == Kind::Oscillator && to == Kind::Multisample;
         case Via::Zone:            return from == Kind::Multisample && to == Kind::Sample;
-        case Via::DrumKeyLayer:    return from == Kind::DrumKit && to == Kind::DrumSample;
+        case Via::DrumKeyLayer:    return (from == Kind::DrumKit || from == Kind::Sound) && to == Kind::DrumSample;
         case Via::DrumSampleOf:    return from == Kind::DrumSample && to == Kind::Sample;
         case Via::StyleTrack:      return from == Kind::Style && soundLike;
         case Via::KeyboardSetPart: return (from == Kind::KeyboardSet || from == Kind::Style || from == Kind::SongBookEntry) && soundLike;

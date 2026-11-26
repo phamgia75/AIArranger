@@ -85,14 +85,35 @@ ParseResult Sff1Reader::parseBufferImpl(const std::vector<uint8_t>& buffer,
                 result_.unknown_chunks++;
             }
 
+            // Fail-closed on encrypted/DRM Yamaha containers.
+            if (chunk.chunk_id == "CRYP" || chunk.chunk_id == "ENCR" || chunk.chunk_id == "DRM ") {
+                result_.encrypted_or_drm = true;
+                result_.success = false;
+                result_.error = "Encrypted/DRM Yamaha style chunk refused (fail-closed): " + chunk.chunk_id;
+                return result_;
+            }
+
+            // Explicitly record non-note Yamaha metadata chunks (never silently swallowed).
+            if (chunk.chunk_id == "OTSc" || chunk.chunk_id == "OTSm" ||
+                chunk.chunk_id == "OTS"  || chunk.chunk_id == "OTS " ||
+                chunk.chunk_id == "FNRP" || chunk.chunk_id == "MDB"  || chunk.chunk_id == "MDB ") {
+                result_.detected_metadata_chunks.push_back(chunk.chunk_id);
+                result_.unsupported_features.push_back(
+                    "Detected Yamaha metadata chunk '" + chunk.chunk_id + "' (read-only, not mapped)");
+            }
+
             // Try to parse known chunk types
             if (chunk.chunk_id == "SInt" || chunk.chunk_id == "Sect") {
                 auto section = parseSection(chunk);
                 result_.sections.push_back(std::move(section));
                 result_.parsed_sections++;
             } else if (chunk.chunk_id == "MThd") {
-                // SMF header — extract resolution
-                parseMThd(chunk);
+                // SMF header — extract resolution (fail-closed on malformed MThd)
+                if (!parseMThd(chunk)) {
+                    result_.success = false;
+                    result_.error = "Malformed MThd chunk (truncated or zero time division)";
+                    return result_;
+                }
             } else if (chunk.chunk_id == "MTrk") {
                 // SMF track — extract MIDI events
                 parseMTrk(chunk);
@@ -122,10 +143,12 @@ ParseResult Sff1Reader::parseBufferImpl(const std::vector<uint8_t>& buffer,
     result_.total_chunks = result_.chunks.size();
     result_.success = result_.total_chunks > 0;
 
-    // Markers are collected MTrk by MTrk, each with its own tick base of 0; the
-    // mapper's section ranges need them in time order (file order on ties).
+    // Markers and time signatures are collected MTrk by MTrk, each with its own
+    // tick base of 0; the mapper's section ranges need them in time order.
     std::stable_sort(result_.markers.begin(), result_.markers.end(),
                      [](const SmfMarker& a, const SmfMarker& b) { return a.tick < b.tick; });
+    std::stable_sort(result_.time_signatures.begin(), result_.time_signatures.end(),
+                     [](const SmfTimeSignature& a, const SmfTimeSignature& b) { return a.tick < b.tick; });
 
     if (!result_.success) {
         result_.error = "No recognizable SFF1 structure found";
@@ -292,10 +315,17 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
                 std::string name(reinterpret_cast<const char*>(d + pos), len);
                 while (!name.empty() && static_cast<uint8_t>(name.back()) <= 32) name.pop_back();
                 result_.markers.push_back({static_cast<uint32_t>(absolute_tick), std::move(name)});
-            } else if (metaType == 0x58 && len >= 2 && !have_time_sig) {
-                result_.time_sig_num = d[pos];
-                result_.time_sig_den = (d[pos + 1] < 8) ? static_cast<uint8_t>(1u << d[pos + 1]) : 4;
-                have_time_sig = true;
+            } else if (metaType == 0x58 && len >= 2) {
+                const uint8_t num = d[pos];
+                const uint8_t den = (d[pos + 1] < 8) ? static_cast<uint8_t>(1u << d[pos + 1]) : 4;
+                if (num > 0 && result_.time_signatures.size() < kMaxTopLevelChunks) {
+                    result_.time_signatures.push_back({static_cast<uint32_t>(absolute_tick), num, den});
+                }
+                if (!have_time_sig) {
+                    result_.time_sig_num = num;
+                    result_.time_sig_den = den;
+                    have_time_sig = true;
+                }
             } else if (metaType == 0x51) {             // Set Tempo: 3-byte MPQN
                 const uint32_t mpqn = (len == 3) ? (uint32_t(d[pos]) << 16) |
                                                    (uint32_t(d[pos + 1]) << 8) | d[pos + 2]
@@ -402,12 +432,14 @@ bool Sff1Reader::parseMThd(const SffChunk& chunk) {
     // playback clock run the events at the wrong tempo (effectively silent).
     uint16_t division = (static_cast<uint16_t>(chunk.data[4]) << 8) |
                         static_cast<uint16_t>(chunk.data[5]);
+    const uint16_t res = (division & 0x8000) ? static_cast<uint16_t>(division & 0x7FFF) : division;
+    if (res == 0) return false;
 
     SffSection section;
     section.type = SffSectionType::Main1;
     section.name = "SMF (SFF2/Genos)";
     section.bars = 4;
-    section.resolution = (division & 0x8000) ? (division & 0x7FFF) : division;
+    section.resolution = res;
     section.casm_parsed = false;
     result_.sections.push_back(std::move(section));
     result_.parsed_sections++;
@@ -434,6 +466,112 @@ bool Sff1Reader::parseMTrk(const SffChunk& chunk) {
 
     return true;
 }
+
+namespace {
+
+CasmZoneConfig readZone(const uint8_t* z) noexcept {
+    CasmZoneConfig out{};
+    out.ntr = z[0];
+    out.ntt_bass = (z[1] & 0x80) != 0;
+    out.ntt = z[1] & 0x7F;
+    out.high_key = z[2];
+    out.note_low = z[3];
+    out.note_high = z[4];
+    out.rtr = z[5];
+    return out;
+}
+
+std::string trimCasmName(const uint8_t* ptr, size_t len) {
+    std::string s(reinterpret_cast<const char*>(ptr), len);
+    while (!s.empty() &&
+           (static_cast<uint8_t>(s.back()) <= 32 ||
+            static_cast<uint8_t>(s.back()) == 127)) {
+        s.pop_back();
+    }
+    return s;
+}
+
+// Parse legacy SFF1 Ctab block (Wierzba/Bedesem v2.1 Tables 5-10, 33 bytes standard, min 26).
+void parseCtabBlock(const uint8_t* data, size_t size, ParseResult& result, int casm_section_idx) {
+    constexpr size_t kMinCtab = 26;
+    if (size < kMinCtab) return;
+
+    CasmTrackConfig cfg{};
+    cfg.source_channel = data[0];
+    cfg.name = trimCasmName(data + 1, 8);
+    cfg.dest_channel = data[9];
+    cfg.editable = data[10];
+    cfg.note_mute_mask = static_cast<uint16_t>(((data[11] & 0x0F) << 8) | data[12]);
+    cfg.chord_mute_mask = (static_cast<uint64_t>(data[13] & 0x03) << 32) |
+                          (static_cast<uint64_t>(data[14]) << 24) |
+                          (static_cast<uint64_t>(data[15]) << 16) |
+                          (static_cast<uint64_t>(data[16]) << 8) |
+                           static_cast<uint64_t>(data[17]);
+    cfg.source_chord_root = data[18];
+    cfg.source_chord_type = data[19];
+    cfg.zone_low = 0;
+    cfg.zone_high = 127;
+    cfg.ntr = data[20];
+    cfg.ntt_bass = (data[21] & 0x80) != 0;
+    cfg.ntt = data[21] & 0x7F;
+    cfg.high_key = data[22];
+    cfg.note_low = data[23];
+    cfg.note_high = data[24];
+    cfg.rtr = data[25];
+    cfg.from_sff1_ctab = true;
+    cfg.is_megavoice = false;
+
+    if (casm_section_idx >= 0 &&
+        casm_section_idx < static_cast<int>(result.casm_sections.size())) {
+        result.casm_sections[casm_section_idx].tracks.push_back(cfg);
+    }
+    result.casm_configs.push_back(std::move(cfg));
+}
+
+// Parse legacy SFF1 Cntt companion block (Wierzba/Bedesem Table 11: [0]=srcCh, [1]=ntt with bit7=bass).
+void parseCnttBlock(const uint8_t* data, size_t size, ParseResult& result, int casm_section_idx) {
+    if (size < 2) return;
+    const uint8_t srcCh = data[0];
+    const bool bass = (data[1] & 0x80) != 0;
+    const uint8_t ntt = data[1] & 0x7F;
+
+    if (casm_section_idx >= 0 &&
+        casm_section_idx < static_cast<int>(result.casm_sections.size())) {
+        auto& tracks = result.casm_sections[casm_section_idx].tracks;
+        bool matchedInSection = false;
+        for (auto it = tracks.rbegin(); it != tracks.rend(); ++it) {
+            if (it->source_channel == srcCh) {
+                it->ntt_bass = bass;
+                it->ntt = ntt;
+                matchedInSection = true;
+                break;
+            }
+        }
+        // Only update the matching entry belonging to this section in flat casm_configs
+        // (never clobbering an earlier section's track config).
+        if (matchedInSection) {
+            const size_t limit = std::min(tracks.size(), result.casm_configs.size());
+            for (size_t k = 0; k < limit; ++k) {
+                auto& cfg = result.casm_configs[result.casm_configs.size() - 1 - k];
+                if (cfg.source_channel == srcCh) {
+                    cfg.ntt_bass = bass;
+                    cfg.ntt = ntt;
+                    break;
+                }
+            }
+        }
+    } else {
+        for (auto it = result.casm_configs.rbegin(); it != result.casm_configs.rend(); ++it) {
+            if (it->source_channel == srcCh) {
+                it->ntt_bass = bass;
+                it->ntt = ntt;
+                break;
+            }
+        }
+    }
+}
+
+} // namespace
 
 // ── CASM Parsing ───────────────────────────────────────────────────
 
@@ -466,16 +604,20 @@ bool Sff1Reader::parseCasm(const uint8_t* data, size_t size, int depth) {
                              static_cast<uint32_t>(data[pos + 7]);
         pos += 8;
 
-        if (pos + sub_size > size) break;
+        if (sub_size > size - pos) break;
 
         if (sub_id == "Ctb2") {
             parseCtb2Block(data + pos, sub_size);
+        } else if (sub_id == "Ctab") {
+            parseCtabBlock(data + pos, sub_size, result_, casm_section_idx_);
+        } else if (sub_id == "Cntt") {
+            parseCnttBlock(data + pos, sub_size, result_, casm_section_idx_);
         } else if (sub_id == "CSEG") {
             // Inner CSEG — another section
             parseCasm(data + pos, sub_size, depth + 1);
         } else if (sub_id == "Sdec") {
             // Section definition — extract section name and open a new
-            // CASM section. Subsequent Ctb2 blocks attach to it.
+            // CASM section. Subsequent Ctb2 / Ctab / Cntt blocks attach to it.
             if (sub_size > 0 && sub_size <= 64) {
                 std::string sec_name(reinterpret_cast<const char*>(data + pos), sub_size);
                 // Strip padding
@@ -511,35 +653,37 @@ void Sff1Reader::parseCtb2Block(const uint8_t* data, size_t size) {
     //   [28..33] Middle zone (same layout)
     //   [34..39] High zone   (same layout)
     //   [40..46] Undocumented
-    // Reading [22..23] as "the" NTR/NTT (before 2026-11-06) took the LOW zone,
-    // which no Genos corpus file uses (all have 0/127): e.g. C_WHISPER Chord1
-    // is Guitar/All-Purpose in its middle zone, not Root Trans/Chord.
-    // shortcut: only the middle zone is kept; a style with a real low/high
-    // zone (zone_low > 0 or zone_high < 127) needs per-zone configs.
     constexpr size_t kMinEntry = 34;   // need the middle zone [28..33]
     if (size < kMinEntry) return;      // buffer too short — skip, no crash
 
     CasmTrackConfig cfg{};
     cfg.source_channel = data[0];
-
-    // Name: bytes 1..8, strip trailing whitespace / non-printable
-    cfg.name = std::string(reinterpret_cast<const char*>(data + 1), 8);
-    while (!cfg.name.empty() &&
-           (static_cast<uint8_t>(cfg.name.back()) <= 32 ||
-            static_cast<uint8_t>(cfg.name.back()) == 127))
-        cfg.name.pop_back();
-
+    cfg.name = trimCasmName(data + 1, 8);
     cfg.dest_channel = data[9];
+    cfg.editable = data[10];
+    cfg.note_mute_mask = static_cast<uint16_t>(((data[11] & 0x0F) << 8) | data[12]);
+    cfg.chord_mute_mask = (static_cast<uint64_t>(data[13] & 0x03) << 32) |
+                          (static_cast<uint64_t>(data[14]) << 24) |
+                          (static_cast<uint64_t>(data[15]) << 16) |
+                          (static_cast<uint64_t>(data[16]) << 8) |
+                           static_cast<uint64_t>(data[17]);
+    cfg.source_chord_root = data[18];
+    cfg.source_chord_type = data[19];
     cfg.zone_low  = data[20];
     cfg.zone_high = data[21];
-    const uint8_t* mid = data + 28;
-    cfg.ntr       = mid[0];
-    cfg.ntt_bass  = (mid[1] & 0x80) != 0;
-    cfg.ntt       = mid[1] & 0x7F;
-    cfg.high_key  = mid[2];
-    cfg.note_low  = mid[3];
-    cfg.note_high = mid[4];
-    cfg.rtr       = mid[5];
+    cfg.low_zone  = readZone(data + 22);
+    const CasmZoneConfig mid = readZone(data + 28);
+    cfg.ntr       = mid.ntr;
+    cfg.ntt_bass  = mid.ntt_bass;
+    cfg.ntt       = mid.ntt;
+    cfg.high_key  = mid.high_key;
+    cfg.note_low  = mid.note_low;
+    cfg.note_high = mid.note_high;
+    cfg.rtr       = mid.rtr;
+    if (size >= 40) {
+        cfg.high_zone = readZone(data + 34);
+    }
+    cfg.from_sff1_ctab = false;
 
     // MegaVoice is detected from velocity data (see report generator),
     // not from CASM track config — do not guess here.

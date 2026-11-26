@@ -16,12 +16,18 @@ namespace ai_arranger::exporters::korg {
 
 struct SoundRef { uint8_t msb = 0, lsb = 0, pc = 0; };
 
+enum class BreakPolicy : uint8_t {
+    Withhold = 0,       // Legacy default: withhold Fill In BA (keeps legacy direct callers/tests unchanged)
+    Yamaha1BarCap = 1,  // Emit validated 1-bar "br" element, truncating post-bar-1 residue (#26)
+};
+
 struct MapOptions {
     uint16_t ppqn = 0;                    // 0 = keep the source resolution
     std::map<uint8_t, uint8_t> route;     // source channel -> CASM destination channel (0-based)
     std::map<uint8_t, SoundRef> sounds;   // Korg channel (0-based) -> user-supplied Pa5X sound
     // (section type, Korg channel) -> that element's sound, written instead of `sounds` in that element only.
     std::map<std::pair<uasf::SectionType, uint8_t>, SoundRef> element_sounds;
+    BreakPolicy break_policy = BreakPolicy::Withhold;
 };
 
 struct SectionRow {
@@ -70,6 +76,7 @@ const char* korgTrackName(uint8_t korgCh) noexcept;
 uint8_t korgChannelFor(uint8_t genosCh) noexcept;
 // Korg marker for a canonical section, or nullptr when the Korg spec has no code for it.
 const char* korgMarkerFor(uasf::SectionType t) noexcept;
+const char* korgMarkerFor(uasf::SectionType t, BreakPolicy policy) noexcept;
 
 MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt);
 
@@ -84,6 +91,8 @@ inline constexpr const char* kDropChordRange = "note C-1..B-1 on a chord-driven 
 inline constexpr const char* kDropLastTick = "note starts in the last tick of the section";
 inline constexpr const char* kDropPastEnd = "event at or after the section end";
 inline constexpr const char* kDropOrphanOff = "NoteOff without a NoteOn";
+inline constexpr const char* kDropBreakTail = "post-bar-1 Break residue truncated (Yamaha 1-bar cap)";
+inline constexpr const char* kDiagBreakTailTruncated = "STYLE_QUAL_BREAK_TAIL_TRUNCATED";
 
 } // namespace ai_arranger::exporters::korg
 

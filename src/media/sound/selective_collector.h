@@ -717,11 +717,15 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
             }
 
             // Trace analysed downstream closure: Sound -> Oscillator -> Multisample -> Zone -> Sample -> PCM
+            // and USERDK -> DrumSample -> Sample -> PCM
             for (const auto& oscId : sc.oscillatorIds) closureNodeSet.insert(oscId);
             for (const auto& msId : sc.multisampleIds) {
                 closureNodeSet.insert(msId);
                 msRefRoots[msId].insert(root->relPath);
                 msRefSounds[msId].insert(sid);
+            }
+            for (const auto& dsId : sc.drumSampleIds) {
+                closureNodeSet.insert(dsId);
             }
             for (const auto& smpId : sc.sampleIds) {
                 if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
@@ -1054,9 +1058,25 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
         }
 
         // Enforce NATIVE_SOUND_WRITE_HOLD and P1 SMF_REMAP_REQUIRED for write modes:
-        // Only exact same-slot Identical target matches (or explicitly approved remaps) satisfy target!
+        // Only exact same-slot Identical target matches (or explicitly approved remaps) satisfy target for melodic Sounds!
+        // Track A write-HOLD invariant: USERDK Drum Kits remain gated by NATIVE_SOUND_WRITE_HOLD in write modes
+        // (matching selective_sub_kst.h:625,698,722 — read-only USERDK analysis never lifts native write HOLD).
         if (request.mode == ExportMode::RootTreeSubKst || request.mode == ExportMode::ImportKitBundle) {
             for (const auto& [sid, roots] : soundRefRoots) {
+                const auto scIt = source.sounds.find(sid);
+                const bool isDk = (scIt != source.sounds.end() && scIt->second.isDrumKit) ||
+                                  graph::closure_detail::isDrumKitBankName(sid.scope);
+                if (isDk) {
+                    for (const std::string& r : roots) {
+                        addDiag(DiagnosticCategory::UNSUPPORTED_FORMAT, diag_code::kNativeSoundWriteHold,
+                                DiagnosticSeverity::Blocking, EvidenceLevel::Unsupported, sid.str(), "",
+                                "Selected item requires Native User Drum Kit " + sid.str() +
+                                    "; USERDK write/target-slot execution remains on HOLD (read-only USERDK analysis only).",
+                                "Use AdvisoryPlan + Pa5X single-Sound load (MAN5 p.736) or replace via Import Kit.",
+                                r);
+                    }
+                    continue;
+                }
                 const auto tmit = targetMatchedSounds.find(sid);
                 if (tmit != targetMatchedSounds.end() && tmit->second.satisfied) continue;
                 if (tmit != targetMatchedSounds.end() && tmit->second.requiresRemap) {
