@@ -13,6 +13,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Standalone, portable C++20 Korg Pa5X style element mix/CC hygiene,
@@ -135,6 +136,21 @@ inline std::string formatOptDb(const std::optional<int8_t>& v) {
     if (!v.has_value()) return "-";
     const int x = static_cast<int>(*v);
     return (x > 0 ? "+" : "") + std::to_string(x) + " dB";
+}
+
+inline std::string escapeMarkdownCell(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char c : text) {
+        if (c == '\r' || c == '\n') {
+            out.push_back(' ');
+        } else if (c == '|') {
+            out += "\\|";
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
 }
 
 } // namespace mix_detail
@@ -262,14 +278,16 @@ inline MixNormalizeStats normalizeElementMix(
         }
 
         if (opt.filter_proprietary_ccs) {
-            for (uint8_t ch = 0; ch < 16u; ++ch) {
+            for (uint8_t ch = kBassCh; ch <= 15u; ++ch) {
                 if (cc94_val[ch] > 0 && !has_any_cc93[ch] && !has_t0_cc93[ch]) {
                     const uint8_t blended = static_cast<uint8_t>(
                         std::min<int>(127, (cc94_val[ch] * 30) / 100));
-                    tick0_synth.push_back(Event{0u, static_cast<uint8_t>(0xB0u | ch), 93u, blended});
-                    has_t0_cc93[ch] = true;
-                    has_any_cc93[ch] = true;
-                    ++stats.xg_params_translated;
+                    if (blended > 0u) {
+                        tick0_synth.push_back(Event{0u, static_cast<uint8_t>(0xB0u | ch), 93u, blended});
+                        has_t0_cc93[ch] = true;
+                        has_any_cc93[ch] = true;
+                        ++stats.xg_params_translated;
+                    }
                 }
             }
         }
@@ -296,10 +314,10 @@ inline MixNormalizeStats normalizeElementMix(
                     if ((ev.status & 0x0Fu) != ch) continue;
                     const uint8_t hi = ev.status & 0xF0u;
                     if (ev.tick == 0 && hi == 0xB0u) {
-                        if (ev.d1 == 7u)  cc7  = ev.d2;
-                        if (ev.d1 == 11u) cc11 = ev.d2;
+                        if (ev.d1 == 7u)  cc7  = std::min<uint8_t>(ev.d2, 127u);
+                        if (ev.d1 == 11u) cc11 = std::min<uint8_t>(ev.d2, 127u);
                     } else if (hi == 0x90u && ev.d2 > 0u) {
-                        const double v = static_cast<double>(ev.d2);
+                        const double v = static_cast<double>(std::min<uint8_t>(ev.d2, 127u));
                         sum_sq += v * v;
                         ++note_ct;
                     }
@@ -320,14 +338,17 @@ inline MixNormalizeStats normalizeElementMix(
 
                     const double denom_no_cc7 = (static_cast<double>(cc11) / 127.0) *
                                                 (rms_vel / 127.0);
-                    int needed_cc7 = 120;
-                    if (denom_no_cc7 > 1e-9) {
-                        needed_cc7 = static_cast<int>(
-                            std::ceil(kTargetLowL * 127.0 / denom_no_cc7));
+                    uint8_t new_cc7 = cc7;
+                    if (cc7 < 120u) {
+                        int needed_cc7 = 120;
+                        if (denom_no_cc7 > 1e-9) {
+                            needed_cc7 = static_cast<int>(
+                                std::ceil(kTargetLowL * 127.0 / denom_no_cc7));
+                        }
+                        new_cc7 = static_cast<uint8_t>(
+                            std::clamp(needed_cc7, static_cast<int>(cc7), 120));
+                        mix_detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
                     }
-                    uint8_t new_cc7 = static_cast<uint8_t>(
-                        std::clamp(needed_cc7, static_cast<int>(cc7), 120));
-                    mix_detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
 
                     double after_cc7_l = (static_cast<double>(new_cc7) / 127.0) * denom_no_cc7;
                     if (after_cc7_l < kTargetLowL) {
@@ -435,7 +456,7 @@ inline std::string formatPa5xStyleEditSheetMd(
         std::ostringstream out;
         out << "# Korg Pa5X Style Edit Parameter Sheet";
         if (!style_name.empty()) {
-            out << " — " << style_name;
+            out << " — " << mix_detail::escapeMarkdownCell(style_name);
         }
         out << "\n\n";
         out << "> **Status:** `hardwareVerified: false` | `L3 = NOT_TESTED` — "
@@ -451,14 +472,14 @@ inline std::string formatPa5xStyleEditSheetMd(
             for (const auto& t : track_advice) {
                 const std::string label = t.track_name.empty()
                     ? std::string(mix_detail::mixTrackLabel(t.korg_ch))
-                    : t.track_name;
+                    : mix_detail::escapeMarkdownCell(t.track_name);
                 out << "| " << (t.korg_ch <= 15u ? std::to_string(static_cast<int>(t.korg_ch) + 1) : "-")
                     << " | " << label
-                    << " | " << t.pa5x_ntt_type
-                    << " | " << t.pa5x_ntt_table
+                    << " | " << mix_detail::escapeMarkdownCell(t.pa5x_ntt_type)
+                    << " | " << mix_detail::escapeMarkdownCell(t.pa5x_ntt_table)
                     << " | " << static_cast<int>(t.wrap_around)
                     << " | " << static_cast<int>(t.key_range_low) << ".." << static_cast<int>(t.key_range_high)
-                    << " | " << t.retrigger_mode
+                    << " | " << mix_detail::escapeMarkdownCell(t.retrigger_mode)
                     << " | " << (t.octave_shift_applied > 0 ? "+" : "") << static_cast<int>(t.octave_shift_applied)
                     << " | " << (t.guitar_mode_candidate ? "Candidate" : "No")
                     << " | " << mix_detail::formatOptDb(t.eq_low_gain_db)
@@ -479,19 +500,21 @@ inline std::string formatPa5xStyleEditSheetMd(
             for (const auto& s : sound_matches) {
                 const std::string label = s.track_name.empty()
                     ? std::string(mix_detail::mixTrackLabel(s.korg_ch))
-                    : s.track_name;
-                const std::string sound_col = s.selected_name.empty() ? "UNRESOLVED" : s.selected_name;
+                    : mix_detail::escapeMarkdownCell(s.track_name);
+                const std::string sound_col = s.selected_name.empty()
+                    ? "UNRESOLVED"
+                    : mix_detail::escapeMarkdownCell(s.selected_name);
                 const std::string bank_pc = (s.msb >= 0 && s.lsb >= 0 && s.pc >= 0)
                     ? (std::to_string(s.msb) + "/" + std::to_string(s.lsb) + "/" + std::to_string(s.pc))
                     : "UNRESOLVED";
                 out << "| " << (s.korg_ch <= 15u ? std::to_string(static_cast<int>(s.korg_ch) + 1) : "-")
                     << " | " << label
-                    << " | " << (s.inferred_family.empty() ? "Unknown" : s.inferred_family)
+                    << " | " << (s.inferred_family.empty() ? "Unknown" : mix_detail::escapeMarkdownCell(s.inferred_family))
                     << " | " << sound_col
                     << " | " << bank_pc
                     << " | " << static_cast<int>(s.score)
-                    << " | " << (s.origin.empty() ? "Unresolved" : s.origin)
-                    << " | " << (s.epistemic_tag.empty() ? "DOCUMENTED_NOT_HW_VERIFIED" : s.epistemic_tag)
+                    << " | " << (s.origin.empty() ? "Unresolved" : mix_detail::escapeMarkdownCell(s.origin))
+                    << " | " << (s.epistemic_tag.empty() ? "DOCUMENTED_NOT_HW_VERIFIED" : mix_detail::escapeMarkdownCell(s.epistemic_tag))
                     << " |\n";
             }
             out << "\n";
@@ -516,7 +539,7 @@ inline std::string formatPa5xStyleEditSheetMd(
             out << "- **Advisory Codes:** ";
             for (size_t i = 0; i < xg.advisory_codes.size(); ++i) {
                 if (i > 0) out << ", ";
-                out << "`" << xg.advisory_codes[i] << "`";
+                out << "`" << mix_detail::escapeMarkdownCell(xg.advisory_codes[i]) << "`";
             }
             out << "\n";
         }

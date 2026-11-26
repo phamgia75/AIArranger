@@ -57,7 +57,7 @@ struct XgSysExSummary {
     std::vector<std::string>           advisory_codes; // e.g., STYLE_QUAL_XG_DSP_SYSEX
 };
 
-namespace xg_detail {
+namespace xg_sysex_detail {
 
 inline void addUniqueAdvisory(std::vector<std::string>& codes, const char* code) {
     for (const auto& existing : codes) {
@@ -79,7 +79,7 @@ inline XgDrumKeyOverride& findOrAddDrumOverride(std::vector<XgDrumKeyOverride>& 
     return list.back();
 }
 
-} // namespace xg_detail
+} // namespace xg_sysex_detail
 
 // Pure read-only parser for a single SysEx payload (excluding leading 0xF0 and
 // trailing 0xF7). Rejects null/empty/oversized payloads, payloads containing
@@ -122,7 +122,7 @@ inline bool parseXgSysExMessage(const uint8_t* payload,
         if (len >= 3 && payload[0] == 0x43u && payload[1] == 0x73u) {
             ++out.recognized_xg_count;
             ++out.dsp_sysex_count;
-            xg_detail::addUniqueAdvisory(out.advisory_codes, kDiagXgDspSysEx);
+            xg_sysex_detail::addUniqueAdvisory(out.advisory_codes, kDiagXgDspSysEx);
             return true;
         }
 
@@ -214,7 +214,7 @@ inline bool parseXgSysExMessage(const uint8_t* payload,
                 if (ll == 0x00u || ll == 0x01u || ll == 0x03u || ll == 0x04u) {
                     const uint8_t drum_setup = static_cast<uint8_t>(hh - 0x30u);
                     const uint8_t key = mm;
-                    auto& ov = xg_detail::findOrAddDrumOverride(out.drum_overrides, drum_setup, key);
+                    auto& ov = xg_sysex_detail::findOrAddDrumOverride(out.drum_overrides, drum_setup, key);
                     if (ll == 0x00u) {
                         ov.pitch_coarse = static_cast<int8_t>(static_cast<int>(dd) - 64);
                     } else if (ll == 0x01u) {

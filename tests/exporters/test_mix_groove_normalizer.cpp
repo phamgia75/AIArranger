@@ -745,6 +745,85 @@ int main() {
              md1.find(kDiagXgDspSysEx) != std::string::npos &&
              md1.find("+4 dB") != std::string::npos &&
              md1.find("Candidate") != std::string::npos);
+
+        // P2-3 regression: escape \r/\n and | in headings and Markdown table cells
+        StyleEditSheetTrackView evil_tv = tv;
+        evil_tv.track_name = "Acc1\r\n|Lead|";
+        StyleEditSheetSoundView evil_sv = sv;
+        evil_sv.track_name = "Acc1\n|Track|";
+        evil_sv.selected_name = "Evil\n|Name|";
+        const std::string evil_md = formatPa5xStyleEditSheetMd({evil_tv}, xg, {evil_sv}, "Evil\n|Name|");
+        const size_t first_nl = evil_md.find('\n');
+        const std::string heading_line = (first_nl != std::string::npos) ? evil_md.substr(0, first_nl) : evil_md;
+        TEST("P2-3 formatPa5xStyleEditSheetMd escapes \\r/\\n and | in heading & table cells",
+             heading_line.find("# Korg Pa5X Style Edit Parameter Sheet") == 0 &&
+             heading_line.find("Evil \\|Name\\|") != std::string::npos &&
+             evil_md.find("Evil\n") == std::string::npos &&
+             evil_md.find("Acc1  \\|Lead\\|") != std::string::npos &&
+             evil_md.find("Acc1 \\|Track\\|") != std::string::npos &&
+             evil_md.find("| Evil \\|Name\\| |") != std::string::npos);
+    }
+
+    // ── 12. Audit Round 1 Regressions (P1 std::clamp UB, P2-1 CC94 scope) ─
+    {
+        // P1 regression: CC7 in [121..127] with soft vel=15 (L < 0.20) must NOT UB/abort,
+        // preserves CC7=127, lifts Note-On vel so L >= 0.24, leaves running-status NoteOff (0x90 vel=0) untouched.
+        Element el;
+        el.marker = "v1cv1";
+        el.num = 4;
+        el.den = 4;
+        el.length = 1920;
+        el.events = {
+            {0,   0xB0 | 11, 7,  127},
+            {0,   0xB0 | 11, 11, 127},
+            {0,   0x90 | 11, 60, 15},
+            {480, 0x90 | 11, 60, 0},   // 0x90 vel=0 Note-Off: MUST stay vel=0!
+            {0,   0xB0 | 12, 7,  121},
+            {0,   0x90 | 12, 64, 15},
+            {480, 0x80 | 12, 64, 0},
+        };
+        const auto p1_stats = normalizeElementMix(el, {});
+        const double l_ch11 = computeEffectiveLoudness(el, 11);
+        const double l_ch12 = computeEffectiveLoudness(el, 12);
+        bool noteoff_zero_preserved = false;
+        for (const auto& ev : el.events) {
+            if (ev.tick == 480 && ev.status == (0x90 | 11) && ev.d1 == 60 && ev.d2 == 0) {
+                noteoff_zero_preserved = true;
+            }
+        }
+        Style st_p1{480, 500000, {el}};
+        TEST("P1 regression: CC7=127 & CC7=121 with vel=15 avoid std::clamp UB and meet L >= 0.24",
+             findLastTick0Cc(el, 11, 7) == 127 &&
+             findLastTick0Cc(el, 12, 7) == 121 &&
+             l_ch11 >= 0.24 && l_ch11 <= 0.92 &&
+             l_ch12 >= 0.24 && l_ch12 <= 0.92 &&
+             noteoff_zero_preserved &&
+             p1_stats.tracks_gain_adjusted == 2 &&
+             validate(st_p1).empty());
+
+        // P2-1 regression: stray CC94=100 on ch=0 (< kBassCh) and CC94=2 (blended=0) on ch=11
+        // must NOT inject tick-0 CC93 on ch=0 or ch=11, and element passes korg::validate().
+        Element el_cc94;
+        el_cc94.marker = "v1cv1";
+        el_cc94.num = 4;
+        el_cc94.den = 4;
+        el_cc94.length = 1920;
+        el_cc94.events = {
+            {0,   0xB0 | 0,  94, 100}, // non-Korg ch=0 -> strip, do NOT inject CC93 on ch=0
+            {0,   0xB0 | 11, 94, 2},   // blended = (2*30)/100 = 0 -> strip, skip CC93=0
+            {0,   0x90 | 11, 60, 88},
+            {480, 0x80 | 11, 60, 0},
+        };
+        MixNormalizeOptions opt_p21;
+        opt_p21.normalize_headroom = false;
+        const auto p21_stats = normalizeElementMix(el_cc94, {}, opt_p21);
+        Style st_p21{480, 500000, {el_cc94}};
+        TEST("P2-1 regression: CC94->CC93 skips ch<8 and blended==0, passing korg::validate()",
+             findLastTick0Cc(el_cc94, 0, 93) == -1 &&
+             findLastTick0Cc(el_cc94, 11, 93) == -1 &&
+             p21_stats.proprietary_ccs_stripped == 2 &&
+             p21_stats.xg_params_translated == 0 &&
+             validate(st_p21).empty());
     }
 
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
