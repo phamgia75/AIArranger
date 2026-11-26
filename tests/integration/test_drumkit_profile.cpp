@@ -13,15 +13,20 @@
 
 #include "media/sound/drumkit_profile.h"
 #include "media/sound/native_refs.h"
+#include "media/sound/slot_conflicts.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace ai_arranger::media::graph;
+using namespace ai_arranger::media::selective;
 
 static int passes = 0, failures = 0;
 #define TEST(name, expr) do { \
@@ -213,6 +218,20 @@ static void testTier3SampleNameKeywordsAndTier4Fallback() {
     setRamKey(km, 91, 6,    "SYN_REGIONAL_BETA");    // Tier 4 -> E
     setRamKey(km, 92, 7,    "SYN_UNKNOWN_GAMMA");    // non-GM kit -> stays '\0' (Unresolved)
 
+    // Audit P2-1 regression traps: substrings inside unrelated words must NOT hijack family!
+    setRamKey(km, 93, 0xFF, "CUSTOM_CRASH");         // C (must NOT match TOM inside CUSTOM!)
+    setRamKey(km, 94, 0xFF, "MARIMBA_1");            // '\0' (must NOT match RIM inside MARIMBA!)
+    setRamKey(km, 95, 0xFF, "GHATAM_1");             // '\0' (must NOT match HAT inside GHATAM!)
+    setRamKey(km, 96, 0xFF, "SHATTER_FX");           // X (must NOT match HAT inside SHATTER!)
+    setRamKey(km, 97, 0xFF, "PRIDE_FX");             // X (must NOT match RIDE inside PRIDE!)
+    // Valid uppercase & CamelCase compounds:
+    setRamKey(km, 98,  0xFF, "HIHAT_OPEN");          // H
+    setRamKey(km, 99,  0xFF, "FloorTom_1");          // T
+    setRamKey(km, 100, 0xFF, "RimShot");             // S
+    setRamKey(km, 101, 0xFF, "CowBell");             // L
+    setRamKey(km, 102, 0xFF, "FLOORTOM");            // T
+    setRamKey(km, 103, 0xFF, "RIMSHOT");             // S
+
     const DrumKitProfile p = profileDrumKit(km);
     TEST("Tier 3 classifies all 7 families case-insensitively and avoids KBD->BD false positive",
          p.keys[10].advisoryFamily == 'B' && p.keys[10].familyTier == DrumFamilyTier::Tier3SampleNameKeyword &&
@@ -227,6 +246,19 @@ static void testTier3SampleNameKeywordsAndTier4Fallback() {
          p.keys[28].advisoryFamily == 'X' &&
          p.keys[31].advisoryFamily == 'X' && p.keys[31].familyTier == DrumFamilyTier::Tier3SampleNameKeyword &&
          p.keys[32].advisoryFamily == 'X');
+
+    TEST("P2-1 regression: token-boundary matching blocks CUSTOM/MARIMBA/GHATAM/SHATTER/PRIDE false hits & preserves valid compounds",
+         p.keys[93].advisoryFamily == 'C' && p.keys[93].familyTier == DrumFamilyTier::Tier3SampleNameKeyword &&
+         p.keys[94].advisoryFamily != 'S' && p.keys[94].advisoryFamily == '\0' &&
+         p.keys[95].advisoryFamily != 'H' && p.keys[95].advisoryFamily == '\0' &&
+         p.keys[96].advisoryFamily == 'X' && p.keys[96].familyTier == DrumFamilyTier::Tier3SampleNameKeyword &&
+         p.keys[97].advisoryFamily == 'X' && p.keys[97].familyTier == DrumFamilyTier::Tier3SampleNameKeyword &&
+         p.keys[98].advisoryFamily == 'H' &&
+         p.keys[99].advisoryFamily == 'T' &&
+         p.keys[100].advisoryFamily == 'S' &&
+         p.keys[101].advisoryFamily == 'L' &&
+         p.keys[102].advisoryFamily == 'T' &&
+         p.keys[103].advisoryFamily == 'S');
 
     TEST("Tier 4 emits 'L' (+113=5) & 'E' (+113=6); unlabelled +113=7 stays Unresolved on non-GM kit",
          p.keys[90].advisoryFamily == 'L' && p.keys[90].familyTier == DrumFamilyTier::Tier4PercussionFamilyByte &&
@@ -372,6 +404,138 @@ static void testMultiLayerTopDownResolution() {
          p.keys[36].familyTier == DrumFamilyTier::Tier1CoreFamilyByte);
 }
 
+static void testEndToEndBuildNativeGraphToProfile() {
+    std::printf("\n[Test 7] End-to-End buildNativeGraph() -> IDrumKitCatalog / TargetOccupancyMap -> profileDrumKit() (P3-1 & P2-2)\n");
+
+    auto makeId = [](uint8_t low) -> Id8 { return Id8{0xD1, 0, 0, 0, 0, 0, 0, low}; };
+    auto putBe16 = [](std::vector<uint8_t>& b, size_t at, uint16_t v) {
+        b[at] = static_cast<uint8_t>(v >> 8);
+        b[at + 1u] = static_cast<uint8_t>(v & 0xFFu);
+    };
+
+    // Synthetic KmpIndex with 7 DrumSamples spanning Tier 1..5 & P2-1 trap names
+    KmpIndex kmp;
+    kmp.samples.push_back({Id8{0xA1, 0, 0, 0, 0, 0, 0, 1}, "SYN_SMP_0", SampleInfo{1, 44100, 16, 4096, 0, "", "PCM/ram01.pcm"}});
+    kmp.drums = {
+        {makeId(1), "SYN_KICK_CORE",  0, kNoZoneSample, 0},    // Tier 1: 'B'
+        {makeId(2), "SYN_SNARE_CORE", 0, kNoZoneSample, 1},    // Tier 1: 'S'
+        {makeId(3), "SYN_HH_NOISE",   0, kNoZoneSample, 0xFF}, // Tier 2 (choke 1 on 42/46): 'H'
+        {makeId(4), "CUSTOM_CRASH",   0, kNoZoneSample, 0xFF}, // Tier 3 (P2-1 trap): 'C'
+        {makeId(5), "SYN_REGIONAL_X", 0, kNoZoneSample, 6},    // Tier 4: 'E'
+        {makeId(6), "SYN_UNLABEL_48", 0, kNoZoneSample, 0xFF}, // Tier 5 (GM aligned note 48): 'T'
+        {makeId(7), "SYN_KICK_CAP",   0, kNoZoneSample, 0},    // Tier 1: 'B'
+    };
+
+    // Build a synthetic 10050038 USERDK body: hdr=514, kst=20, lcOff=2, lst=32, modeFlagOff=2
+    const DrumKitLayout layout = *knownDrumKitLayout(0x10050038u);
+    struct KeySpec { uint8_t choke = 0; std::vector<uint8_t> velTops = {127}; std::vector<std::tuple<uint8_t, uint16_t, Id8>> layers = {{0, 0, {}}}; };
+    auto buildBody = [&](const std::array<KeySpec, 128>& ks) {
+        uint32_t totalL = 0;
+        for (const auto& k : ks) totalL += static_cast<uint32_t>(k.layers.size());
+        const size_t prefix = size_t(layout.headerBytes) + 128u * size_t(layout.keyStride);
+        std::vector<uint8_t> body(prefix + size_t(totalL) * size_t(layout.layerStride), 0x00);
+        body[layout.modeFlagOffset] = 0x82u;
+        uint32_t cum = 0;
+        size_t lIdx = 0;
+        for (size_t k = 0; k < 128u; ++k) {
+            const size_t ko = size_t(layout.headerBytes) + k * size_t(layout.keyStride);
+            const uint8_t lc = static_cast<uint8_t>(ks[k].layers.size());
+            body[ko + layout.layerCountOffset] = lc;
+            body[ko + layout.layerCountOffset + 1u] = 64u;
+            body[ko + layout.layerCountOffset + 6u] = ks[k].choke;
+            const size_t velOff = layout.keyStride - 10u;
+            for (size_t j = 0; j < 8u; ++j) body[ko + velOff + j] = j < ks[k].velTops.size() ? ks[k].velTops[j] : 127u;
+            cum += lc;
+            putBe16(body, ko + layout.keyStride - 2u, static_cast<uint16_t>(cum | (k == 127u ? 0x8000u : 0u)));
+            for (const auto& [bank, tbl, id] : ks[k].layers) {
+                const size_t lo = prefix + (lIdx++) * size_t(layout.layerStride);
+                body[lo + 0u] = bank;
+                putBe16(body, lo + 2u, tbl);
+                std::copy(id.begin(), id.end(), body.begin() + static_cast<std::ptrdiff_t>(lo + layout.layerStride - 8u));
+            }
+        }
+        return body;
+    };
+
+    // Kit 0: GM-aligned multi-tier RAM+ROM kit with placeholder keys, degenerate [127,127], and sub-max ceiling 109
+    std::array<KeySpec, 128> k0{};
+    k0[36] = {0, {64, 109}, {{1, 0, makeId(1)}, {1, 6, makeId(7)}}}; // RamPopulated, Tier 1 'B', maxVel=109
+    k0[38] = {0, {127, 127}, {{1, 1, makeId(2)}, {1, 1, makeId(2)}}}; // RamPopulated, Tier 1 'S', degenerate [127,127]
+    k0[42] = {1, {127}, {{1, 2, makeId(3)}}};                         // RamPopulated, Tier 2 'H' (choke 1)
+    k0[46] = {1, {127}, {{1, 2, makeId(3)}}};                         // RamPopulated, Tier 2 'H' (choke 1)
+    k0[49] = {0, {127}, {{1, 3, makeId(4)}}};                         // RamPopulated, Tier 3 'C' ("CUSTOM_CRASH")
+    k0[65] = {0, {127}, {{1, 4, makeId(5)}}};                         // RamPopulated, Tier 4 'E'
+    k0[48] = {0, {127}, {{1, 5, makeId(6)}}};                         // RamPopulated, Tier 5 'T' (GM fallback)
+    k0[51] = {0, {127}, {{0, 150, {}}}};                              // RomOrBank2Populated, Tier 5 'C' (GM fallback)
+
+    // Kit 1: Corrupt unknown-bank (0x03) kit with zero RAM layers + GM choke group 1 on key 42 + ROM key 38
+    //        -> MUST have isRomOnly() == false in BOTH KeyMap & Profile, blocking Tier 5 ROM-choke fallback on key 38!
+    std::array<KeySpec, 128> k1{};
+    k1[36] = {0, {127}, {{0x03u, 5, {}}}};
+    k1[38] = {0, {127}, {{0x00u, 201, {}}}};
+    k1[42] = {1, {127}, {{0x00u, 200, {}}}};
+
+    DecodedSound ds0{"USERDK01", 0, 0x10050038u, "SYN_E2E_GM", buildBody(k0)};
+    DecodedSound ds1{"USERDK01", 1, 0x10050038u, "SYN_E2E_CORRUPT_BANK", buildBody(k1)};
+
+    NativeRefReport rep;
+    std::map<ResourceId, DrumKitKeyMap> keyMaps;
+    std::string err;
+    const auto graphOpt = buildNativeGraph(kmp, {ds0, ds1}, {}, {{0x10050038u, layout}}, rep, &err, &keyMaps);
+
+    // Expose via IDrumKitCatalog AND TargetOccupancyMap to verify both lookup surfaces end-to-end
+    struct MapCatalog : IDrumKitCatalog {
+        const std::map<ResourceId, DrumKitKeyMap>& m;
+        explicit MapCatalog(const std::map<ResourceId, DrumKitKeyMap>& ref) : m(ref) {}
+        const DrumKitKeyMap* findDrumKitKeyMap(const ResourceId& id) const override {
+            const auto it = m.find(id);
+            return it == m.end() ? nullptr : &it->second;
+        }
+    } catalog(keyMaps);
+
+    TargetOccupancyMap occ = TargetOccupancyMap::makeEmpty(true);
+    for (const auto& [rid, km] : keyMaps) {
+        if (const auto addr = SlotAddress::fromBankAndSlot(rid.scope, rid.number); addr.has_value()) {
+            occ.drumKeyMaps.emplace(*addr, km);
+        }
+    }
+
+    const ResourceId id0{false, "USERDK01", Kind::Sound, 0};
+    const ResourceId id1{false, "USERDK01", Kind::Sound, 1};
+    const size_t edgesBefore = graphOpt ? graphOpt->uses(id0).size() : 0;
+
+    const DrumKitKeyMap* km0 = catalog.findDrumKitKeyMap(id0);
+    const DrumKitKeyMap* occKm0 = occ.findDrumKitKeyMap({true, 1, 0});
+    const DrumKitKeyMap* km1 = catalog.findDrumKitKeyMap(id1);
+
+    const DrumKitProfile p0 = km0 ? profileDrumKit(*km0) : DrumKitProfile{};
+    const DrumKitProfile p1 = km1 ? profileDrumKit(*km1) : DrumKitProfile{};
+    const size_t edgesAfter = graphOpt ? graphOpt->uses(id0).size() : 0;
+
+    TEST("P3-1 e2e: buildNativeGraph() -> IDrumKitCatalog / TargetOccupancyMap -> profileDrumKit() resolves all 5 tiers & excludes 120 placeholders",
+         graphOpt.has_value() && rep.drumKitsAnalysed == 1 &&
+         km0 != nullptr && occKm0 != nullptr && km0->activeKeyMask == occKm0->activeKeyMask &&
+         edgesBefore == 9 && edgesAfter == edgesBefore &&
+         p0.populatedKeyCount == 8 && p0.ramPopulatedCount == 7 && p0.romOrBank2PopulatedCount == 1 &&
+         p0.romPlaceholderCount == 120 && p0.emptyOrUnknownCount == 0 &&
+         p0.isGmAligned && p0.gmAnchorPopulatedCount == 6 && p0.gmAnchorMatchedCount == 5 &&
+         p0.keys[36].advisoryFamily == 'B' && p0.keys[36].familyTier == DrumFamilyTier::Tier1CoreFamilyByte &&
+         p0.keys[38].advisoryFamily == 'S' && p0.keys[38].hasDegenerateVelSplit && p0.keys[38].effectiveDistinctLayers == 1 &&
+         p0.keys[42].advisoryFamily == 'H' && p0.keys[42].familyTier == DrumFamilyTier::Tier2ChokeGroupHint &&
+         p0.keys[49].advisoryFamily == 'C' && p0.keys[49].familyTier == DrumFamilyTier::Tier3SampleNameKeyword &&
+         p0.keys[65].advisoryFamily == 'E' && p0.keys[65].familyTier == DrumFamilyTier::Tier4PercussionFamilyByte &&
+         p0.keys[48].advisoryFamily == 'T' && p0.keys[48].familyTier == DrumFamilyTier::Tier5GmPositionFallback &&
+         p0.keys[51].advisoryFamily == 'C' && p0.keys[51].familyTier == DrumFamilyTier::Tier5GmPositionFallback &&
+         p0.degenerateVelKeyCount == 1 && p0.subMaxVelCeilingKeyCount == 1 && p0.minEffectiveMaxVel == 109 &&
+         !p0.hasKey(0) && !p0.familyB.test(0) && !p0.familyT.test(0));
+
+    TEST("P2-2 e2e: unknown-bank 0x03 kit through buildNativeGraph() -> profileDrumKit() reports isRomOnly()==false & blocks Tier 5 ROM fallback",
+         km1 != nullptr && km1->unresolvedNonRamLayerCount == 1 && !km1->isRomOnly() &&
+         !p1.isRomOnly && !p1.isGmAligned && p1.hasStandardGmChokeGroups &&
+         p1.emptyOrUnknownCount == 1 && p1.keys[36].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+         p1.keys[42].advisoryFamily == 'H' && p1.keys[38].advisoryFamily == '\0' && p1.keys[36].advisoryFamily == '\0');
+}
+
 int main() {
     std::printf("Test: Strictly Read-Only Advisory DrumKitProfile (Slice A2)\n");
     testTier1CoreFamilyBytes();
@@ -380,6 +544,7 @@ int main() {
     testTier5GmAlignedVsNonGmRegionalAndRomOnly();
     testVelocityDynamicsAndDegenerateSplits();
     testMultiLayerTopDownResolution();
+    testEndToEndBuildNativeGraphToProfile();
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

@@ -184,6 +184,7 @@ struct DrumKitKeyMap {
     size_t nonRamDrumLayers = 0;              // sourceBank == 2 && ID8 == 0 (UNVERIFIED_HYPOTHESIS Bank2)
     uint32_t nonRamBank2LayerCount = 0;       // count of Bank-2 (sourceBank == 0x02 && ID8 == 0) layers
     size_t danglingRamLayers = 0;
+    uint32_t unresolvedNonRamLayerCount = 0;  // non-RAM layers with unknown sourceBank (e.g. 0x03/0xFF) or non-zero ID8
     size_t disambiguatedDuplicateLayers = 0;
     std::bitset<128> activeKeyMask{};         // bit k set iff keys[k].occupancy is RamPopulated or RomOrBank2Populated
     std::bitset<128> ramKeyMask{};            // bit k set iff keys[k].occupancy is RamPopulated
@@ -195,7 +196,8 @@ struct DrumKitKeyMap {
 
     bool isRomOnly() const noexcept {
         return ramDrumLayers == 0u && ramKeyMask.none() && danglingRamLayers == 0u &&
-               !hasBank2Layers() && (romDrumLayers > 0u || activeKeyMask.any());
+               unresolvedNonRamLayerCount == 0u && !hasBank2Layers() &&
+               (romDrumLayers > 0u || activeKeyMask.any());
     }
 
     bool hasKey(uint8_t midiNote) const noexcept {
@@ -1030,11 +1032,13 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                             // Contradicts ROM/non-RAM zero-ID invariant -> fail-closed UnresolvedSlot.
                             const bool wk = (msIndex.count(lid) > 0 || smp.count(lid) > 0);
                             bad.push_back({sid_, keyIdx, l, wk, false});
+                            ++km.unresolvedNonRamLayerCount;
                         }
                     } else {
                         // Unknown source bank byte -> fail-closed UnresolvedSlot.
                         const bool wk = (msIndex.count(lid) > 0 || smp.count(lid) > 0);
                         bad.push_back({sid_, keyIdx, l, wk, false});
+                        ++km.unresolvedNonRamLayerCount;
                     }
                     ks.layers.push_back(std::move(ls));
                 }

@@ -25,6 +25,7 @@
 #include <bitset>
 #include <cctype>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <string_view>
@@ -224,75 +225,122 @@ inline constexpr bool isStandardGmChokeGroup1To6(uint8_t midiNote, uint8_t choke
     return chokeGroup >= 1u && chokeGroup <= 6u && classifyChokeGroupHint(midiNote, chokeGroup) != '\0';
 }
 
+inline bool isAsciiUpper(char c) noexcept {
+    return c >= 'A' && c <= 'Z';
+}
+
+inline bool isAsciiLower(char c) noexcept {
+    return c >= 'a' && c <= 'z';
+}
+
 inline bool isAsciiAlpha(char c) noexcept {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    return isAsciiUpper(c) || isAsciiLower(c);
 }
 
-inline std::string toUpperAscii(std::string_view sv) {
-    std::string out;
-    out.reserve(sv.size());
-    for (char c : sv) {
-        out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+// Splits a sample name into uppercase alphabetic tokens on non-letter (punctuation/space/digit)
+// boundaries AND CamelCase transitions ("FloorTom1" -> {"FLOOR","TOM"}, "SYNKick" -> {"SYN","KICK"}).
+inline std::vector<std::string> tokenizeSampleName(std::string_view rawName) {
+    std::vector<std::string> tokens;
+    std::string cur;
+    const size_t n = rawName.size();
+    for (size_t i = 0; i < n; ++i) {
+        const char ch = rawName[i];
+        if (!isAsciiAlpha(ch)) {
+            if (!cur.empty()) {
+                tokens.push_back(std::move(cur));
+                cur.clear();
+            }
+            continue;
+        }
+        if (!cur.empty() && i > 0u) {
+            const char prev = rawName[i - 1u];
+            const bool lowerToUpper = isAsciiLower(prev) && isAsciiUpper(ch);
+            const bool acronymToWord =
+                isAsciiUpper(prev) && isAsciiUpper(ch) && (i + 1u < n) && isAsciiLower(rawName[i + 1u]);
+            if (lowerToUpper || acronymToWord) {
+                tokens.push_back(std::move(cur));
+                cur.clear();
+            }
+        }
+        cur.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
     }
-    return out;
+    if (!cur.empty()) tokens.push_back(std::move(cur));
+    return tokens;
 }
 
-inline bool containsSubstr(std::string_view haystack, std::string_view needle) noexcept {
-    return haystack.find(needle) != std::string_view::npos;
+inline bool startsWithToken(std::string_view tok, std::string_view prefix) noexcept {
+    return tok.size() >= prefix.size() && tok.substr(0, prefix.size()) == prefix;
 }
 
-// Matches short 2-letter abbreviations (BD, SD, HH, FX) bounded by non-letter characters
-// (start/end, digits, underscores, hyphens, spaces) to avoid false matches like "KBD" -> BD.
-inline bool containsAlphaBounded(std::string_view haystack, std::string_view needle) noexcept {
-    if (needle.empty() || needle.size() > haystack.size()) return false;
-    size_t pos = 0;
-    while ((pos = haystack.find(needle, pos)) != std::string_view::npos) {
-        const bool leftOk = (pos == 0u) || !isAsciiAlpha(haystack[pos - 1u]);
-        const size_t after = pos + needle.size();
-        const bool rightOk = (after >= haystack.size()) || !isAsciiAlpha(haystack[after]);
-        if (leftOk && rightOk) return true;
-        ++pos;
+inline bool isTokenInList(std::string_view tok, const std::initializer_list<std::string_view>& list) noexcept {
+    for (std::string_view item : list) {
+        if (tok == item) return true;
     }
     return false;
 }
 
-// Tier 3: Case-insensitive RAM DrumSample::name keyword classifier (INFERRED).
+// Tier 3: Token-boundary, case-insensitive RAM DrumSample::name keyword classifier (INFERRED).
+// Matches strictly on whole tokens (plus explicit uppercase drum compounds) so substrings inside
+// unrelated words (e.g. CUSTOM->TOM, MARIMBA->RIM, GHATAM/SHATTER->HAT, PRIDE->RIDE) never hijack family.
 inline char classifySampleNameKeyword(std::string_view rawName) {
     if (rawName.empty()) return '\0';
-    const std::string up = toUpperAscii(rawName);
-    const std::string_view sv(up);
+    const std::vector<std::string> tokens = tokenizeSampleName(rawName);
+    if (tokens.empty()) return '\0';
+
+    auto anyExact = [&](std::initializer_list<std::string_view> list) noexcept {
+        for (const std::string& tok : tokens) {
+            if (isTokenInList(tok, list)) return true;
+        }
+        return false;
+    };
+    auto anyPrefix = [&](std::initializer_list<std::string_view> prefixes) noexcept {
+        for (const std::string& tok : tokens) {
+            for (std::string_view p : prefixes) {
+                if (startsWithToken(tok, p)) return true;
+            }
+        }
+        return false;
+    };
 
     // 'B' — Bass Drum / Kick
-    if (containsSubstr(sv, "KICK") || containsAlphaBounded(sv, "BD")) return 'B';
+    if (anyExact({"KICK", "KICKS", "BD", "KICKDRUM", "BASSDRUM", "BDRUM"})) {
+        return 'B';
+    }
     // 'S' — Snare / Rim / Clap / Brush
-    if (containsSubstr(sv, "SNARE") || containsAlphaBounded(sv, "SD") ||
-        containsSubstr(sv, "RIM") || containsSubstr(sv, "CLAP") || containsSubstr(sv, "BRUSH")) {
+    if (anyExact({"SNARE", "SNARES", "SD", "SNAREDRUM", "SDRUM",
+                  "RIM", "RIMS", "RIMSHOT", "RIMSHOTS", "SIDESTICK",
+                  "CLAP", "CLAPS", "HANDCLAP", "HANDCLAPS",
+                  "BRUSH", "BRUSHES"})) {
         return 'S';
     }
     // 'H' — Hi-Hat
-    if (containsSubstr(sv, "HAT") || containsAlphaBounded(sv, "HH") ||
-        containsSubstr(sv, "CHH") || containsSubstr(sv, "OHH") || containsSubstr(sv, "PHH")) {
+    if (anyExact({"HAT", "HATS", "HH", "CHH", "OHH", "PHH",
+                  "HIHAT", "HIHATS", "CLOSEDHAT", "OPENHAT", "PEDALHAT"})) {
         return 'H';
     }
     // 'T' — Tom
-    if (containsSubstr(sv, "TOM")) return 'T';
+    if (anyExact({"TOM", "TOMS", "FLOORTOM", "MIDTOM", "HIGHTOM", "HITOM",
+                  "LOWTOM", "LOTOM", "RACKTOM", "ROTOM", "ROTOTOM"})) {
+        return 'T';
+    }
     // 'C' — Cymbal
-    if (containsSubstr(sv, "CRASH") || containsSubstr(sv, "RIDE") ||
-        containsSubstr(sv, "CYM") || containsSubstr(sv, "SPLASH") || containsSubstr(sv, "CHINA")) {
+    if (anyExact({"CRASH", "CRASHES", "RIDE", "RIDES", "CYM", "CYMS",
+                  "SPLASH", "SPLASHES", "CHINA", "CHINAS",
+                  "CRASHCYM", "RIDECYM", "CHINACYM", "SPLASHCYM"}) ||
+        anyPrefix({"CYMB"})) {
         return 'C';
     }
     // 'L' — Latin Percussion
-    if (containsSubstr(sv, "CONGA") || containsSubstr(sv, "BONGO") ||
-        containsSubstr(sv, "TIMB") || containsSubstr(sv, "SHAK") ||
-        containsSubstr(sv, "TAMB") || containsSubstr(sv, "COW") ||
-        containsSubstr(sv, "GUIRO") || containsSubstr(sv, "CLAVE") ||
-        containsSubstr(sv, "SURDO") || containsSubstr(sv, "CUICA") ||
-        containsSubstr(sv, "TRIANG")) {
+    if (anyExact({"COW", "COWBELL", "COWBELLS",
+                  "HICONGA", "LOCONGA", "LOWCONGA", "MIDCONGA",
+                  "HIBONGO", "LOBONGO", "LOWBONGO"}) ||
+        anyPrefix({"CONGA", "BONGO", "TIMB", "SHAK", "TAMB",
+                   "GUIRO", "CLAVE", "SURDO", "CUICA", "TRIANG"})) {
         return 'L';
     }
     // 'X' — Special FX / Scratch / Loop
-    if (containsSubstr(sv, "SFX") || containsAlphaBounded(sv, "FX") ||
-        containsSubstr(sv, "LOOP") || containsSubstr(sv, "SCRAT")) {
+    if (anyExact({"FX", "SFX", "LOOP", "LOOPS", "DRUMLOOP", "DRUMLOOPS"}) ||
+        anyPrefix({"SCRAT"})) {
         return 'X';
     }
     return '\0';
@@ -478,10 +526,11 @@ inline DrumKitProfile profileDrumKit(const DrumKitKeyMap& keyMap) {
         kp.advisoryFamily = resolvedFamily;
     }
 
-    profile.isRomOnly = keyMap.isRomOnly() ||
-                        (profile.ramPopulatedCount == 0u && !profile.hasBank2Layers &&
-                         keyMap.danglingRamLayers == 0u &&
-                         (profile.romOrBank2PopulatedCount > 0u || profile.romPlaceholderCount > 0u));
+    const bool hasUnresolvedLayers = (keyMap.danglingRamLayers > 0u || keyMap.unresolvedNonRamLayerCount > 0u);
+    profile.isRomOnly = !hasUnresolvedLayers && profile.emptyOrUnknownCount == 0u &&
+                        (keyMap.isRomOnly() ||
+                         (profile.ramPopulatedCount == 0u && !profile.hasBank2Layers &&
+                          (profile.romOrBank2PopulatedCount > 0u || profile.romPlaceholderCount > 0u)));
 
     // Compute per-kit GM-alignment score over populated core anchor keys {35, 36, 38, 40, 42, 44, 46, 49, 51}.
     for (uint8_t anchor : drumkit_profile_detail::kGmCoreAnchorNotes) {

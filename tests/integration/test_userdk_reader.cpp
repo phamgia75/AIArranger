@@ -1408,10 +1408,46 @@ static void testGroupE_SliceA1EnrichmentAndBank2Guard(const SynthUniverse& U) {
              cm.hasBlockingConflicts() && hasInsuffDiag && !hasUnparsedDiag &&
              occDirect.targetLibraryKey == occFromAdapter.targetLibraryKey);
     }
+
+    // T28 (Audit P2-2): Unknown-bank (0x03/0xFF) & corrupt non-zero-ID8 ROM kits MUST NOT report isRomOnly() == true
+    //                   and MUST fail closed to InsufficientEvidence!
+    {
+        auto keysUnknownBank = makeDefaultKeys();
+        keysUnknownBank[36].layers = {{0x03u, 10, 0x8000u, 0, 0, {}}};
+        keysUnknownBank[38].layers = {{0xFFu, 11, 0x8000u, 0, 0, {}}};
+
+        auto keysCorruptRom = makeDefaultKeys();
+        keysCorruptRom[42].layers = {{0x00u, 100, 0x8000u, 0, 0, makeId(0xD0, 1)}}; // ROM layer carrying non-zero ID8!
+
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 10, "SYN_UNK_BANK",   rawKorfPayload(buildSynthUserDkBody(kProf1005, keysUnknownBank)), ""},
+                {kProf1005.kind, 4, 11, 11, "SYN_BAD_ROM_ID", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysCorruptRom)),  ""},
+            })}
+        };
+        const NativeKstResult res = resolveNativeKst(in);
+        const TargetOccupancyMap occ = inspectTargetKstInput(in);
+        const auto* kmUnk = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 10});
+        const auto* kmBad = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 11});
+        const auto* occUnk = occ.findOccupied({true, 1, 10});
+        const auto* occBad = occ.findOccupied({true, 1, 11});
+        TEST("T28 (P2-2): unknown-bank (0x03/0xFF) & corrupt non-zero-ID8 ROM kits track unresolvedNonRamLayerCount, isRomOnly()==false & InsufficientEvidence",
+             res.ok && kmUnk != nullptr && kmBad != nullptr &&
+             kmUnk->unresolvedNonRamLayerCount == 2 && !kmUnk->isRomOnly() &&
+             kmUnk->keys[36].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             kmUnk->keys[38].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             kmBad->unresolvedNonRamLayerCount == 1 && !kmBad->isRomOnly() &&
+             kmBad->keys[42].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             occUnk != nullptr && !occUnk->equivalence.provablyComparable() &&
+             compareSoundEquivalence(occUnk->equivalence, occUnk->equivalence).verdict == EquivalenceVerdict::InsufficientEvidence &&
+             occBad != nullptr && !occBad->equivalence.provablyComparable() &&
+             compareSoundEquivalence(occBad->equivalence, occBad->equivalence).verdict == EquivalenceVerdict::InsufficientEvidence);
+    }
 }
 
 int main() {
-    std::printf("Test: Read-Only USERDK Drum Kit Parser, Resource Graph Integration & Equivalence (T1..T27)\n");
+    std::printf("Test: Read-Only USERDK Drum Kit Parser, Resource Graph Integration & Equivalence (T1..T28)\n");
     const SynthUniverse U;
     testGroupA_PositiveControls(U);
     testGroupB_AnomaliesAndLegacy(U);
