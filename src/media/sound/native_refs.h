@@ -25,6 +25,7 @@
 #include "media/sound/resource_graph.h"
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <cctype>
 #include <cerrno>
 #include <cstring>
@@ -89,6 +90,25 @@ struct DrumKitLayout {
 };
 using DrumKitLayoutTable = std::map<uint32_t, DrumKitLayout>;
 
+// Four-state per-key occupancy classification for parsed USERDK Drum Kits (Track A Next Spec §2.1).
+// Prevents silent fallback routing onto unassigned ROM(index==0) placeholder keys.
+enum class DrumKeyOccupancy : uint8_t {
+    EmptyOrUnknown,          // Unparsed, dangling-only, or structurally invalid key
+    RomIndexZeroPlaceholder, // INFERRED: lc==1 && sourceBank==0 && tableIndex==0 (default unassigned placeholder)
+    RomOrBank2Populated,     // INFERRED: >=1 valid layer with (sourceBank==0 && tableIndex!=0) or sourceBank==2
+    RamPopulated             // VERIFIED: >=1 resolved RAM.KMP DrumSample layer (sourceBank==1)
+};
+
+inline const char* drumKeyOccupancyName(DrumKeyOccupancy o) {
+    switch (o) {
+        case DrumKeyOccupancy::EmptyOrUnknown:          return "EmptyOrUnknown";
+        case DrumKeyOccupancy::RomIndexZeroPlaceholder: return "RomIndexZeroPlaceholder";
+        case DrumKeyOccupancy::RomOrBank2Populated:     return "RomOrBank2Populated";
+        case DrumKeyOccupancy::RamPopulated:            return "RamPopulated";
+    }
+    return "EmptyOrUnknown";
+}
+
 // Read-only per-layer summary for a parsed USERDK key (foundation for future Drum Mapping Engine).
 // Verified structural fields and INFERRED advisory fields are strictly separated.
 struct DrumKitLayerSummary {
@@ -102,6 +122,7 @@ struct DrumKitLayerSummary {
     uint32_t drumSampleIndex = kNoZoneSample; // positional RAM.KMP DrumSample index when resolved
     Id8 drumSampleId{};                       // trailing 8-byte DrumSample ID (all-0 for ROM/Bank2)
     // Advisory INFERRED metadata ONLY (NEVER used to infer graph edges or equivalence):
+    std::string advisoryDrumSampleName;       // INFERRED/advisory: RAM.KMP DrumSample::name when resolved ("" otherwise)
     uint8_t advisoryDrumFamilyByte = 0xFF;    // INFERRED: RAM.KMP DrumSample +113 (0=B..7=X, 0xFF=None)
     std::optional<uint16_t> advisoryLayerGainRaw; // INFERRED: u16 BE layer gain in 1005..1007 (0x8000 = 0 dB)
     std::optional<int8_t> advisoryTranspose;      // INFERRED: semitones
@@ -112,12 +133,45 @@ struct DrumKitLayerSummary {
 struct DrumKitKeySummary {
     uint8_t midiNote = 0;                     // VERIFIED: direct 0-indexed MIDI note 0..127 (C-1..G9)
     uint8_t layerCount = 0;                   // VERIFIED: 1..8
+    DrumKeyOccupancy occupancy = DrumKeyOccupancy::EmptyOrUnknown;
     std::array<uint8_t, 8> velTop{};          // VERIFIED: 8-byte monotonic velocity top thresholds (<= 127)
     std::vector<DrumKitLayerSummary> layers;
     // Advisory INFERRED metadata ONLY (NEVER used to infer graph edges or equivalence):
     std::optional<uint16_t> advisoryKeyGainRaw;   // INFERRED: u16 BE key gain in 1005..1007
     uint8_t advisoryPan = 64;                 // INFERRED: 0..127 (64 = Center)
     uint8_t advisoryExclusiveGroup = 0;       // INFERRED: 0 = None, 1..127 (Choke Group)
+
+    constexpr bool isPopulated() const noexcept {
+        return occupancy == DrumKeyOccupancy::RamPopulated ||
+               occupancy == DrumKeyOccupancy::RomOrBank2Populated;
+    }
+
+    // Count of distinct non-degenerate velocity zones when adjacent velTop[l] == velTop[l - 1].
+    constexpr uint8_t effectiveDistinctLayers() const noexcept {
+        if (layerCount == 0u) return 0u;
+        const uint8_t n = layerCount <= 8u ? layerCount : 8u;
+        uint8_t distinct = 1u;
+        for (uint8_t l = 1u; l < n; ++l) {
+            if (velTop[l] != velTop[l - 1u]) ++distinct;
+        }
+        return distinct;
+    }
+
+    // Highest velocity ceiling for this key (velTop[layerCount - 1], or 0 when unparsed/empty).
+    constexpr uint8_t effectiveMaxVel() const noexcept {
+        if (layerCount == 0u) return 0u;
+        const uint8_t n = layerCount <= 8u ? layerCount : 8u;
+        return velTop[n - 1u];
+    }
+
+    // True iff any adjacent velocity split repeats the same threshold (e.g. [127, 127]).
+    constexpr bool hasDegenerateVelSplit() const noexcept {
+        const uint8_t n = layerCount <= 8u ? layerCount : 8u;
+        for (uint8_t l = 1u; l < n; ++l) {
+            if (velTop[l] == velTop[l - 1u]) return true;
+        }
+        return false;
+    }
 };
 
 // Read-only 128-key map for one parsed USERDK kit.
@@ -128,9 +182,25 @@ struct DrumKitKeyMap {
     size_t ramDrumLayers = 0;
     size_t romDrumLayers = 0;                 // sourceBank == 0 && ID8 == 0
     size_t nonRamDrumLayers = 0;              // sourceBank == 2 && ID8 == 0 (UNVERIFIED_HYPOTHESIS Bank2)
+    uint32_t nonRamBank2LayerCount = 0;       // count of Bank-2 (sourceBank == 0x02 && ID8 == 0) layers
     size_t danglingRamLayers = 0;
     size_t disambiguatedDuplicateLayers = 0;
+    std::bitset<128> activeKeyMask{};         // bit k set iff keys[k].occupancy is RamPopulated or RomOrBank2Populated
+    std::bitset<128> ramKeyMask{};            // bit k set iff keys[k].occupancy is RamPopulated
     std::array<DrumKitKeySummary, 128> keys{};
+
+    bool hasBank2Layers() const noexcept {
+        return nonRamBank2LayerCount > 0u || nonRamDrumLayers > 0u;
+    }
+
+    bool isRomOnly() const noexcept {
+        return ramDrumLayers == 0u && ramKeyMask.none() && danglingRamLayers == 0u &&
+               !hasBank2Layers() && (romDrumLayers > 0u || activeKeyMask.any());
+    }
+
+    bool hasKey(uint8_t midiNote) const noexcept {
+        return midiNote < 128u && activeKeyMask.test(midiNote);
+    }
 };
 
 // Read-only interface foundation for future Drum Mapping Engine (Track B Q3).
@@ -138,6 +208,8 @@ struct IDrumKitKeyMap {
     virtual ~IDrumKitKeyMap() = default;
     virtual const DrumKitKeyMap* findDrumKitKeyMap(const ResourceId& soundId) const = 0;
 };
+// Catalog-level alias avoiding cross-namespace confusion with per-kit exporters::korg::quality::IDrumKitKeyMap.
+using IDrumKitCatalog = IDrumKitKeyMap;
 
 enum class Gap { NoLayoutForKind, SizeDoesNotFit, NoKnownReference, TooManyRecords, NumberOutOfRange, DecodeFailed, NoId8InDrumLayers };
 inline const char* gapName(Gap g) {
@@ -879,6 +951,8 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                 ks.layers.reserve(lc);
 
                 uint8_t prevVel = 0;
+                bool keyHasResolvedRam = false;
+                bool keyHasPopulatedRomOrBank2 = false;
                 for (uint32_t l = 0; l < lc; ++l) {
                     const uint8_t* lr = s.body.data() + prefix + layerCursor * size_t(DL.layerStride);
                     ++layerCursor;
@@ -917,7 +991,9 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                             if (tblIdx < k.drums.size() && k.drums[tblIdx].id == lid) {
                                 ls.resolved = true;
                                 ls.drumSampleIndex = tblIdx;
+                                ls.advisoryDrumSampleName = k.drums[tblIdx].name;
                                 ls.advisoryDrumFamilyByte = k.drums[tblIdx].drumFamilyByte;
+                                keyHasResolvedRam = true;
                                 hits.push_back({keyIdx, l, velLo, velHi, tblIdx});
                                 if (idxs.size() > 1) {
                                     ++disambigCount;
@@ -940,8 +1016,16 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                         }
                     } else if (srcBank == 0x00u || srcBank == 0x02u) {
                         if (idIsZero) {
-                            if (srcBank == 0x00u) { ++romCount; ++km.romDrumLayers; }
-                            else { ++nonRamCount; ++km.nonRamDrumLayers; }
+                            if (srcBank == 0x00u) {
+                                ++romCount;
+                                ++km.romDrumLayers;
+                                if (tblIdx != 0u) keyHasPopulatedRomOrBank2 = true;
+                            } else {
+                                ++nonRamCount;
+                                ++km.nonRamDrumLayers;
+                                ++km.nonRamBank2LayerCount;
+                                keyHasPopulatedRomOrBank2 = true;
+                            }
                         } else {
                             // Contradicts ROM/non-RAM zero-ID invariant -> fail-closed UnresolvedSlot.
                             const bool wk = (msIndex.count(lid) > 0 || smp.count(lid) > 0);
@@ -953,6 +1037,22 @@ inline std::optional<Graph> buildNativeGraph(const KmpIndex& k, const std::vecto
                         bad.push_back({sid_, keyIdx, l, wk, false});
                     }
                     ks.layers.push_back(std::move(ls));
+                }
+
+                if (keyHasResolvedRam) {
+                    ks.occupancy = DrumKeyOccupancy::RamPopulated;
+                    km.activeKeyMask.set(keyIdx);
+                    km.ramKeyMask.set(keyIdx);
+                } else if (keyHasPopulatedRomOrBank2) {
+                    ks.occupancy = DrumKeyOccupancy::RomOrBank2Populated;
+                    km.activeKeyMask.set(keyIdx);
+                } else if (lc == 1u && ks.layers.size() == 1u &&
+                           ks.layers[0].sourceBank == 0x00u &&
+                           ks.layers[0].tableIndex == 0u &&
+                           native_detail::allSame(ks.layers[0].drumSampleId, 0u)) {
+                    ks.occupancy = DrumKeyOccupancy::RomIndexZeroPlaceholder;
+                } else {
+                    ks.occupancy = DrumKeyOccupancy::EmptyOrUnknown;
                 }
             }
 
