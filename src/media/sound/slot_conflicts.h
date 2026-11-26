@@ -199,6 +199,7 @@ struct SoundEquivalenceProfile {
     size_t unresolvedSlotCount = 0; // MUST be 0 for equivalence proof
     bool isDrumKit = false;
     bool hasDuplicateDrumSampleId = false; // true if any referenced DrumSample Id8 appears >1x in RAM.KMP -> InsufficientEvidence
+    bool hasNonRamBank2Layers = false;     // true if parsed USERDK contains unverified Bank-2 (0x02) layers -> InsufficientEvidence
     bool kmpComplete = false;       // true iff raw Pa5X RAM.KMP parsed and zone/drum/PCM tables are populated
     std::vector<MultisampleFingerprint> referencedMultisamples; // canonically sorted by multisampleId
     std::vector<DrumSampleFingerprint> referencedDrumSamples;   // canonically sorted by drumSampleId
@@ -227,8 +228,8 @@ struct SoundEquivalenceProfile {
             return false;
         }
         if (isDrumKit) {
-            return !hasDuplicateDrumSampleId && !referencedDrumSamples.empty() &&
-                   allReferencedDrumSamplesHavePcm();
+            return !hasDuplicateDrumSampleId && !hasNonRamBank2Layers &&
+                   !referencedDrumSamples.empty() && allReferencedDrumSamplesHavePcm();
         }
         return !referencedMultisamples.empty() && allReferencedSamplesHavePcm();
     }
@@ -304,6 +305,9 @@ inline std::string insufficientEvidenceReason(const SoundEquivalenceProfile& p, 
     if (p.isDrumKit) {
         if (p.hasDuplicateDrumSampleId) {
             return std::string(side) + " User Drum Kit references duplicate RAM.KMP DrumSample ID8";
+        }
+        if (p.hasNonRamBank2Layers) {
+            return std::string(side) + " User Drum Kit contains unverified Bank-2 (0x02) drum layers";
         }
         if (p.referencedDrumSamples.empty()) {
             return std::string(side) + " User Drum Kit has no verified RAM DrumSample references";
@@ -723,6 +727,7 @@ struct TargetOccupancyMap {
     std::set<std::string> extraOutOfSpecDrumKitBanksPresent;
 
     std::map<SlotAddress, OccupiedSlotEntry> occupiedSlots;
+    std::map<SlotAddress, graph::DrumKitKeyMap> drumKeyMaps;             // parsed read-only USERDK key maps (including ROM-only kits)
     std::map<std::string, std::vector<ObjectPathEntry>> objectPathsByFolded;
     std::map<std::string, std::set<std::string>> objectDirsByFolded;   // folded dir prefix -> original-case dir prefixes (FAT R-18)
     std::map<std::string, std::vector<SlotAddress>> equivalenceIndex;  // equivalenceDigest -> sorted SlotAddresses
@@ -770,6 +775,11 @@ struct TargetOccupancyMap {
     const OccupiedSlotEntry* findOccupied(const SlotAddress& addr) const {
         const auto it = occupiedSlots.find(addr);
         return it == occupiedSlots.end() ? nullptr : &it->second;
+    }
+
+    const graph::DrumKitKeyMap* findDrumKitKeyMap(const SlotAddress& addr) const {
+        const auto it = drumKeyMaps.find(addr);
+        return it == drumKeyMaps.end() ? nullptr : &it->second;
     }
 
     size_t occupiedCount(bool isDrumKit) const {
@@ -1113,6 +1123,7 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
     // 8. Run layout fitting (melodic + USERDK) & native graph construction when KMP parsed cleanly
     graph::NativeRefReport refRep;
     std::optional<graph::Graph> nativeGraph;
+    std::map<graph::ResourceId, graph::DrumKitKeyMap> parsedDrumKeyMaps;
     if (kmpOk) {
         graph::LayoutTable layouts = opts.downstream.layouts;
         graph::DrumKitLayoutTable drumLayouts = opts.downstream.drumLayouts;
@@ -1141,9 +1152,16 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
             }
         }
         std::string gerr;
-        nativeGraph = graph::buildNativeGraph(kmpIndex, decodedSounds, layouts, drumLayouts, refRep, &gerr);
+        nativeGraph = graph::buildNativeGraph(kmpIndex, decodedSounds, layouts, drumLayouts,
+                                              refRep, &gerr, &parsedDrumKeyMaps);
         if (!nativeGraph) {
             containerErrors.push_back("graph build failed: " + gerr);
+        } else {
+            for (const auto& [rid, km] : parsedDrumKeyMaps) {
+                if (const auto addrOpt = SlotAddress::fromBankAndSlot(rid.scope, rid.number); addrOpt.has_value()) {
+                    map.drumKeyMaps.emplace(*addrOpt, km);
+                }
+            }
         }
     }
 
@@ -1223,6 +1241,11 @@ inline TargetOccupancyMap buildTargetOccupancyFromInMemory(
         const graph::ResourceId sid = addr.resourceId();
         if (const auto uit = unresolvedCountBySound.find(sid); uit != unresolvedCountBySound.end()) {
             eq.unresolvedSlotCount = uit->second;
+        }
+        if (addr.isDrumKit) {
+            if (const auto kmit = parsedDrumKeyMaps.find(sid); kmit != parsedDrumKeyMaps.end()) {
+                eq.hasNonRamBank2Layers = kmit->second.hasBank2Layers();
+            }
         }
 
         if (!sm.decoded) {
@@ -1361,6 +1384,12 @@ inline TargetOccupancyMap buildTargetOccupancyFromM1Closure(const graph::NativeK
     map.partialInspect.pcmSampleCount = M.summary.pcmSamplesTotal;
     map.partialInspect.soundInventory = closure.downstream.report.soundCatalog;
 
+    for (const auto& [rid, km] : closure.downstream.report.drumKeyMaps) {
+        if (const auto addrOpt = SlotAddress::fromBankAndSlot(rid.scope, rid.number); addrOpt.has_value()) {
+            map.drumKeyMaps.emplace(*addrOpt, km);
+        }
+    }
+
     for (const auto& sm : closure.downstream.report.soundCatalog) {
         const auto addrOpt = SlotAddress::fromBankAndSlot(sm.bank, sm.number);
         if (!addrOpt.has_value()) continue;
@@ -1371,6 +1400,11 @@ inline TargetOccupancyMap buildTargetOccupancyFromM1Closure(const graph::NativeK
         occ.equivalence.kindChunkId = sm.kind;
         occ.equivalence.decoded = sm.decoded;
         occ.equivalence.isDrumKit = addrOpt->isDrumKit;
+        if (addrOpt->isDrumKit) {
+            if (const auto kmit = map.drumKeyMaps.find(*addrOpt); kmit != map.drumKeyMaps.end()) {
+                occ.equivalence.hasNonRamBank2Layers = kmit->second.hasBank2Layers();
+            }
+        }
         occ.equivalence.analysed = false;  // M1 manifest does not carry decoded body SHA-256 / zone topKeys
         occ.equivalence.unanalysedReason = "BodyShaAndZoneTableNotInM1Summary";
         map.addOccupiedSlot(std::move(occ));

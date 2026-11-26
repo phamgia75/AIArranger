@@ -245,6 +245,11 @@ if(TARGET test_userdk_reader)
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
         $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
 endif()
+if(TARGET test_drumkit_profile)
+    target_compile_options(test_drumkit_profile PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-free-nonheap-object>)
+endif()
 
 # ── Korg exporter tests (format, mapper, Genos corpus conversion) ─────
 file(GLOB EXPORTER_TEST_SRC tests/exporters/*.cpp)
