@@ -309,6 +309,7 @@ struct M1AdapterView {
     std::vector<RootItemRecord> roots;                              // sorted by relPath
     std::map<std::string, size_t> rootIndexByRelPath;               // relPath -> index in `roots`
     std::map<graph::ResourceId, SoundClosureRecord> sounds;         // Native KST occupied Sound catalog
+    std::map<graph::ResourceId, graph::DrumKitKeyMap> drumKeyMaps;  // parsed read-only USERDK key maps (including ROM-only kits)
     std::set<std::string> presentSoundBanks;                        // e.g. "USER01", "USERDK01"
     std::map<graph::ResourceId, MultisampleRecord> multisamples;
     std::map<graph::ResourceId, DrumSampleRecord> drumSamples;
@@ -338,6 +339,10 @@ struct M1AdapterView {
     const RootItemRecord* findRoot(const std::string& relPath) const {
         const auto it = rootIndexByRelPath.find(relPath);
         return it == rootIndexByRelPath.end() ? nullptr : &roots[it->second];
+    }
+    const graph::DrumKitKeyMap* findDrumKitKeyMap(const graph::ResourceId& soundId) const {
+        const auto it = drumKeyMaps.find(soundId);
+        return it == drumKeyMaps.end() ? nullptr : &it->second;
     }
 };
 
@@ -838,8 +843,9 @@ inline M1AdapterView adaptFromM1Closure(
         return view;
     }
 
-    // Preserve unified read-only Graph (never declaring scanned/complete!)
+    // Preserve unified read-only Graph (never declaring scanned/complete!) and parsed USERDK key maps
     view.graph = *m1.graph;
+    view.drumKeyMaps = m1.downstream.report.drumKeyMaps;
     const graph::Graph& g = *view.graph;
 
     // 1. Index KMP Samples, Multisamples, DrumSamples with exact Id8, zone topKeys, and stored-proxy flag
@@ -1020,6 +1026,11 @@ inline M1AdapterView adaptFromM1Closure(
         eq.bodySha256 = sc.decodedBodySha256;
         eq.decoded = use.decoded;
         eq.isDrumKit = use.isDrumKit;
+        if (use.isDrumKit) {
+            if (const auto kmit = view.drumKeyMaps.find(use.id); kmit != view.drumKeyMaps.end()) {
+                eq.hasNonRamBank2Layers = kmit->second.hasBank2Layers();
+            }
+        }
         eq.analysed = sc.analysed;
         eq.unanalysedReason = sc.unanalysedGap;
         eq.unresolvedSlotCount = sc.unresolvedSlotsInAnalysed.size() + sc.unresolvedSlotsInUnanalysed.size();
@@ -1285,7 +1296,13 @@ inline TargetOccupancyMap buildTargetOccupancyFromAdapter(
         }
     }
 
-    // Populate occupied Sound slots with M2a's canonical SoundEquivalenceProfile
+    // Populate occupied Sound slots with M2a's canonical SoundEquivalenceProfile & mirror parsed USERDK key maps
+    for (const auto& [rid, km] : view.drumKeyMaps) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+        if (const auto addrOpt = SlotAddress::fromBankAndSlot(rid.scope, rid.number); addrOpt.has_value()) {
+            map.drumKeyMaps.emplace(*addrOpt, km);
+        }
+    }
     for (const auto& [sid, sc] : view.sounds) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const auto addr = sc.slotAddress.has_value() ? sc.slotAddress : SlotAddress::fromBankAndSlot(sc.bank, sc.slot);
