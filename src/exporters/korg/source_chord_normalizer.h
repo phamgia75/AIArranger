@@ -4,6 +4,7 @@
 #include "engine/arranger/chord_input.h"
 #include "engine/uasf/types.h"
 #include "exporters/korg/korg_style_smf.h"
+#include "exporters/korg/megavoice_sanitizer.h"
 
 #include <algorithm>
 #include <array>
@@ -15,43 +16,10 @@
 // Standalone, portable C++20 Yamaha Ctb2[18..19] Source-Chord Normalizer and
 // 12-Root Register-Safety / Pa5X Style Edit Parameter Recommender (Track B Q3a).
 // Zero JUCE/GUI dependency; 100% deterministic, offline, header-only.
+// Consumes canonical CasmTrackView and NoteSpan from megavoice_sanitizer.h so
+// all four quality headers can be included in any order with zero ODR conflicts.
 
 namespace ai_arranger::exporters::korg::quality {
-
-#ifndef AI_ARRANGER_EXPORTERS_KORG_QUALITY_CASM_TRACK_VIEW_DEFINED
-#define AI_ARRANGER_EXPORTERS_KORG_QUALITY_CASM_TRACK_VIEW_DEFINED
-// Shared lightweight read-only CASM track metadata view (guarded identically
-// across megavoice_sanitizer.h, cv_splitter.h, source_chord_normalizer.h, and
-// drum_remap.h for order-independent inclusion with zero ODR conflicts).
-struct CasmTrackView {
-    uint8_t  src_ch            = 0;
-    uint8_t  dest_ch           = 0;               // Ctb2[9] (0..15)
-    uint8_t  ntr               = 0;               // Ctb2[28]: 0=RootTrans, 1=RootFixed, 2=Guitar
-    uint8_t  ntt               = 0;               // Ctb2[29] & 0x7F
-    bool     ntt_bass          = false;           // (Ctb2[29] & 0x80) != 0
-    uint8_t  high_key          = 11;              // Ctb2[30]: 0..11
-    uint8_t  note_low          = 0;               // Ctb2[31]: 0..127
-    uint8_t  note_high         = 127;             // Ctb2[32]: 0..127
-    uint8_t  rtr               = 0;               // Ctb2[33]
-    uint8_t  source_chord_root = 0;               // Ctb2[18]: 0=C..11=B, 0x7F=unset
-    uint8_t  source_chord_type = 0x00;            // Ctb2[19]: Yamaha SFF chord code
-    uint16_t note_mute_mask    = 0x0FFF;          // Ctb2[11..12] 12-bit active note mask (bit 0=C .. bit 11=B)
-    uint64_t chord_mute_mask   = 0x3FFFFFFFFULL;  // Ctb2[13..17] 34-bit active chord mask (all 1s = all chords)
-    bool     has_casm          = false;           // true iff parsed from Ctb2 or SFF1 Ctab/Cntt
-};
-#endif
-
-#if !defined(AI_ARRANGER_EXPORTERS_KORG_QUALITY_NOTE_SPAN_DEFINED) && \
-    !defined(AI_ARRANGER_EXPORTERS_KORG_MEGAVOICE_SANITIZER_H)
-#define AI_ARRANGER_EXPORTERS_KORG_QUALITY_NOTE_SPAN_DEFINED
-struct NoteSpan {
-    uint32_t on_tick         = 0;
-    uint32_t off_tick        = 0;   // strictly > on_tick
-    uint8_t  pitch           = 60;  // 0..127
-    uint8_t  vel             = 80;  // 1..127
-    bool     from_guitar_ntr = false;
-};
-#endif
 
 // Decoded Yamaha Ctb2[18..19] source chord (Wierzba/Bedesem v2.1 Table 15).
 struct DecodedYamahaSourceChord {
@@ -153,19 +121,13 @@ inline std::string mapYamahaRtrToPa5x(uint8_t rtr) noexcept {
     }
 }
 
-namespace detail {
+namespace norm_detail {
 
 inline bool isMinorTargetChord(arranger::ChordType t) noexcept {
     using CT = arranger::ChordType;
     return t == CT::Minor  || t == CT::Min7   || t == CT::Min6 ||
            t == CT::Min9   || t == CT::Min7b5 || t == CT::MinMaj7 ||
            t == CT::Dim    || t == CT::Dim7;
-}
-
-inline uint8_t clampMidiInt(int p) noexcept {
-    if (p < 0) return 0;
-    if (p > 127) return 127;
-    return static_cast<uint8_t>(p);
 }
 
 // Fold into [0, 127] by octaves so pitch class is never lost.
@@ -313,7 +275,49 @@ inline bool hasSimultaneousPitch(const std::vector<NoteSpan>& notes,
     return false;
 }
 
-}  // namespace detail
+// Choose the first collision-free candidate delta for a simultaneous note remap;
+// falls back to the primary delta (later deduplicated if all targets are occupied).
+inline int pickNonCollidingDelta(const std::vector<NoteSpan>& notes,
+                                 size_t idx,
+                                 std::initializer_list<int> deltas) noexcept {
+    const auto& n = notes[idx];
+    int primary = 0;
+    bool havePrimary = false;
+    for (int d : deltas) {
+        if (!havePrimary) { primary = d; havePrimary = true; }
+        const uint8_t cand = foldMidiPitch(static_cast<int>(n.pitch) + d);
+        if (!hasSimultaneousPitch(notes, idx, n.on_tick, cand)) {
+            return d;
+        }
+    }
+    return primary;
+}
+
+// Deduplicate any identical (on_tick, pitch) spans in-place while preserving
+// first-seen order and retaining max(off_tick) and max(vel).
+inline void deduplicateSimultaneousPitches(std::vector<NoteSpan>& notes) noexcept {
+    if (notes.size() < 2) return;
+    std::vector<NoteSpan> out;
+    out.reserve(notes.size());
+    for (const auto& s : notes) {
+        bool merged = false;
+        for (auto& existing : out) {
+            if (existing.on_tick == s.on_tick && existing.pitch == s.pitch) {
+                if (s.off_tick > existing.off_tick) existing.off_tick = s.off_tick;
+                if (s.vel > existing.vel)           existing.vel = s.vel;
+                existing.from_guitar_ntr = existing.from_guitar_ntr || s.from_guitar_ntr;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) {
+            out.push_back(s);
+        }
+    }
+    notes.swap(out);
+}
+
+}  // namespace norm_detail
 
 // Independent 12-root register safety audit helper (usable by callers & tests).
 // Returns total (note x root) out-of-range events across all 12 roots 0..11.
@@ -321,7 +325,7 @@ inline uint32_t auditRegisterSafetyAcross12Roots(const std::vector<NoteSpan>& no
                                                  uint8_t wrap_around,
                                                  uint8_t key_range_low,
                                                  uint8_t key_range_high) noexcept {
-    return detail::countRegisterViolations(notes, 0, wrap_around, key_range_low, key_range_high);
+    return norm_detail::countRegisterViolations(notes, 0, wrap_around, key_range_low, key_range_high);
 }
 
 // Normalizes a chord-driven track from its Yamaha Ctb2[18..19] source chord into
@@ -336,13 +340,13 @@ inline NormalizeResult normalizeTrackToPa5xReference(
     NormalizeResult res{};
     res.notes.reserve(notes.size());
     for (const auto& s : notes) {
-        res.notes.push_back(detail::sanitizeSpan(s));
+        res.notes.push_back(norm_detail::sanitizeSpan(s));
     }
 
     auto& adv = res.advice;
     adv.korg_ch = korg_ch;
     adv.retrigger_mode = mapYamahaRtrToPa5x(casm.has_casm ? casm.rtr : 0);
-    detail::populatePa5xNttAdvice(casm, korg_ch, role, adv);
+    norm_detail::populatePa5xNttAdvice(casm, korg_ch, role, adv);
 
     // 1. Skip Guard: Drum/Percussion or explicit CASM RootFixed+Bypass (NTR=1 & NTT=0).
     const bool isBypass = casm.has_casm && casm.ntr == 1 && (casm.ntt & 0x7Fu) == 0;
@@ -371,7 +375,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
                                           : static_cast<int>(12 - src.root);
         res.normalized_from_non_c = true;
         for (auto& n : res.notes) {
-            const uint8_t shifted = detail::foldMidiPitch(static_cast<int>(n.pitch) + delta);
+            const uint8_t shifted = norm_detail::foldMidiPitch(static_cast<int>(n.pitch) + delta);
             if (shifted != n.pitch) {
                 n.pitch = shifted;
                 ++res.notes_transposed;
@@ -380,7 +384,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
     }
 
     // 4. Quality Normalization: source chord quality -> target CV chord (C Maj or C Min).
-    const bool targetMinor = detail::isMinorTargetChord(target_cv_chord);
+    const bool targetMinor = norm_detail::isMinorTargetChord(target_cv_chord);
     const uint8_t nttLow = static_cast<uint8_t>(casm.ntt & 0x7Fu);
     const bool isMelodyNtt = casm.has_casm && !casm.ntt_bass && (nttLow == 1 || nttLow == 3 || nttLow == 4);
     const bool isChordOrBass =
@@ -398,58 +402,53 @@ inline NormalizeResult normalizeTrackToPa5xReference(
             if (!targetMinor) {
                 // Target CV is C Major (cv1).
                 if (src.has_maj7 && pc == 11) {
-                    // Preserve B (pc 11) on Melody NTT; snap B -> C on Chord/Bass to prevent C7 clash.
+                    // Preserve B (pc 11) on Melody NTT; snap B -> C/G on Chord/Bass to prevent C7 clash.
                     if (isChordOrBass && !isMelodyNtt) {
-                        delta = +1;
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4, +5});
                     }
                 } else if (src.is_minor_family) {
                     if (pc == 3) {
-                        delta = +1;  // Eb -> E
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, +4, -3});  // Eb -> E
                     } else if (src.has_min7 && pc == 10) {
-                        // Bb -> prefer C (+2), or G (-3) if C already occupied at same on_tick.
-                        const uint8_t upC = detail::foldMidiPitch(static_cast<int>(n.pitch) + 2);
-                        const bool cBusy = detail::hasSimultaneousPitch(res.notes, i, n.on_tick, upC);
-                        delta = cBusy ? -3 : +2;
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3, +6});  // Bb -> C or G or E
                     } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12) && pc == 6) {
-                        delta = +1;  // Gb -> G
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // Gb -> G
                     } else if (src.raw_type == 0x12 && pc == 9 && isChordOrBass) {
-                        delta = -2;  // Dim7 A -> G
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-2, +3});      // Dim7 A -> G
                     }
                 } else if (src.is_dominant_family) {
                     if (pc == 10) {
-                        const uint8_t upC = detail::foldMidiPitch(static_cast<int>(n.pitch) + 2);
-                        const bool cBusy = detail::hasSimultaneousPitch(res.notes, i, n.on_tick, upC);
-                        delta = cBusy ? -3 : +2;
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3, +6});  // Bb -> C or G or E
                     } else if (src.raw_type == 0x14 && pc == 5 && isChordOrBass) {
-                        delta = -1;  // 7sus4 F -> E
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // 7sus4 F -> E
                     } else if (src.raw_type == 0x15 && pc == 6) {
-                        delta = +1;  // 7b5 Gb -> G
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // 7b5 Gb -> G
                     } else if (src.raw_type == 0x1D && pc == 8) {
-                        delta = -1;  // 7aug G# -> G
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // 7aug G# -> G
                     }
                 } else {
                     // Major-family edge qualities (Aug, Maj7aug, Sus4)
                     if ((src.raw_type == 0x07 || src.raw_type == 0x1C) && pc == 8) {
-                        delta = -1;  // Aug G# -> G
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // Aug G# -> G
                     } else if (src.raw_type == 0x20 && pc == 5 && isChordOrBass) {
-                        delta = -1;  // Sus4 F -> E
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // Sus4 F -> E
                     }
                 }
             } else {
                 // Target CV is C Minor (cv2).
                 if ((src.is_major_family || src.is_dominant_family) && pc == 4) {
-                    delta = -1;  // E -> Eb
+                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +3});          // E -> Eb
                 } else if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
-                    delta = +1;  // B -> C
+                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4, +4});      // B -> C
                 } else if ((src.raw_type == 0x07 || src.raw_type == 0x1C || src.raw_type == 0x1D) && pc == 8) {
-                    delta = -1;  // Aug G# -> G
+                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});          // Aug G# -> G
                 } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12) && pc == 6) {
-                    delta = +1;  // Gb -> G
+                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -3});          // Gb -> G
                 }
             }
 
             if (delta != 0) {
-                n.pitch = detail::foldMidiPitch(static_cast<int>(n.pitch) + delta);
+                n.pitch = norm_detail::foldMidiPitch(static_cast<int>(n.pitch) + delta);
                 ++res.quality_remapped;
             }
         }
@@ -457,31 +456,35 @@ inline NormalizeResult normalizeTrackToPa5xReference(
 
     // 5. 12-Root Register Safety Audit, Whole-Octave Centering & Wrap Around Selection.
     uint8_t targetLo = 36, targetHi = 84;
-    detail::targetRegisterBounds(korg_ch, role, casm, targetLo, targetHi);
+    norm_detail::targetRegisterBounds(korg_ch, role, casm, targetLo, targetHi);
 
     const uint8_t initialWrap =
         (casm.has_casm && casm.ntr == 0 && casm.high_key <= 11)
             ? static_cast<uint8_t>(casm.high_key + 1)
-            : detail::defaultWrapAroundFor(korg_ch, role, casm);
+            : norm_detail::defaultWrapAroundFor(korg_ch, role, casm);
 
-    adv.wrap_around    = std::clamp<uint8_t>(initialWrap, 1, 12);
-    adv.key_range_low  = (casm.has_casm && casm.note_low > 0 && casm.note_low < casm.note_high)
-                             ? casm.note_low
-                             : targetLo;
-    adv.key_range_high = (casm.has_casm && casm.note_high < 127 && casm.note_low < casm.note_high)
-                             ? casm.note_high
-                             : targetHi;
+    adv.wrap_around = std::clamp<uint8_t>(initialWrap, 1, 12);
+
+    // Coherent validation of CASM key range (prevents inverted or >127 bounds).
+    const bool validCasmRange =
+        casm.has_casm && casm.note_low <= 127 && casm.note_high <= 127 &&
+        casm.note_low < casm.note_high && (casm.note_high - casm.note_low) >= 11;
+    if (validCasmRange && (casm.note_low > 0 || casm.note_high < 127)) {
+        adv.key_range_low  = casm.note_low;
+        adv.key_range_high = casm.note_high;
+    } else {
+        adv.key_range_low  = targetLo;
+        adv.key_range_high = targetHi;
+    }
     adv.octave_shift_applied = 0;
 
     if (!res.notes.empty()) {
         // Check if initial (oct_shift = 0, initialWrap) is already 100% 12-root register-safe.
-        uint32_t bestViol = detail::countRegisterViolations(res.notes, 0, adv.wrap_around, targetLo, targetHi);
+        uint32_t bestViol = norm_detail::countRegisterViolations(res.notes, 0, adv.wrap_around, targetLo, targetHi);
         int bestOctShift = 0;
         uint8_t bestWrap = adv.wrap_around;
 
         if (bestViol > 0) {
-            // Search order prioritizes oct_shift=0 with tightened wrap_around (4..7),
-            // then +/-12 whole-octave centering, then +/-24 for extreme recordings.
             const std::array<int, 5> octCandidates = {0, -12, 12, -24, 24};
             const std::array<uint8_t, 13> wrapCandidates = {
                 adv.wrap_around, 6, 5, 7, 4, 8, 3, 9, 2, 10, 1, 11, 12
@@ -489,7 +492,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
 
             for (int oct : octCandidates) {
                 for (uint8_t w : wrapCandidates) {
-                    const uint32_t v = detail::countRegisterViolations(res.notes, oct, w, targetLo, targetHi);
+                    const uint32_t v = norm_detail::countRegisterViolations(res.notes, oct, w, targetLo, targetHi);
                     if (v < bestViol) {
                         bestViol = v;
                         bestOctShift = oct;
@@ -505,7 +508,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
         if (bestOctShift != 0) {
             adv.octave_shift_applied = static_cast<int8_t>(std::clamp(bestOctShift, -24, 24));
             for (auto& n : res.notes) {
-                const uint8_t moved = detail::foldMidiPitch(static_cast<int>(n.pitch) + bestOctShift);
+                const uint8_t moved = norm_detail::foldMidiPitch(static_cast<int>(n.pitch) + bestOctShift);
                 if (moved != n.pitch) {
                     n.pitch = moved;
                     ++res.register_violations_fixed;
@@ -513,9 +516,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
             }
         }
 
-        // If individual outlier notes STILL violate [targetLo, targetHi] across the 12 roots
-        // (e.g., an extremely wide track spanning > 3 octaves), fold only those outlier notes
-        // by octaves into the 12-root-safe core band [safeLo, safeHi].
+        // Fold any remaining outlier notes into the 12-root-safe core band [safeLo, safeHi].
         if (bestViol > 0) {
             const int safeLo = static_cast<int>(targetLo) + (12 - static_cast<int>(adv.wrap_around));
             const int safeHi = static_cast<int>(targetHi) - (static_cast<int>(adv.wrap_around) - 1);
@@ -525,7 +526,6 @@ inline NormalizeResult normalizeTrackToPa5xReference(
                     const int orig = p;
                     while (p < safeLo && p + 12 <= safeHi) p += 12;
                     while (p > safeHi && p - 12 >= safeLo) p -= 12;
-                    // Fallback if safe band is narrower than an octave: keep closest octave in [targetLo, targetHi].
                     while (p < static_cast<int>(targetLo) && p + 12 <= static_cast<int>(targetHi)) p += 12;
                     while (p > static_cast<int>(targetHi) && p - 12 >= static_cast<int>(targetLo)) p -= 12;
                     p = std::clamp(p, 0, 127);
@@ -538,7 +538,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
         }
 
         // 6. Low-Interval Limit (LIL) mud guard on Chord/Pad tracks:
-        // Avoid intervals < 7 st below C3 (48) so downward Pa5X wrap never produces muddy clusters.
+        // Avoid intervals < 7 st below C3 (48) without colliding onto an occupied pitch.
         const bool isBassOrGuitar =
             (korg_ch == kBassCh || role == uasf::TrackRole::Bass || (casm.has_casm && casm.ntr == 2));
         if (!isBassOrGuitar && res.notes.size() >= 2) {
@@ -550,13 +550,28 @@ inline NormalizeResult normalizeTrackToPa5xReference(
                     const size_t hiIdx = (loIdx == i) ? j : i;
                     const int loP = static_cast<int>(res.notes[loIdx].pitch);
                     const int hiP = static_cast<int>(res.notes[hiIdx].pitch);
-                    if (loP < 48 && hiP > loP && (hiP - loP) < 7 && hiP + 12 <= safeHi) {
-                        res.notes[hiIdx].pitch = static_cast<uint8_t>(hiP + 12);
-                        ++res.register_violations_fixed;
+                    if (loP < 48 && hiP > loP && (hiP - loP) < 7) {
+                        if (hiP + 12 <= safeHi &&
+                            !norm_detail::hasSimultaneousPitch(res.notes, hiIdx, res.notes[hiIdx].on_tick,
+                                                               static_cast<uint8_t>(hiP + 12))) {
+                            res.notes[hiIdx].pitch = static_cast<uint8_t>(hiP + 12);
+                            ++res.register_violations_fixed;
+                        } else if (hiP + 24 <= safeHi &&
+                                   !norm_detail::hasSimultaneousPitch(res.notes, hiIdx, res.notes[hiIdx].on_tick,
+                                                                      static_cast<uint8_t>(hiP + 24))) {
+                            res.notes[hiIdx].pitch = static_cast<uint8_t>(hiP + 24);
+                            ++res.register_violations_fixed;
+                        } else if (hiP + 12 <= safeHi) {
+                            res.notes[hiIdx].pitch = static_cast<uint8_t>(hiP + 12);
+                            ++res.register_violations_fixed;
+                        }
                     }
                 }
             }
         }
+
+        // 7. Guarantee zero duplicate (on_tick, pitch) spans after normalization & LIL lifts.
+        norm_detail::deduplicateSimultaneousPitches(res.notes);
     }
 
     return res;

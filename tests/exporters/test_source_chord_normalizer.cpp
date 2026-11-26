@@ -1,13 +1,18 @@
 // Track B Q3a — Unit tests for src/exporters/korg/source_chord_normalizer.h.
-// 100% synthetic/CC0 fixtures; zero private data; also verifies order-independent
-// inclusion with drum_remap.h (zero ODR conflicts on CasmTrackView / NoteSpan).
+// 100% synthetic/CC0 fixtures; zero private data; includes ALL 4 quality headers
+// (megavoice_sanitizer.h -> cv_splitter.h -> source_chord_normalizer.h -> drum_remap.h)
+// to verify order-independent inclusion with zero ODR conflicts.
 
+#include "exporters/korg/megavoice_sanitizer.h"
+#include "exporters/korg/cv_splitter.h"
 #include "exporters/korg/source_chord_normalizer.h"
 #include "exporters/korg/drum_remap.h"
 
 #include <cstdio>
 #include <limits>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ai_arranger;
@@ -212,6 +217,81 @@ int main() {
             if (!(s.on_tick < s.off_tick && s.pitch <= 127 && s.vel >= 1 && s.vel <= 127)) invOk = false;
         }
         TEST("Malformed spans sanitized (strict on_tick < off_tick, pitch/vel clamped)", invOk);
+    }
+
+    // ── 8. Audit Round 1 P2-1: Coherent key_range_low < key_range_high <= 127 ──
+    {
+        const std::vector<NoteSpan> triad = {mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67)};
+
+        CasmTrackView cHi{};
+        cHi.has_casm = true; cHi.ntr = 0; cHi.ntt = 2; cHi.note_low = 90; cHi.note_high = 127;
+        const auto rHi = normalizeTrackToPa5xReference(triad, kAcc1Ch, uasf::TrackRole::Chord, cHi);
+        TEST("P2-1: partial CASM note_low=90, note_high=127 yields coherent [90, 127] (never inverted)",
+             rHi.advice.key_range_low == 90 && rHi.advice.key_range_high == 127 &&
+             rHi.advice.key_range_low < rHi.advice.key_range_high);
+
+        CasmTrackView cLo{};
+        cLo.has_casm = true; cLo.ntr = 0; cLo.ntt = 2; cLo.note_low = 0; cLo.note_high = 30;
+        const auto rLo = normalizeTrackToPa5xReference(triad, kAcc1Ch, uasf::TrackRole::Chord, cLo);
+        TEST("P2-1: partial CASM note_low=0, note_high=30 yields coherent [0, 30] (never inverted)",
+             rLo.advice.key_range_low == 0 && rLo.advice.key_range_high == 30 &&
+             rLo.advice.key_range_low < rLo.advice.key_range_high);
+
+        CasmTrackView cOob{};
+        cOob.has_casm = true; cOob.ntr = 0; cOob.ntt = 2; cOob.note_low = 150; cOob.note_high = 200;
+        const auto rOob = normalizeTrackToPa5xReference(triad, kAcc1Ch, uasf::TrackRole::Chord, cOob);
+        TEST("P2-1: out-of-range CASM note_low=150, note_high=200 falls back to valid [36, 84]",
+             rOob.advice.key_range_low == 36 && rOob.advice.key_range_high == 84 &&
+             rOob.advice.key_range_high <= 127);
+    }
+
+    // ── 9. Audit Round 1 P2-3: Zero duplicate simultaneous (on_tick, pitch) spans ──
+    {
+        auto hasDup = [](const std::vector<NoteSpan>& ns) {
+            std::set<std::pair<uint32_t, uint8_t>> seen;
+            for (const auto& s : ns) {
+                if (!seen.insert({s.on_tick, s.pitch}).second) return true;
+            }
+            return false;
+        };
+
+        CasmTrackView casmMaj7{};
+        casmMaj7.has_casm = true; casmMaj7.ntr = 0; casmMaj7.ntt = 2;
+        casmMaj7.source_chord_root = 0; casmMaj7.source_chord_type = 0x02; // CMaj7
+        const std::vector<NoteSpan> maj7Dense = {
+            mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67),
+            mkNote(0, 480, 71), mkNote(0, 480, 72)
+        };
+        const auto rMaj7 = normalizeTrackToPa5xReference(maj7Dense, kAcc1Ch, uasf::TrackRole::Chord, casmMaj7, ChordType::Major);
+        TEST("P2-3: CMaj7 {60,64,67,71,72} produces zero duplicate simultaneous pitches",
+             !hasDup(rMaj7.notes) && !rMaj7.notes.empty());
+
+        CasmTrackView casmDom7 = casmMaj7;
+        casmDom7.source_chord_type = 0x13; // C7
+        const std::vector<NoteSpan> dom7Dense = {
+            mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67),
+            mkNote(0, 480, 70), mkNote(0, 480, 72)
+        };
+        const auto rDom7 = normalizeTrackToPa5xReference(dom7Dense, kAcc1Ch, uasf::TrackRole::Chord, casmDom7, ChordType::Major);
+        TEST("P2-3: C7 {60,64,67,70,72} produces zero duplicate simultaneous pitches",
+             !hasDup(rDom7.notes) && !rDom7.notes.empty());
+
+        CasmTrackView casmLil = casmMaj7;
+        casmLil.source_chord_type = 0x00; // C Maj
+        const std::vector<NoteSpan> lilCollide = {
+            mkNote(0, 480, 40), mkNote(0, 480, 44), mkNote(0, 480, 56)
+        };
+        const auto rLil = normalizeTrackToPa5xReference(lilCollide, kAcc1Ch, uasf::TrackRole::Chord, casmLil, ChordType::Major);
+        bool stillMuddy = false;
+        for (size_t i = 0; i < rLil.notes.size(); ++i) {
+            for (size_t j = i + 1; j < rLil.notes.size(); ++j) {
+                const int lo = std::min(rLil.notes[i].pitch, rLil.notes[j].pitch);
+                const int hi = std::max(rLil.notes[i].pitch, rLil.notes[j].pitch);
+                if (lo < 48 && hi > lo && (hi - lo) < 7) stillMuddy = true;
+            }
+        }
+        TEST("P2-3: LIL lift on {40,44,56} avoids colliding onto 56 (3 unique pitches, no mud)",
+             !hasDup(rLil.notes) && rLil.notes.size() == 3 && !stillMuddy);
     }
 
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);

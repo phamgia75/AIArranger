@@ -1,9 +1,11 @@
 // Track B Q3a — Unit tests for src/exporters/korg/drum_remap.h (+ Track A IDrumKitKeyMap seam).
-// 100% synthetic/CC0 fixtures; zero private data; includes drum_remap.h BEFORE
-// source_chord_normalizer.h to verify order-independent header inclusion.
+// 100% synthetic/CC0 fixtures; zero private data; includes ALL 4 quality headers starting
+// with drum_remap.h FIRST to verify order-independent inclusion with zero ODR conflicts.
 
 #include "exporters/korg/drum_remap.h"
 #include "exporters/korg/source_chord_normalizer.h"
+#include "exporters/korg/cv_splitter.h"
+#include "exporters/korg/megavoice_sanitizer.h"
 
 #include <cmath>
 #include <cstdio>

@@ -293,6 +293,32 @@ int main() {
         TEST("transposeVoicing handles null/zero safely",
              transposeVoicing(nullptr, 4, outSmooth, maj(60), NtrRule::RootTransposition, NttMode::Chord) == 0 &&
              transposeVoicing(inFixed, 0, outSmooth, maj(60), NtrRule::RootTransposition, NttMode::Chord) == 0);
+
+        // Audit Round 1 P2-2: LIL mud guard on {24, 28, 31, 40} must NOT create duplicate 40!
+        const uint8_t inMudDup[4] = {24, 28, 31, 40};
+        uint8_t outMudDup[4] = {};
+        const size_t nMudDup = transposeVoicing(inMudDup, 4, outMudDup, maj(60),
+                                                NtrRule::RootTransposition, NttMode::Chord);
+        std::set<uint8_t> uniqMudDup(outMudDup, outMudDup + nMudDup);
+        std::vector<uint8_t> sortedMudDup(outMudDup, outMudDup + nMudDup);
+        std::sort(sortedMudDup.begin(), sortedMudDup.end());
+        bool mudDupStillMud = false;
+        for (size_t i = 0; i + 1 < sortedMudDup.size(); ++i) {
+            if (sortedMudDup[i] < 36 && (sortedMudDup[i + 1] - sortedMudDup[i]) < 7) mudDupStillMud = true;
+        }
+        TEST("P2-2: transposeVoicing({24,28,31,40}) preserves 4 unique pitches AND zero LIL mud",
+             nMudDup == 4 && uniqMudDup.size() == 4 && !mudDupStillMud);
+
+        // Audit Round 1 P2-2: intentional unison when avoid_unison_collapse==false is NOT split by LIL
+        const uint8_t inUnison[2] = {24, 24};
+        uint8_t outUnison[2] = {};
+        VoicingOptions noDedup{};
+        noDedup.avoid_unison_collapse = false;
+        noDedup.enforce_lil_mud_guard = true;
+        const size_t nUni = transposeVoicing(inUnison, 2, outUnison, maj(60),
+                                             NtrRule::RootTransposition, NttMode::Chord, 60, {}, noDedup);
+        TEST("P2-2: intentional unison {24,24} with avoid_unison_collapse=false stays {24,24}",
+             nUni == 2 && outUnison[0] == 24 && outUnison[1] == 24);
     }
 
     // ── Q3a: fromCasmRule() Yamaha Ctb2 -> (NtrRule, NttMode) ──
@@ -300,6 +326,21 @@ int main() {
         NtrRule r; NttMode m;
         fromCasmRule(1, 0, false, r, m);
         TEST("fromCasmRule(1, 0, false) -> Bypass/Bypass", r == NtrRule::Bypass && m == NttMode::Bypass);
+        // Audit Round 1 P1-2: NTR=0, NTT=0x80 (ntt=0, ntt_bass=true) must transpose Bass, NOT freeze!
+        fromCasmRule(0, 0, true, r, m);
+        TEST("P1-2: fromCasmRule(0, 0, true) -> RootTransposition/Bass",
+             r == NtrRule::RootTransposition && m == NttMode::Bass);
+        TEST_EQ("P1-2: NTR=0/NTT=0x80 Bass C2 (36) over G -> G2 (43)",
+                transpose(36, maj(67), r, m), 43);
+        TEST_EQ("P1-2: NTR=0/NTT=0x80 Bass C2 (36) over C/E -> E2 (40)",
+                transpose(36, Chord{ChordType::Major, 60, 64, 0}, r, m), 40);
+        // Audit Round 1 P1-2: NTR=0, NTT=0 (ntt_bass=false) must transpose with root, NOT freeze!
+        fromCasmRule(0, 0, false, r, m);
+        TEST("P1-2: fromCasmRule(0, 0, false) -> RootTransposition/Melody (non-freezing)",
+             r == NtrRule::RootTransposition && m == NttMode::Melody);
+        TEST_EQ("P1-2: NTR=0/NTT=0 C4 (60) over G -> G4 (67)",
+                transpose(60, maj(67), r, m), 67);
+
         fromCasmRule(0, 1, true, r, m);
         TEST("fromCasmRule(0, 1, true) -> RootTransposition/Bass", r == NtrRule::RootTransposition && m == NttMode::Bass);
         fromCasmRule(0, 2, false, r, m);

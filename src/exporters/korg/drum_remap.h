@@ -3,6 +3,7 @@
 
 #include "engine/uasf/types.h"
 #include "exporters/korg/korg_style_smf.h"
+#include "exporters/korg/megavoice_sanitizer.h"
 #include "media/sound/drumkit.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -21,40 +23,10 @@
 // + Track A Next USERDK reuse seam).
 // Zero JUCE/GUI dependency; zero dependency on native_refs.h / pa5x_kmp.h /
 // slot_conflicts.h (strictly zero circular library deps).
+// Consumes canonical CasmTrackView and NoteSpan from megavoice_sanitizer.h so
+// all four quality headers can be included in any order with zero ODR conflicts.
 
 namespace ai_arranger::exporters::korg::quality {
-
-#ifndef AI_ARRANGER_EXPORTERS_KORG_QUALITY_CASM_TRACK_VIEW_DEFINED
-#define AI_ARRANGER_EXPORTERS_KORG_QUALITY_CASM_TRACK_VIEW_DEFINED
-struct CasmTrackView {
-    uint8_t  src_ch            = 0;
-    uint8_t  dest_ch           = 0;               // Ctb2[9] (0..15)
-    uint8_t  ntr               = 0;               // Ctb2[28]: 0=RootTrans, 1=RootFixed, 2=Guitar
-    uint8_t  ntt               = 0;               // Ctb2[29] & 0x7F
-    bool     ntt_bass          = false;           // (Ctb2[29] & 0x80) != 0
-    uint8_t  high_key          = 11;              // Ctb2[30]: 0..11
-    uint8_t  note_low          = 0;               // Ctb2[31]: 0..127
-    uint8_t  note_high         = 127;             // Ctb2[32]: 0..127
-    uint8_t  rtr               = 0;               // Ctb2[33]
-    uint8_t  source_chord_root = 0;               // Ctb2[18]: 0=C..11=B, 0x7F=unset
-    uint8_t  source_chord_type = 0x00;            // Ctb2[19]: Yamaha SFF chord code
-    uint16_t note_mute_mask    = 0x0FFF;          // Ctb2[11..12] 12-bit active note mask
-    uint64_t chord_mute_mask   = 0x3FFFFFFFFULL;  // Ctb2[13..17] 34-bit active chord mask
-    bool     has_casm          = false;           // true iff parsed from Ctb2 or SFF1 Ctab/Cntt
-};
-#endif
-
-#if !defined(AI_ARRANGER_EXPORTERS_KORG_QUALITY_NOTE_SPAN_DEFINED) && \
-    !defined(AI_ARRANGER_EXPORTERS_KORG_MEGAVOICE_SANITIZER_H)
-#define AI_ARRANGER_EXPORTERS_KORG_QUALITY_NOTE_SPAN_DEFINED
-struct NoteSpan {
-    uint32_t on_tick         = 0;
-    uint32_t off_tick        = 0;   // strictly > on_tick
-    uint8_t  pitch           = 60;  // 0..127
-    uint8_t  vel             = 80;  // 1..127
-    bool     from_guitar_ntr = false;
-};
-#endif
 
 // ── (a) Abstract IDrumKitKeyMap Seam (Factory GM2, TXPERF, and Track A USERDK) ──
 
@@ -102,7 +74,7 @@ enum class DrumKitCategory : uint8_t {
     Sfx               // MSB 126/0 PC 0, 1 (SFX1/SFX2); name "sfx"/"fx"
 };
 
-namespace detail {
+namespace drum_detail {
 
 inline char gm2DefaultFamily(uint8_t note) noexcept {
     switch (note) {
@@ -175,7 +147,7 @@ inline NoteSpan sanitizeDrumSpan(const NoteSpan& s) noexcept {
     return out;
 }
 
-}  // namespace detail
+}  // namespace drum_detail
 
 // ── Concrete Adapter 1: Factory Pa5X GM2 / Extended Drum Kits ────────────────
 
@@ -190,22 +162,22 @@ public:
         if (cat == DrumKitCategory::Sfx) {
             // SFX kits expose GM2 SFX/extended keys 27..34, 82..87 plus standard SFX region 35..81.
             for (uint8_t n = 27; n <= 87; ++n) {
-                populateKey(n, (n >= 27 && n <= 34) ? 'X' : detail::gm2DefaultFamily(n),
-                            detail::gm2DefaultChokeGroup(n), 2, "Pa5X SFX");
+                populateKey(n, (n >= 27 && n <= 34) ? 'X' : drum_detail::gm2DefaultFamily(n),
+                            drum_detail::gm2DefaultChokeGroup(n), 2, "Pa5X SFX");
             }
             return;
         }
 
         // Core GM2 / Korg Extended populated range 24..99.
         for (uint8_t n = 24; n <= 99; ++n) {
-            char fam = detail::gm2DefaultFamily(n);
+            char fam = drum_detail::gm2DefaultFamily(n);
             if (cat == DrumKitCategory::BrushJazz && (n >= 25 && n <= 28)) {
                 fam = 'S';  // Brush Tap / Swirl / Slap / Sweep
             } else if (cat == DrumKitCategory::EthnicArabic && (n >= 60 && n <= 87)) {
                 fam = 'E';
             }
             if (fam == '\0') fam = 'X';
-            populateKey(n, fam, detail::gm2DefaultChokeGroup(n), 4, "Pa5X Factory");
+            populateKey(n, fam, drum_detail::gm2DefaultChokeGroup(n), 4, "Pa5X Factory");
         }
     }
 
@@ -238,18 +210,18 @@ public:
 private:
     void populateKey(uint8_t n, char fam, uint8_t choke, uint8_t layers, const char* lbl) {
         auto& k = keys_[n];
-        k.populated        = true;
-        k.family           = fam;
-        k.layer_count      = layers;
-        k.effective_layers = layers;
-        k.choke_group      = choke;
+        k.populated         = true;
+        k.family            = fam;
+        k.layer_count       = layers;
+        k.effective_layers  = layers;
+        k.choke_group       = choke;
         k.effective_max_vel = 127;
-        k.pan              = 64;
-        k.label            = lbl;
+        k.pan               = 64;
+        k.label             = lbl;
     }
 
-    DrumKitCategory                category_;
-    std::array<DrumKeyInfo, 128>   keys_{};
+    DrumKitCategory              category_;
+    std::array<DrumKeyInfo, 128> keys_{};
 };
 
 // ── Concrete Adapter 2: Zero-Copy TXPERF DrumKit Adapter ─────────────────────
@@ -287,12 +259,12 @@ public:
         if (note >= 128 || !keys_[note]) return {};
         const auto& dk = *keys_[note];
         DrumKeyInfo info{};
-        info.populated        = true;
-        info.is_ram           = true;
-        info.family           = dk.family;
-        info.layer_count      = static_cast<uint8_t>(std::min<size_t>(dk.layers.size(), 16));
-        info.effective_layers = info.layer_count;
-        info.choke_group      = chokes_[note];
+        info.populated         = true;
+        info.is_ram            = true;
+        info.family            = dk.family;
+        info.layer_count       = static_cast<uint8_t>(std::min<size_t>(dk.layers.size(), 16));
+        info.effective_layers  = info.layer_count;
+        info.choke_group       = chokes_[note];
         info.effective_max_vel = 127;
         // Convert TXPERF panPct (-100..100) -> MIDI pan (0..127, 64=center).
         const int panMidi = std::clamp(64 + static_cast<int>(dk.panPct) * 63 / 100, 0, 127);
@@ -302,9 +274,9 @@ public:
     }
 
 private:
-    const media::sound::DrumKit*                    kit_ = nullptr;
-    std::array<const media::sound::DrumKey*, 128>   keys_{};
-    std::array<uint8_t, 128>                        chokes_{};
+    const media::sound::DrumKit*                  kit_ = nullptr;
+    std::array<const media::sound::DrumKey*, 128> keys_{};
+    std::array<uint8_t, 128>                      chokes_{};
 };
 
 // ── Concrete Adapter 3: Track A Read-Only USERDK Seam ────────────────────────
@@ -328,7 +300,7 @@ struct UserdkKeySlotSummary {
 };
 
 struct DrumKitKeySummaryView {
-    std::string                           kit_name;              // e.g. "USERDK01/0"
+    std::string                           kit_name;                 // e.g. "USERDK01/0"
     double                                gm_alignment_score = 1.0; // Track A Next §2.2 Tier 5 (0.0..1.0)
     std::array<UserdkKeySlotSummary, 128> keys{};
 };
@@ -404,18 +376,18 @@ inline DrumKitCategory classifyDrumKitCategory(int yamaha_msb,
                                                int yamaha_pc,
                                                const std::string& track_name,
                                                uasf::TrackRole role = uasf::TrackRole::Drum) noexcept {
-    const std::string low = detail::toLowerAscii(track_name);
+    const std::string low = drum_detail::toLowerAscii(track_name);
 
     // 1. Explicit name cues (high signal across XG and Genos Revo! kits).
-    if (detail::containsAny(low, {"sfx", "fxkit", "fx kit"})) return DrumKitCategory::Sfx;
-    if (detail::containsAny(low, {"brush", "jazz"})) return DrumKitCategory::BrushJazz;
-    if (detail::containsAny(low, {"808", "909", "electro", "dance", "edm", "techno", "house", "hiphop", "analog"})) {
+    if (drum_detail::containsAny(low, {"sfx", "fxkit", "fx kit"})) return DrumKitCategory::Sfx;
+    if (drum_detail::containsAny(low, {"brush", "jazz"})) return DrumKitCategory::BrushJazz;
+    if (drum_detail::containsAny(low, {"808", "909", "electro", "dance", "edm", "techno", "house", "hiphop", "analog"})) {
         return DrumKitCategory::Electronic;
     }
-    if (detail::containsAny(low, {"arab", "orient", "tabla", "asian", "ethnic", "indian", "turk", "darbuka"})) {
+    if (drum_detail::containsAny(low, {"arab", "orient", "tabla", "asian", "ethnic", "indian", "turk", "darbuka"})) {
         return DrumKitCategory::EthnicArabic;
     }
-    if (detail::containsAny(low, {"latin", "perc", "cuban", "samba", "bossa", "salsa"})) {
+    if (drum_detail::containsAny(low, {"latin", "perc", "cuban", "samba", "bossa", "salsa"})) {
         return DrumKitCategory::LatinPerc;
     }
 
@@ -451,7 +423,7 @@ struct RhythmSwapDecision {
     std::string reason;
 };
 
-namespace detail {
+namespace drum_detail {
 
 inline bool isCoreKitPitch(uint8_t p) noexcept {
     return p == 35 || p == 36 || p == 38 || p == 40 || p == 42 || p == 44 || p == 46;
@@ -461,7 +433,7 @@ inline bool isHandPercPitch(uint8_t p) noexcept {
     return p == 54 || p == 56 || (p >= 60 && p <= 87);
 }
 
-}  // namespace detail
+}  // namespace drum_detail
 
 // Detects when Genos Rhythm1 (ch8) holds the main Kick+Snare+HiHat kit while
 // Rhythm2 (ch9) holds secondary percussion (or is empty), preventing swapped
@@ -474,8 +446,8 @@ inline RhythmSwapDecision detectRhythmTrackSwap(const std::vector<NoteSpan>& ch8
         if (ns.empty()) { kitScore = 0.0; percScore = 0.0; return; }
         uint32_t kitHits = 0, percHits = 0;
         for (const auto& n : ns) {
-            if (detail::isCoreKitPitch(n.pitch))  ++kitHits;
-            if (detail::isHandPercPitch(n.pitch)) ++percHits;
+            if (drum_detail::isCoreKitPitch(n.pitch))  ++kitHits;
+            if (drum_detail::isHandPercPitch(n.pitch)) ++percHits;
         }
         kitScore  = static_cast<double>(kitHits) / static_cast<double>(ns.size());
         percScore = static_cast<double>(percHits) / static_cast<double>(ns.size());
@@ -535,7 +507,7 @@ struct DrumRemapResult {
     std::vector<std::string> diagnostic_codes;
 };
 
-namespace detail {
+namespace drum_detail {
 
 // Lookup deterministic Yamaha XG / Revo! -> Pa5X mapping rule for one MIDI note.
 inline DrumRemapRule lookupDrumRemapRule(uint8_t note,
@@ -626,10 +598,8 @@ inline DrumRemapRule lookupDrumRemapRule(uint8_t note,
         case 121: r = {49, 57, 'C', 0, 0.85, false, false}; break;
         default:
             if (note < 13) {
-                // Ultra-low sub-XG triggers (0..12): drop cleanly if absent.
                 r = {note, 0, 'X', 0, 1.00, false, true};
             } else {
-                // 116..120, 122..127: keep only if target kit explicitly defines key, else drop.
                 r = {note, 0, 'X', 0, 1.00, false, true};
             }
             break;
@@ -812,7 +782,7 @@ inline void addUniqueDiagnostic(std::vector<std::string>& diags, const char* cod
     diags.emplace_back(code);
 }
 
-}  // namespace detail
+}  // namespace drum_detail
 
 // Remap a Yamaha XG / SFF2 / Revo! drum or percussion track onto `target_kit`.
 inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
@@ -835,7 +805,7 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
     bool emittedEthnicFactoryAdvisory = false;
 
     for (const auto& rawSpan : notes) {
-        NoteSpan span = detail::sanitizeDrumSpan(rawSpan);
+        NoteSpan span = drum_detail::sanitizeDrumSpan(rawSpan);
         const uint8_t srcPitch = span.pitch;
 
         // 1. Custom / Regional USERDK pass-through for populated native keys.
@@ -845,7 +815,7 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
                 info.effective_max_vel < 127 && span.vel > info.effective_max_vel) {
                 span.vel = std::max<uint8_t>(1u, info.effective_max_vel);
                 ++res.stats.vel_ceiling_clamped;
-                detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_TARGET_VEL_CEILING");
+                drum_detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_TARGET_VEL_CEILING");
             }
             ++res.stats.passthrough_notes;
             ++res.stats.family_preserved_notes;
@@ -854,11 +824,11 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
             continue;
         }
 
-        const DrumRemapRule rule = detail::lookupDrumRemapRule(srcPitch, category, is_revo_kit);
+        const DrumRemapRule rule = drum_detail::lookupDrumRemapRule(srcPitch, category, is_revo_kit);
 
         if (category == DrumKitCategory::EthnicArabic && !target_kit.isUserdkTarget() &&
             (srcPitch < 35 || srcPitch > 87) && !emittedEthnicFactoryAdvisory) {
-            detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_EXTENDED_DRUM_MAP");
+            drum_detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_EXTENDED_DRUM_MAP");
             emittedEthnicFactoryAdvisory = true;
         }
 
@@ -871,7 +841,7 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
         } else if (rule.drop_if_absent) {
             // Unpopulated SFX or high unassigned Revo! RX key -> drop cleanly.
             ++res.stats.notes_dropped;
-            detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_EXTENDED_DRUM_MAP");
+            drum_detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_EXTENDED_DRUM_MAP");
             continue;
         } else {
             // Check explicit table fallback first if it matches family/choke expectations.
@@ -880,15 +850,15 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
                 const DrumKeyInfo fbInfo = target_kit.keyInfo(rule.fallback_note);
                 const bool chokeOk = (rule.choke_group == 0) || (fbInfo.choke_group == rule.choke_group);
                 const bool famOk   = (rule.family == 0) || (fbInfo.family == 0) ||
-                                     detail::familyCompatible(rule.family, fbInfo.family) ||
-                                     detail::percCrossFamilyCompatible(rule.family, fbInfo.family);
+                                     drum_detail::familyCompatible(rule.family, fbInfo.family) ||
+                                     drum_detail::percCrossFamilyCompatible(rule.family, fbInfo.family);
                 if (chokeOk && famOk) {
                     resolvedPitch = static_cast<int>(rule.fallback_note);
                     explicitOk = true;
                 }
             }
             if (!explicitOk) {
-                resolvedPitch = detail::findFallbackKeyInKit(
+                resolvedPitch = drum_detail::findFallbackKeyInKit(
                     target_kit, rule.target_note, rule.family, rule.choke_group);
             }
             usedFallback = (resolvedPitch >= 0);
@@ -896,7 +866,7 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
 
         if (resolvedPitch < 0) {
             ++res.stats.notes_dropped;
-            detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_EXTENDED_DRUM_MAP");
+            drum_detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_EXTENDED_DRUM_MAP");
             continue;
         }
 
@@ -912,7 +882,7 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
             finalInfo.effective_max_vel < 127 && finalVel > finalInfo.effective_max_vel) {
             finalVel = std::max<uint8_t>(1u, finalInfo.effective_max_vel);
             ++res.stats.vel_ceiling_clamped;
-            detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_TARGET_VEL_CEILING");
+            drum_detail::addUniqueDiagnostic(res.diagnostic_codes, "STYLE_QUAL_TARGET_VEL_CEILING");
         }
 
         // 5. Short gate conditioning (e.g., Half-Open Hi-Hat, Crash Choke), preserving on < off.
@@ -935,8 +905,8 @@ inline DrumRemapResult remapDrumTrack(const std::vector<NoteSpan>& notes,
             ++res.stats.fallback_substituted_notes;
         }
         if (rule.family == 0 || finalInfo.family == 0 ||
-            detail::familyCompatible(rule.family, finalInfo.family) ||
-            detail::percCrossFamilyCompatible(rule.family, finalInfo.family)) {
+            drum_detail::familyCompatible(rule.family, finalInfo.family) ||
+            drum_detail::percCrossFamilyCompatible(rule.family, finalInfo.family)) {
             ++res.stats.family_preserved_notes;
         }
         if (rule.choke_group > 0 && finalInfo.choke_group == rule.choke_group) {
