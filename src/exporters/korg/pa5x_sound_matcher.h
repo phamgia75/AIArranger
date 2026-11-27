@@ -406,6 +406,28 @@ inline const char* sectionShortName(uasf::SectionType t) noexcept {
     return m ? m : "unknown";
 }
 
+inline const char* sectionMapPrefix(uasf::SectionType t) noexcept {
+    using T = uasf::SectionType;
+    switch (t) {
+        case T::Main1:   return "v1";
+        case T::Main2:   return "v2";
+        case T::Main3:   return "v3";
+        case T::Main4:   return "v4";
+        case T::Intro1:  return "i1";
+        case T::Intro2:  return "i2";
+        case T::Intro3:  return "i3";
+        case T::Fill1:   return "f1";
+        case T::Fill2:   return "f2";
+        case T::Fill3:   return "f3";
+        case T::Fill4:   return "f4";
+        case T::Ending1: return "e1";
+        case T::Ending2: return "e2";
+        case T::Ending3: return "e3";
+        case T::Break:   return "br";
+        default:         return nullptr;
+    }
+}
+
 inline int originSortRank(MatchOrigin origin, bool prefer_target) noexcept {
     if (origin == MatchOrigin::UserSoundMap) return 0;
     if (prefer_target) {
@@ -921,7 +943,8 @@ inline std::string formatSoundMapTemplateWithRecommendations(
     out += "# Status: hardwareVerified=false | L3=NOT_TESTED\n";
     out += std::string("# ") + kPa5xK8K9Caveat + "\n";
     out += "# Replace 'unresolved' with '<msb> <lsb> <pc>' confirmed on the Pa5X Sound\n";
-    out += "# Select window. Never copy the Yamaha numbers below.\n";
+    out += "# Select window. Optional per-element overrides: '<section>.<track> <msb> <lsb> <pc>'\n";
+    out += "# (e.g. v2.drum 120 0 40). Never copy the Yamaha numbers below.\n";
     if (matches.target_partial_inspect && !matches.target_partial_notice.empty()) {
         out += "# Target KST partial inspect notice: " + clean(matches.target_partial_notice) + "\n";
     }
@@ -941,6 +964,15 @@ inline std::string formatSoundMapTemplateWithRecommendations(
 
         // Prefer UserSoundMap track, then first track with `selected.has_value()`, then first track for `t.ch`.
         const TrackSoundMatch* primary_match = nullptr;
+        struct EmitElementLine {
+            SoundRef ref{};
+            uint8_t score = 0;
+            bool is_user = false;
+            std::string display_name;
+            std::string epistemic_tag;
+        };
+        std::map<uasf::SectionType, EmitElementLine> emitted_elem_lines;
+
         for (const auto& m : matches.tracks) {
             if (m.korg_ch != t.ch) continue;
             if (!primary_match) {
@@ -986,6 +1018,32 @@ inline std::string formatSoundMapTemplateWithRecommendations(
                        "  score=" + std::to_string(el_cand.score) +
                        "  [" + clean(el_cand.epistemic_tag) + "]\n";
             }
+            for (const auto& [sec_type, el_ref] : m.element_selected) {
+                bool is_user = false;
+                uint8_t sc = 100;
+                std::string dname;
+                std::string epi = kEpistemicFactoryDocumented;
+                if (const auto cit = m.element_candidates.find(sec_type); cit != m.element_candidates.end()) {
+                    is_user = (cit->second.origin == MatchOrigin::UserSoundMap);
+                    sc = cit->second.score;
+                    dname = cit->second.display_name;
+                    epi = cit->second.epistemic_tag;
+                }
+                if (is_user || auto_emit) {
+                    auto it = emitted_elem_lines.find(sec_type);
+                    if (it == emitted_elem_lines.end() || (is_user && !it->second.is_user)) {
+                        emitted_elem_lines[sec_type] = {el_ref, sc, is_user, dname, epi};
+                    }
+                }
+            }
+        }
+        // Also capture any resolved element_sounds for this track not already queued above.
+        for (const auto& [key, el_ref] : matches.element_sounds) {
+            if (key.second != t.ch) continue;
+            if (emitted_elem_lines.count(key.first)) continue;
+            if (auto_emit) {
+                emitted_elem_lines[key.first] = {el_ref, 100, false, "", kEpistemicFactoryDocumented};
+            }
         }
 
         if (!any_row) {
@@ -1027,6 +1085,24 @@ inline std::string formatSoundMapTemplateWithRecommendations(
             }
         } else {
             out += std::string(t.key) + " unresolved\n";
+        }
+
+        // Emit parseSoundMap()-compatible per-element override lines (P1-W2).
+        for (const auto& [sec_type, el] : emitted_elem_lines) {
+            const char* sp = matcher_detail::sectionMapPrefix(sec_type);
+            if (!sp) continue;
+            out += std::string(sp) + "." + t.key + " " +
+                   std::to_string(el.ref.msb) + " " + std::to_string(el.ref.lsb) + " " +
+                   std::to_string(el.ref.pc) + "  # element " +
+                   (el.is_user ? "user" : "auto") +
+                   " score=" + std::to_string(el.score);
+            if (!el.display_name.empty()) {
+                out += " \"" + clean(el.display_name) + "\"";
+            }
+            if (!el.epistemic_tag.empty()) {
+                out += " " + clean(el.epistemic_tag);
+            }
+            out += "\n";
         }
     }
     return out;
