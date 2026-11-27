@@ -117,6 +117,7 @@ struct CollectedSoundSummary {
     size_t referencingRootCount = 0;
     std::vector<std::string> referencingRoots;
     size_t multisampleCount = 0;
+    size_t drumSampleCount = 0;
     size_t sampleCount = 0;
     uint64_t uniqueSampleBytes = 0;
     bool satisfiedByTarget = false;        // true ONLY on exact same-slot Identical OR explicitly approved cross-slot remap
@@ -151,6 +152,7 @@ struct DryRunExportPlan {
     std::vector<CollectedSoundSummary> collectedSounds; // sorted by ResourceId
     std::vector<std::string> uniqueProvisionalPackages; // sorted unique packageIds
     std::vector<graph::ResourceId> uniqueMultisamples;  // sorted unique
+    std::vector<graph::ResourceId> uniqueDrumSamples;   // sorted unique
     std::vector<graph::ResourceId> uniqueSamples;       // sorted unique
     std::vector<std::string> uniquePcmFiles;            // sorted unique KST-relative PCM paths
 
@@ -469,6 +471,8 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
     std::map<graph::ResourceId, std::set<std::string>> soundRefRoots;
     std::map<graph::ResourceId, std::set<std::string>> msRefRoots;
     std::map<graph::ResourceId, std::set<graph::ResourceId>> msRefSounds;
+    std::map<graph::ResourceId, std::set<std::string>> dsRefRoots;
+    std::map<graph::ResourceId, std::set<graph::ResourceId>> dsRefSounds;
     std::map<graph::ResourceId, std::set<std::string>> sampleRefRoots;
     std::map<graph::ResourceId, size_t> sampleRawRefCount;
     std::map<graph::ResourceId, std::set<std::string>> unknownSampleRoots;
@@ -726,6 +730,8 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
             }
             for (const auto& dsId : sc.drumSampleIds) {
                 closureNodeSet.insert(dsId);
+                dsRefRoots[dsId].insert(root->relPath);
+                dsRefSounds[dsId].insert(sid);
             }
             for (const auto& smpId : sc.sampleIds) {
                 if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
@@ -1105,7 +1111,7 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
         }
     }
 
-    // 4. Build CollectedSoundSummary + Tier-1 Logical Identity Dedup Groups (Sounds, Multisamples, Samples)
+    // 4. Build CollectedSoundSummary + Tier-1 Logical Identity Dedup Groups (Sounds, Multisamples, DrumSamples, Samples)
     for (const auto& [sid, roots] : soundRefRoots) {
         if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
         const auto scIt = source.sounds.find(sid);
@@ -1123,6 +1129,7 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
         css.referencingRootCount = roots.size();
         css.referencingRoots.assign(roots.begin(), roots.end());
         css.multisampleCount = sc.multisampleIds.size();
+        css.drumSampleCount = sc.drumSampleIds.size();
         css.sampleCount = sc.sampleIds.size();
         css.uniqueSampleBytes = sc.storedPcmBytesProxy;
         if (const auto tmit = targetMatchedSounds.find(sid); tmit != targetMatchedSounds.end()) {
@@ -1167,6 +1174,32 @@ inline DryRunExportPlan collectSelectiveExportWithTargetMap(
                 dg.keyValue = msId.str();
             }
             dg.canonicalMember = msId.str();
+            dg.members.assign(roots.begin(), roots.end());
+            dg.occurrenceCount = shareCount;
+            dg.savedBytes = 0; // Sample-level Tier 1 carries exact byte accounting without double-counting
+            dg.appliedInExport = true;
+            plan.dedupGroups.push_back(std::move(dg));
+        }
+    }
+
+    for (const auto& [dsId, roots] : dsRefRoots) {
+        if (!adapter_detail::tickCancel(keepGoing, tick, stride)) return makeCancelled();
+        plan.uniqueDrumSamples.push_back(dsId);
+        const auto& sounds = dsRefSounds[dsId];
+        const size_t shareCount = std::max(roots.size(), sounds.size());
+        if (shareCount > 1) {
+            DedupGroup dg;
+            dg.tier = DedupTier::Tier1LogicalIdentity;
+            dg.resourceKind = "DrumSample";
+            const auto dit = source.drumSamples.find(dsId);
+            if (dit != source.drumSamples.end()) {
+                dg.keyType = "resource-id+kmp-id8";
+                dg.keyValue = dsId.str() + "|id8:" + graph::native_detail::hexId(dit->second.id8);
+            } else {
+                dg.keyType = "resource-id";
+                dg.keyValue = dsId.str();
+            }
+            dg.canonicalMember = dsId.str();
             dg.members.assign(roots.begin(), roots.end());
             dg.occurrenceCount = shareCount;
             dg.savedBytes = 0; // Sample-level Tier 1 carries exact byte accounting without double-counting
@@ -1444,6 +1477,7 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
     o += "    \"uniqueUserSounds\": " + std::to_string(p.collectedSounds.size()) + ",\n";
     o += "    \"uniqueProvisionalPackages\": " + std::to_string(p.uniqueProvisionalPackages.size()) + ",\n";
     o += "    \"uniqueMultisamples\": " + std::to_string(p.uniqueMultisamples.size()) + ",\n";
+    o += "    \"uniqueDrumSamples\": " + std::to_string(p.uniqueDrumSamples.size()) + ",\n";
     o += "    \"uniqueSamples\": " + std::to_string(p.uniqueSamples.size()) + ",\n";
     o += "    \"uniquePcmFiles\": " + std::to_string(p.uniquePcmFiles.size()) + ",\n";
     o += "    \"unresolvedSlotsInAnalysed\": " + std::to_string(p.unresolvedSlotsInAnalysedCount) + ",\n";
@@ -1488,6 +1522,7 @@ inline std::string serializeDryRunPlanJson(const DryRunExportPlan& p) {
              ", \"msToSampleConfidence\": " + q(edgeConfidenceName(cs.msToSampleConfidence)) +
              ", \"referencingRootCount\": " + std::to_string(cs.referencingRootCount) +
              ", \"multisampleCount\": " + std::to_string(cs.multisampleCount) +
+             ", \"drumSampleCount\": " + std::to_string(cs.drumSampleCount) +
              ", \"sampleCount\": " + std::to_string(cs.sampleCount) +
              ", \"uniqueSampleBytes\": " + std::to_string(cs.uniqueSampleBytes) +
              ", \"satisfiedByTarget\": " + std::string(bstr(cs.satisfiedByTarget)) +
@@ -1596,6 +1631,7 @@ inline std::string serializeDryRunPlanMarkdown(const DryRunExportPlan& p) {
     o += "- **Closure Summary:** " + std::to_string(p.collectedSounds.size()) + " User Sound(s), " +
          std::to_string(p.uniqueProvisionalPackages.size()) + " Provisional Package(s), " +
          std::to_string(p.uniqueMultisamples.size()) + " Multisample(s), " +
+         std::to_string(p.uniqueDrumSamples.size()) + " DrumSample(s), " +
          std::to_string(p.uniqueSamples.size()) + " Sample(s), " +
          std::to_string(p.uniquePcmFiles.size()) + " PCM file(s), " +
          std::to_string(p.factorySoundSelectCount) + " Factory ROM select(s)\n";

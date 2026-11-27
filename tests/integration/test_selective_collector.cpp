@@ -21,6 +21,7 @@
 #include "media/sound/selective_collector.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +30,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace ai_arranger::media::graph;
@@ -1267,6 +1269,323 @@ static void testAuditHardeningAndM2aIntegration() {
     }
 }
 
+// ── Test 8: Track A Slice A3 — USERDK DrumSample Tier-1 Closure, Dedup Parity, Dual-Use Sample Accounting & HOLD ─────
+
+static Bytes buildSynthUserDk1005Body(
+    const std::vector<std::tuple<uint8_t, uint8_t, uint16_t, Id8>>& keyAssignments) {
+    // Known variable-layer 0x10050038 USERDK layout: hdr=514 (modeFlag @ +2 = 0x82), kst=20 (lcOff=2), lst=32 (hasId8=true).
+    constexpr size_t kHdr = 514;
+    constexpr size_t kKst = 20;
+    constexpr size_t kLcOff = 2;
+    constexpr size_t kLst = 32;
+    constexpr size_t kVelOff = kKst - 10;
+
+    struct LayerSpec { uint8_t bank = 0; uint16_t tblIdx = 0; Id8 id8{}; };
+    std::array<LayerSpec, 128> keyLayer{};
+    for (const auto& [note, bank, tblIdx, id8] : keyAssignments) {
+        if (note < 128u) keyLayer[note] = LayerSpec{bank, tblIdx, id8};
+    }
+
+    Bytes body(kHdr + 128u * kKst + 128u * kLst, 0x00);
+    body[2] = 0x82u; // modeFlag bit 7 set
+    for (uint32_t k = 0; k < 128u; ++k) {
+        const size_t ko = kHdr + size_t(k) * kKst;
+        body[ko + 0u] = 0x7Fu;
+        body[ko + 1u] = 0xFFu;
+        body[ko + kLcOff] = 1u;
+        body[ko + kLcOff + 1u] = 64u;
+        for (size_t j = 0; j < 8u; ++j) body[ko + kVelOff + j] = 127u;
+        const uint16_t cumEnd = static_cast<uint16_t>((k + 1u) | (k == 127u ? 0x8000u : 0u));
+        body[ko + kKst - 2u] = static_cast<uint8_t>(cumEnd >> 8);
+        body[ko + kKst - 1u] = static_cast<uint8_t>(cumEnd & 0xFFu);
+
+        const size_t lo = kHdr + 128u * kKst + size_t(k) * kLst;
+        body[lo + 0u] = keyLayer[k].bank;
+        body[lo + 2u] = static_cast<uint8_t>(keyLayer[k].tblIdx >> 8);
+        body[lo + 3u] = static_cast<uint8_t>(keyLayer[k].tblIdx & 0xFFu);
+        body[lo + 4u] = 0x80u;
+        body[lo + 5u] = 0x00u;
+        std::copy(keyLayer[k].id8.begin(), keyLayer[k].id8.end(),
+                  body.begin() + static_cast<std::ptrdiff_t>(lo + kLst - 8u));
+    }
+    return body;
+}
+
+static void testUserDkDrumSampleTier1Parity() {
+    std::printf("[Test 8] Track A Slice A3 USERDK DrumSample Tier-1 closure, dedup parity, dual-use Sample & HOLD\n");
+
+    const RecordLayout melL{12, 24, 8};
+    const uint32_t kKind = 0x10050038u;
+
+    const Id8 smp0Id = makeId(0x91, 0); // 2000 B (Kick L)
+    const Id8 smp1Id = makeId(0x91, 1); // 2500 B (Kick R)
+    const Id8 smp2Id = makeId(0x91, 2); // 3000 B (Snare)
+    const Id8 smp3Id = makeId(0x91, 3); // 4096 B (Dual-use: Multisample/0 ∩ DrumSample/2!)
+    const Id8 smp4Id = makeId(0x91, 4); // 5000 B (KitB extra perc)
+
+    const Id8 ds0Id = makeId(0x92, 0); // Kick stereo (smp0, smp1)
+    const Id8 ds1Id = makeId(0x92, 1); // Snare mono (smp2)
+    const Id8 ds2Id = makeId(0x92, 2); // Shared perc mono (smp3)
+    const Id8 ds3Id = makeId(0x92, 3); // Extra perc mono (smp4)
+    const Id8 ms0Id = makeId(0x93, 0); // Melodic MS referencing smp3 (dual-use!)
+
+    SynthKmpSpec kmp;
+    kmp.samples.push_back({smp0Id, "SynKickL", 48000});
+    kmp.samples.push_back({smp1Id, "SynKickR", 48000});
+    kmp.samples.push_back({smp2Id, "SynSnare", 48000});
+    kmp.samples.push_back({smp3Id, "SynDualPerc", 48000});
+    kmp.samples.push_back({smp4Id, "SynExtraPerc", 48000});
+    kmp.drums.push_back({ds0Id, "SynDrumKick", 0, 1});
+    kmp.drums.push_back({ds1Id, "SynDrumSnare", 2, kNoZoneSample});
+    kmp.drums.push_back({ds2Id, "SynDrumDual", 3, kNoZoneSample});
+    kmp.drums.push_back({ds3Id, "SynDrumExtra", 4, kNoZoneSample});
+    kmp.zones.push_back({3, 127});
+    kmp.multis.push_back({ms0Id, "SynMsDual", 0, 1});
+
+    const Bytes melBody = buildSoundBody(melL, {{ms0Id, kZeroId}}, 0x4Au);
+    const Bytes dk0Body = buildSynthUserDk1005Body({
+        {36, 1, 0, ds0Id},
+        {38, 1, 1, ds1Id},
+        {42, 1, 2, ds2Id},
+    });
+    const Bytes dk1Body = buildSynthUserDk1005Body({
+        {42, 1, 2, ds2Id},
+        {46, 1, 3, ds3Id},
+    });
+    // ROM-only USERDK: populated ROM key (bank=0, tblIdx=15, zero ID8) + default placeholders
+    const Bytes dkRomBody = buildSynthUserDk1005Body({
+        {36, 0, 15, kZeroId},
+        {38, 0, 22, kZeroId},
+    });
+
+    NativeKstClosureInput in;
+    in.downstream.kmpContainer = RawNamedBlob{
+        "MULTISMP/RAM.KMP", "", buildKorfContainer({{kPa5xKmpChunkId, 0, 0, 0, "RAM", buildPa5xKmpPayload(kmp), ""}})};
+    in.downstream.pcmContainers.push_back({"PCM/ram01.pcm", "", buildKorfContainer({
+        {0x01010018u, 0, 0, 0, "SynKickL",    Bytes(2000, 0x11), idAsStr(smp0Id)},
+        {0x01010018u, 0, 0, 1, "SynKickR",    Bytes(2500, 0x12), idAsStr(smp1Id)},
+        {0x01010018u, 0, 0, 2, "SynSnare",    Bytes(3000, 0x13), idAsStr(smp2Id)},
+        {0x01010018u, 0, 0, 3, "SynDualPerc", Bytes(4096, 0x14), idAsStr(smp3Id)},
+        {0x01010018u, 0, 0, 4, "SynExtraPerc", Bytes(5000, 0x15), idAsStr(smp4Id)},
+    })});
+    in.downstream.soundContainers.push_back({"SOUND/USER01.PCG", "USER01", buildKorfContainer({
+        {kKind, 0, 0, 0, "SynDualMel", makeOcLiteralFrame("OC31", melBody), ""}
+    })});
+    in.downstream.soundContainers.push_back({"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+        {kKind, 4, 11, 0, "SynKitAlpha", dk0Body, ""},
+        {kKind, 4, 11, 1, "SynKitBeta",  dk1Body, ""},
+        {kKind, 4, 11, 2, "SynKitRom",   dkRomBody, ""},
+    })});
+
+    // StyleSoloDk: single Style referencing RAM USERDK01/0 only
+    in.upstreamRoots.push_back({"STYLE/BankA/SoloDk.stg", rtSerialize({
+        rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{9, 120, 64, 0}}))})})
+    })});
+    // StyleDualA: melodic USER01/0 (Smp3) + USERDK01/0 (ds0, ds1, ds2 -> Smp0..Smp3)
+    in.upstreamRoots.push_back({"STYLE/BankA/DualA.stg", rtSerialize({
+        rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{0, 121, 64, 0}, {9, 120, 64, 0}}))})})
+    })});
+    // StyleDualB: USERDK01/0 (ds0, ds1, ds2) + USERDK01/1 (ds2, ds3 -> Smp3, Smp4)
+    in.upstreamRoots.push_back({"STYLE/BankA/DualB.stg", rtSerialize({
+        rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{9, 120, 64, 0}, {10, 120, 64, 1}}))})})
+    })});
+    // StyleRomDk: ROM-only USERDK01/2
+    in.upstreamRoots.push_back({"STYLE/BankA/RomDk.stg", rtSerialize({
+        rtBranch("Var1.scn", {rtBranch("T1.pdc", {rtLeaf("Main.mid", makeSmf({{9, 120, 64, 2}}))})})
+    })});
+
+    M1AdapterOptions aopts;
+    aopts.closureOptions.downstream.layouts[kKind] = melL;
+    aopts.closureOptions.downstream.allowFitLayout = false;
+    const M1AdapterView view = adaptNativeKstInput(in, aopts);
+
+    TEST("A3 adapter ok with RAM & ROM USERDKs", view.ok && !view.coverage.deleteProofAvailable);
+
+    size_t unrefCount = 0;
+    for (const auto& [nid, _] : view.graph->nodes()) {
+        if (view.graph->deleteCheck(nid).verdict == DeleteVerdict::Unreferenced) ++unrefCount;
+    }
+    TEST("A3 Native-KST deleteCheck() NEVER Unreferenced with USERDK", unrefCount == 0);
+
+    // 8a. Single Style referencing RAM USERDK -> uniqueDrumSamples == 3, drumSampleCount == 3, closureNodes has DrumSample,
+    //     and RootTreeSubKst keeps blocking NATIVE_SOUND_WRITE_HOLD even on identical same-slot target!
+    {
+        CollectorRequest req;
+        req.mode = ExportMode::AdvisoryPlan;
+        req.targets = {selStyle("STYLE/BankA/SoloDk.stg")};
+        const DryRunExportPlan p = collectSelectiveExport(view, req);
+
+        const ResourceId ds0{false, "KST", Kind::DrumSample, 0};
+        const ResourceId ds1{false, "KST", Kind::DrumSample, 1};
+        const ResourceId ds2{false, "KST", Kind::DrumSample, 2};
+        const bool allDsInClosure =
+            std::find(p.closureNodes.begin(), p.closureNodes.end(), ds0) != p.closureNodes.end() &&
+            std::find(p.closureNodes.begin(), p.closureNodes.end(), ds1) != p.closureNodes.end() &&
+            std::find(p.closureNodes.begin(), p.closureNodes.end(), ds2) != p.closureNodes.end();
+
+        size_t tier1Ds = 0;
+        for (const auto& dg : p.dedupGroups) {
+            if (dg.tier == DedupTier::Tier1LogicalIdentity && dg.resourceKind == "DrumSample") ++tier1Ds;
+        }
+        TEST("A3(a) single RAM USERDK Style: uniqueDrumSamples==3, drumSampleCount==3, closureNodes has DrumSamples, 0 DS dedup groups",
+             p.ok && p.executable && !p.deleteProofAvailable && !p.hardwareVerified &&
+                 p.uniqueDrumSamples.size() == 3 &&
+                 p.uniqueDrumSamples[0] == ds0 && p.uniqueDrumSamples[1] == ds1 && p.uniqueDrumSamples[2] == ds2 &&
+                 p.collectedSounds.size() == 1 &&
+                 p.collectedSounds[0].isDrumKit && p.collectedSounds[0].analysed &&
+                 p.collectedSounds[0].drumSampleCount == 3 &&
+                 p.collectedSounds[0].multisampleCount == 0 &&
+                 p.collectedSounds[0].sampleCount == 4 &&
+                 p.collectedSounds[0].uniqueSampleBytes == 11596u &&
+                 allDsInClosure && tier1Ds == 0);
+
+        // Same-slot Identical target in RootTreeSubKst MUST keep blocking NATIVE_SOUND_WRITE_HOLD (T19 parity)
+        CollectorRequest subReq = req;
+        subReq.mode = ExportMode::RootTreeSubKst;
+        const DryRunExportPlan pSub = collectSelectiveExport(view, subReq, &view);
+        TEST("A3(a') same-slot Identical USERDK stays blocked by NATIVE_SOUND_WRITE_HOLD in RootTreeSubKst",
+             pSub.ok && !pSub.executable && pSub.hasBlockingCode(diag_code::kNativeSoundWriteHold) &&
+                 pSub.uniqueDrumSamples.size() == 3 &&
+                 std::find(pSub.closureNodes.begin(), pSub.closureNodes.end(), ds0) != pSub.closureNodes.end());
+    }
+
+    // 8b. Two Styles sharing USERDK / DrumSample + dual-use Sample (Multisample ∩ DrumSample):
+    //     Tier-1 DrumSample DedupGroups emitted, uniqueDrumSamples deduplicated, ZERO double-counting of dual-use Sample bytes!
+    {
+        CollectorRequest reqAB;
+        reqAB.mode = ExportMode::AdvisoryPlan;
+        reqAB.targets = {selStyle("STYLE/BankA/DualA.stg"), selStyle("STYLE/BankA/DualB.stg")};
+        const DryRunExportPlan pAB = collectSelectiveExport(view, reqAB);
+
+        CollectorRequest reqBA = reqAB;
+        std::reverse(reqBA.targets.begin(), reqBA.targets.end());
+        const DryRunExportPlan pBA = collectSelectiveExport(view, reqBA);
+
+        // Unique samples: Smp0(2000) + Smp1(2500) + Smp2(3000) + Smp3(4096) + Smp4(5000) = 16596 (Smp3 counted ONCE!)
+        // Raw refs: DualA = USER01/0(4096) + USERDK01/0(11596) = 15692;
+        //           DualB = USERDK01/0(11596) + USERDK01/1(9096) = 20692; total raw = 36388; saved = 19792.
+        const uint64_t wantUniqueBytes = 2000u + 2500u + 3000u + 4096u + 5000u;
+        const uint64_t wantRawBytes = 4096u + 11596u + 11596u + 9096u;
+        const uint64_t wantSavedBytes = wantRawBytes - wantUniqueBytes;
+
+        size_t tier1DsCount = 0;
+        std::set<std::string> dedupedDsIds;
+        bool allDsZeroSavedApplied = true;
+        bool foundDualSmpDedup = false;
+        for (const auto& dg : pAB.dedupGroups) {
+            if (dg.tier == DedupTier::Tier1LogicalIdentity && dg.resourceKind == "DrumSample") {
+                ++tier1DsCount;
+                dedupedDsIds.insert(dg.canonicalMember);
+                if (dg.keyType != "resource-id+kmp-id8" || dg.savedBytes != 0u || !dg.appliedInExport || dg.occurrenceCount != 2u) {
+                    allDsZeroSavedApplied = false;
+                }
+            }
+            if (dg.tier == DedupTier::Tier1LogicalIdentity && dg.resourceKind == "Sample" &&
+                dg.canonicalMember == "pa5x:KST/Sample/3") {
+                // Referenced 4 times: USER01/0 (DualA), USERDK01/0 (DualA), USERDK01/0 (DualB), USERDK01/1 (DualB)
+                foundDualSmpDedup = (dg.appliedInExport && dg.occurrenceCount == 4u && dg.savedBytes == 3u * 4096u);
+            }
+        }
+
+        const CollectedSoundSummary* melSum = nullptr;
+        const CollectedSoundSummary* dk0Sum = nullptr;
+        const CollectedSoundSummary* dk1Sum = nullptr;
+        for (const auto& cs : pAB.collectedSounds) {
+            if (cs.id == ResourceId{false, "USER01", Kind::Sound, 0}) melSum = &cs;
+            if (cs.id == ResourceId{false, "USERDK01", Kind::Sound, 0}) dk0Sum = &cs;
+            if (cs.id == ResourceId{false, "USERDK01", Kind::Sound, 1}) dk1Sum = &cs;
+        }
+
+        TEST("A3(b) two Styles sharing USERDK/DrumSample + dual-use Sample: exact counts & ZERO double-counting",
+             pAB.ok && pAB.executable &&
+                 pAB.uniqueMultisamples.size() == 1 &&
+                 pAB.uniqueDrumSamples.size() == 4 &&
+                 pAB.uniqueSamples.size() == 5 &&
+                 pAB.memoryProjection.uniqueLogicalSampleBytes == wantUniqueBytes &&
+                 pAB.memoryProjection.rawReferencedSampleBytes == wantRawBytes &&
+                 pAB.memoryProjection.logicalDedupSavedBytes == wantSavedBytes &&
+                 melSum != nullptr && melSum->multisampleCount == 1 && melSum->drumSampleCount == 0 &&
+                 dk0Sum != nullptr && dk0Sum->multisampleCount == 0 && dk0Sum->drumSampleCount == 3 &&
+                 dk1Sum != nullptr && dk1Sum->multisampleCount == 0 && dk1Sum->drumSampleCount == 2);
+
+        TEST("A3(b') Tier-1 DrumSample DedupGroups emitted for shared ds0/ds1/ds2 (not unshared ds3) & dual-use Sample dedup exact",
+             tier1DsCount == 3 && allDsZeroSavedApplied && foundDualSmpDedup &&
+                 dedupedDsIds.count("pa5x:KST/DrumSample/0") == 1 &&
+                 dedupedDsIds.count("pa5x:KST/DrumSample/1") == 1 &&
+                 dedupedDsIds.count("pa5x:KST/DrumSample/2") == 1 &&
+                 dedupedDsIds.count("pa5x:KST/DrumSample/3") == 0);
+
+        // Single Style (DualB alone) with 2 distinct USERDK kits sharing DrumSample/2 -> Tier-1 DrumSample DedupGroup emitted via sounds.size()==2
+        CollectorRequest reqB;
+        reqB.mode = ExportMode::AdvisoryPlan;
+        reqB.targets = {selStyle("STYLE/BankA/DualB.stg")};
+        const DryRunExportPlan pB = collectSelectiveExport(view, reqB);
+        size_t singleRootDsDedup = 0;
+        bool ds2SharedAcrossKits = false;
+        for (const auto& dg : pB.dedupGroups) {
+            if (dg.tier == DedupTier::Tier1LogicalIdentity && dg.resourceKind == "DrumSample") {
+                ++singleRootDsDedup;
+                if (dg.canonicalMember == "pa5x:KST/DrumSample/2" && dg.occurrenceCount == 2u &&
+                    dg.savedBytes == 0u && dg.appliedInExport) {
+                    ds2SharedAcrossKits = true;
+                }
+            }
+        }
+        TEST("A3(b'') single Style referencing 2 USERDKs sharing DrumSample/2 emits Tier-1 DrumSample DedupGroup (occurrenceCount==2)",
+             pB.ok && pB.uniqueDrumSamples.size() == 4 &&
+                 pB.memoryProjection.uniqueLogicalSampleBytes == wantUniqueBytes &&
+                 singleRootDsDedup == 1 && ds2SharedAcrossKits);
+
+        // JSON & Markdown additive serialization + byte-identical reproducibility + M2a bridge
+        const std::string jsonAB = serializeDryRunPlanJson(pAB);
+        const std::string jsonBA = serializeDryRunPlanJson(pBA);
+        const std::string mdAB = serializeDryRunPlanMarkdown(pAB);
+        const std::string mdBA = serializeDryRunPlanMarkdown(pBA);
+        kit::Json parsedDry;
+        const std::string dryErr = kit::parseJson(jsonAB, &parsedDry);
+        const SelectiveExportReport m2aRep = toSelectiveExportReport(pAB, "SyntheticSource");
+        const std::string m2aJson = serializeSelectiveReportJson(m2aRep);
+        kit::Json parsedM2a;
+        const std::string m2aErr = kit::parseJson(m2aJson, &parsedM2a);
+
+        TEST("A3(d) JSON & Markdown include additive uniqueDrumSamples/drumSampleCount/DrumSample dedup & stay reproducible",
+             dryErr.empty() && m2aErr.empty() &&
+                 pAB.planFingerprint == pBA.planFingerprint &&
+                 jsonAB == jsonBA && mdAB == mdBA &&
+                 jsonAB.find("\"uniqueDrumSamples\": 4") != std::string::npos &&
+                 jsonAB.find("\"drumSampleCount\": 3") != std::string::npos &&
+                 jsonAB.find("\"drumSampleCount\": 2") != std::string::npos &&
+                 jsonAB.find("\"drumSampleCount\": 0") != std::string::npos &&
+                 jsonAB.find("\"resourceKind\": \"DrumSample\"") != std::string::npos &&
+                 mdAB.find("4 DrumSample(s)") != std::string::npos &&
+                 mdAB.find("`DrumSample`") != std::string::npos);
+    }
+
+    // 8c. ROM-only USERDK -> uniqueDrumSamples == 0, drumSampleCount == 0, no crash, HOLD preserved in RootTreeSubKst
+    {
+        CollectorRequest req;
+        req.mode = ExportMode::AdvisoryPlan;
+        req.requireCompleteSampleClosure = false;
+        req.targets = {selStyle("STYLE/BankA/RomDk.stg")};
+        const DryRunExportPlan pRom = collectSelectiveExport(view, req);
+
+        CollectorRequest reqSub = req;
+        reqSub.mode = ExportMode::RootTreeSubKst;
+        const DryRunExportPlan pRomSub = collectSelectiveExport(view, reqSub, &view);
+
+        TEST("A3(c) ROM-only USERDK: uniqueDrumSamples==0, drumSampleCount==0, no crash, HOLD preserved in RootTreeSubKst",
+             pRom.ok && !pRom.deleteProofAvailable &&
+                 pRom.uniqueDrumSamples.empty() &&
+                 pRom.collectedSounds.size() == 1 &&
+                 pRom.collectedSounds[0].isDrumKit &&
+                 pRom.collectedSounds[0].drumSampleCount == 0 &&
+                 pRom.collectedSounds[0].sampleCount == 0 &&
+                 pRom.collectedSounds[0].uniqueSampleBytes == 0 &&
+                 pRomSub.ok && !pRomSub.executable &&
+                 pRomSub.hasBlockingCode(diag_code::kNativeSoundWriteHold));
+    }
+}
+
 int main() {
     std::printf("=== Slice M2b Selective Collector & M2a Unified Integration Synthetic Tests ===\n");
     testMultiStyleSharingAndEmbeddedFlags();
@@ -1276,6 +1595,7 @@ int main() {
     testCooperativeCancellation();
     testReproducibilityJsonAndPathFree();
     testAuditHardeningAndM2aIntegration();
+    testUserDkDrumSampleTier1Parity();
     std::printf("=== Summary: %d passed, %d failed ===\n", gPasses, gFailures);
     return gFailures == 0 ? 0 : 1;
 }
