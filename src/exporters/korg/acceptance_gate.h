@@ -204,6 +204,56 @@ inline bool hasControlChar(std::string_view s) noexcept {
     return false;
 }
 
+inline bool isPlaceholderText(std::string_view s) noexcept {
+    if (isBlankAscii(s)) return true;
+    std::string up;
+    up.reserve(s.size());
+    for (char c : s) up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    return up.find("REPLACE_WITH") != std::string::npos ||
+           up.find("REPLACE_ME") != std::string::npos ||
+           up.find("TEMPLATE ONLY") != std::string::npos ||
+           up.find(" | ") != std::string::npos;
+}
+
+inline std::string stripStyleExtension(std::string_view filename) {
+    std::string base(filename);
+    const size_t slash = base.find_last_of("/\\");
+    if (slash != std::string::npos) base = base.substr(slash + 1u);
+    const size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos && dot > 0u) {
+        std::string ext = base.substr(dot);
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".sty" || ext == ".prs" || ext == ".sst" || ext == ".bcs" || ext == ".pcs" || ext == ".fps") {
+            base = base.substr(0u, dot);
+        }
+    }
+    return base.empty() ? std::string("UNKNOWN_STYLE") : base;
+}
+
+inline std::string canonicalCandidateLabel(std::string_view raw) {
+    std::string up;
+    up.reserve(raw.size());
+    for (char c : raw) up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    if (up == "A_REF" || up.find("CANDIDATE A") != std::string::npos || up.find("REFERENCE") != std::string::npos) {
+        return "A_REF";
+    }
+    if (up == "C_ENHANCED" || up.find("CANDIDATE C") != std::string::npos || up.find("MODE B") != std::string::npos ||
+        up.find("ENHANCED") != std::string::npos) {
+        return "C_ENHANCED";
+    }
+    return "B_FAITHFUL";
+}
+
+inline std::string inferTemplateSourceClass(std::string_view style_id) {
+    std::string up;
+    up.reserve(style_id.size());
+    for (char c : style_id) up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    if (up.rfind("SYNTH_", 0u) == 0u || up.rfind("EXP", 0u) == 0u || up.rfind("MAL", 0u) == 0u) {
+        return "SYNTHETIC_CC0";
+    }
+    return "REAL_GENOS_HUMAN";
+}
+
 inline bool isCriticalTrackKey(std::string_view key) noexcept {
     return key == "drum" || key == "bass" || key == "acc1";
 }
@@ -396,6 +446,107 @@ public:
         return true;
     }
 
+    bool parseNumberToken(std::string& err) {
+        skipWs();
+        if (pos_ >= text_.size()) { err = "expected JSON number"; return false; }
+        if (text_[pos_] == '-') ++pos_;
+        if (pos_ >= text_.size() || !std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+            err = "expected JSON number";
+            return false;
+        }
+        if (text_[pos_] == '0') {
+            ++pos_;
+            if (pos_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+                err = "leading zero in JSON number";
+                return false;
+            }
+        } else {
+            while (pos_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) ++pos_;
+        }
+        if (pos_ < text_.size() && text_[pos_] == '.') {
+            ++pos_;
+            if (pos_ >= text_.size() || !std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+                err = "expected digit after decimal point in JSON number";
+                return false;
+            }
+            while (pos_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) ++pos_;
+        }
+        if (pos_ < text_.size() && (text_[pos_] == 'e' || text_[pos_] == 'E')) {
+            ++pos_;
+            if (pos_ < text_.size() && (text_[pos_] == '+' || text_[pos_] == '-')) ++pos_;
+            if (pos_ >= text_.size() || !std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+                err = "expected digit in JSON number exponent";
+                return false;
+            }
+            while (pos_ < text_.size() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) ++pos_;
+        }
+        if (!atDelimiter()) {
+            err = "invalid trailing characters in JSON number";
+            return false;
+        }
+        return true;
+    }
+
+    bool skipValue(std::string& err, int depth = 0) {
+        if (depth > 16) {
+            err = "JSON nesting depth exceeds safety limit";
+            return false;
+        }
+        skipWs();
+        if (pos_ >= text_.size()) { err = "unexpected end of JSON value"; return false; }
+        const char c = text_[pos_];
+        if (c == '"') {
+            std::string tmp;
+            return parseString(tmp, err);
+        }
+        if (c == 't' || c == 'f') {
+            bool b = false;
+            return parseBool(b, err);
+        }
+        if (c == 'n') {
+            if (parseNull()) return true;
+            err = "invalid literal in JSON";
+            return false;
+        }
+        if (c == '-' || std::isdigit(static_cast<unsigned char>(c))) {
+            return parseNumberToken(err);
+        }
+        if (c == '[') {
+            ++pos_;
+            skipWs();
+            if (consume(']')) return true;
+            while (true) {
+                if (!skipValue(err, depth + 1)) return false;
+                if (consume(',')) continue;
+                if (consume(']')) return true;
+                err = "expected ',' or ']' in JSON array";
+                return false;
+            }
+        }
+        if (c == '{') {
+            ++pos_;
+            skipWs();
+            if (consume('}')) return true;
+            std::set<std::string> seen_obj_keys;
+            while (true) {
+                std::string k;
+                if (!parseString(k, err)) return false;
+                if (!seen_obj_keys.insert(k).second) {
+                    err = "duplicate key '" + k + "' in nested JSON object";
+                    return false;
+                }
+                if (!consume(':')) { err = "expected ':' in nested JSON object"; return false; }
+                if (!skipValue(err, depth + 1)) return false;
+                if (consume(',')) continue;
+                if (consume('}')) return true;
+                err = "expected ',' or '}' in nested JSON object";
+                return false;
+            }
+        }
+        err = "unexpected character in JSON value";
+        return false;
+    }
+
 private:
     bool atDelimiter() const noexcept {
         if (pos_ >= text_.size()) return true;
@@ -431,6 +582,8 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
         bool has_evaluator = false;
         bool has_overall_rating = false;
         bool is_template_placeholder = false;
+        bool is_synthetic_self_test = false;
+        std::string listening_environment;
 
         r.skipWs();
         if (r.peek() == '}') {
@@ -450,7 +603,9 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
                 return res;
             }
 
-            // Normalize canonical camelCase & snake_case field aliases.
+            // Normalize canonical camelCase & P3-M5 snake_case field aliases.
+            // Mapping both spellings to one canonical key guarantees duplicate/conflicting
+            // camelCase + snake_case combinations are rejected fail-closed.
             std::string canonical = key;
             if (key == "evaluator_id") canonical = "evaluatorId";
             else if (key == "overall_rating_1_to_5") canonical = "overallRating";
@@ -463,7 +618,35 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
             else if (key == "major_correction_needed") canonical = "majorCorrectionNeeded";
             else if (key == "required_sections_verified") canonical = "requiredSectionsVerified";
             else if (key == "required_chords_verified") canonical = "requiredChordsVerified";
-            else if (key == "template_placeholder") canonical = "templatePlaceholder";
+            else if (key == "template_placeholder" || key == "is_template" || key == "isTemplate") {
+                canonical = "templatePlaceholder";
+            } else if (key == "evaluator_comments" || key == "evaluatorComments") {
+                canonical = "notes";
+            } else if (key == "style_filename" || key == "styleFilename") {
+                canonical = "styleName";
+            } else if (key == "candidate_label" || key == "candidateLabel") {
+                canonical = "candidate";
+            } else if (key == "style_sha256" || key == "styleSha256" || key == "converted_mid_sha256") {
+                canonical = "convertedMidSha256";
+            } else if (key == "session_date" || key == "sessionDate") {
+                canonical = "date";
+            } else if (key == "record_id" || key == "recordId") {
+                canonical = "recordId";
+            } else if (key == "style_id" || key == "styleId") {
+                canonical = "styleId";
+            } else if (key == "source_class" || key == "sourceClass") {
+                canonical = "sourceClass";
+            } else if (key == "blind_session" || key == "blindSession") {
+                canonical = "blindSession";
+            } else if (key == "listening_environment" || key == "listeningEnvironment") {
+                canonical = "listeningEnvironment";
+            } else if (key == "analyzer_version" || key == "analyzerVersion") {
+                canonical = "analyzerVersion";
+            } else if (key == "defect_annotations" || key == "defectAnnotations") {
+                canonical = "defectAnnotations";
+            } else if (key == "synthetic_self_test" || key == "syntheticSelfTest") {
+                canonical = "syntheticSelfTest";
+            }
 
             if (!seen_fields.insert(canonical).second) {
                 res.error = "duplicate field '" + canonical + "' in human listening record";
@@ -479,15 +662,71 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
                     return res;
                 }
             } else if (canonical == "styleName" || canonical == "candidate" ||
-                       canonical == "convertedMidSha256" || canonical == "date") {
-                std::string ignored_meta;
-                if (!r.parseString(ignored_meta, err)) {
+                       canonical == "convertedMidSha256" || canonical == "date" ||
+                       canonical == "recordId" || canonical == "styleId" ||
+                       canonical == "genre" || canonical == "sourceClass" ||
+                       canonical == "analyzerVersion") {
+                if (!r.parseNull()) {
+                    std::string ignored_meta;
+                    if (!r.parseString(ignored_meta, err)) {
+                        res.error = "field '" + key + "': " + err;
+                        return res;
+                    }
+                }
+            } else if (canonical == "listeningEnvironment") {
+                if (!r.parseNull()) {
+                    if (!r.parseString(listening_environment, err)) {
+                        res.error = "field '" + key + "': " + err;
+                        return res;
+                    }
+                    if (hasControlChar(listening_environment) || listening_environment.size() > 256u) {
+                        res.error = "field '" + key + "' must be single-line (<= 256 chars)";
+                        return res;
+                    }
+                }
+            } else if (canonical == "blindSession") {
+                if (!r.parseNull()) {
+                    bool ignored_bool = false;
+                    if (!r.parseBool(ignored_bool, err)) {
+                        res.error = "field '" + key + "': " + err;
+                        return res;
+                    }
+                }
+            } else if (canonical == "syntheticSelfTest") {
+                if (!r.parseBool(is_synthetic_self_test, err)) {
                     res.error = "field '" + key + "': " + err;
+                    return res;
+                }
+            } else if (canonical == "defectAnnotations") {
+                r.skipWs();
+                if (r.parseNull()) {
+                    // Explicitly omitted.
+                } else if (r.consume('[')) {
+                    r.skipWs();
+                    if (!r.consume(']')) {
+                        while (true) {
+                            r.skipWs();
+                            if (r.peek() != '{') {
+                                res.error = "field '" + key + "' entries must be JSON objects";
+                                return res;
+                            }
+                            if (!r.skipValue(err, 1)) {
+                                res.error = "field '" + key + "': " + err;
+                                return res;
+                            }
+                            if (r.consume(',')) continue;
+                            if (r.consume(']')) break;
+                            res.error = "expected ',' or ']' in '" + key + "' array";
+                            return res;
+                        }
+                    }
+                } else {
+                    res.error = "field '" + key + "' must be null or a JSON array";
                     return res;
                 }
             } else if (canonical == "templatePlaceholder") {
                 if (!r.parseBool(is_template_placeholder, err)) {
-                    res.error = "field 'templatePlaceholder': " + err;
+                    res.error = "field '" + key + "': " + err;
                     return res;
                 }
             } else if (canonical == "evaluatorId") {
@@ -502,17 +741,19 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
                 }
                 has_evaluator = true;
             } else if (canonical == "overallRating") {
-                int64_t val = 0;
-                if (!r.parseInt64(val, err)) {
-                    res.error = "field 'overallRating': " + err;
-                    return res;
+                if (!r.parseNull()) {
+                    int64_t val = 0;
+                    if (!r.parseInt64(val, err)) {
+                        res.error = "field 'overallRating': " + err;
+                        return res;
+                    }
+                    if (val < 1 || val > 5) {
+                        res.error = "field 'overallRating' out of range (must be integer 1..5)";
+                        return res;
+                    }
+                    rec.overall_rating_1_to_5 = static_cast<int>(val);
+                    has_overall_rating = true;
                 }
-                if (val < 1 || val > 5) {
-                    res.error = "field 'overallRating' out of range (must be integer 1..5)";
-                    return res;
-                }
-                rec.overall_rating_1_to_5 = static_cast<int>(val);
-                has_overall_rating = true;
             } else if (canonical == "criticalDefectCount") {
                 int64_t val = 0;
                 if (!r.parseInt64(val, err)) {
@@ -629,6 +870,7 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
                 } else if (r.consume('{')) {
                     r.skipWs();
                     if (!r.consume('}')) {
+                        std::array<bool, 12> seen_dim{};
                         while (true) {
                             std::string dk;
                             if (!r.parseString(dk, err)) {
@@ -640,6 +882,12 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
                                 res.error = "unknown dimension key '" + dk + "' in 'perDimensionRatings'";
                                 return res;
                             }
+                            if (seen_dim[static_cast<size_t>(dim_idx)]) {
+                                res.error = "duplicate dimension key '" + dk +
+                                            "' in 'perDimensionRatings'";
+                                return res;
+                            }
+                            seen_dim[static_cast<size_t>(dim_idx)] = true;
                             if (!r.consume(':')) {
                                 res.error = "expected ':' after dimension key '" + dk + "'";
                                 return res;
@@ -689,7 +937,11 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
         }
         if (is_template_placeholder) {
             res.error = "listening record is still an unfilled template "
-                        "(complete authorized audition and set templatePlaceholder to false)";
+                        "(complete authorized audition and set is_template to false)";
+            return res;
+        }
+        if (is_synthetic_self_test) {
+            res.error = "rejected synthetic_self_test record (not real human listening data)";
             return res;
         }
         if (!has_evaluator) {
@@ -701,8 +953,12 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
             return res;
         }
         if (rec.hardware_verified && isBlankAscii(rec.hardware_model)) {
-            res.error = "hardwareVerified=true requires non-empty 'hardwareModel'";
-            return res;
+            if (!isPlaceholderText(listening_environment)) {
+                rec.hardware_model = listening_environment;
+            } else {
+                res.error = "hardwareVerified=true requires non-empty 'hardwareModel' (or non-placeholder 'listening_environment')";
+                return res;
+            }
         }
 
         rec.present = true;
@@ -1107,25 +1363,51 @@ inline std::string formatListeningRecordTemplateJson(
     const std::string& candidate_label,
     const std::string& converted_mid_sha256) {
     using namespace acceptance_gate_detail;
+    const std::string style_id = stripStyleExtension(style_name);
+    const std::string cand = canonicalCandidateLabel(candidate_label);
+    const std::string src_class = inferTemplateSourceClass(style_id);
+    const std::string record_id = "REC_" + style_id + "_" + cand;
     std::ostringstream o;
     o << "{\n";
     o << "  \"schema\": \"aiarranger-human-listening-record/1\",\n";
-    o << "  \"templatePlaceholder\": true,\n";
-    o << "  \"styleName\": \"" << jsonEscape(style_name) << "\",\n";
-    o << "  \"candidate\": \"" << jsonEscape(candidate_label) << "\",\n";
-    o << "  \"convertedMidSha256\": \"" << jsonEscape(converted_mid_sha256) << "\",\n";
-    o << "  \"evaluatorId\": \"musician-01\",\n";
-    o << "  \"overallRating\": 4,\n";
-    o << "  \"perDimensionRatings\": [null, null, null, null, null, null, null, null, null, null, null, null],\n";
-    o << "  \"criticalDefectCount\": 0,\n";
-    o << "  \"minorDefectCount\": 0,\n";
-    o << "  \"hardwareVerified\": false,\n";
-    o << "  \"hardwareModel\": \"Korg Pa5X\",\n";
-    o << "  \"referenceType\": \"Genos_Direct_AB\",\n";
-    o << "  \"majorCorrectionNeeded\": false,\n";
-    o << "  \"requiredSectionsVerified\": true,\n";
-    o << "  \"requiredChordsVerified\": true,\n";
-    o << "  \"notes\": \"Fill after owner-authorized Pa5X audition, then set templatePlaceholder=false and hardwareVerified=true.\"\n";
+    o << "  \"is_template\": true,\n";
+    o << "  \"record_id\": \"" << jsonEscape(record_id) << "\",\n";
+    o << "  \"style_id\": \"" << jsonEscape(style_id) << "\",\n";
+    o << "  \"style_filename\": \"" << jsonEscape(style_name) << "\",\n";
+    o << "  \"style_sha256\": \"" << jsonEscape(converted_mid_sha256) << "\",\n";
+    o << "  \"genre\": \"Other/Unclassified\",\n";
+    o << "  \"source_class\": \"" << jsonEscape(src_class) << "\",\n";
+    o << "  \"candidate_label\": \"" << jsonEscape(cand) << "\",\n";
+    o << "  \"evaluator_id\": \"EVAL_01\",\n";
+    o << "  \"hardware_verified\": false,\n";
+    o << "  \"hardware_model\": \"Korg Pa5X\",\n";
+    o << "  \"reference_type\": \"Genos_Direct_AB\",\n";
+    o << "  \"session_date\": \"YYYY-MM-DD\",\n";
+    o << "  \"blind_session\": true,\n";
+    o << "  \"listening_environment\": \"Korg Pa5X direct monitoring\",\n";
+    o << "  \"analyzer_version\": \"phase2-m4-v1\",\n";
+    o << "  \"overall_rating_1_to_5\": null,\n";
+    o << "  \"per_dimension_ratings\": {\n";
+    o << "    \"D01\": null,\n";
+    o << "    \"D02\": null,\n";
+    o << "    \"D03\": null,\n";
+    o << "    \"D04\": null,\n";
+    o << "    \"D05\": null,\n";
+    o << "    \"D06\": null,\n";
+    o << "    \"D07\": null,\n";
+    o << "    \"D08\": null,\n";
+    o << "    \"D09\": null,\n";
+    o << "    \"D10\": null,\n";
+    o << "    \"D11\": null,\n";
+    o << "    \"D12\": null\n";
+    o << "  },\n";
+    o << "  \"critical_defect_count\": 0,\n";
+    o << "  \"minor_defect_count\": 0,\n";
+    o << "  \"defect_annotations\": [],\n";
+    o << "  \"major_correction_needed\": false,\n";
+    o << "  \"required_sections_verified\": true,\n";
+    o << "  \"required_chords_verified\": true,\n";
+    o << "  \"evaluator_comments\": \"TEMPLATE ONLY — fill after owner-authorized Pa5X audition, then set is_template=false, hardware_verified=true, and overall_rating_1_to_5 (1..5).\"\n";
     o << "}\n";
     return o.str();
 }

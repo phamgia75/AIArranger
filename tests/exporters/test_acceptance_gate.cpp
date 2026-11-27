@@ -226,8 +226,75 @@ int main() {
              !parseHumanListeningRecordJson(R"({"schema":"wrong/99","evaluatorId":"m1","overallRating":4})").ok);
 
         const std::string tmpl = formatListeningRecordTemplateJson("TEST.sty", "Candidate B", "deadbeef");
-        TEST("generated LISTENING_RECORD_TEMPLATE.json is rejected until templatePlaceholder=false",
-             !parseHumanListeningRecordJson(tmpl).ok);
+        TEST("generated LISTENING_RECORD_TEMPLATE.json is rejected until is_template=false",
+             !parseHumanListeningRecordJson(tmpl).ok &&
+             tmpl.find("\"is_template\": true") != std::string::npos &&
+             tmpl.find("\"candidate_label\": \"B_FAITHFUL\"") != std::string::npos &&
+             tmpl.find("\"overall_rating_1_to_5\": null") != std::string::npos &&
+             tmpl.find("\"per_dimension_ratings\": {") != std::string::npos);
+
+        // P1-1: Full P3-M5 canonical TEMPLATE_LISTENING_RECORD.json schema (filled) parses cleanly in C++
+        const std::string p3m5Record = R"({
+            "schema": "aiarranger-human-listening-record/1",
+            "is_template": false,
+            "record_id": "REC_SYNTH_POP_01",
+            "style_id": "SYNTH_POP_SFF2",
+            "style_filename": "SYNTH_POP_SFF2.sty",
+            "style_sha256": "abcdef0123456789",
+            "genre": "Pop/Ballad",
+            "source_class": "SYNTHETIC_CC0",
+            "candidate_label": "B_FAITHFUL",
+            "evaluator_id": "EVAL_01",
+            "hardware_verified": true,
+            "session_date": "2026-11-28",
+            "blind_session": true,
+            "listening_environment": "Korg Pa5X direct studio monitors",
+            "analyzer_version": "phase2-m4-v1",
+            "overall_rating_1_to_5": 5,
+            "per_dimension_ratings": {
+                "D01": 5, "D02": 5, "D03": null, "D04": 4,
+                "D05": 5, "D06": 5, "D07": 4, "D08": 5,
+                "D09": 5, "D10": 4, "D11": 5, "D12": 5
+            },
+            "critical_defect_count": 0,
+            "minor_defect_count": 0,
+            "defect_annotations": [
+                {
+                    "timestamp_sec": 12.5,
+                    "section": "v1cv1",
+                    "track": "Acc1",
+                    "dimension": "D04",
+                    "severity": "MINOR",
+                    "note": "Checked cleanly"
+                }
+            ],
+            "evaluator_comments": "Completed P3-M5 canonical listening record."
+        })";
+        const auto pP3m5 = parseHumanListeningRecordJson(p3m5Record);
+        TEST("P1-1: completed P3-M5 schema JSON parses cleanly & populates hardware_model + notes",
+             pP3m5.ok && pP3m5.record.present &&
+             pP3m5.record.evaluator_id == "EVAL_01" &&
+             pP3m5.record.overall_rating_1_to_5 == 5 &&
+             pP3m5.record.hardware_verified &&
+             pP3m5.record.hardware_model == "Korg Pa5X direct studio monitors" &&
+             pP3m5.record.notes == "Completed P3-M5 canonical listening record." &&
+             pP3m5.record.per_dimension_present[0] && pP3m5.record.per_dimension_ratings[0] == 5 &&
+             !pP3m5.record.per_dimension_present[2]);
+
+        TEST("P1-1: rejects conflicting camelCase + snake_case duplicate keys (is_template + templatePlaceholder)",
+             !parseHumanListeningRecordJson(R"({"evaluator_id":"m1","overall_rating_1_to_5":4,"is_template":false,"templatePlaceholder":false})").ok);
+        TEST("P1-1: rejects conflicting notes + evaluator_comments duplicate keys",
+             !parseHumanListeningRecordJson(R"({"evaluator_id":"m1","overall_rating_1_to_5":4,"notes":"a","evaluator_comments":"b"})").ok);
+        TEST("P1-1: rejects synthetic_self_test=true fail-closed",
+             !parseHumanListeningRecordJson(R"({"evaluator_id":"m1","overall_rating_1_to_5":4,"synthetic_self_test":true})").ok);
+        TEST("P1-1: rejects unfilled P3-M5 placeholder listening_environment when hardware_verified=true",
+             !parseHumanListeningRecordJson(R"({"evaluator_id":"m1","overall_rating_1_to_5":4,"hardware_verified":true,"listening_environment":"REPLACE_WITH_ANONYMIZED_MONITORING_CHAIN"})").ok);
+
+        // P2-1: Reject duplicate dimension keys inside perDimensionRatings / per_dimension_ratings object
+        TEST("P2-1: rejects exact duplicate dimension key in per_dimension_ratings object",
+             !parseHumanListeningRecordJson(R"({"evaluator_id":"m1","overall_rating_1_to_5":4,"per_dimension_ratings":{"D01":4,"D01":5}})").ok);
+        TEST("P2-1: rejects aliased duplicate dimension key (D01 + D01_drum_perc_balance)",
+             !parseHumanListeningRecordJson(R"({"evaluator_id":"m1","overall_rating_1_to_5":4,"per_dimension_ratings":{"D01":4,"D01_drum_perc_balance":5}})").ok);
     }
 
     // 7. JSON control-char escaping, Markdown formatting, and NaN/Inf/empty bounds safety

@@ -368,6 +368,10 @@ int main(int argc, char** argv) {
              run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad1") + " --enhance magic") == 1);
         TEST("--raw + --enhance recommended fails closed (exit 1)",
              run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad2") + " --raw --enhance recommended") == 1);
+        TEST("P2-2: --validation-bundle empty string alongside --output fails closed (exit 1) with no output written",
+             run("--input " + q(pop) + " --target pa5x --output " + q(dir / "vb_empty_out.mid") +
+                 " --validation-bundle \"\"") == 1 &&
+             !fs::exists(dir / "vb_empty_out.mid"));
         TEST("--listening-record missing file fails closed (exit 1)",
              run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad3") +
                  " --listening-record " + q(dir / "missing_listening.json")) == 1);
@@ -431,7 +435,8 @@ int main(int argc, char** argv) {
              prepNotes.find("OFFLINE_STAGING_ONLY") != std::string::npos &&
              prepNotes.find("NO_HARDWARE_WRITES") != std::string::npos &&
              prepNotes.find("HARDWARE_AUTHORIZATION_REQUIRED") != std::string::npos &&
-             tmplJson.find("\"templatePlaceholder\": true") != std::string::npos);
+             tmplJson.find("\"is_template\": true") != std::string::npos &&
+             tmplJson.find("\"overall_rating_1_to_5\": null") != std::string::npos);
 
         // Template placeholder cannot be blindly fed back to --listening-record
         TEST("unfilled LISTENING_RECORD_TEMPLATE.json is rejected fail-closed by --listening-record",

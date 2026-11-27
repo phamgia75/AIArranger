@@ -270,7 +270,7 @@ std::string formatOperatorPrepNotesMd(
         o << " — perform blind A/B listening comparing Candidate B (Mode A Faithful) vs. Candidate C (Mode B Enhanced)";
     }
     o << ".\n";
-    o << "6. Record honest musician ratings and defects in `LISTENING_RECORD_TEMPLATE.json`, set `\"templatePlaceholder\": false` and `\"hardwareVerified\": true`, save to a new file (e.g., `listening_record_completed.json`), and re-run `aiarranger-convert --validation-bundle ... --listening-record listening_record_completed.json` to compute the hardware-verified Acceptance Gate grade.\n";
+    o << "6. Record honest musician ratings and defects in `LISTENING_RECORD_TEMPLATE.json`, set `\"is_template\": false`, `\"hardware_verified\": true`, and `\"overall_rating_1_to_5\"` (`1..5`), save to a new file (e.g., `listening_record_completed.json`), and re-run `aiarranger-convert --validation-bundle ... --listening-record listening_record_completed.json` to compute the hardware-verified Acceptance Gate grade (the completed JSON is also directly compatible with `calibrate_analyzer_human.py`).\n";
     return o.str();
 }
 
@@ -770,6 +770,7 @@ int main(int argc, char** argv) {
     std::string outBundleDir, batchDir, outDir, manifestPath, unresolvedReportPath;
     std::string enhanceMode = "off";
     std::string analyzeQualityArg, listeningRecordPath, validationBundleDir;
+    bool hasValidationBundle = false;
     MapOptions opt;
     bool rawModeRequested = false;
     bool explicitAutoSoundMap = false;
@@ -860,9 +861,22 @@ int main(int argc, char** argv) {
                 std::cerr << "invalid flags: --enhance must be 'off' or 'recommended' (got '" << v << "')\n";
                 return 1;
             }
-        } else if (a == "--analyze-musical-quality") analyzeQualityArg = v;
-        else if (a == "--listening-record") listeningRecordPath = v;
-        else if (a == "--validation-bundle") validationBundleDir = v;
+        } else if (a == "--analyze-musical-quality") {
+            if (v.empty()) {
+                std::cerr << "invalid flags: --analyze-musical-quality path must be non-empty\n";
+                return 1;
+            }
+            analyzeQualityArg = v;
+        } else if (a == "--listening-record") {
+            if (v.empty()) {
+                std::cerr << "invalid flags: --listening-record path must be non-empty\n";
+                return 1;
+            }
+            listeningRecordPath = v;
+        } else if (a == "--validation-bundle") {
+            hasValidationBundle = true;
+            validationBundleDir = v;
+        }
         else if (a == "--ppqn") {
             try {
                 size_t used = 0;
@@ -939,9 +953,14 @@ int main(int argc, char** argv) {
     }
 
     // ── Mode dispatch & fail-closed flag combination validation ──
+    if (hasValidationBundle && validationBundleDir.empty()) {
+        std::cerr << "invalid flags: --validation-bundle directory must be non-empty\n";
+        return 1;
+    }
+
     if (!compareA.empty() || !compareB.empty()) {
         if (compareA.empty() || compareB.empty() || !input.empty() || !batchDir.empty() ||
-            !outBundleDir.empty() || !validationBundleDir.empty() ||
+            !outBundleDir.empty() || hasValidationBundle ||
             !analyzeQualityArg.empty() || !listeningRecordPath.empty()) {
             return usage();
         }
@@ -955,7 +974,7 @@ int main(int argc, char** argv) {
             std::cerr << "invalid flags: --batch-dir and --out-dir must both be specified\n";
             return 1;
         }
-        if (!input.empty() || !output.empty() || !outBundleDir.empty() || !validationBundleDir.empty() ||
+        if (!input.empty() || !output.empty() || !outBundleDir.empty() || hasValidationBundle ||
             !analyzeQualityArg.empty() || !listeningRecordPath.empty() ||
             !manifestPath.empty() || !unresolvedReportPath.empty() ||
             !reportPath.empty() || !templatePath.empty() || !dumpSoundMapPath.empty() ||
@@ -972,15 +991,15 @@ int main(int argc, char** argv) {
             std::cerr << "invalid flags: --strict-batch and --flat require --batch-dir\n";
             return 1;
         }
-        if (!validationBundleDir.empty() && !outBundleDir.empty()) {
+        if (hasValidationBundle && !outBundleDir.empty()) {
             std::cerr << "invalid flags: --validation-bundle cannot be combined with --out-bundle\n";
             return 1;
         }
         if (input.empty()) return usage();
-        if (output.empty() && outBundleDir.empty() && validationBundleDir.empty() && analyzeQualityArg.empty()) {
+        if (output.empty() && outBundleDir.empty() && !hasValidationBundle && analyzeQualityArg.empty()) {
             return usage();
         }
-        if (outBundleDir.empty() && validationBundleDir.empty() && analyzeQualityArg.empty() && target.empty()) {
+        if (outBundleDir.empty() && !hasValidationBundle && analyzeQualityArg.empty() && target.empty()) {
             return usage();
         }
         if (!target.empty() && target != "pa5x") {
@@ -993,7 +1012,7 @@ int main(int argc, char** argv) {
         std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --enhance recommended\n";
         return 1;
     }
-    if (!listeningRecordPath.empty() && validationBundleDir.empty()) {
+    if (!listeningRecordPath.empty() && !hasValidationBundle) {
         std::cerr << "invalid flags: --listening-record requires --validation-bundle <dir>\n";
         return 1;
     }
