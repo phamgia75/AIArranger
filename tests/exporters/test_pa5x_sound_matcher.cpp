@@ -1,19 +1,25 @@
 // Track B Q4a unit tests for standalone Korg Pa5X Factory Catalog &
 // Read-Only Target-KST Sound Matcher. 100% synthetic fixtures, zero private data.
 
-// Dual-include order verification (Order B: pa5x_sound_matcher.h -> timbre_profiler.h).
+// Dual-include order verification (Order B: pa5x_sound_matcher.h -> timbre_profiler.h + Track A read-only adapter).
 #include "exporters/korg/pa5x_sound_matcher.h"
+#include "exporters/korg/target_kst_drum_adapter.h"
 #include "exporters/korg/timbre_profiler.h"
 #include "exporters/korg/cv_splitter.h"
 #include "exporters/korg/megavoice_sanitizer.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 using namespace ai_arranger::exporters::korg;
 using namespace ai_arranger::exporters::korg::quality;
@@ -603,6 +609,215 @@ int main() {
                  parsed.sounds.count(11) == 1 && parsed.sounds.at(11).pc == 0 &&
                  parsed.sounds.count(15) == 1 && parsed.sounds.at(15).msb == 121 &&
                  parsed.sounds.at(15).lsb == 13 && parsed.sounds.at(15).pc == 49);
+        }
+    }
+
+    // ── 10. Wave-3 Q4-Wire: Track A Read-Only Bridge (`target_kst_drum_adapter.h`) ──
+    {
+        using namespace ai_arranger::media;
+
+        auto makeKeyMap = [](const std::string& bank, uint32_t num, bool addBank2) {
+            graph::DrumKitKeyMap km{};
+            km.sound = graph::ResourceId{false, bank, graph::Kind::Sound, num};
+            km.kindChunkId = 0x10050038u;
+
+            auto setRamKey = [&](uint8_t note, uint8_t famByte, const char* sampleName, uint8_t choke, uint8_t maxVel) {
+                auto& ks = km.keys[note];
+                ks.midiNote = note;
+                ks.layerCount = 2;
+                ks.occupancy = graph::DrumKeyOccupancy::RamPopulated;
+                ks.velTop = {64, maxVel, 0, 0, 0, 0, 0, 0};
+                ks.advisoryExclusiveGroup = choke;
+                ks.advisoryPan = 64;
+
+                graph::DrumKitLayerSummary l0{};
+                l0.layerIndex = 0; l0.sourceBank = 1; l0.isRam = true; l0.resolved = true;
+                l0.velLo = 1; l0.velHi = 64;
+                l0.advisoryDrumSampleName = sampleName;
+                l0.advisoryDrumFamilyByte = famByte;
+                graph::DrumKitLayerSummary l1 = l0;
+                l1.layerIndex = 1; l1.velLo = 65; l1.velHi = maxVel;
+                ks.layers = {l0, l1};
+
+                km.activeKeyMask.set(note);
+                km.ramKeyMask.set(note);
+                km.ramDrumLayers += 2;
+                km.totalLayers += 2;
+            };
+
+            // Core GM anchors: Kick 35/36, Snare 38/40, HiHat 42/44/46, Crash 49, Ride 51
+            setRamKey(35, 0, "Acoustic_Kick_Lo", 0, 127);
+            setRamKey(36, 0, "Acoustic_Kick", 0, 127);
+            setRamKey(38, 1, "Acoustic_Snare", 0, 127);
+            setRamKey(40, 1, "Rim_Snare", 0, 127);
+            setRamKey(42, 2, "Closed_Hat", 1, 120);
+            setRamKey(44, 2, "Pedal_Hat", 1, 120);
+            setRamKey(46, 2, "Open_Hat", 1, 120);
+            setRamKey(49, 4, "Crash_Cym", 0, 127);
+            setRamKey(51, 4, "Ride_Cym", 0, 127);
+
+            // ROM(idx==0) placeholder on key 70 MUST be excluded by adapter!
+            {
+                auto& ph = km.keys[70];
+                ph.midiNote = 70;
+                ph.layerCount = 1;
+                ph.occupancy = graph::DrumKeyOccupancy::RomIndexZeroPlaceholder;
+                ph.velTop[0] = 127;
+            }
+
+            if (addBank2) {
+                km.nonRamBank2LayerCount = 1;
+                km.nonRamDrumLayers = 1;
+            }
+            return km;
+        };
+
+        selective::TargetOccupancyMap occMap = selective::TargetOccupancyMap::makeEmpty(true);
+
+        // 1. In-spec melodic slot USER02/5
+        {
+            selective::OccupiedSlotEntry e{};
+            e.address = selective::SlotAddress{false, 2, 5};
+            e.displayName = "Synthetic Warm Rhodes EP";
+            e.sourceContainer = "SOUND/USER02.PCG";
+            occMap.addOccupiedSlot(std::move(e));
+        }
+        // 2. Comparable in-spec GM-aligned USERDK01/2
+        const selective::SlotAddress dkGoodAddr{true, 1, 2};
+        {
+            selective::OccupiedSlotEntry e{};
+            e.address = dkGoodAddr;
+            e.displayName = "Synthetic Studio Pop Drum Kit";
+            e.sourceContainer = "SOUND/USERDK01.PCG";
+            e.equivalence.isDrumKit = true;
+            occMap.addOccupiedSlot(std::move(e));
+            occMap.drumKeyMaps.emplace(dkGoodAddr, makeKeyMap("USERDK01", 2, false));
+        }
+        // 3. Bank-2 (0x02) unverified USERDK01/4 — MUST fail closed!
+        const selective::SlotAddress dkBank2Addr{true, 1, 4};
+        {
+            selective::OccupiedSlotEntry e{};
+            e.address = dkBank2Addr;
+            e.displayName = "Synthetic Bank2 Brush Kit";
+            e.sourceContainer = "SOUND/USERDK01.PCG";
+            e.equivalence.isDrumKit = true;
+            e.equivalence.hasNonRamBank2Layers = true;
+            occMap.addOccupiedSlot(std::move(e));
+            occMap.drumKeyMaps.emplace(dkBank2Addr, makeKeyMap("USERDK01", 4, true));
+        }
+        // 4. Out-of-spec USERDK07/0 — MUST stay in_spec=false & never produce a UserdkDrumKitKeyMap!
+        const selective::SlotAddress dkOosAddr{true, 7, 0};
+        {
+            selective::OccupiedSlotEntry e{};
+            e.address = dkOosAddr;
+            e.displayName = "Synthetic OutOfSpec Rock Kit";
+            e.sourceContainer = "SOUND/USERDK07.PCG";
+            e.equivalence.isDrumKit = true;
+            occMap.addOccupiedSlot(std::move(e));
+            occMap.drumKeyMaps.emplace(dkOosAddr, makeKeyMap("USERDK07", 0, false));
+        }
+        occMap.rebuildIndexesAndKey();
+
+        const auto bridge = buildTargetKstBridge(occMap);
+        const auto entries = buildTargetSoundEntries(occMap);
+        TEST("Track A adapter: read-only bridge builds catalog & skips Bank-2 and OOS USERDK07 fail-closed",
+             kTargetKstAdapterReadOnly &&
+             bridge.valid &&
+             entries.size() == 4 &&
+             bridge.drum_key_maps.size() == 1 &&
+             bridge.drum_kits_skipped_bank2 == 1 &&
+             bridge.drum_kits_skipped_out_of_spec == 1);
+
+        // Verify Bank-2 kit got NO fabricated gm_alignment_score or family_bitmask, while clean USERDK01/2 got gm=100 & DrumKit bitmask
+        bool goodEnriched = false, bank2Unfabricated = false, oosMarkedFalse = false;
+        for (const auto& te : bridge.catalog.entries) {
+            if (te.msb == 120 && te.lsb == 64 && te.pc == 2) {
+                goodEnriched = te.in_spec && te.gm_alignment_score.has_value() && *te.gm_alignment_score == 100 &&
+                               te.family_bitmask.has_value() && (*te.family_bitmask & timbreFamilyBit(TimbreFamily::DrumKit)) != 0;
+            }
+            if (te.msb == 120 && te.lsb == 64 && te.pc == 4) {
+                bank2Unfabricated = !te.gm_alignment_score.has_value() && !te.family_bitmask.has_value();
+            }
+            if (te.msb == 120 && te.lsb == 70 && te.pc == 0) {
+                oosMarkedFalse = !te.in_spec;
+            }
+        }
+        TEST("Track A adapter: clean USERDK01/2 enriched (gm=100), Bank-2 unfabricated, USERDK07 in_spec=false",
+             goodEnriched && bank2Unfabricated && oosMarkedFalse);
+
+        // Verify findComparableTargetDrumKeyMap & Q3 remapDrumTrack integration
+        const auto goodKm = findComparableTargetDrumKeyMap(occMap, SoundRef{120, 64, 2});
+        const auto bank2Km = findComparableTargetDrumKeyMap(occMap, SoundRef{120, 64, 4});
+        const auto oosKm = findComparableTargetDrumKeyMap(occMap, SoundRef{120, 70, 0});
+        TEST("Track A adapter: comparable USERDK01/2 returns UserdkDrumKitKeyMap excluding ROM(idx==0) key 70; Bank-2 & OOS return nullopt",
+             goodKm.has_value() && goodKm->isUserdkTarget() &&
+             goodKm->hasKey(36) && goodKm->familyOf(36) == 'B' &&
+             goodKm->hasKey(42) && goodKm->keyInfo(42).choke_group == 1 && goodKm->keyInfo(42).effective_max_vel == 120 &&
+             !goodKm->hasKey(70) && goodKm->keyInfo(70).is_rom_zero_placeholder &&
+             !bank2Km.has_value() && !oosKm.has_value());
+
+        // Feed the bridged UserdkDrumKitKeyMap directly into Q3 remapDrumTrack()
+        if (goodKm.has_value()) {
+            const std::vector<NoteSpan> testHits = {
+                {0, 120, 36, 110, false},  // exact populated kick
+                {240, 360, 13, 95, false}, // Revo!/XG low key -> remapped to populated key in goodKm!
+                {480, 600, 42, 127, false} // populated hi-hat with sub-max ceiling 120
+            };
+            const auto dr = remapDrumTrack(testHits, DrumKitCategory::StandardPopRock, *goodKm, true, 480);
+            bool allInTarget = !dr.notes.empty();
+            for (const auto& n : dr.notes) {
+                if (!goodKm->hasKey(n.pitch)) allInTarget = false;
+            }
+            TEST("Track A adapter -> Q3 remapDrumTrack: 100% surviving notes land on populated USERDK01/2 keys",
+                 allInTarget && dr.stats.passthrough_notes >= 2);
+        }
+
+        // Read-only disk folder fail-closed check (missing folder & symlink refused, valid empty dir succeeds with 0 mutation)
+        {
+            namespace fs = std::filesystem;
+            const fs::path tmpDir = fs::temp_directory_path() / ("aiarr_q4_adapter_" + std::to_string(::getpid()));
+            fs::remove_all(tmpDir);
+            fs::create_directories(tmpDir / "Valid.KST" / "SOUND");
+            const auto missing = inspectTargetKstReadOnly(tmpDir / "Missing.KST");
+            const auto okEmpty = inspectTargetKstReadOnly(tmpDir / "Valid.KST");
+            bool symlinkRefused = true;
+#if !defined(_WIN32)
+            std::error_code ec;
+            fs::create_directory_symlink(tmpDir / "Valid.KST", tmpDir / "Link.KST", ec);
+            if (!ec) {
+                const auto linkRes = inspectTargetKstReadOnly(tmpDir / "Link.KST");
+                symlinkRefused = !linkRes.valid;
+            }
+#endif
+            TEST("Track A adapter disk read-only: missing path & symlink fail closed, valid KST succeeds with zero mutation",
+                 !missing.valid && okEmpty.valid && symlinkRefused &&
+                 fs::is_empty(tmpDir / "Valid.KST" / "SOUND"));
+            fs::remove_all(tmpDir);
+        }
+
+        // Audit P2-3: NaN / +Inf / -Inf gmAlignmentScore fail-closed clamping (0 UBSan issues)
+        {
+            auto baseProf = graph::profileDrumKit(makeKeyMap("USERDK01", 2, false));
+            const double badVals[3] = {
+                std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity()
+            };
+            bool allNonFiniteSafe = true;
+            for (double bv : badVals) {
+                auto p = baseProf;
+                p.gmAlignmentScore = bv;
+                const auto v = buildUserdkSummaryView(p, "SYNTH_NONFINITE");
+                const auto km = buildComparableUserdkKeyMap(p, "SYNTH_NONFINITE");
+                const uint8_t pct = target_adapter_detail::clampGmScorePercent(bv);
+                if (!std::isfinite(v.gm_alignment_score) || v.gm_alignment_score != 0.0 ||
+                    !km.has_value() || !std::isfinite(km->gmAlignmentScore()) || km->gmAlignmentScore() != 0.0 ||
+                    pct != 0u) {
+                    allNonFiniteSafe = false;
+                }
+            }
+            TEST("P2-3: NaN/+Inf/-Inf gmAlignmentScore fails closed deterministically to 0.0 (0 UBSan issues)",
+                 allNonFiniteSafe);
         }
     }
 

@@ -1,5 +1,7 @@
 #include "exporters/korg/genos_to_korg.h"
 #include "exporters/korg/cv_splitter.h"
+#include "exporters/korg/pa5x_sound_matcher.h"
+#include "exporters/korg/timbre_profiler.h"
 
 #include <algorithm>
 #include <cctype>
@@ -222,6 +224,226 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         return korgChannelFor(routed);
     };
 
+    // ── Stage 5 (Q4-Wire): Timbre Profiler -> Pa5X Sound Matcher (post-swap aware, fail-closed) ──
+    // Runs whenever sound matching is enabled OR when caller requests `capture_soundmap_dump`
+    // (single source of truth so `--dump-soundmap` can NEVER diverge from SMF Bank/PC emission!).
+    std::map<uint8_t, SoundRef> effectiveSounds = opt.sounds;
+    std::map<std::pair<SectionType, uint8_t>, SoundRef> effectiveElementSounds = opt.element_sounds;
+    std::map<uint8_t, quality::TrackSoundMatch> matchBySrcCh;
+    std::map<uint8_t, quality::TrackSoundMatch> matchByKorgCh;
+    std::map<std::pair<SectionType, uint8_t>, std::string> elementSoundLabels;
+    quality::StyleSoundMatchResult stage5StyleMatch;
+    quality::SoundMatchOptions stage5MatchOpt{};
+
+    if (opt.enable_sound_matching || opt.capture_soundmap_dump) {
+        struct ProfileAccum {
+            uint8_t src_ch = 0;
+            uint8_t korg_ch = 0xFF;
+            std::string name;
+            uasf::TrackRole role = uasf::TrackRole::Accompaniment;
+            int dominant_msb = -1;
+            int dominant_lsb = -1;
+            int dominant_pc = -1;
+            std::map<std::tuple<int, int, int>, uint32_t> voice_freq;
+            std::map<SectionType, std::tuple<int, int, int>> element_voices;
+            std::vector<quality::NoteSpan> notes;
+            uint64_t total_bars = 0;
+            uint32_t ppqn = 480;
+            uint64_t bar_ticks = 1920;
+        };
+
+        const uint32_t tempoMpqn = r.style.mpqn ? r.style.mpqn : 500000u;
+        std::map<uint8_t, ProfileAccum> bySrc;
+        std::set<SectionType> seenProfiledSectionTypes;
+        for (const auto& sec : style.sections) {
+            const bool sectionExportable = (korgMarkerFor(sec.type, opt.break_policy) != nullptr && sec.bars > 0);
+            // Match the exporter's first-wins duplicate-section-type rule (P2-1):
+            // never let a dropped duplicate SectionType overwrite an already-recorded element voice or pollute profiles.
+            if (sectionExportable && !seenProfiledSectionTypes.insert(sec.type).second) {
+                continue;
+            }
+            const uint32_t secPpqn = sec.resolution ? sec.resolution : (style.resolution ? style.resolution : 480u);
+            const uint64_t sNum = sec.beats_per_bar ? uint64_t{sec.beats_per_bar} : 4u;
+            const uint64_t sDen = sec.beat_note ? uint64_t{sec.beat_note} : 4u;
+            const uint64_t barTicks64 = std::max<uint64_t>(1u, (uint64_t{secPpqn} * 4u * sNum) / sDen);
+            const uint64_t secBars64 = std::max<uint64_t>(1u, uint64_t{sec.bars});
+            const uint64_t secEnd64 = (secBars64 > uint64_t{UINT32_MAX} / barTicks64)
+                                          ? uint64_t{UINT32_MAX}
+                                          : (secBars64 * barTicks64);
+
+            for (const auto& tr : sec.tracks) {
+                const uint8_t srcCh = tr.midi_channel;
+                const uint8_t routed = resolveRoutedChannel(tr, opt);
+                const uint8_t kch = resolveKorgCh(routed);
+                const uasf::TrackRole effRole = (kch == kDrumCh) ? uasf::TrackRole::Drum
+                                              : (kch == kPercCh) ? uasf::TrackRole::Percussion
+                                                                 : tr.role;
+
+                auto [it, fresh] = bySrc.try_emplace(srcCh);
+                ProfileAccum& acc = it->second;
+                if (fresh) {
+                    acc.src_ch = srcCh;
+                    acc.korg_ch = kch;
+                    acc.name = tr.name;
+                    acc.role = effRole;
+                    acc.ppqn = secPpqn;
+                    acc.bar_ticks = barTicks64;
+                } else if (acc.name.empty() && !tr.name.empty()) {
+                    acc.name = tr.name;
+                }
+
+                const auto voice = quality::extractSectionYamahaVoice(tr.events);
+                const auto [vMsb, vLsb, vPc] = voice;
+                if (vMsb >= 0 || vLsb >= 0 || vPc >= 0) {
+                    if (sectionExportable) {
+                        // First-wins per (srcCh, SectionType): never silently clobber an already-recorded element voice.
+                        acc.element_voices.try_emplace(sec.type, voice);
+                    }
+                    if (vPc >= 0) {
+                        acc.voice_freq[voice]++;
+                        if (acc.dominant_pc < 0) {
+                            acc.dominant_msb = vMsb;
+                            acc.dominant_lsb = vLsb;
+                            acc.dominant_pc = vPc;
+                        }
+                    }
+                }
+
+                const auto spans = quality::extractNoteSpansFromEvents(tr.events, static_cast<uint32_t>(secEnd64));
+                const uint64_t offset64 = (acc.bar_ticks > 0 && acc.total_bars > UINT64_MAX / acc.bar_ticks)
+                                              ? UINT64_MAX
+                                              : (acc.total_bars * acc.bar_ticks);
+                for (auto ns : spans) {
+                    const uint64_t on64 = (offset64 >= uint64_t{UINT32_MAX} - ns.on_tick)
+                                              ? uint64_t{UINT32_MAX}
+                                              : (offset64 + uint64_t{ns.on_tick});
+                    const uint64_t off64 = (offset64 >= uint64_t{UINT32_MAX} - ns.off_tick)
+                                               ? uint64_t{UINT32_MAX}
+                                               : (offset64 + uint64_t{ns.off_tick});
+                    ns.on_tick = static_cast<uint32_t>(on64);
+                    ns.off_tick = static_cast<uint32_t>(off64);
+                    acc.notes.push_back(ns);
+                }
+                if (acc.total_bars <= UINT64_MAX - secBars64) {
+                    acc.total_bars += secBars64;
+                } else {
+                    acc.total_bars = UINT64_MAX;
+                }
+            }
+        }
+
+        std::vector<quality::TrackTimbreProfile> profiles;
+        profiles.reserve(bySrc.size());
+        for (const auto& [srcCh, acc] : bySrc) {
+            int bestMsb = acc.dominant_msb;
+            int bestLsb = acc.dominant_lsb;
+            int bestPc = acc.dominant_pc;
+            uint32_t bestCount = 0;
+            for (const auto& [voice, cnt] : acc.voice_freq) {
+                if (cnt > bestCount) {
+                    bestCount = cnt;
+                    std::tie(bestMsb, bestLsb, bestPc) = voice;
+                }
+            }
+            quality::TimbreProfileOptions topt{};
+            topt.ppqn = acc.ppqn;
+            topt.tempo_mpqn = tempoMpqn;
+            topt.bar_ticks = static_cast<uint32_t>(std::min<uint64_t>(acc.bar_ticks, UINT32_MAX));
+            topt.bars = static_cast<uint32_t>(std::min<uint64_t>(acc.total_bars, UINT32_MAX));
+            profiles.push_back(quality::profileTrackTimbre(
+                bestMsb, bestLsb, bestPc, acc.name, acc.role, acc.notes,
+                acc.element_voices, srcCh, acc.korg_ch, topt));
+        }
+
+        quality::TargetSoundCatalogView localTargetCatalog;
+        const quality::TargetSoundCatalogView* targetCatalogPtr = opt.target_sound_catalog;
+        if (!targetCatalogPtr && opt.target_sounds != nullptr) {
+            localTargetCatalog.entries = *opt.target_sounds;
+            targetCatalogPtr = &localTargetCatalog;
+        }
+
+        stage5MatchOpt.enable_factory_catalog = opt.enable_sound_matching;
+        stage5MatchOpt.prefer_target_user_sounds = opt.enable_sound_matching && opt.prefer_target_user_sounds;
+        stage5MatchOpt.min_auto_select_score = std::max<uint8_t>(opt.min_sound_match_score, uint8_t{40u});
+
+        stage5StyleMatch = quality::matchStyleSounds(
+            profiles, opt.sounds, targetCatalogPtr, stage5MatchOpt, opt.element_sounds);
+
+        if (opt.enable_sound_matching) {
+            rep.sound_match_stats.unsupported += stage5StyleMatch.target_entries_skipped_oos;
+            if (stage5StyleMatch.target_entries_skipped_oos > 0) {
+                addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_TARGET_KST_OUT_OF_SPEC_SKIPPED");
+            }
+            if (stage5StyleMatch.target_partial_inspect) {
+                addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_TARGET_KST_PARTIAL_INSPECT");
+                if (!stage5StyleMatch.target_partial_notice.empty()) {
+                    rep.warnings.push_back("Target KST partial inspect: " + stage5StyleMatch.target_partial_notice);
+                }
+            }
+
+            // Defense-in-depth fail-closed audit:
+            //   1. NEVER auto-select any non-user sound when profile.confidence < 40.
+            //   2. NEVER allow melodic-to-drum (MSB 120 on melodic) or drum-to-melodic (MSB 121 on drum/perc).
+            //   3. Explicit user --sound-map / element_sounds ALWAYS take highest precedence.
+            effectiveSounds = opt.sounds;
+            effectiveElementSounds = opt.element_sounds;
+
+            for (auto& m : stage5StyleMatch.tracks) {
+                if (m.korg_ch == 0xFF) continue;
+                const bool isDrumKch = (m.korg_ch == kDrumCh || m.korg_ch == kPercCh);
+
+                if (m.selected.has_value() && m.selected_origin != quality::MatchOrigin::UserSoundMap) {
+                    const bool lowConf = (m.profile.confidence < 40u);
+                    const bool msbOk = isDrumKch ? (m.selected->msb == 120u) : (m.selected->msb == 121u);
+                    if (lowConf || !msbOk) {
+                        m.selected.reset();
+                        m.selected_epistemic_tag.clear();
+                        if (lowConf) addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_LOW_CONFIDENCE_REJECTED");
+                        if (!msbOk) addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_CROSS_FAMILY_REJECTED");
+                    }
+                }
+
+                if (m.selected.has_value() &&
+                    (m.selected_origin == quality::MatchOrigin::UserSoundMap || !effectiveSounds.count(m.korg_ch))) {
+                    effectiveSounds[m.korg_ch] = *m.selected;
+                }
+
+                for (auto it = m.element_selected.begin(); it != m.element_selected.end(); ) {
+                    const SectionType st = it->first;
+                    const SoundRef& elRef = it->second;
+                    const bool userEl = opt.element_sounds.count({st, m.korg_ch}) > 0;
+                    const bool msbOk = isDrumKch ? (elRef.msb == 120u) : (elRef.msb == 121u);
+                    if (!userEl && !msbOk) {
+                        addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_CROSS_FAMILY_REJECTED");
+                        it = m.element_selected.erase(it);
+                        continue;
+                    }
+                    if (!userEl && !effectiveElementSounds.count({st, m.korg_ch})) {
+                        effectiveElementSounds[{st, m.korg_ch}] = elRef;
+                        if (const auto cit = m.element_candidates.find(st); cit != m.element_candidates.end()) {
+                            elementSoundLabels[{st, m.korg_ch}] = cit->second.display_name;
+                        }
+                    }
+                    ++it;
+                }
+
+                matchBySrcCh[m.profile.src_ch] = m;
+                auto kit = matchByKorgCh.find(m.korg_ch);
+                if (kit == matchByKorgCh.end() ||
+                    m.selected_origin == quality::MatchOrigin::UserSoundMap ||
+                    (m.selected.has_value() && !kit->second.selected.has_value())) {
+                    matchByKorgCh[m.korg_ch] = m;
+                }
+            }
+
+            // Keep `stage5StyleMatch` resolved maps synchronized with the audited `effective*` maps.
+            stage5StyleMatch.resolved_sounds = effectiveSounds;
+            stage5StyleMatch.element_sounds = effectiveElementSounds;
+        }
+    }
+
+    std::set<std::pair<SectionType, uint8_t>> emittedElementSwitches;
+
     std::map<uint8_t, TrackRow> rows;
     std::set<std::pair<uint8_t, uint8_t>> mergeWarned;
     std::set<SectionType> exportedSectionTypes;
@@ -415,9 +637,32 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                         secVoice.msb, secVoice.lsb, secVoice.pc, tr.name, drumRole);
                     const bool isRevo = (secVoice.msb == 62 && secVoice.lsb == 100);
                     quality::FactoryPa5xDrumKitKeyMap factoryKit(cat);
+                    // P1-2: Scope target_drum_key_map strictly to kDrumCh, and target_perc_key_map strictly to kPercCh.
+                    // When target_drum_key_maps (Track A read-only bridge) is provided, bind each channel independently
+                    // ONLY when that channel's own resolved sound points to a comparable target USERDK kit.
+                    const quality::IDrumKitKeyMap* resolvedTargetKit = nullptr;
+                    auto lookupBridgeKit = [&](uint8_t ch) -> const quality::IDrumKitKeyMap* {
+                        if (!opt.target_drum_key_maps) return nullptr;
+                        const SoundRef* refPtr = nullptr;
+                        if (const auto elit = effectiveElementSounds.find({sec.type, ch});
+                            elit != effectiveElementSounds.end()) {
+                            refPtr = &elit->second;
+                        } else if (const auto sit = effectiveSounds.find(ch); sit != effectiveSounds.end()) {
+                            refPtr = &sit->second;
+                        }
+                        if (!refPtr) return nullptr;
+                        const auto kitIt = opt.target_drum_key_maps->find(
+                            std::make_tuple(refPtr->msb, refPtr->lsb, refPtr->pc));
+                        return kitIt == opt.target_drum_key_maps->end() ? nullptr : &kitIt->second;
+                    };
+                    if (kch == kDrumCh) {
+                        resolvedTargetKit = opt.target_drum_key_map ? opt.target_drum_key_map : lookupBridgeKit(kDrumCh);
+                    } else if (kch == kPercCh) {
+                        resolvedTargetKit = opt.target_perc_key_map ? opt.target_perc_key_map : lookupBridgeKit(kPercCh);
+                    }
                     const quality::IDrumKitKeyMap& targetKit =
-                        opt.target_drum_key_map ? *opt.target_drum_key_map
-                                                : static_cast<const quality::IDrumKitKeyMap&>(factoryKit);
+                        resolvedTargetKit ? *resolvedTargetKit
+                                          : static_cast<const quality::IDrumKitKeyMap&>(factoryKit);
                     const auto dr = quality::remapDrumTrack(boundedNotes, cat, targetKit, isRevo, dst);
                     rep.drum_notes_remapped_exact += dr.stats.passthrough_notes;
                     rep.drum_notes_remapped_approx += dr.stats.remapped_notes;
@@ -567,13 +812,24 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 }
             }
 
-            std::map<uint8_t, SoundRef> sounds = opt.sounds;
-            for (const auto& [key, s] : opt.element_sounds) {
+            std::map<uint8_t, SoundRef> sounds = effectiveSounds;
+            for (const auto& [key, s] : effectiveElementSounds) {
                 if (key.first == sec.type) {
                     sounds[key.second] = s;
-                    rep.element_sounds.push_back(bucket.marker + " " + korgTrackName(key.second) + ": MSB " +
-                                                 std::to_string(s.msb) + " LSB " + std::to_string(s.lsb) +
-                                                 " PC " + std::to_string(s.pc));
+                    emittedElementSwitches.insert(key);
+                    const bool isUserEl = opt.element_sounds.count(key) > 0;
+                    std::string line = bucket.marker + " " + korgTrackName(key.second) + ": MSB " +
+                                       std::to_string(s.msb) + " LSB " + std::to_string(s.lsb) +
+                                       " PC " + std::to_string(s.pc);
+                    if (!isUserEl) {
+                        if (const auto lit = elementSoundLabels.find(key);
+                            lit != elementSoundLabels.end() && !lit->second.empty()) {
+                            line += " (" + lit->second + ", auto match)";
+                        } else {
+                            line += " (auto match)";
+                        }
+                    }
+                    rep.element_sounds.push_back(std::move(line));
                 }
             }
             for (const auto& [kch, s] : sounds) {
@@ -601,13 +857,87 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         rep.track_edit_advice.push_back(std::move(adv));
     }
 
+    rep.resolved_sounds = effectiveSounds;
+    rep.resolved_element_sounds = effectiveElementSounds;
+    rep.sound_match_stats.element_voice_switches = static_cast<uint32_t>(emittedElementSwitches.size());
+
     for (auto& [ch, row] : rows) {
         auto s = row.korg_ch == 0xFF ? opt.sounds.end() : opt.sounds.find(row.korg_ch);
-        if (row.korg_ch == 0xFF) row.target = "not exported";
-        else if (s != opt.sounds.end())
-            row.target = "MSB " + std::to_string(s->second.msb) + " LSB " + std::to_string(s->second.lsb) +
-                         " PC " + std::to_string(s->second.pc) + " (user map)";
-        else row.target = "UNRESOLVED";
+        if (row.korg_ch == 0xFF) {
+            row.target = "not exported";
+        } else {
+            ++rep.sound_match_stats.tracks_evaluated;
+            if (s != opt.sounds.end()) {
+                row.target = "MSB " + std::to_string(s->second.msb) + " LSB " + std::to_string(s->second.lsb) +
+                             " PC " + std::to_string(s->second.pc) + " (user map)";
+                ++rep.sound_match_stats.user_overrides;
+            } else if (opt.enable_sound_matching) {
+                const quality::TrackSoundMatch* mPtr = nullptr;
+                if (const auto mit = matchBySrcCh.find(ch); mit != matchBySrcCh.end()) {
+                    mPtr = &mit->second;
+                } else if (const auto kit = matchByKorgCh.find(row.korg_ch); kit != matchByKorgCh.end()) {
+                    mPtr = &kit->second;
+                }
+
+                if (mPtr && row.family == "Unidentified" &&
+                    mPtr->profile.inferred.family != quality::TimbreFamily::Unknown &&
+                    mPtr->profile.confidence >= 40u) {
+                    row.family = quality::timbreFamilyName(mPtr->profile.inferred.family);
+                }
+
+                if (mPtr && mPtr->selected.has_value()) {
+                    const SoundRef& sel = *mPtr->selected;
+                    const bool isDrumKch = (row.korg_ch == kDrumCh || row.korg_ch == kPercCh);
+                    const bool msbOk = isDrumKch ? (sel.msb == 120u) : (sel.msb == 121u);
+                    if (!msbOk) ++rep.sound_match_stats.cross_family_contaminations;
+                    if (mPtr->profile.confidence < 40u) ++rep.sound_match_stats.low_confidence_auto_selects;
+
+                    std::string candName;
+                    uint8_t candScore = 0;
+                    std::string originLabel = (mPtr->selected_origin == quality::MatchOrigin::TargetKstUserSound)
+                                                  ? "target-kst"
+                                                  : "auto-factory";
+                    for (const auto& c : mPtr->top_candidates) {
+                        if (c.origin == mPtr->selected_origin &&
+                            c.ref.msb == sel.msb && c.ref.lsb == sel.lsb && c.ref.pc == sel.pc) {
+                            candName = c.display_name;
+                            candScore = c.score;
+                            if (c.target_slot.has_value()) {
+                                originLabel += " " + c.target_slot->shortLabel();
+                            }
+                            break;
+                        }
+                    }
+
+                    row.target = "MSB " + std::to_string(sel.msb) + " LSB " + std::to_string(sel.lsb) +
+                                 " PC " + std::to_string(sel.pc) + " (" +
+                                 (candName.empty() ? std::string("Pa5X Sound") : candName) + ", " +
+                                 originLabel + ", score=" + std::to_string(candScore) + ", " +
+                                 mPtr->selected_epistemic_tag + ")";
+
+                    if (candScore >= 85u) ++rep.sound_match_stats.exact_matches;
+                    else ++rep.sound_match_stats.approx_matches;
+                    if (mPtr->selected_origin == quality::MatchOrigin::TargetKstUserSound) {
+                        ++rep.sound_match_stats.target_kst_matches;
+                    } else {
+                        ++rep.sound_match_stats.factory_matches;
+                    }
+                } else {
+                    row.target = "UNRESOLVED";
+                    ++rep.sound_match_stats.unresolved;
+                    if (row.pc >= 120 && row.pc <= 127 && (row.msb <= 0)) {
+                        ++rep.sound_match_stats.unsupported;
+                        addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_UNSUPPORTED_SFX");
+                    } else {
+                        ++rep.sound_match_stats.low_confidence_fallbacks;
+                        addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_UNRESOLVED_LOW_CONFIDENCE");
+                    }
+                }
+            } else {
+                row.target = "UNRESOLVED";
+                ++rep.sound_match_stats.unresolved;
+            }
+        }
 
         const bool drumTrack = row.korg_ch == kDrumCh || row.korg_ch == kPercCh;
         // Keys at C7+ are MegaVoice noise/FX keys on plucked parts; a part with
@@ -631,6 +961,12 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         if (std::none_of(rep.tracks.begin(), rep.tracks.end(), [&](const TrackRow& t) { return t.korg_ch == kch; }))
             rep.warnings.push_back(std::string("sound map sets Korg ") + korgTrackName(kch) +
                                    " but no Genos part plays it (bank/PC still written)");
+    if (opt.capture_soundmap_dump) {
+        const std::string dumpName = opt.soundmap_style_name.empty() ? style.name : opt.soundmap_style_name;
+        rep.soundmap_dump = quality::formatSoundMapTemplateWithRecommendations(
+            rep, stage5StyleMatch, dumpName, stage5MatchOpt);
+    }
+
     if (r.style.elements.empty()) { r.error = "no section maps to a Korg style element"; return r; }
     r.ok = true;
     return r;
@@ -655,7 +991,16 @@ std::string formatReport(const Report& r, const Style& s) {
              std::to_string(t.pc) + " | " + t.family + " -> " + korgTrackName(t.korg_ch) + " | " + t.target);
     line("");
     if (!r.element_sounds.empty()) {
-        line("Element-specific Pa5X sounds (user map, in that element only):");
+        bool anyAuto = false;
+        bool anyUser = false;
+        for (const auto& e : r.element_sounds) {
+            if (e.find("auto match)") != std::string::npos) anyAuto = true;
+            else anyUser = true;
+        }
+        const char* originDesc = (anyAuto && anyUser) ? "user map / auto match"
+                               : anyAuto              ? "auto match"
+                                                      : "user map";
+        line(std::string("Element-specific Pa5X sounds (") + originDesc + ", in that element only):");
         for (const auto& e : r.element_sounds) line("  " + e);
         line("");
     }
@@ -680,7 +1025,7 @@ std::string formatReport(const Report& r, const Style& s) {
     line("Drum/percussion notes outside GM 35..81 (kept; Pa5X kit sound unverified): " +
          std::to_string(nonGm) + (notes.empty() ? "" : " (notes" + notes + ")"));
     line("");
-    line("Quality pipeline (Stages 1-4; offline software-verified only, hardwareVerified=false):");
+    line("Quality pipeline (Stages 1-5; offline software-verified only, hardwareVerified=false):");
     line("  CV splits created: " + std::to_string(r.cv_splits_created) +
          ", shadowed tracks dropped: " + std::to_string(r.shadowed_tracks_dropped));
     line("  MegaVoice/S.Art: " + std::to_string(r.megavoice_tracks_sanitized) + " section-tracks sanitized, " +
@@ -693,6 +1038,17 @@ std::string formatReport(const Report& r, const Style& s) {
     line("  Source-chord normalization: " + std::to_string(r.tracks_source_chord_normalized) +
          " track patterns normalized, " + std::to_string(r.register_violations_fixed) +
          " register/LIL violations fixed");
+    line("  Sound matching (Stage 5, L3=" + r.sound_match_stats.l3_status + "): evaluated=" +
+         std::to_string(r.sound_match_stats.tracks_evaluated) +
+         ", user=" + std::to_string(r.sound_match_stats.user_overrides) +
+         ", exact=" + std::to_string(r.sound_match_stats.exact_matches) +
+         ", approx=" + std::to_string(r.sound_match_stats.approx_matches) +
+         ", target_kst=" + std::to_string(r.sound_match_stats.target_kst_matches) +
+         ", factory=" + std::to_string(r.sound_match_stats.factory_matches) +
+         ", elem_switches=" + std::to_string(r.sound_match_stats.element_voice_switches) +
+         ", low_conf_fallback=" + std::to_string(r.sound_match_stats.low_confidence_fallbacks) +
+         ", unresolved=" + std::to_string(r.sound_match_stats.unresolved) +
+         ", unsupported=" + std::to_string(r.sound_match_stats.unsupported));
     if (!r.track_edit_advice.empty()) {
         line("Pa5X Style Edit advice (per Korg track):");
         for (const auto& a : r.track_edit_advice) {

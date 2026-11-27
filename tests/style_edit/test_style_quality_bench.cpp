@@ -414,8 +414,9 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
     opt.breakYamaha1BarCap = true;
 
     std::vector<bench::BenchResult> allResults;
+    std::vector<bench::BenchResult> rawResults;
     bool allOk = true, allDeterministic = true, allScrubbed = true, allEpistemic = true;
-    bool allCasmActiveOk = true, allM6Honest = true;
+    bool allCasmActiveOk = true, allRawM6Honest = true, allLiveM6Lifted = true;
     for (const char* name : kAll12) {
         const std::string path = fx(name);
         const auto r1 = bench::evaluateStyleFile(path, opt);
@@ -424,10 +425,27 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
         // P2-2: Active-channel CASM preservation must be 100% with zero false STYLE_QUAL_CASM_LOST!
         if (r1.m1.casmPreservationRate < 0.999) allCasmActiveOk = false;
         for (const auto& d : r1.diagnostics) if (d.code == "STYLE_QUAL_CASM_LOST") allCasmActiveOk = false;
-        // P1-2: M6 with 0 resolved sounds must be <= 15.0 and targetKstEvaluated=false, targetKstValid=false, targetKstStatus=NOT_TESTED!
-        if (r1.m6.score > 15.01 || r1.m6.targetKstEvaluated || r1.m6.targetKstValid ||
+        // Q4-Wire live M6 lift: real curated sound matching lifts M6 while keeping targetKstStatus=NOT_TESTED & l3Status=NOT_TESTED!
+        if (r1.m6.score < 70.0 || r1.m6.targetKstEvaluated || r1.m6.targetKstValid ||
             r1.m6.targetKstStatus != bench::BenchStatus::NotTested || r1.l3Status != bench::BenchStatus::NotTested) {
-            allM6Honest = false;
+            allLiveM6Lifted = false;
+        }
+        // P1-2 (raw NegCtrl): MapOptions::raw() with 0 resolved sounds MUST still keep M6 <= 15.01!
+        {
+            const auto rawBytes = readFileBytes(path);
+            const auto pr = Sff1Reader().parseBuffer(rawBytes, name);
+            const auto mr = Sff1ToUasfMapper().map(pr);
+            korg::MapOptions rawOpt = korg::MapOptions::raw();
+            rawOpt.ppqn = opt.targetPpqn;
+            rawOpt.route = korg::routeFromCasm(pr);
+            rawOpt.break_policy = korg::BreakPolicy::Yamaha1BarCap;
+            const auto rawKr = korg::mapToKorg(mr.style, rawOpt);
+            const auto rRaw = bench::evaluateExportedStyleAgainstSty(rawBytes, rawKr.style, rawKr.report, name, opt);
+            if (!rRaw.ok || rRaw.m6.score > 15.01 || rRaw.m6.targetKstEvaluated || rRaw.m6.targetKstValid ||
+                rRaw.m6.targetKstStatus != bench::BenchStatus::NotTested || rRaw.l3Status != bench::BenchStatus::NotTested) {
+                allRawM6Honest = false;
+            }
+            rawResults.push_back(rRaw);
         }
 
         const std::string j1 = bench::toJson(r1);
@@ -443,7 +461,8 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
     }
     TEST("bench: all 12 CC0 torture fixtures evaluate & structurally validate", allOk);
     TEST("P2-2: active-channel CASM preservation = 1.0 across all 12 fixtures (zero false CASM_LOST)", allCasmActiveOk);
-    TEST("P1-2: honest M6 <= 15.0 with 0 resolved sounds & targetKstStatus=NOT_TESTED, l3Status=NOT_TESTED", allM6Honest);
+    TEST("P1-2 (raw NegCtrl): honest M6 <= 15.0 with 0 resolved sounds & targetKstStatus=NOT_TESTED, l3Status=NOT_TESTED", allRawM6Honest);
+    TEST("Q4-Wire (live): M6 >= 70.0 across all 12 fixtures while keeping targetKstStatus=NOT_TESTED & l3Status=NOT_TESTED", allLiveM6Lifted);
     TEST("bench: 100% deterministic byte-identical JSON across repeated runs", allDeterministic);
     TEST("bench: JSON output is path-scrubbed (zero host paths leaked)", allScrubbed);
     TEST("bench: epistemic stamps present (hardwareVerified=false, l3Status=NOT_TESTED)", allEpistemic);
@@ -541,10 +560,16 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
 
     // P1-4 + R2-P1-1/R2-P1-2: CorpusSummary coverage, N/A exclusions, unsupportedFeatures, notTestedItems & activeComposite
     {
+        const auto rawCs = bench::computeCorpusSummary(rawResults);
+        TEST("P1-4 + R2-P1-2 (raw NegCtrl): raw corpus keeps activeComposite < meanComposite < 85.0 & corpusGrade=FAIL",
+             rawCs.fixtureCount == 12 && rawCs.activeComposite < rawCs.meanComposite &&
+             rawCs.meanComposite < 85.0 && rawCs.hardInvariantViolations > 0 && rawCs.corpusGrade == bench::kStatusFail);
+
         const auto cs = bench::computeCorpusSummary(allResults);
-        TEST("P1-4 + R2-P1-2: corpusSummary reports activeComposite < meanComposite < 85.0, M2 N/A excluded (9), notTestedItems, corpusGrade=FAIL",
+        TEST("P1-4 + R2-P1-2 (Q4-Wire live): corpusSummary reports real M6 & composite lift, M2 N/A excluded (9), notTestedItems, corpusGrade=FAIL",
              cs.fixtureCount == 12 && cs.activeComposite < cs.meanComposite &&
-             cs.meanComposite < 85.0 && cs.hardInvariantViolations > 0 && cs.corpusGrade == bench::kStatusFail &&
+             cs.meanComposite > 85.0 && cs.meanDimensions[5] >= 90.0 &&
+             cs.hardInvariantViolations > 0 && cs.corpusGrade == bench::kStatusFail &&
              cs.evaluatedDimensionCounts[1] == 3 && cs.naExcludedCounts[1] == 9 &&
              cs.targetKstNotTestedCount == 12 && cs.l3Status == bench::BenchStatus::NotTested &&
              cs.notTestedItems.size() == 2 &&
