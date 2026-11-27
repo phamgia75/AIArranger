@@ -263,6 +263,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             }
         }
     }
+    const std::map<uint8_t, VoiceSelect> initialVoice = activeVoice;
 
     // Style-wide Stage 2a: verify Rhythm1 (ch8) vs Rhythm2 (ch9) drum/perc swap risk
     // consistently across all sections (avoids partial-section flip on sparse Breaks).
@@ -519,8 +520,11 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
 
     std::map<uint8_t, TrackRow> rows;
     std::set<std::pair<uint8_t, uint8_t>> mergeWarned;
+    std::map<uint8_t, std::string> mergedWarningByKch;
+    std::map<uint8_t, std::string> zoneAdvisoryByKch;
     std::set<SectionType> exportedSectionTypes;
     std::map<uint8_t, quality::Pa5xTrackEditAdvice> adviceByKch;
+    std::vector<std::pair<std::string, quality::Pa5xTrackEditAdvice>> rawElementAdvice;
 
     for (const auto& sec : style.sections) {
         SectionRow row{sec.name, "", sec.bars, ""};
@@ -722,8 +726,18 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 if (opt.enable_drum_remap) {
                     const uasf::TrackRole drumRole =
                         (kch == kPercCh) ? uasf::TrackRole::Percussion : uasf::TrackRole::Drum;
+                    // EXP12 stale-track-name fix: when a section switches to a distinct mid-style
+                    // drum kit voice, do not let the style-wide CASM track name (e.g. "SfxPerc")
+                    // override the section-local Bank/PC classification (matches Stage 5 behavior).
+                    const auto initIt = initialVoice.find(srcCh);
+                    const bool switchedVoice = (initIt != initialVoice.end()) &&
+                        ((secVoice.msb >= 0 && initIt->second.msb >= 0 && secVoice.msb != initIt->second.msb) ||
+                         (secVoice.lsb >= 0 && initIt->second.lsb >= 0 && secVoice.lsb != initIt->second.lsb) ||
+                         (secVoice.pc  >= 0 && initIt->second.pc  >= 0 && secVoice.pc  != initIt->second.pc));
+                    static const std::string kEmptyTrackName;
+                    const std::string& drumCatName = switchedVoice ? kEmptyTrackName : tr.name;
                     const quality::DrumKitCategory cat = quality::classifyDrumKitCategory(
-                        secVoice.msb, secVoice.lsb, secVoice.pc, tr.name, drumRole);
+                        secVoice.msb, secVoice.lsb, secVoice.pc, drumCatName, drumRole);
                     const bool isRevo = (secVoice.msb == 62 && secVoice.lsb == 100);
                     quality::FactoryPa5xDrumKitKeyMap factoryKit(cat);
                     // P1-2: Scope target_drum_key_map strictly to kDrumCh, and target_perc_key_map strictly to kPercCh.
@@ -868,9 +882,22 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
 
                 auto [own, first] = owner.try_emplace(pt.kch, pt.srcCh);
                 if (!first && own->second != pt.srcCh && mergeWarned.insert({own->second, pt.srcCh}).second) {
-                    rep.warnings.push_back("Genos channels " + std::to_string(own->second + 1) + " and " +
-                                           std::to_string(pt.srcCh + 1) + " both play Korg " + korgTrackName(pt.kch) +
-                                           " (merged; their NTR/NTT may differ)");
+                    const std::string mwarn = "Genos channels " + std::to_string(own->second + 1) + " and " +
+                                              std::to_string(pt.srcCh + 1) + " both play Korg " + korgTrackName(pt.kch) +
+                                              " (merged; their NTR/NTT may differ)";
+                    rep.warnings.push_back(mwarn);
+                    if (mergedWarningByKch.find(pt.kch) == mergedWarningByKch.end()) {
+                        mergedWarningByKch[pt.kch] = mwarn;
+                    }
+                }
+                if (pt.track && pt.track->articulation.has_casm_meta &&
+                    (pt.track->articulation.zone_low > 0 || pt.track->articulation.zone_high < 127) &&
+                    zoneAdvisoryByKch.find(pt.kch) == zoneAdvisoryByKch.end()) {
+                    const auto& a = pt.track->articulation;
+                    zoneAdvisoryByKch[pt.kch] =
+                        "Main zone " + std::to_string(a.zone_low) + ".." + std::to_string(a.zone_high) +
+                        " (LowZone NTR=" + std::to_string(a.low_zone.ntr) + "/NTT=" + std::to_string(a.low_zone.ntt) +
+                        ", HighZone NTR=" + std::to_string(a.high_zone.ntr) + "/NTT=" + std::to_string(a.high_zone.ntt) + ")";
                 }
                 if (mixEnabled && opt.enable_xg_sysex_mix_injection) {
                     if (const auto xgit = style.xg_sysex.parts.find(pt.srcCh);
@@ -900,6 +927,9 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                         (sec.type == SectionType::Main1 && bucket.cv_index == 1)) {
                         adviceByKch[pt.kch] = normRes.advice;
                     }
+                    if (bucket.cv_index <= 1) {
+                        rawElementAdvice.emplace_back(bucket.marker, normRes.advice);
+                    }
                 }
 
                 auto& dstNotes = bucketNotesByKch[pt.kch];
@@ -911,23 +941,53 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             quality::GrooveNormalizeOptions gopt{};
             gopt.preserve_anticipations = true;
             gopt.deoverlap_same_pitch = true;
-            gopt.bake_rubato = false; // Preserve intentional Ending rubato/ritardando & swing microtiming
+            gopt.bake_rubato = opt.enable_bake_rubato;
             gopt.is_looping_main = (sec.type >= SectionType::Main1 && sec.type <= SectionType::Main4);
             gopt.base_mpqn = r.style.mpqn ? r.style.mpqn : 500000u;
             gopt.ppqn = dst;
 
+            std::vector<std::pair<uint32_t, uint32_t>> secTemposDst;
+            if (grooveEnabled && opt.enable_bake_rubato) {
+                if (const auto tit = opt.section_tempos.find(sec.type); tit != opt.section_tempos.end()) {
+                    secTemposDst.reserve(tit->second.size());
+                    for (const auto& [srcTk, mpqn] : tit->second) {
+                        const uint64_t dstTk = conv(srcTk);
+                        if (dstTk < len && mpqn > 0) {
+                            secTemposDst.emplace_back(static_cast<uint32_t>(dstTk), mpqn);
+                        }
+                    }
+                }
+            }
+
+            bool elementRubatoBaked = false;
+            uint32_t activeLen = len;
             for (auto& [kch, kchNotes] : bucketNotesByKch) {
                 if (grooveEnabled) {
-                    const auto gstats = quality::normalizeTrackGroove(kchNotes, len, barTicks, {}, gopt);
+                    const auto gstats = quality::normalizeTrackGroove(kchNotes, len, barTicks, secTemposDst, gopt);
                     rep.same_pitch_overlaps_fixed += gstats.same_pitch_overlaps_fixed;
                     rep.zero_length_notes_fixed += gstats.zero_length_notes_fixed;
                     rep.anticipations_preserved += gstats.anticipations_preserved;
+                    if (gstats.rubato_baked && gstats.new_element_length_ticks >= 2u &&
+                        gstats.new_element_length_ticks <= 0x0FFFFFFFu &&
+                        (barTicks == 0u || gstats.new_element_length_ticks % barTicks == 0u)) {
+                        elementRubatoBaked = true;
+                        activeLen = gstats.new_element_length_ticks;
+                    }
                 }
+            }
+            if (elementRubatoBaked) {
+                ++rep.rubato_elements_baked;
+                el.length = activeLen;
+                for (auto& ev : el.events) {
+                    if (ev.tick >= activeLen) ev.tick = activeLen - 1u;
+                }
+            }
+            for (auto& [kch, kchNotes] : bucketNotesByKch) {
                 const uint8_t onSt = static_cast<uint8_t>(0x90 | kch);
                 const uint8_t offSt = static_cast<uint8_t>(0x80 | kch);
                 for (auto n : kchNotes) {
-                    if (len < 2 || n.on_tick >= len - 1) continue;
-                    n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
+                    if (activeLen < 2 || n.on_tick >= activeLen - 1) continue;
+                    n.off_tick = std::max(std::min(n.off_tick, activeLen - 1), n.on_tick + 1);
                     el.events.push_back({n.on_tick, onSt, n.pitch, n.vel});
                     el.events.push_back({n.off_tick, offSt, n.pitch, 0});
                 }
@@ -986,14 +1046,80 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
 
             SectionRow cvRow = row;
             cvRow.marker = bucket.marker;
+            if (elementRubatoBaked && barTicks > 0u) {
+                cvRow.bars = activeLen / barTicks;
+            }
+            {
+                ElementCvEntry cve{};
+                cve.marker = bucket.marker;
+                cve.source_section = sec.name;
+                cve.bars = cvRow.bars;
+                cve.meter_num = num;
+                cve.meter_den = den;
+                cve.cv_index = bucket.cv_index;
+                if (sec.type == SectionType::Break) {
+                    cve.target_key_chord = "N/A (Break)";
+                    cve.chord_table_families = "No CV suffix";
+                } else {
+                    switch (bucket.cv_index) {
+                        case 2:
+                            cve.target_key_chord = "C Min";
+                            cve.chord_table_families = "Min, Min6, Min7, Min7b5, Min(9), Min7(9), Min7(11), MinMaj7";
+                            break;
+                        case 3:
+                            cve.target_key_chord = "C 7";
+                            cve.chord_table_families = "7, 7sus4, 7b5, 7(9), 7(#11), 7(13), 7(b9), 7(b13), 7(#9), 7aug";
+                            break;
+                        case 4:
+                            cve.target_key_chord = "C dim";
+                            cve.chord_table_families = "Dim, Dim7";
+                            break;
+                        case 5:
+                            cve.target_key_chord = "C sus4";
+                            cve.chord_table_families = "Sus4, Sus2";
+                            break;
+                        case 6:
+                            cve.target_key_chord = "C 5";
+                            cve.chord_table_families = "1+5, 1+8 (Power / Alt)";
+                            break;
+                        default:
+                            cve.target_key_chord = "C Maj";
+                            cve.chord_table_families = "Maj, Maj6, Maj7, Maj7#11, Maj(9), Maj7(9), Maj6(9), Aug";
+                            break;
+                    }
+                }
+                rep.element_cv_entries.push_back(std::move(cve));
+            }
             rep.sections.push_back(std::move(cvRow));
             r.style.elements.push_back(std::move(el));
         }
     }
 
     for (auto& [kch, adv] : adviceByKch) {
-        (void)kch;
-        rep.track_edit_advice.push_back(std::move(adv));
+        if (const auto mwit = mergedWarningByKch.find(kch); mwit != mergedWarningByKch.end()) {
+            adv.merged_warning = mwit->second;
+        }
+        rep.track_edit_advice.push_back(adv);
+    }
+
+    {
+        std::set<std::pair<std::string, uint8_t>> seenElOverrides;
+        for (const auto& [marker, elAdv] : rawElementAdvice) {
+            const auto baseIt = adviceByKch.find(elAdv.korg_ch);
+            if (baseIt == adviceByKch.end()) continue;
+            const auto& base = baseIt->second;
+            const bool differs =
+                elAdv.pa5x_ntt_type != base.pa5x_ntt_type ||
+                elAdv.pa5x_ntt_table != base.pa5x_ntt_table ||
+                elAdv.bass_inversion != base.bass_inversion ||
+                elAdv.wrap_around != base.wrap_around ||
+                elAdv.key_range_low != base.key_range_low ||
+                elAdv.key_range_high != base.key_range_high ||
+                elAdv.retrigger_mode != base.retrigger_mode;
+            if (differs && seenElOverrides.insert({marker, elAdv.korg_ch}).second) {
+                rep.element_track_edit_advice.emplace_back(marker, elAdv);
+            }
+        }
     }
 
     rep.resolved_sounds = effectiveSounds;
@@ -1004,11 +1130,19 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         auto s = row.korg_ch == 0xFF ? opt.sounds.end() : opt.sounds.find(row.korg_ch);
         if (row.korg_ch == 0xFF) {
             row.target = "not exported";
+            row.match_status = "NOT_EXPORTED";
         } else {
             ++rep.sound_match_stats.tracks_evaluated;
             if (s != opt.sounds.end()) {
                 row.target = "MSB " + std::to_string(s->second.msb) + " LSB " + std::to_string(s->second.lsb) +
                              " PC " + std::to_string(s->second.pc) + " (user map)";
+                row.match_status = "USER_OVERRIDE";
+                row.match_score = 100;
+                row.target_sound_name = "User Sound Map";
+                row.target_msb = s->second.msb;
+                row.target_lsb = s->second.lsb;
+                row.target_pc = s->second.pc;
+                row.target_epistemic_tag = "USER_EXPLICIT";
                 ++rep.sound_match_stats.user_overrides;
             } else if (opt.enable_sound_matching) {
                 const quality::TrackSoundMatch* mPtr = nullptr;
@@ -1053,6 +1187,13 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                                  (candName.empty() ? std::string("Pa5X Sound") : candName) + ", " +
                                  originLabel + ", score=" + std::to_string(candScore) + ", " +
                                  mPtr->selected_epistemic_tag + ")";
+                    row.match_status = (candScore >= 85u) ? "EXACT" : "APPROX";
+                    row.match_score = candScore;
+                    row.target_sound_name = candName.empty() ? std::string("Pa5X Sound") : candName;
+                    row.target_msb = sel.msb;
+                    row.target_lsb = sel.lsb;
+                    row.target_pc = sel.pc;
+                    row.target_epistemic_tag = mPtr->selected_epistemic_tag;
 
                     if (candScore >= 85u) ++rep.sound_match_stats.exact_matches;
                     else ++rep.sound_match_stats.approx_matches;
@@ -1065,15 +1206,18 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                     row.target = "UNRESOLVED";
                     ++rep.sound_match_stats.unresolved;
                     if (row.pc >= 120 && row.pc <= 127 && (row.msb <= 0)) {
+                        row.match_status = "UNSUPPORTED";
                         ++rep.sound_match_stats.unsupported;
                         addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_UNSUPPORTED_SFX");
                     } else {
+                        row.match_status = "UNRESOLVED_LOW_CONFIDENCE";
                         ++rep.sound_match_stats.low_confidence_fallbacks;
                         addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_UNRESOLVED_LOW_CONFIDENCE");
                     }
                 }
             } else {
                 row.target = "UNRESOLVED";
+                row.match_status = "UNRESOLVED_LOW_CONFIDENCE";
                 ++rep.sound_match_stats.unresolved;
             }
         }
@@ -1118,12 +1262,17 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             tv.track_name = korgTrackName(adv.korg_ch);
             tv.pa5x_ntt_type = adv.pa5x_ntt_type;
             tv.pa5x_ntt_table = adv.pa5x_ntt_table;
+            tv.bass_inversion = adv.bass_inversion;
             tv.wrap_around = adv.wrap_around;
             tv.key_range_low = adv.key_range_low;
             tv.key_range_high = adv.key_range_high;
             tv.retrigger_mode = adv.retrigger_mode;
             tv.octave_shift_applied = adv.octave_shift_applied;
             tv.guitar_mode_candidate = (adv.pa5x_ntt_type == "Guitar Mode");
+            tv.merged_warning = adv.merged_warning;
+            if (const auto zit = zoneAdvisoryByKch.find(adv.korg_ch); zit != zoneAdvisoryByKch.end()) {
+                tv.zone_advisory = zit->second;
+            }
             if (const auto sit = kchToSrcCh.find(adv.korg_ch); sit != kchToSrcCh.end()) {
                 if (const auto xgit = style.xg_sysex.parts.find(sit->second);
                     xgit != style.xg_sysex.parts.end()) {
@@ -1133,6 +1282,22 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 }
             }
             sheetTracks.push_back(std::move(tv));
+        }
+
+        std::vector<quality::StyleEditSheetCvEntry> sheetCvs;
+        sheetCvs.reserve(rep.element_cv_entries.size());
+        for (const auto& c : rep.element_cv_entries) {
+            sheetCvs.push_back({c.marker, c.source_section, c.bars, c.meter_num, c.meter_den,
+                                c.cv_index, c.target_key_chord, c.chord_table_families});
+        }
+
+        std::vector<quality::StyleEditSheetElementNttOverride> sheetElOverrides;
+        sheetElOverrides.reserve(rep.element_track_edit_advice.size());
+        for (const auto& [marker, eadv] : rep.element_track_edit_advice) {
+            sheetElOverrides.push_back({marker, eadv.korg_ch, korgTrackName(eadv.korg_ch),
+                                        eadv.pa5x_ntt_type, eadv.pa5x_ntt_table, eadv.bass_inversion,
+                                        eadv.wrap_around, eadv.key_range_low, eadv.key_range_high,
+                                        eadv.retrigger_mode});
         }
 
         std::vector<quality::StyleEditSheetSoundView> sheetSounds;
@@ -1172,8 +1337,10 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             sheetSounds.push_back(std::move(sv));
         }
         const std::string sheetName = opt.soundmap_style_name.empty() ? style.name : opt.soundmap_style_name;
+        const uint32_t bpm = r.style.mpqn ? ((60'000'000u + r.style.mpqn / 2) / r.style.mpqn) : 0u;
         rep.style_edit_sheet_md = quality::formatPa5xStyleEditSheetMd(
-            sheetTracks, toXgSysExSummary(style.xg_sysex), sheetSounds, sheetName);
+            sheetTracks, toXgSysExSummary(style.xg_sysex), sheetSounds, sheetName,
+            sheetCvs, sheetElOverrides, r.style.ppqn, bpm);
     }
 
     if (r.style.elements.empty()) { r.error = "no section maps to a Korg style element"; return r; }

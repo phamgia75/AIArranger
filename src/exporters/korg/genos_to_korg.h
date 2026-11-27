@@ -60,6 +60,8 @@ struct MapOptions {
     bool enable_mix_normalization = true;                           // Stage 6b: mix_normalizer.h (NRPN/CC94 hygiene, loop CC64/PB/CC11 resets)
     bool enable_xg_sysex_mix_injection = true;                      // Stage 6b: synthesize missing tick-0 CC7/10/91/93 from style.xg_sysex
     bool enable_headroom_normalization = true;                      // Stage 6b: active-span CC11 effective loudness headroom [0.20, 0.92]
+    bool enable_bake_rubato = false;                                // P1-W3 opt-in (--bake-rubato): warp ticks for multi-tempo rubato sections
+    std::map<uasf::SectionType, std::vector<std::pair<uint32_t, uint32_t>>> section_tempos; // Optional per-section (rel_src_tick, mpqn) for enable_bake_rubato
     bool capture_style_edit_sheet = false;                          // When true, populate Report::style_edit_sheet_md via formatPa5xStyleEditSheetMd()
 
     // Default quality pipeline (Stages 1–6 enabled).
@@ -81,6 +83,7 @@ struct MapOptions {
         o.enable_mix_normalization = false;
         o.enable_xg_sysex_mix_injection = false;
         o.enable_headroom_normalization = false;
+        o.enable_bake_rubato = false;
         return o;
     }
 };
@@ -108,6 +111,23 @@ struct TrackRow {
     uint8_t velocity_zones = 0;        // bitmask of Mega zones 1-64/65-90/91-100/101-127
     bool megavoice = false;
     std::string megavoice_why;
+    // Structured Stage-5 sound resolution details (for manifests & unresolved reports)
+    std::string match_status;          // "USER_OVERRIDE" | "EXACT" | "APPROX" | "UNRESOLVED_LOW_CONFIDENCE" | "UNSUPPORTED" | "NOT_EXPORTED"
+    uint8_t match_score = 0;
+    std::string target_sound_name;
+    int target_msb = -1, target_lsb = -1, target_pc = -1;
+    std::string target_epistemic_tag;
+};
+
+struct ElementCvEntry {
+    std::string marker;               // e.g. "v1cv1", "v1cv2", "br"
+    std::string source_section;       // e.g. "Main A"
+    uint32_t bars = 0;
+    uint8_t meter_num = 4;
+    uint8_t meter_den = 4;
+    uint8_t cv_index = 1;             // 0 = Break, 1..6 = CV1..CV6
+    std::string target_key_chord;     // e.g. "C Maj", "C Min", "C 7", "C dim", "C sus4", "C 5"
+    std::string chord_table_families;
 };
 
 struct SoundMatchStats {
@@ -169,6 +189,9 @@ struct Report {
     uint32_t xg_sysex_seen = 0;                    // Total SysEx messages carried in style.xg_sysex
     uint32_t xg_sysex_recognized = 0;              // Recognized XG/GM/GS SysEx messages
     uint32_t xg_sysex_malformed = 0;               // Malformed SysEx count reported by importer
+    uint32_t rubato_elements_baked = 0;            // P1-W3: elements warped via opt-in enable_bake_rubato
+    std::vector<ElementCvEntry> element_cv_entries; // P1-W1: per-element CV1..CV6 Key/Chord & Chord Table setup
+    std::vector<std::pair<std::string, quality::Pa5xTrackEditAdvice>> element_track_edit_advice; // P1-W1: per-element NTT diffs
     std::string style_edit_sheet_md;               // Populated when MapOptions::capture_style_edit_sheet == true
 };
 

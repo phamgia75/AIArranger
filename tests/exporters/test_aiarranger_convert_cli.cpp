@@ -2,18 +2,26 @@
 // input error, 2 conversion failed (and no output file), plus the sound-map
 // template and --compare round-trip modes.
 
+#include "exporters/korg/conversion_manifest.h"
+#include "exporters/korg/genos_to_korg.h"
+#include "exporters/korg/korg_style_smf.h"
+
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <sstream>
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <iterator>
 #include <vector>
 #include "../support/genos_corpus.h"
 
 namespace fs = std::filesystem;
+using namespace ai_arranger;
+using namespace ai_arranger::exporters::korg;
 
 static int failures = 0, passes = 0;
 #define TEST(name, expr) do { \
@@ -29,6 +37,11 @@ static std::string q(const fs::path& p) { return "\"" + p.string() + "\""; }
 
 static void writeBytes(const fs::path& p, const std::vector<uint8_t>& b) {
     std::ofstream(p, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+}
+
+static std::string readTextFile(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), {});
 }
 
 int main(int argc, char** argv) {
@@ -100,6 +113,240 @@ int main(int argc, char** argv) {
     }
     TEST("--compare unreadable file exits 1", run("--compare " + q(dir / "pop.mid") + " --with " + q(dir / "none.mid")) == 1);
     TEST("--compare without --with exits 1", run("--compare " + q(dir / "pop.mid")) == 1);
+
+    // ── NIST SHA-256 vectors (conversion_manifest.h) ──
+    TEST("SHA-256 empty NIST vector",
+         manifest_detail::sha256Hex("") ==
+             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    TEST("SHA-256 'abc' NIST vector",
+         manifest_detail::sha256Hex("abc") ==
+             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    TEST("SHA-256 multi-block NIST vector",
+         manifest_detail::sha256Hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    // ── Fail-closed flag validation (batch, bundle, bake-rubato, soundmap) ──
+    TEST("--batch-dir without --out-dir exits 1", run("--batch-dir " + q(dir)) == 1);
+    TEST("--out-dir without --batch-dir exits 1", run("--out-dir " + q(dir)) == 1);
+    TEST("--batch-dir combined with --input exits 1",
+         run("--batch-dir " + q(dir) + " --out-dir " + q(dir / "b") + " --input " + q(pop)) == 1);
+    TEST("--bake-rubato combined with --raw exits 1",
+         run(base + "--output " + q(dir / "rb_bad.mid") + " --raw --bake-rubato") == 1);
+    TEST("--soundmap missing file exits 1",
+         run(base + "--output " + q(dir / "sm_bad.mid") + " --soundmap " + q(dir / "missing.soundmap")) == 1);
+
+    // ── Single-file --out-bundle full artifact & SHA-256 manifest verification ──
+    {
+        const fs::path bundle = dir / "pop_bundle";
+        const fs::path cvStyle = genos_corpus::synthetic("SYNTH_CHORD_MUTE_SPLIT");
+        TEST("single-file --out-bundle exits 0",
+             run("--input " + q(cvStyle) + " --out-bundle " + q(bundle) + " --ppqn 384 --break-policy cap") == 0);
+        const std::vector<std::string> expectedFiles = {
+            "converted.mid", "style.uasf", "soundmap.txt",
+            "style_edit_sheet.md", "report.md", "unresolved_sounds.md", "manifest.json"
+        };
+        bool allExist = true;
+        for (const auto& fn : expectedFiles) {
+            if (!fs::exists(bundle / fn)) allExist = false;
+        }
+        TEST("--out-bundle emits all 7 structured artifacts", allExist);
+
+        const std::string manifestTxt = readTextFile(bundle / "manifest.json");
+        uint64_t inSz = 0;
+        const std::string inSha = manifest_detail::sha256FileHex(cvStyle, inSz);
+        uint64_t midSz = 0;
+        const std::string midSha = manifest_detail::sha256FileHex(bundle / "converted.mid", midSz);
+        uint64_t uasfSz = 0;
+        const std::string uasfSha = manifest_detail::sha256FileHex(bundle / "style.uasf", uasfSz);
+        TEST("manifest.json carries exact SHA-256 hashes & honest provenance",
+             manifestTxt.find("\"hardwareVerified\": false") != std::string::npos &&
+             manifestTxt.find("\"l3Status\": \"NOT_TESTED\"") != std::string::npos &&
+             manifestTxt.find("\"outputFormat\": \"PA5X_MAPPED_SMF_IMPORT_ARTIFACT\"") != std::string::npos &&
+             manifestTxt.find("\"nativeStyBinaryVerified\": false") != std::string::npos &&
+             manifestTxt.find("\"sha256\": \"" + inSha + "\"") != std::string::npos &&
+             manifestTxt.find("\"sha256\": \"" + midSha + "\"") != std::string::npos &&
+             manifestTxt.find("\"sha256\": \"" + uasfSha + "\"") != std::string::npos);
+
+        // P1-W1 Style Edit Parameter Sheet Section 0 verification
+        const std::string sheetTxt = readTextFile(bundle / "style_edit_sheet.md");
+        TEST("P1-W1 style_edit_sheet.md has Section 0 Import SMF, CV1..CV6, Key/Chord & Bass Inversion",
+             sheetTxt.find("## 0. Pa5X Import SMF & CV1..CV6 Chord Table / Key-Chord Setup") != std::string::npos &&
+             sheetTxt.find("Initialize") != std::string::npos &&
+             sheetTxt.find("SHIFT + Execute") != std::string::npos &&
+             sheetTxt.find("`v1cv1`") != std::string::npos &&
+             sheetTxt.find("`v1cv2`") != std::string::npos &&
+             sheetTxt.find("C Min") != std::string::npos &&
+             sheetTxt.find("Bass Inversion") != std::string::npos);
+    }
+
+    // ── P1-W3: --bake-rubato opt-in on SYNTH_MIXED_METER_RUBATO.sty ──
+    {
+        const fs::path rubatoSty = genos_corpus::synthetic("SYNTH_MIXED_METER_RUBATO");
+        const fs::path bOff = dir / "rubato_off";
+        const fs::path bOn = dir / "rubato_on";
+        TEST("rubato default (off) exits 0",
+             run("--input " + q(rubatoSty) + " --out-bundle " + q(bOff) + " --ppqn 384 --break-policy cap") == 0);
+        TEST("rubato --bake-rubato (on) exits 0",
+             run("--input " + q(rubatoSty) + " --out-bundle " + q(bOn) + " --ppqn 384 --break-policy cap --bake-rubato") == 0);
+        const std::string mOff = readTextFile(bOff / "manifest.json");
+        const std::string mOn = readTextFile(bOn / "manifest.json");
+        TEST("P1-W3 rubato default off leaves rubatoElementsBaked=0, --bake-rubato bakes >=1 element",
+             mOff.find("\"bake_rubato\": false") != std::string::npos &&
+             mOff.find("\"rubatoElementsBaked\": 0") != std::string::npos &&
+             mOn.find("\"bake_rubato\": true") != std::string::npos &&
+             mOn.find("\"rubatoElementsBaked\": 0") == std::string::npos);
+    }
+
+    // ── Batch --batch-dir on mixed valid + malformed inputs ──
+    {
+        const fs::path batchIn = dir / "batch_in";
+        const fs::path batchOut = dir / "batch_out";
+        fs::create_directories(batchIn / "sub");
+        fs::copy_file(pop, batchIn / "01_pop.sty");
+        fs::copy_file(other, batchIn / "sub" / "02_waltz.sty");
+        writeBytes(batchIn / "03_corrupt.sty", {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0}); // truncated MThd
+        std::ofstream(batchIn / "README.txt") << "non-style ignored\n";
+
+        const int brc = run("--batch-dir " + q(batchIn) + " --out-dir " + q(batchOut) + " --ppqn 384 --break-policy cap");
+        TEST("batch with 1 corrupt + 2 valid styles isolates failure and exits 2", brc == 2);
+        const std::string bm = readTextFile(batchOut / "batch_manifest.json");
+        const std::string bs = readTextFile(batchOut / "BATCH_SUMMARY.md");
+        TEST("batch_manifest.json & BATCH_SUMMARY.md record 2/3 ok, 1 failed, sorted deterministically",
+             fs::exists(batchOut / "01_pop" / "converted.mid") &&
+             fs::exists(batchOut / "sub__02_waltz" / "converted.mid") &&
+             !fs::exists(batchOut / "03_corrupt" / "converted.mid") &&
+             bm.find("\"totalFiles\": 3") != std::string::npos &&
+             bm.find("\"succeeded\": 2") != std::string::npos &&
+             bm.find("\"failed\": 1") != std::string::npos &&
+             bm.find("README.txt") == std::string::npos &&
+             bs.find("01_pop.sty") != std::string::npos &&
+             bs.find("03_corrupt.sty") != std::string::npos &&
+             bs.find("FAILED") != std::string::npos);
+
+        // Clean batch (valid only) exits 0
+        fs::remove(batchIn / "03_corrupt.sty");
+        const fs::path batchCleanOut = dir / "batch_clean_out";
+        TEST("clean batch exits 0",
+             run("--batch-dir " + q(batchIn) + " --out-dir " + q(batchCleanOut) + " --ppqn 384 --break-policy cap") == 0);
+    }
+
+    // ── Unresolved private-bank (EXP15-style) fail-closed + manual override resolution loop ──
+    {
+        // Build minimal SFF1-compatible SMF with Main A containing:
+        // ch 11 (Acc1): vendor-private bank MSB=65 LSB=12 PC=45 + chord notes -> must stay UNRESOLVED_LOW_CONFIDENCE
+        // ch 12 (Acc2): GM SFX MSB=0 LSB=0 PC=125 -> must stay UNSUPPORTED
+        std::vector<uint8_t> trk = {
+            0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,                                     // 120 BPM
+            0x00, 0xFF, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08,                               // 4/4
+            0x00, 0xFF, 0x06, 0x06, 'M', 'a', 'i', 'n', ' ', 'A',                         // Main A
+            0x00, 0xBB, 0x00, 65, 0x00, 0xBB, 0x20, 12, 0x00, 0xCB, 45,                   // Acc1 private bank 65/12/45
+            0x00, 0xBC, 0x00, 0,  0x00, 0xBC, 0x20, 0,  0x00, 0xCC, 125,                  // Acc2 GM SFX 0/0/125
+            0x00, 0x9B, 60, 80,   0x00, 0x9B, 64, 80,   0x00, 0x9B, 67, 80,               // Acc1 chord
+            0x00, 0x9C, 72, 80,                                                           // Acc2 SFX note
+            0x83, 0x60, 0x8B, 60, 0, 0x00, 0x8B, 64, 0, 0x00, 0x8B, 67, 0, 0x00, 0x8C, 72, 0, // tick 480
+            0x8B, 0x20, 0xFF, 0x2F, 0x00                                                  // tick 1920 EOT
+        };
+        std::vector<uint8_t> sty = {'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xE0,
+                                    'M', 'T', 'r', 'k', 0, 0, 0, static_cast<uint8_t>(trk.size())};
+        sty.insert(sty.end(), trk.begin(), trk.end());
+        const fs::path exp15Like = dir / "private_bank.sty";
+        writeBytes(exp15Like, sty);
+
+        const fs::path unresBundle = dir / "unres_bundle";
+        TEST("EXP15-style private-bank conversion exits 0 (fail-closed unresolved)",
+             run("--input " + q(exp15Like) + " --out-bundle " + q(unresBundle) + " --ppqn 384") == 0);
+        const std::string unresMd = readTextFile(unresBundle / "unresolved_sounds.md");
+        const std::string unresManifest = readTextFile(unresBundle / "manifest.json");
+        TEST("private-bank & GM SFX reported fail-closed in unresolved_sounds.md & manifest.json",
+             unresMd.find("UNRESOLVED_LOW_CONFIDENCE") != std::string::npos &&
+             unresMd.find("UNSUPPORTED") != std::string::npos &&
+             unresMd.find("acc1 unresolved") != std::string::npos &&
+             unresMd.find("acc2 unresolved") != std::string::npos &&
+             unresManifest.find("\"status\": \"UNRESOLVED_LOW_CONFIDENCE\"") != std::string::npos &&
+             unresManifest.find("\"status\": \"UNSUPPORTED\"") != std::string::npos);
+
+        // Apply manual .soundmap override and confirm USER_OVERRIDE resolves both cleanly!
+        const fs::path manualMap = dir / "manual.soundmap";
+        std::ofstream(manualMap) << "acc1 121 0 1\nacc2 121 0 48\n";
+        const fs::path fixedBundle = dir / "fixed_bundle";
+        TEST("manual --soundmap override resolves private-bank tracks cleanly",
+             run("--input " + q(exp15Like) + " --out-bundle " + q(fixedBundle) +
+                 " --ppqn 384 --soundmap " + q(manualMap)) == 0);
+        const std::string fixedMd = readTextFile(fixedBundle / "unresolved_sounds.md");
+        const std::string fixedManifest = readTextFile(fixedBundle / "manifest.json");
+        TEST("manual override transitions tracks to USER_OVERRIDE with 0 unresolved",
+             fixedMd.find("All exported tracks resolved cleanly") != std::string::npos &&
+             fixedManifest.find("\"status\": \"USER_OVERRIDE\"") != std::string::npos &&
+             fixedManifest.find("\"manual_soundmap_used\": true") != std::string::npos &&
+             fixedManifest.find("UNRESOLVED_LOW_CONFIDENCE") == std::string::npos);
+    }
+
+    // ── EXP12 stale-track-name kit-switch regression + P1-W2 dump/load round-trip ──
+    {
+        uasf::StyleDefinition st{};
+        st.name = "EXP12_STALE_NAME_TEST";
+        st.tempo_bpm = 120;
+        st.resolution = 480;
+        auto makeSec = [](uasf::SectionType type, const char* secName, uint8_t msb, uint8_t lsb, uint8_t pc) {
+            uasf::SectionDefinition s{};
+            s.type = type;
+            s.name = secName;
+            s.bars = 1;
+            s.resolution = 480;
+            s.beats_per_bar = 4;
+            s.beat_note = 4;
+            uasf::TrackDefinition tr{};
+            tr.name = "SfxPerc"; // Style-wide CASM name containing "sfx"!
+            tr.midi_channel = 8; // Rhythm1 -> Perc
+            tr.role = uasf::TrackRole::Percussion;
+            tr.is_drum = true;
+            tr.events.push_back({uasf::MidiEventType::ControlChange, 8, 0, msb, 0});
+            tr.events.push_back({uasf::MidiEventType::ControlChange, 8, 32, lsb, 0});
+            tr.events.push_back({uasf::MidiEventType::ProgramChange, 8, pc, 0, 0});
+            uint64_t tk = 0;
+            for (uint8_t p : {uint8_t{88}, uint8_t{92}, uint8_t{96}, uint8_t{104}}) {
+                tr.events.push_back({uasf::MidiEventType::NoteOn, 8, p, 90, tk});
+                tr.events.push_back({uasf::MidiEventType::NoteOff, 8, p, 0, tk + 120});
+                tk += 240;
+            }
+            s.tracks.push_back(std::move(tr));
+            return s;
+        };
+        st.sections.push_back(makeSec(uasf::SectionType::Main1, "Main A", 126, 0, 0));  // SFX Kit -> >87 conservatively dropped
+        st.sections.push_back(makeSec(uasf::SectionType::Main2, "Main B", 126, 0, 40)); // Ethnic switch -> must NOT be dropped!
+        st.sections.push_back(makeSec(uasf::SectionType::Main3, "Main C", 127, 0, 40)); // Brush switch -> must NOT be dropped!
+
+        MapOptions mopt = MapOptions::quality();
+        mopt.ppqn = 384;
+        mopt.capture_soundmap_dump = true;
+        mopt.soundmap_style_name = "EXP12_STALE_NAME_TEST.sty";
+        const auto mres = mapToKorg(st, mopt);
+        TEST("EXP12 stale-track-name fix: Main B & Main C keep all 8 switched-kit hits (only 4 Main A SFX hits dropped)",
+             mres.ok && mres.report.drum_notes_unsupported == 4u &&
+             (mres.report.drum_notes_remapped_exact + mres.report.drum_notes_remapped_approx) == 8u);
+
+        // P1-W2 round-trip: dumped soundmap contains per-element v2.perc / v3.perc lines,
+        // and reloading with --no-auto-sound-map produces byte-identical SMF!
+        std::istringstream smIn(mres.report.soundmap_dump);
+        const auto parsedSm = parseSoundMap(smIn, "dump.soundmap");
+        TEST("P1-W2 dumped soundmap includes parseable per-element v2/v3 switches",
+             parsedSm.ok &&
+             mres.report.soundmap_dump.find("v2.perc ") != std::string::npos &&
+             mres.report.soundmap_dump.find("v3.perc ") != std::string::npos &&
+             parsedSm.element_sounds.count({uasf::SectionType::Main2, kPercCh}) == 1 &&
+             parsedSm.element_sounds.count({uasf::SectionType::Main3, kPercCh}) == 1);
+
+        MapOptions rtOpt = MapOptions::quality();
+        rtOpt.ppqn = 384;
+        rtOpt.enable_sound_matching = false;
+        rtOpt.sounds = parsedSm.sounds;
+        rtOpt.element_sounds = parsedSm.element_sounds;
+        const auto rtRes = mapToKorg(st, rtOpt);
+        const auto w1 = write(mres.style);
+        const auto w2 = write(rtRes.style);
+        TEST("P1-W2 --dump-soundmap -> --sound-map --no-auto-sound-map round-trip is byte-identical",
+             rtRes.ok && w1.ok && w2.ok && w1.bytes == w2.bytes);
+    }
 
     fs::remove_all(dir);
     std::printf("\n%d passed, %d failed\n", passes, failures);

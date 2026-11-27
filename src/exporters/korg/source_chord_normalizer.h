@@ -92,11 +92,13 @@ struct Pa5xTrackEditAdvice {
     uint8_t     korg_ch              = 0xFF;
     std::string pa5x_ntt_type;            // "Parallel" | "Fixed" | "No Transpose" | "Guitar Mode"
     std::string pa5x_ntt_table;           // "Root" | "Parallel" | "Chord" | "i-Series" | "No Transpose" | "Guitar"
+    bool        bass_inversion       = false; // Pa5X Bass Inversion / Yamaha CASM ntt_bass (bit 7)
     uint8_t     wrap_around          = 6; // 1..12 semitones (derived from CASM high_key or role sweet spot)
     uint8_t     key_range_low        = 0; // Pa5X LimitKeyRange low
     uint8_t     key_range_high       = 127;
     std::string retrigger_mode;           // "Off" | "Retrigger" | "Repitch" (mapped from Yamaha RTR 0..5)
     int8_t      octave_shift_applied = 0; // -12, 0, or +12 (or +/-24 if extreme) when centered
+    std::string merged_warning;           // Non-empty if multiple Genos channels merged onto this Korg track
 };
 
 struct NormalizeResult {
@@ -192,6 +194,7 @@ inline void populatePa5xNttAdvice(const CasmTrackView& casm,
                                   uint8_t korg_ch,
                                   uasf::TrackRole role,
                                   Pa5xTrackEditAdvice& advice) noexcept {
+    advice.bass_inversion = false;
     if (!isChordDriven(korg_ch) ||
         role == uasf::TrackRole::Drum ||
         role == uasf::TrackRole::Percussion) {
@@ -201,6 +204,7 @@ inline void populatePa5xNttAdvice(const CasmTrackView& casm,
     }
 
     if (casm.has_casm) {
+        advice.bass_inversion = casm.ntt_bass;
         const uint8_t nttLow = static_cast<uint8_t>(casm.ntt & 0x7Fu);
         if (casm.ntr == 2) {
             advice.pa5x_ntt_type  = "Guitar Mode";

@@ -76,6 +76,45 @@ int main(int argc, char** argv) {
     TEST("track keys round-trip", std::string(soundMapKey(kPercCh)) == "perc" && std::string(soundMapKey(15)) == "acc5" &&
          soundMapKey(3) == nullptr);
 
+    // ── P1-W2: Per-element override grammar & CR/LF/NUL sanitization ──
+    {
+        const std::string elemText =
+            "drum 120 0 100\r\n"
+            "v2.drum 120 0 48  # brush override\r\n"
+            "main_b.perc 120 0 56\n"
+            "i1cv1.acc1 121 4 25\n"
+            "br.bass unresolved\n"
+            "ending_a.acc5 121 0 48\n";
+        const auto r = load(elemText);
+        TEST("P1-W2 per-element grammar loads with CRLF + aliases",
+             r.ok &&
+             r.sounds.size() == 1 && r.sounds.at(kDrumCh).pc == 100 &&
+             r.element_sounds.size() == 4 &&
+             r.element_sounds.at({uasf::SectionType::Main2, kDrumCh}).pc == 48 &&
+             r.element_sounds.at({uasf::SectionType::Main2, kPercCh}).pc == 56 &&
+             r.element_sounds.at({uasf::SectionType::Intro1, 11}).pc == 25 &&
+             r.element_sounds.at({uasf::SectionType::Ending1, 15}).pc == 48 &&
+             r.element_unresolved.count({uasf::SectionType::Break, kBassCh}) == 1);
+    }
+    TEST("P1-W2 section key canonical emitter",
+         std::string(soundMapSectionKey(uasf::SectionType::Main2)) == "v2" &&
+         std::string(soundMapSectionKey(uasf::SectionType::Break)) == "br" &&
+         std::string(soundMapSectionKey(uasf::SectionType::Ending3)) == "e3");
+    TEST("P1-W2 unknown section prefix rejected", errorFor("v9.drum 120 0 0\n", "unknown section"));
+    TEST("P1-W2 unknown track in per-element key rejected", errorFor("v2.acc9 120 0 0\n", "unknown track"));
+    TEST("P1-W2 multiple dots rejected", errorFor("v2.cv1.drum 120 0 0\n", "invalid per-element key"));
+    TEST("P1-W2 duplicate (section, track) via alias rejected",
+         errorFor("v2.drum 120 0 40\nmain_b.drum 120 0 48\n", "twice"));
+    TEST("P1-W2 per-element out-of-range byte rejected", errorFor("v2.drum 128 0 0\n", "expected"));
+    {
+        std::string withNul = "drum 120 0 0";
+        withNul.push_back('\0');
+        withNul += "\n";
+        TEST("P1-W2 embedded NUL byte rejected", errorFor(withNul, "NUL"));
+    }
+    TEST("P1-W2 embedded CR rejected", errorFor("drum 120\r 0 0\n", "CR"));
+    TEST("P1-W2 control char in token rejected", errorFor("drum 120 \x07 0\n", "control character"));
+
     // ── MegaVoice heuristic + template on a synthetic style ──
     uasf::SectionDefinition sec;
     sec.type = uasf::SectionType::Main1;

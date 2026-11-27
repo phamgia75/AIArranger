@@ -46,6 +46,7 @@ struct StyleEditSheetTrackView {
     std::string           track_name;
     std::string           pa5x_ntt_type         = "Parallel";
     std::string           pa5x_ntt_table        = "Root";
+    bool                  bass_inversion        = false;
     uint8_t               wrap_around           = 6;
     uint8_t               key_range_low         = 0;
     uint8_t               key_range_high        = 127;
@@ -55,6 +56,32 @@ struct StyleEditSheetTrackView {
     std::optional<int8_t> eq_low_gain_db;
     std::optional<int8_t> eq_mid_gain_db;
     std::optional<int8_t> eq_high_gain_db;
+    std::string           merged_warning;
+    std::string           zone_advisory;
+};
+
+struct StyleEditSheetCvEntry {
+    std::string marker;               // e.g. "v1cv1", "v1cv2", "br"
+    std::string source_section;       // e.g. "Main A"
+    uint32_t    bars = 0;
+    uint8_t     meter_num = 4;
+    uint8_t     meter_den = 4;
+    uint8_t     cv_index = 1;         // 0 = Break, 1..6 = CV1..CV6
+    std::string target_key_chord;     // e.g. "C Maj", "C Min", "C 7", "C dim", "C sus4", "C 5"
+    std::string chord_table_families; // e.g. "Maj, Maj6, Maj7, Maj(9), Aug"
+};
+
+struct StyleEditSheetElementNttOverride {
+    std::string marker;
+    uint8_t     korg_ch = 0xFF;
+    std::string track_name;
+    std::string pa5x_ntt_type;
+    std::string pa5x_ntt_table;
+    bool        bass_inversion = false;
+    uint8_t     wrap_around = 6;
+    uint8_t     key_range_low = 0;
+    uint8_t     key_range_high = 127;
+    std::string retrigger_mode;
 };
 
 struct StyleEditSheetSoundView {
@@ -527,15 +554,20 @@ inline MixNormalizeStats normalizeElementMix(
     return stats;
 }
 
-// Emits a deterministic Markdown Pa5X Style Edit Parameter Sheet covering NTT,
-// Wrap Around, LimitKeyRange, Retrigger, Guitar Mode, 3-Band EQ, Sound matches,
-// and XG SysEx FX/Mix/Drum advisories. Always stamps hardwareVerified: false
-// and L3 = NOT_TESTED.
+// Emits a deterministic Markdown Pa5X Style Edit Parameter Sheet covering
+// Section 0 (Import SMF + CV1..CV6 Key/Chord & Chord Table setup), NTT,
+// Bass Inversion, Wrap Around, LimitKeyRange, Retrigger, Guitar Mode,
+// per-element NTT overrides, 3-Band EQ, Sound matches, and XG SysEx FX/Mix/Drum
+// advisories. Always stamps hardwareVerified: false and L3 = NOT_TESTED.
 inline std::string formatPa5xStyleEditSheetMd(
     const std::vector<StyleEditSheetTrackView>& track_advice,
     const importers::sff1::XgSysExSummary& xg,
     const std::vector<StyleEditSheetSoundView>& sound_matches,
-    const std::string& style_name = "") noexcept {
+    const std::string& style_name = "",
+    const std::vector<StyleEditSheetCvEntry>& cv_entries = {},
+    const std::vector<StyleEditSheetElementNttOverride>& element_ntt_overrides = {},
+    uint16_t ppqn = 0,
+    uint32_t tempo_bpm = 0) noexcept {
     try {
         std::ostringstream out;
         out << "# Korg Pa5X Style Edit Parameter Sheet";
@@ -546,13 +578,57 @@ inline std::string formatPa5xStyleEditSheetMd(
         out << "> **Status:** `hardwareVerified: false` | `L3 = NOT_TESTED` — "
                "STRUCTURALLY VALID, NOT VERIFIED ON A PA5X HARDWARE UNIT.\n\n";
 
-        // 1. Track NTT, Register & EQ Advice
-        out << "## 1. Track NTT, Register & EQ Parameters\n\n";
+        // 0. Pa5X Import SMF & CV1..CV6 Chord Table / Key-Chord Setup (P1-W1)
+        out << "## 0. Pa5X Import SMF & CV1..CV6 Chord Table / Key-Chord Setup\n\n";
+        out << "1. On the Pa5X, open **Style Edit > Menu > Import/Export > Import SMF** (MAN5 pp.1035-1040).\n";
+        out << "2. Check **Initialize** (for a fresh Style) and press **SHIFT + Execute** to import every marker element in a single pass.\n";
+        if (ppqn > 0 || tempo_bpm > 0) {
+            out << "3. **Imported Grid / Tempo:** ";
+            if (ppqn > 0) out << "PPQN = `" << ppqn << "`";
+            if (ppqn > 0 && tempo_bpm > 0) out << " | ";
+            if (tempo_bpm > 0) out << "Tempo = `" << tempo_bpm << " BPM`";
+            out << "\n";
+        }
+        out << "\n### Standard CV1..CV6 Recording Key/Chord Convention\n\n";
+        out << "| CV Slot | Example Marker | Pa5X Element Key/Chord | Recommended Pa5X Chord Table Families |\n";
+        out << "|---|---|---|---|\n";
+        out << "| CV1 | `v1cv1` | `C Maj` | Maj, Maj6, Maj7, Maj7#11, Maj(9), Maj7(9), Maj6(9), Aug, Maj7aug |\n";
+        out << "| CV2 | `v1cv2` | `C Min` | Min, Min6, Min7, Min7b5, Min(9), Min7(9), Min7(11), MinMaj7, MinMaj7(9) |\n";
+        out << "| CV3 | `v1cv3` | `C 7` | 7, 7sus4, 7b5, 7(9), 7(#11), 7(13), 7(b9), 7(b13), 7(#9), 7aug |\n";
+        out << "| CV4 | `v1cv4` | `C dim` | Dim, Dim7 |\n";
+        out << "| CV5 | `v1cv5` | `C sus4` | Sus4, Sus2 |\n";
+        out << "| CV6 | `v1cv6` | `C 5` | 1+5, 1+8 (Power / Alt) |\n\n";
+
+        if (!cv_entries.empty()) {
+            bool has_multi_cv = false;
+            out << "### Exported Elements & Per-CV Key/Chord Setup\n\n";
+            out << "| Marker | Source Section | Bars | Meter | Key/Chord | Chord Table Families |\n";
+            out << "|---|---|---:|---|---|---|\n";
+            for (const auto& cv : cv_entries) {
+                if (cv.cv_index >= 2) has_multi_cv = true;
+                out << "| `" << mix_detail::escapeMarkdownCell(cv.marker) << "`"
+                    << " | " << mix_detail::escapeMarkdownCell(cv.source_section)
+                    << " | " << cv.bars
+                    << " | " << static_cast<int>(cv.meter_num) << "/" << static_cast<int>(cv.meter_den)
+                    << " | " << mix_detail::escapeMarkdownCell(cv.target_key_chord.empty() ? "C Maj" : cv.target_key_chord)
+                    << " | " << mix_detail::escapeMarkdownCell(cv.chord_table_families.empty() ? "-" : cv.chord_table_families)
+                    << " |\n";
+            }
+            out << "\n";
+            if (has_multi_cv) {
+                out << "> **Multi-CV Operator Action Required:** SMF Format 0 cannot encode Pa5X's XML Chord Table. "
+                       "After `Import SMF (Initialize + SHIFT + Execute)`, set each `cv2..cv6` element's **Key/Chord** "
+                       "per the table above and bind matching chord qualities in **Style Edit > Element Controls > Chord Table**.\n\n";
+            }
+        }
+
+        // 1. Track NTT, Register, Bass Inversion & EQ Advice
+        out << "## 1. Track NTT, Register, Bass Inversion & EQ Parameters\n\n";
         if (track_advice.empty()) {
             out << "_No per-track Style Edit parameter overrides recorded._\n\n";
         } else {
-            out << "| Korg Ch | Track | NTT Type | NTT Table | Wrap Around | Key Range | Retrigger | Oct Shift | Guitar Mode | EQ Lo / Mid / Hi |\n";
-            out << "|---:|---|---|---|---:|---|---|---:|---|---|\n";
+            out << "| Korg Ch | Track | NTT Type | NTT Table | Bass Inversion | Wrap Around | Key Range | Retrigger | Oct Shift | Guitar Mode | EQ Lo / Mid / Hi |\n";
+            out << "|---:|---|---|---|---|---:|---|---|---:|---|---|\n";
             for (const auto& t : track_advice) {
                 const std::string label = t.track_name.empty()
                     ? std::string(mix_detail::mixTrackLabel(t.korg_ch))
@@ -561,6 +637,7 @@ inline std::string formatPa5xStyleEditSheetMd(
                     << " | " << label
                     << " | " << mix_detail::escapeMarkdownCell(t.pa5x_ntt_type)
                     << " | " << mix_detail::escapeMarkdownCell(t.pa5x_ntt_table)
+                    << " | " << (t.bass_inversion ? "On" : "Off")
                     << " | " << static_cast<int>(t.wrap_around)
                     << " | " << static_cast<int>(t.key_range_low) << ".." << static_cast<int>(t.key_range_high)
                     << " | " << mix_detail::escapeMarkdownCell(t.retrigger_mode)
@@ -569,6 +646,43 @@ inline std::string formatPa5xStyleEditSheetMd(
                     << " | " << mix_detail::formatOptDb(t.eq_low_gain_db)
                     << " / " << mix_detail::formatOptDb(t.eq_mid_gain_db)
                     << " / " << mix_detail::formatOptDb(t.eq_high_gain_db)
+                    << " |\n";
+            }
+            out << "\n";
+
+            bool any_note = false;
+            for (const auto& t : track_advice) {
+                if (!t.merged_warning.empty()) {
+                    if (!any_note) { out << "### Track Merge & Multi-Zone Advisories\n\n"; any_note = true; }
+                    out << "- **" << (t.track_name.empty() ? std::string(mix_detail::mixTrackLabel(t.korg_ch)) : mix_detail::escapeMarkdownCell(t.track_name))
+                        << " (Merged Track):** " << mix_detail::escapeMarkdownCell(t.merged_warning) << "\n";
+                }
+                if (!t.zone_advisory.empty()) {
+                    if (!any_note) { out << "### Track Merge & Multi-Zone Advisories\n\n"; any_note = true; }
+                    out << "- **" << (t.track_name.empty() ? std::string(mix_detail::mixTrackLabel(t.korg_ch)) : mix_detail::escapeMarkdownCell(t.track_name))
+                        << " (SFF2 Multi-Zone):** " << mix_detail::escapeMarkdownCell(t.zone_advisory) << "\n";
+                }
+            }
+            if (any_note) out << "\n";
+        }
+
+        if (!element_ntt_overrides.empty()) {
+            out << "### Per-Element NTT / Wrap / Key-Range Overrides\n\n";
+            out << "| Marker | Korg Ch | Track | NTT Type | NTT Table | Bass Inversion | Wrap Around | Key Range | Retrigger |\n";
+            out << "|---|---:|---|---|---|---|---:|---|---|\n";
+            for (const auto& o : element_ntt_overrides) {
+                const std::string label = o.track_name.empty()
+                    ? std::string(mix_detail::mixTrackLabel(o.korg_ch))
+                    : mix_detail::escapeMarkdownCell(o.track_name);
+                out << "| `" << mix_detail::escapeMarkdownCell(o.marker) << "`"
+                    << " | " << (o.korg_ch <= 15u ? std::to_string(static_cast<int>(o.korg_ch) + 1) : "-")
+                    << " | " << label
+                    << " | " << mix_detail::escapeMarkdownCell(o.pa5x_ntt_type)
+                    << " | " << mix_detail::escapeMarkdownCell(o.pa5x_ntt_table)
+                    << " | " << (o.bass_inversion ? "On" : "Off")
+                    << " | " << static_cast<int>(o.wrap_around)
+                    << " | " << static_cast<int>(o.key_range_low) << ".." << static_cast<int>(o.key_range_high)
+                    << " | " << mix_detail::escapeMarkdownCell(o.retrigger_mode)
                     << " |\n";
             }
             out << "\n";
