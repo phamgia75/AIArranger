@@ -137,6 +137,73 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         if (s.resolution > 0) { style.resolution = s.resolution; break; }
     }
 
+    // ── Propagate live-parsed XG / GM / GS SysEx metadata into UASF ───────
+    // Purely additive metadata carrier (zero bytes written when no SysEx seen)
+    // so downstream exporters can consume mix defaults, effect types, drum part
+    // modes, drum key overrides, and MegaVoice/Revo! hints deterministically.
+    if (parseResult.xg_sysex.total_sysex_seen > 0 ||
+        parseResult.xg_sysex.xg_system_on ||
+        parseResult.xg_sysex.gm1_system_on ||
+        parseResult.xg_sysex.gm2_system_on ||
+        parseResult.xg_sysex.gs_reset ||
+        !parseResult.xg_sysex.parts.empty() ||
+        !parseResult.xg_sysex.drum_overrides.empty() ||
+        !parseResult.xg_sysex.advisory_codes.empty()) {
+        const auto& src = parseResult.xg_sysex;
+        auto& dst = style.xg_sysex;
+        dst.total_sysex_seen       = src.total_sysex_seen;
+        dst.recognized_xg_count    = src.recognized_xg_count;
+        dst.unrecognized_count     = src.unrecognized_count;
+        dst.malformed_count        = src.malformed_count;
+        dst.dsp_sysex_count        = src.dsp_sysex_count;
+        dst.xg_system_on           = src.xg_system_on;
+        dst.gm1_system_on          = src.gm1_system_on;
+        dst.gm2_system_on          = src.gm2_system_on;
+        dst.gs_reset               = src.gs_reset;
+        dst.reverb_type            = src.reverb_type;
+        dst.chorus_type            = src.chorus_type;
+        dst.variation_type         = src.variation_type;
+        dst.master_volume          = src.master_volume;
+        dst.master_eq_type         = src.master_eq_type;
+        dst.master_eq_low_gain_db  = src.master_eq_low_gain_db;
+        dst.master_eq_mid_gain_db  = src.master_eq_mid_gain_db;
+        dst.master_eq_high_gain_db = src.master_eq_high_gain_db;
+        for (const auto& [part, sp] : src.parts) {
+            if (part > 15) continue;
+            uasf::XgPartMetadata dp;
+            dp.bank_msb             = sp.bank_msb;
+            dp.bank_lsb             = sp.bank_lsb;
+            dp.program              = sp.program;
+            dp.part_mode            = sp.part_mode;
+            dp.volume               = sp.volume;
+            dp.pan                  = sp.pan;
+            dp.dry_level            = sp.dry_level;
+            dp.chorus_send          = sp.chorus_send;
+            dp.reverb_send          = sp.reverb_send;
+            dp.variation_send       = sp.variation_send;
+            dp.filter_cutoff_offset = sp.filter_cutoff_offset;
+            dp.filter_res_offset    = sp.filter_res_offset;
+            dp.eq_low_gain_db       = sp.eq_low_gain_db;
+            dp.eq_mid_gain_db       = sp.eq_mid_gain_db;
+            dp.eq_high_gain_db      = sp.eq_high_gain_db;
+            dp.megavoice_hint       = sp.megavoice_hint;
+            dp.revo_drum_hint       = sp.revo_drum_hint;
+            dst.parts.emplace(part, dp);
+        }
+        dst.drum_overrides.reserve(src.drum_overrides.size());
+        for (const auto& sd : src.drum_overrides) {
+            uasf::XgDrumOverrideMetadata dd;
+            dd.drum_setup   = sd.drum_setup;
+            dd.key          = sd.key;
+            dd.level        = sd.level;
+            dd.pan          = sd.pan;
+            dd.reverb_send  = sd.reverb_send;
+            dd.pitch_coarse = sd.pitch_coarse;
+            dst.drum_overrides.push_back(dd);
+        }
+        dst.advisory_codes = src.advisory_codes;
+    }
+
     // ── Source-channel → CASM config map (Task A: per-role splitting) ──
     // The SFF1 reader collapses the whole style into a single mixed-channel
     // SMF MTrk (one `Phrase1` track). Each MIDI event still carries its
@@ -191,7 +258,16 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         if (isDrum) return false;
         if (hasMegaVoiceName(name)) return true;
         auto it = chInitialBank.find(ch);
-        return it != chInitialBank.end() && isMegaVoiceBank(it->second.first, it->second.second);
+        if (it != chInitialBank.end() && isMegaVoiceBank(it->second.first, it->second.second)) {
+            return true;
+        }
+        auto xgIt = style.xg_sysex.parts.find(ch);
+        return xgIt != style.xg_sysex.parts.end() && xgIt->second.megavoice_hint;
+    };
+
+    auto isXgDrumPart = [&](uint8_t ch) noexcept {
+        auto xgIt = style.xg_sysex.parts.find(ch);
+        return xgIt != style.xg_sysex.parts.end() && xgIt->second.isDrumMode();
     };
 
     // One UASF track per MIDI channel; role/NTR/NTT from the CASM config for
@@ -210,16 +286,18 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             track.role = mapCasmTrackRole(*cfg);
             setCasmArticulation(track.articulation, *cfg);
         } else {
-            // No CASM metadata for this channel: fall back to the
-            // GM drum convention, else treat as a melodic phrase.
+            // No CASM metadata for this channel: honor explicit XG Drum Part Mode
+            // SysEx (08 ch 07 1..5) or fall back to the GM drum convention, else
+            // treat as a melodic phrase.
+            const bool drumFallback = (ch == 9) || isXgDrumPart(ch);
             track.name = "Channel " + std::to_string(static_cast<int>(ch));
-            track.role = (ch == 9) ? uasf::TrackRole::Drum
-                                   : uasf::TrackRole::Phrase1;
+            track.role = drumFallback ? uasf::TrackRole::Drum
+                                      : uasf::TrackRole::Phrase1;
             if (fallbackWarned.insert(ch).second) {
                 result.warnings.push_back(
                     "Channel " + std::to_string(static_cast<int>(ch)) +
                     " has events but no CASM metadata — using " +
-                    (ch == 9 ? "drum" : "melodic") + " fallback role");
+                    (drumFallback ? "drum" : "melodic") + " fallback role");
             }
         }
         track.is_drum = (track.role == uasf::TrackRole::Drum ||

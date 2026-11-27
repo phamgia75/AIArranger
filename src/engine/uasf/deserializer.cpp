@@ -147,7 +147,7 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
     // ── Extension blocks (v1.1): only when flagged; v1.0 files never set the
     // flag, and trailing bytes without it are ignored as before. ─────────────
     if (header.flags & format::kFlagExtensions) {
-        bool haveTempo = false, haveTrns = false, haveKexp = false, haveSnam = false, haveCasm = false;
+        bool haveTempo = false, haveTrns = false, haveKexp = false, haveSnam = false, haveCasm = false, haveXgsx = false;
         while (pos_ < size_) {
             if (!ensure(sizeof(format::ExtensionHeader))) {
                 result.error = "Truncated extension header";
@@ -303,6 +303,125 @@ DeserializeResult UasfDeserializer::deserialize(const std::vector<uint8_t>& data
                     a.high_zone = highZ;
                 }
                 haveCasm = true;
+                continue;
+            }
+            if (ext.tag == format::kExtXgSysEx) {
+                const size_t end = pos_ + ext.length;
+                auto badXg = [&](const char* why) {
+                    result.error = std::string("Malformed XGSX block: ") + why;
+                    return result;
+                };
+                if (haveXgsx) return badXg("duplicate");
+                auto u8 = [&](uint8_t& v) {
+                    if (pos_ >= end) return false;
+                    v = readU8();
+                    return true;
+                };
+                auto u16 = [&](uint16_t& v) {
+                    if (end - pos_ < 2) return false;
+                    v = readU16();
+                    return true;
+                };
+                auto u32 = [&](uint32_t& v) {
+                    if (end - pos_ < 4) return false;
+                    v = readU32();
+                    return true;
+                };
+                auto eqOk  = [](int8_t g) { return g >= -12 && g <= 12; };
+                auto offOk = [](int8_t o) { return o >= -64 && o <= 63; };
+
+                uint8_t ver = 0;
+                if (!u8(ver) || ver != 1) return badXg("version");
+
+                XgSysExMetadata xg;
+                if (!u32(xg.total_sysex_seen) || !u32(xg.recognized_xg_count) ||
+                    !u32(xg.unrecognized_count) || !u32(xg.malformed_count) ||
+                    !u32(xg.dsp_sysex_count)) {
+                    return badXg("counters truncated");
+                }
+                uint8_t mode_flags = 0, opt_flags = 0;
+                if (!u8(mode_flags) || !u8(opt_flags)) return badXg("flags truncated");
+                if ((mode_flags & 0xF0u) != 0) return badXg("invalid mode flags");
+                xg.xg_system_on  = (mode_flags & (1u << 0)) != 0;
+                xg.gm1_system_on = (mode_flags & (1u << 1)) != 0;
+                xg.gm2_system_on = (mode_flags & (1u << 2)) != 0;
+                xg.gs_reset      = (mode_flags & (1u << 3)) != 0;
+
+                if (opt_flags & (1u << 0)) { uint16_t v = 0; if (!u16(v)) return badXg("reverb_type"); xg.reverb_type = v; }
+                if (opt_flags & (1u << 1)) { uint16_t v = 0; if (!u16(v)) return badXg("chorus_type"); xg.chorus_type = v; }
+                if (opt_flags & (1u << 2)) { uint16_t v = 0; if (!u16(v)) return badXg("variation_type"); xg.variation_type = v; }
+                if (opt_flags & (1u << 3)) { uint8_t v = 0; if (!u8(v) || v > 127) return badXg("master_volume"); xg.master_volume = v; }
+                if (opt_flags & (1u << 4)) { uint8_t v = 0; if (!u8(v) || v > 127) return badXg("master_eq_type"); xg.master_eq_type = v; }
+                if (opt_flags & (1u << 5)) { uint8_t v = 0; if (!u8(v) || !eqOk(static_cast<int8_t>(v))) return badXg("master_eq_low"); xg.master_eq_low_gain_db = static_cast<int8_t>(v); }
+                if (opt_flags & (1u << 6)) { uint8_t v = 0; if (!u8(v) || !eqOk(static_cast<int8_t>(v))) return badXg("master_eq_mid"); xg.master_eq_mid_gain_db = static_cast<int8_t>(v); }
+                if (opt_flags & (1u << 7)) { uint8_t v = 0; if (!u8(v) || !eqOk(static_cast<int8_t>(v))) return badXg("master_eq_high"); xg.master_eq_high_gain_db = static_cast<int8_t>(v); }
+
+                uint8_t part_count = 0;
+                if (!u8(part_count) || part_count > 16) return badXg("part_count");
+                int last_part = -1;
+                for (uint8_t i = 0; i < part_count; ++i) {
+                    uint8_t part = 0, hints = 0;
+                    uint16_t mask = 0;
+                    if (!u8(part) || !u16(mask) || !u8(hints)) return badXg("part header");
+                    if (static_cast<int>(part) <= last_part || part > 15 ||
+                        (mask & 0x8000u) != 0 || (hints & 0xFCu) != 0) {
+                        return badXg("part range");
+                    }
+                    last_part = part;
+                    XgPartMetadata p;
+                    p.megavoice_hint = (hints & (1u << 0)) != 0;
+                    p.revo_drum_hint = (hints & (1u << 1)) != 0;
+                    uint8_t b = 0;
+                    if (mask & (1u << 0))  { if (!u8(b) || b > 127) return badXg("bank_msb"); p.bank_msb = b; }
+                    if (mask & (1u << 1))  { if (!u8(b) || b > 127) return badXg("bank_lsb"); p.bank_lsb = b; }
+                    if (mask & (1u << 2))  { if (!u8(b) || b > 127) return badXg("program"); p.program = b; }
+                    if (mask & (1u << 3))  { if (!u8(b) || b > 5) return badXg("part_mode"); p.part_mode = b; }
+                    if (mask & (1u << 4))  { if (!u8(b) || b > 127) return badXg("volume"); p.volume = b; }
+                    if (mask & (1u << 5))  { if (!u8(b) || b > 127) return badXg("pan"); p.pan = b; }
+                    if (mask & (1u << 6))  { if (!u8(b) || b > 127) return badXg("dry_level"); p.dry_level = b; }
+                    if (mask & (1u << 7))  { if (!u8(b) || b > 127) return badXg("chorus_send"); p.chorus_send = b; }
+                    if (mask & (1u << 8))  { if (!u8(b) || b > 127) return badXg("reverb_send"); p.reverb_send = b; }
+                    if (mask & (1u << 9))  { if (!u8(b) || b > 127) return badXg("variation_send"); p.variation_send = b; }
+                    if (mask & (1u << 10)) { if (!u8(b) || !offOk(static_cast<int8_t>(b))) return badXg("filter_cutoff"); p.filter_cutoff_offset = static_cast<int8_t>(b); }
+                    if (mask & (1u << 11)) { if (!u8(b) || !offOk(static_cast<int8_t>(b))) return badXg("filter_res"); p.filter_res_offset = static_cast<int8_t>(b); }
+                    if (mask & (1u << 12)) { if (!u8(b) || !eqOk(static_cast<int8_t>(b))) return badXg("eq_low"); p.eq_low_gain_db = static_cast<int8_t>(b); }
+                    if (mask & (1u << 13)) { if (!u8(b) || !eqOk(static_cast<int8_t>(b))) return badXg("eq_mid"); p.eq_mid_gain_db = static_cast<int8_t>(b); }
+                    if (mask & (1u << 14)) { if (!u8(b) || !eqOk(static_cast<int8_t>(b))) return badXg("eq_high"); p.eq_high_gain_db = static_cast<int8_t>(b); }
+                    xg.parts.emplace(part, p);
+                }
+
+                uint16_t drum_count = 0;
+                if (!u16(drum_count) || drum_count > 512) return badXg("drum_count");
+                xg.drum_overrides.reserve(drum_count);
+                for (uint16_t i = 0; i < drum_count; ++i) {
+                    uint8_t setup = 0, key = 0, dmask = 0;
+                    if (!u8(setup) || !u8(key) || !u8(dmask)) return badXg("drum header");
+                    if (setup > 3 || key > 127 || (dmask & 0xF0u) != 0) return badXg("drum range");
+                    XgDrumOverrideMetadata d;
+                    d.drum_setup = setup;
+                    d.key = key;
+                    uint8_t b = 0;
+                    if (dmask & (1u << 0)) { if (!u8(b) || b > 127) return badXg("drum level"); d.level = b; }
+                    if (dmask & (1u << 1)) { if (!u8(b) || b > 127) return badXg("drum pan"); d.pan = b; }
+                    if (dmask & (1u << 2)) { if (!u8(b) || b > 127) return badXg("drum reverb"); d.reverb_send = b; }
+                    if (dmask & (1u << 3)) { if (!u8(b) || !offOk(static_cast<int8_t>(b))) return badXg("drum pitch"); d.pitch_coarse = static_cast<int8_t>(b); }
+                    xg.drum_overrides.push_back(d);
+                }
+
+                uint8_t adv_count = 0;
+                if (!u8(adv_count) || adv_count > 32) return badXg("advisory_count");
+                xg.advisory_codes.reserve(adv_count);
+                for (uint8_t i = 0; i < adv_count; ++i) {
+                    uint8_t slen = 0;
+                    if (!u8(slen) || slen < 1 || slen > 64 || slen > end - pos_) {
+                        return badXg("advisory string");
+                    }
+                    xg.advisory_codes.push_back(readString(slen));
+                }
+
+                if (pos_ != end) return badXg("trailing bytes");
+                style.xg_sysex = std::move(xg);
+                haveXgsx = true;
                 continue;
             }
             if (ext.tag != format::kExtTempo) {   // unknown: keep verbatim for the writer

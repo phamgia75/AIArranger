@@ -191,6 +191,80 @@ struct KorgExportSettings {
     bool empty() const { return route.empty() && sounds.empty() && element_sounds.empty(); }
 };
 
+// ── XG SysEx Mix / Effect / Part-Mode Metadata (extension 'XGSX') ────
+// Additive style-level metadata captured from Yamaha XG / GM / GS SysEx during
+// SFF1/SFF2 import so exporters (e.g. genos_to_korg) can consume mix defaults,
+// drum part modes, master/effect types, and MegaVoice/Revo! hints. Absent
+// (empty) in legacy files and styles without SysEx (zero 'XGSX' bytes written).
+
+struct XgPartMetadata {
+    std::optional<uint8_t> bank_msb;             // 0..127
+    std::optional<uint8_t> bank_lsb;             // 0..127
+    std::optional<uint8_t> program;              // 0..127
+    std::optional<uint8_t> part_mode;            // 0=Normal, 1=Drum, 2..5=DrumS1..S4
+    std::optional<uint8_t> volume;               // 0..127
+    std::optional<uint8_t> pan;                  // 0..127 (64=C)
+    std::optional<uint8_t> dry_level;            // 0..127
+    std::optional<uint8_t> chorus_send;          // 0..127
+    std::optional<uint8_t> reverb_send;          // 0..127
+    std::optional<uint8_t> variation_send;       // 0..127
+    std::optional<int8_t>  filter_cutoff_offset; // -64..+63
+    std::optional<int8_t>  filter_res_offset;    // -64..+63
+    std::optional<int8_t>  eq_low_gain_db;       // -12..+12
+    std::optional<int8_t>  eq_mid_gain_db;       // -12..+12
+    std::optional<int8_t>  eq_high_gain_db;      // -12..+12
+    bool                   megavoice_hint = false;
+    bool                   revo_drum_hint = false;
+
+    bool isDrumMode() const noexcept {
+        return part_mode.has_value() && *part_mode >= 1u && *part_mode <= 5u;
+    }
+};
+
+struct XgDrumOverrideMetadata {
+    uint8_t                drum_setup = 0;       // 0..3
+    uint8_t                key        = 0;       // 0..127
+    std::optional<uint8_t> level;                // 0..127
+    std::optional<uint8_t> pan;                  // 0..127
+    std::optional<uint8_t> reverb_send;          // 0..127
+    std::optional<int8_t>  pitch_coarse;         // -64..+63
+};
+
+struct XgSysExMetadata {
+    uint32_t total_sysex_seen    = 0;
+    uint32_t recognized_xg_count = 0;
+    uint32_t unrecognized_count  = 0;
+    uint32_t malformed_count     = 0;
+    uint32_t dsp_sysex_count     = 0;
+    bool     xg_system_on        = false;
+    bool     gm1_system_on       = false;
+    bool     gm2_system_on       = false;
+    bool     gs_reset            = false;
+    std::optional<uint16_t> reverb_type;
+    std::optional<uint16_t> chorus_type;
+    std::optional<uint16_t> variation_type;
+    std::optional<uint8_t>  master_volume;
+    std::optional<uint8_t>  master_eq_type;
+    std::optional<int8_t>   master_eq_low_gain_db;
+    std::optional<int8_t>   master_eq_mid_gain_db;
+    std::optional<int8_t>   master_eq_high_gain_db;
+    std::map<uint8_t, XgPartMetadata>   parts;          // part 0..15
+    std::vector<XgDrumOverrideMetadata> drum_overrides;
+    std::vector<std::string>            advisory_codes;
+
+    bool empty() const noexcept {
+        return total_sysex_seen == 0 && recognized_xg_count == 0 &&
+               unrecognized_count == 0 && malformed_count == 0 &&
+               dsp_sysex_count == 0 &&
+               !xg_system_on && !gm1_system_on && !gm2_system_on && !gs_reset &&
+               !reverb_type.has_value() && !chorus_type.has_value() &&
+               !variation_type.has_value() && !master_volume.has_value() &&
+               !master_eq_type.has_value() && !master_eq_low_gain_db.has_value() &&
+               !master_eq_mid_gain_db.has_value() && !master_eq_high_gain_db.has_value() &&
+               parts.empty() && drum_overrides.empty() && advisory_codes.empty();
+    }
+};
+
 struct StyleDefinition {
     std::string name;
     std::string format_version;
@@ -204,6 +278,7 @@ struct StyleDefinition {
     // (UASF_VERSIONING_POLICY: unknown fields MUST be preserved).
     std::vector<uint8_t> unknown_extensions;
     KorgExportSettings korg_export;   // 'KEXP'
+    XgSysExMetadata xg_sysex;         // 'XGSX'
 };
 
 } // namespace ai_arranger::uasf

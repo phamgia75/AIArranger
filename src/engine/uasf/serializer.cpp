@@ -125,8 +125,161 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
             casm.push_back(0);  // reserved
         }
     }
+    std::vector<uint8_t> xgsx;   // 'XGSX' payload (additive XG SysEx metadata)
+    if (!style.xg_sysex.empty()) {
+        const auto& xg = style.xg_sysex;
+        auto pushU16 = [&](uint16_t v) {
+            xgsx.push_back(static_cast<uint8_t>(v & 0xFF));
+            xgsx.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        };
+        auto pushU32 = [&](uint32_t v) {
+            xgsx.push_back(static_cast<uint8_t>(v & 0xFF));
+            xgsx.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+            xgsx.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+            xgsx.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+        };
+        auto eqOk = [](int8_t g) { return g >= -12 && g <= 12; };
+        auto offOk = [](int8_t o) { return o >= -64 && o <= 63; };
+
+        if (xg.parts.size() > 16 || xg.drum_overrides.size() > 512 || xg.advisory_codes.size() > 32) {
+            return {false, {}, "XG SysEx metadata: too many entries"};
+        }
+        if ((xg.master_volume && *xg.master_volume > 127) ||
+            (xg.master_eq_type && *xg.master_eq_type > 127) ||
+            (xg.master_eq_low_gain_db && !eqOk(*xg.master_eq_low_gain_db)) ||
+            (xg.master_eq_mid_gain_db && !eqOk(*xg.master_eq_mid_gain_db)) ||
+            (xg.master_eq_high_gain_db && !eqOk(*xg.master_eq_high_gain_db))) {
+            return {false, {}, "XG SysEx metadata: invalid master parameter"};
+        }
+
+        xgsx.push_back(1);  // version = 1
+        pushU32(xg.total_sysex_seen);
+        pushU32(xg.recognized_xg_count);
+        pushU32(xg.unrecognized_count);
+        pushU32(xg.malformed_count);
+        pushU32(xg.dsp_sysex_count);
+
+        uint8_t mode_flags = 0;
+        if (xg.xg_system_on)  mode_flags |= (1u << 0);
+        if (xg.gm1_system_on) mode_flags |= (1u << 1);
+        if (xg.gm2_system_on) mode_flags |= (1u << 2);
+        if (xg.gs_reset)      mode_flags |= (1u << 3);
+        xgsx.push_back(mode_flags);
+
+        uint8_t opt_flags = 0;
+        if (xg.reverb_type)            opt_flags |= (1u << 0);
+        if (xg.chorus_type)            opt_flags |= (1u << 1);
+        if (xg.variation_type)         opt_flags |= (1u << 2);
+        if (xg.master_volume)          opt_flags |= (1u << 3);
+        if (xg.master_eq_type)         opt_flags |= (1u << 4);
+        if (xg.master_eq_low_gain_db)  opt_flags |= (1u << 5);
+        if (xg.master_eq_mid_gain_db)  opt_flags |= (1u << 6);
+        if (xg.master_eq_high_gain_db) opt_flags |= (1u << 7);
+        xgsx.push_back(opt_flags);
+
+        if (xg.reverb_type)            pushU16(*xg.reverb_type);
+        if (xg.chorus_type)            pushU16(*xg.chorus_type);
+        if (xg.variation_type)         pushU16(*xg.variation_type);
+        if (xg.master_volume)          xgsx.push_back(*xg.master_volume);
+        if (xg.master_eq_type)         xgsx.push_back(*xg.master_eq_type);
+        if (xg.master_eq_low_gain_db)  xgsx.push_back(static_cast<uint8_t>(*xg.master_eq_low_gain_db));
+        if (xg.master_eq_mid_gain_db)  xgsx.push_back(static_cast<uint8_t>(*xg.master_eq_mid_gain_db));
+        if (xg.master_eq_high_gain_db) xgsx.push_back(static_cast<uint8_t>(*xg.master_eq_high_gain_db));
+
+        xgsx.push_back(static_cast<uint8_t>(xg.parts.size()));
+        for (const auto& [part, p] : xg.parts) {
+            if (part > 15 ||
+                (p.bank_msb && *p.bank_msb > 127) ||
+                (p.bank_lsb && *p.bank_lsb > 127) ||
+                (p.program && *p.program > 127) ||
+                (p.part_mode && *p.part_mode > 5) ||
+                (p.volume && *p.volume > 127) ||
+                (p.pan && *p.pan > 127) ||
+                (p.dry_level && *p.dry_level > 127) ||
+                (p.chorus_send && *p.chorus_send > 127) ||
+                (p.reverb_send && *p.reverb_send > 127) ||
+                (p.variation_send && *p.variation_send > 127) ||
+                (p.filter_cutoff_offset && !offOk(*p.filter_cutoff_offset)) ||
+                (p.filter_res_offset && !offOk(*p.filter_res_offset)) ||
+                (p.eq_low_gain_db && !eqOk(*p.eq_low_gain_db)) ||
+                (p.eq_mid_gain_db && !eqOk(*p.eq_mid_gain_db)) ||
+                (p.eq_high_gain_db && !eqOk(*p.eq_high_gain_db))) {
+                return {false, {}, "XG SysEx metadata: invalid part parameter"};
+            }
+            uint16_t mask = 0;
+            if (p.bank_msb)             mask |= (1u << 0);
+            if (p.bank_lsb)             mask |= (1u << 1);
+            if (p.program)              mask |= (1u << 2);
+            if (p.part_mode)            mask |= (1u << 3);
+            if (p.volume)               mask |= (1u << 4);
+            if (p.pan)                  mask |= (1u << 5);
+            if (p.dry_level)            mask |= (1u << 6);
+            if (p.chorus_send)          mask |= (1u << 7);
+            if (p.reverb_send)          mask |= (1u << 8);
+            if (p.variation_send)       mask |= (1u << 9);
+            if (p.filter_cutoff_offset) mask |= (1u << 10);
+            if (p.filter_res_offset)    mask |= (1u << 11);
+            if (p.eq_low_gain_db)       mask |= (1u << 12);
+            if (p.eq_mid_gain_db)       mask |= (1u << 13);
+            if (p.eq_high_gain_db)      mask |= (1u << 14);
+            uint8_t hints = 0;
+            if (p.megavoice_hint) hints |= (1u << 0);
+            if (p.revo_drum_hint) hints |= (1u << 1);
+
+            xgsx.push_back(part);
+            pushU16(mask);
+            xgsx.push_back(hints);
+            if (p.bank_msb)             xgsx.push_back(*p.bank_msb);
+            if (p.bank_lsb)             xgsx.push_back(*p.bank_lsb);
+            if (p.program)              xgsx.push_back(*p.program);
+            if (p.part_mode)            xgsx.push_back(*p.part_mode);
+            if (p.volume)               xgsx.push_back(*p.volume);
+            if (p.pan)                  xgsx.push_back(*p.pan);
+            if (p.dry_level)            xgsx.push_back(*p.dry_level);
+            if (p.chorus_send)          xgsx.push_back(*p.chorus_send);
+            if (p.reverb_send)          xgsx.push_back(*p.reverb_send);
+            if (p.variation_send)       xgsx.push_back(*p.variation_send);
+            if (p.filter_cutoff_offset) xgsx.push_back(static_cast<uint8_t>(*p.filter_cutoff_offset));
+            if (p.filter_res_offset)    xgsx.push_back(static_cast<uint8_t>(*p.filter_res_offset));
+            if (p.eq_low_gain_db)       xgsx.push_back(static_cast<uint8_t>(*p.eq_low_gain_db));
+            if (p.eq_mid_gain_db)       xgsx.push_back(static_cast<uint8_t>(*p.eq_mid_gain_db));
+            if (p.eq_high_gain_db)      xgsx.push_back(static_cast<uint8_t>(*p.eq_high_gain_db));
+        }
+
+        pushU16(static_cast<uint16_t>(xg.drum_overrides.size()));
+        for (const auto& d : xg.drum_overrides) {
+            if (d.drum_setup > 3 || d.key > 127 ||
+                (d.level && *d.level > 127) ||
+                (d.pan && *d.pan > 127) ||
+                (d.reverb_send && *d.reverb_send > 127) ||
+                (d.pitch_coarse && !offOk(*d.pitch_coarse))) {
+                return {false, {}, "XG SysEx metadata: invalid drum override"};
+            }
+            uint8_t dmask = 0;
+            if (d.level)        dmask |= (1u << 0);
+            if (d.pan)          dmask |= (1u << 1);
+            if (d.reverb_send)  dmask |= (1u << 2);
+            if (d.pitch_coarse) dmask |= (1u << 3);
+            xgsx.push_back(d.drum_setup);
+            xgsx.push_back(d.key);
+            xgsx.push_back(dmask);
+            if (d.level)        xgsx.push_back(*d.level);
+            if (d.pan)          xgsx.push_back(*d.pan);
+            if (d.reverb_send)  xgsx.push_back(*d.reverb_send);
+            if (d.pitch_coarse) xgsx.push_back(static_cast<uint8_t>(*d.pitch_coarse));
+        }
+
+        xgsx.push_back(static_cast<uint8_t>(xg.advisory_codes.size()));
+        for (const auto& code : xg.advisory_codes) {
+            if (code.empty() || code.size() > 64) {
+                return {false, {}, "XG SysEx metadata: invalid advisory code length"};
+            }
+            xgsx.push_back(static_cast<uint8_t>(code.size()));
+            xgsx.insert(xgsx.end(), code.begin(), code.end());
+        }
+    }
     header.flags = (style.tempo_bpm != 0 || !trns.empty() || !kexp.empty() || !snam.empty() ||
-                    !casm.empty() || !style.unknown_extensions.empty())
+                    !casm.empty() || !xgsx.empty() || !style.unknown_extensions.empty())
                        ? format::kFlagExtensions : 0;
     header.section_count = static_cast<uint32_t>(std::min(style.sections.size(),
                                                          size_t(format::kMaxSections)));
@@ -235,6 +388,11 @@ SerializeResult UasfSerializer::serialize(const StyleDefinition& style) noexcept
         writeU32(format::kExtCasm);
         writeU32(static_cast<uint32_t>(casm.size()));
         writeBytes(casm.data(), casm.size());
+    }
+    if (!xgsx.empty()) {
+        writeU32(format::kExtXgSysEx);
+        writeU32(static_cast<uint32_t>(xgsx.size()));
+        writeBytes(xgsx.data(), xgsx.size());
     }
     // Blocks a reader kept but did not understand, re-emitted verbatim.
     if (!style.unknown_extensions.empty())

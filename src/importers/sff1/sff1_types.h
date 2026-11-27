@@ -1,6 +1,7 @@
 #ifndef AI_ARRANGER_SFF1_TYPES_H
 #define AI_ARRANGER_SFF1_TYPES_H
 
+#include "importers/sff1/xg_sysex_parser.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -210,6 +211,8 @@ struct ParseResult {
     uint8_t  time_sig_num = 4;
     uint8_t  time_sig_den = 4;
     uint32_t end_of_track_tick = 0;
+    // Live-parsed Yamaha XG / GM / GS SysEx summary from MTrk 0xF0/0xF7 events.
+    XgSysExSummary xg_sysex;
 };
 
 // ── Supported Chunk IDs ───────────────────────────────────────────

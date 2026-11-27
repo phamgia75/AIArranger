@@ -261,6 +261,12 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
     size_t   pos = 0;
     bool     have_time_sig = false;
 
+    // Bounded multi-packet SMF SysEx reassembly state (0xF0 ... 0xF7 continuations).
+    // Strictly capped at kMaxSysExPayloadBytes so crafted files never allocate unbounded RAM.
+    bool                 sysex_in_progress = false;
+    bool                 sysex_overflowed  = false;
+    std::vector<uint8_t> sysex_buf;
+
     // Standard MIDI File variable-length quantity (max 4 bytes).
     auto readVlq = [&](uint32_t& out) -> bool {
         out = 0;
@@ -274,11 +280,13 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
     };
 
     // SMF 1.0 track decoding. Only channel messages become events. SysEx
-    // (F0/F7 <len> <payload>) and meta (FF <type> <len> <payload>) events are
-    // skipped by their declared length — real Genos styles carry dozens of
-    // SysEx messages, whose payload must never be read as delta-times — and
-    // both cancel running status. End of Track (FF 2F) stops decoding; a
-    // truncated or unparseable message stops decoding without emitting it.
+    // (F0/F7 <len> <payload>) are decoded live into result_.xg_sysex with strict
+    // bounds (single-packet and multi-packet 0xF7 continuation), then skipped by
+    // their declared length — real Genos styles carry dozens of SysEx messages,
+    // whose payload must never be read as delta-times — and both SysEx and meta
+    // (FF <type> <len> <payload>) cancel running status. End of Track (FF 2F)
+    // stops decoding; a truncated or unparseable message stops decoding without
+    // emitting it.
     for (;;) {
         uint32_t delta = 0;
         if (!readVlq(delta)) break;
@@ -342,9 +350,73 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
         }
         if (status == 0xF0 || status == 0xF7) {
             uint32_t len = 0;
-            if (!readVlq(len)) break;
             running_status = 0;
-            if (len > remaining - pos) break;          // truncated SysEx
+            if (!readVlq(len) || len > remaining - pos) {
+                if (sysex_in_progress) {
+                    recordMalformedSysEx(result_.xg_sysex);
+                    sysex_in_progress = false;
+                    sysex_overflowed = false;
+                    sysex_buf.clear();
+                }
+                recordMalformedSysEx(result_.xg_sysex);
+                break;                                 // truncated or invalid SysEx
+            }
+
+            const uint8_t* pkt = d + pos;
+            if (status == 0xF0) {
+                if (sysex_in_progress) {
+                    // Previous divided SysEx was never terminated by 0xF7.
+                    recordMalformedSysEx(result_.xg_sysex);
+                    sysex_in_progress = false;
+                    sysex_overflowed = false;
+                    sysex_buf.clear();
+                }
+                if (len == 0) {
+                    recordMalformedSysEx(result_.xg_sysex);
+                } else if (pkt[len - 1] == 0xF7u) {
+                    // Complete single-packet SMF SysEx (strip trailing 0xF7; zero allocation).
+                    parseXgSysExMessage(pkt, static_cast<size_t>(len - 1), result_.xg_sysex);
+                } else {
+                    // Start of divided / multi-packet SMF SysEx; continue on 0xF7 packets.
+                    sysex_in_progress = true;
+                    sysex_overflowed = (len > kMaxSysExPayloadBytes);
+                    sysex_buf.clear();
+                    if (!sysex_overflowed) {
+                        sysex_buf.assign(pkt, pkt + len);
+                    }
+                }
+            } else { // status == 0xF7
+                if (sysex_in_progress) {
+                    const bool closes = (len > 0 && pkt[len - 1] == 0xF7u);
+                    const size_t chunk_len = closes ? static_cast<size_t>(len - 1)
+                                                    : static_cast<size_t>(len);
+                    if (!sysex_overflowed) {
+                        if (chunk_len > kMaxSysExPayloadBytes - sysex_buf.size()) {
+                            sysex_overflowed = true;
+                            sysex_buf.clear();
+                        } else if (chunk_len > 0) {
+                            sysex_buf.insert(sysex_buf.end(), pkt, pkt + chunk_len);
+                        }
+                    }
+                    if (closes) {
+                        if (sysex_overflowed) {
+                            recordMalformedSysEx(result_.xg_sysex);
+                        } else {
+                            parseXgSysExMessage(sysex_buf.data(), sysex_buf.size(), result_.xg_sysex);
+                        }
+                        sysex_in_progress = false;
+                        sysex_overflowed = false;
+                        sysex_buf.clear();
+                    }
+                } else if (len >= 2 && pkt[0] == 0xF0u && pkt[len - 1] == 0xF7u) {
+                    // Escaped complete SysEx packet: F7 <len> F0 <payload...> F7.
+                    parseXgSysExMessage(pkt + 1, static_cast<size_t>(len - 2), result_.xg_sysex);
+                } else {
+                    // Stray 0xF7 continuation or non-SysEx escape with no preceding 0xF0.
+                    recordMalformedSysEx(result_.xg_sysex);
+                }
+            }
+
             pos += len;
             continue;
         }
@@ -362,6 +434,10 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
         ev.data2  = (need == 2) ? d[pos + 1] : 0;
         pos += need;
         events.push_back(ev);
+    }
+
+    if (sysex_in_progress) {
+        recordMalformedSysEx(result_.xg_sysex);
     }
 
     offset += pos;

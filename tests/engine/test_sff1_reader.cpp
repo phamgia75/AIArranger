@@ -154,6 +154,27 @@ int main() {
         TEST("Ctb2: entry without a full middle zone is skipped", res2.success && res2.casm_configs.empty());
     }
 
+    // ── Live XG SysEx parsing in MTrk (Wave 4a Q5-Importer) ───────────
+    {
+        const std::vector<uint8_t> mthd = {0, 0, 0, 1, 0x01, 0xE0};
+        const std::vector<uint8_t> mtrk = {
+            0x00, 0xF0, 0x08, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7, // XG System On
+            0x00, 0xF0, 0x08, 0x43, 0x10, 0x4C, 0x08, 0x09, 0x07, 0x01, 0xF7, // Part 9 Drum Mode
+            0x00, 0x99, 36, 100,
+            0x60, 0x89, 36, 0,
+            0x00, 0xFF, 0x2F, 0x00
+        };
+        auto buf = makeChunk("MThd", mthd);
+        auto trk = makeChunk("MTrk", mtrk);
+        buf.insert(buf.end(), trk.begin(), trk.end());
+        Sff1Reader r;
+        const auto res = r.parseBuffer(buf, "xg_smoke.sty");
+        TEST("XG SysEx parsed live in Sff1Reader (XG System On + Part 9 Drum Mode)",
+             res.success && res.xg_sysex.xg_system_on &&
+             res.xg_sysex.recognized_xg_count == 2 &&
+             res.xg_sysex.parts.count(9) && res.xg_sysex.parts.at(9).isDrumMode());
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }
