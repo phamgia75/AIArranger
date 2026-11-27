@@ -357,7 +357,7 @@ inline TimbreSubFamily classifyGmProgramChange(int pc) {
         case 40: return {TimbreFamily::Strings, "Solo Violin", false};
         case 41: return {TimbreFamily::Strings, "Solo Viola", false};
         case 42: return {TimbreFamily::Strings, "Solo Cello", false};
-        case 43: return {TimbreFamily::Strings, "Contrabass", false};
+        case 43: return {TimbreFamily::AcousticBass, "Contrabass", false};
         case 44: return {TimbreFamily::Strings, "Tremolo Strings", false};
         case 45: return {TimbreFamily::Strings, "Pizzicato Strings", false};
         case 46: return {TimbreFamily::PluckedStrings, "Orchestral Harp", false};
@@ -672,7 +672,7 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
         (hasAnyToken(tokens, {"synth", "syn", "sub", "analog", "acid", "moog"}) && hasAnyToken(tokens, {"bass", "bs"}))) {
         return {{TimbreFamily::SynthBass, "Synth Bass", dncHint}, 86, "keyword:synth-bass"};
     }
-    if (hasAnyToken(tokens, {"acbs", "abass", "a.bass", "doublebass", "contrabass", "woodbass"}) ||
+    if (hasAnyToken(tokens, {"acbs", "abass", "a.bass", "doublebass", "contrabass", "contrabs", "woodbass"}) ||
         (hasAnyToken(tokens, {"ac", "acoust", "acoustic", "upright", "wood", "double"}) && hasAnyToken(tokens, {"bass", "bs"}))) {
         return {{TimbreFamily::AcousticBass, "Acoustic Upright Bass", dncHint}, 86, "keyword:acoustic-bass"};
     }
@@ -696,9 +696,11 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
     // ── Piano (Acoustic) ──
     if (hasAnyToken(tokens, {"piano", "pno", "grand", "honky", "klavier", "austrian"})) {
         std::string sub = "Acoustic Grand Piano";
+        const bool specific = hasAnyToken(tokens, {"grand", "bright", "honky", "austrian"});
         if (hasToken(tokens, "bright")) sub = "Bright Acoustic Piano";
         else if (hasToken(tokens, "honky")) sub = "Honky-Tonk Piano";
-        return {{TimbreFamily::Piano, std::move(sub), dncHint}, 86, "keyword:piano"};
+        return {{TimbreFamily::Piano, std::move(sub), dncHint}, 86,
+                specific ? "keyword:piano" : "keyword:piano-generic"};
     }
 
     // ── Plucked Strings (Harp, Banjo, Mandolin, Ukulele — never shadowed by Harpsichord) ──
@@ -737,6 +739,7 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
         else if (hasAnyToken(tokens, {"xylo", "xylophone"})) sub = "Xylophone";
         else if (hasAnyToken(tokens, {"glock", "glockenspiel"})) sub = "Glockenspiel";
         else if (hasToken(tokens, "celesta")) sub = "Celesta";
+        else if (hasToken(tokens, "timpani")) sub = "Timpani";
         else if (hasAnyToken(tokens, {"bell", "bells", "tubular", "chimes"})) sub = "Tubular Bells";
         return {{TimbreFamily::MalletPerc, std::move(sub), dncHint}, 85, "keyword:mallet"};
     }
@@ -772,6 +775,14 @@ inline KeywordMatch classifyByKeywords(std::string_view name,
     }
 
     return {};
+}
+
+inline bool isGenericKeywordRule(std::string_view rule) noexcept {
+    return rule == "keyword:guitar-generic" ||
+           rule == "keyword:bass-generic" ||
+           rule == "keyword:drum-kit" ||
+           rule == "keyword:perc" ||
+           rule == "keyword:piano-generic";
 }
 
 struct SignalFeatures {
@@ -1034,13 +1045,23 @@ inline TrackTimbreProfile profileTrackTimbre(
             TimbreSubFamily sub{};
             sub.family = isPercTarget ? TimbreFamily::PercussionKit : TimbreFamily::DrumKit;
             sub.prefers_dnc = nameDnc;
-            if (yamaha_pc <= 7)       sub.sub_family = "Standard Drum Kit";
-            else if (yamaha_pc <= 15) sub.sub_family = "Room Drum Kit";
-            else if (yamaha_pc <= 23) sub.sub_family = "Rock / Power Drum Kit";
-            else if (yamaha_pc <= 31) sub.sub_family = "Electronic / Analog Drum Kit";
-            else if (yamaha_pc <= 39) sub.sub_family = "Jazz Drum Kit";
-            else if (yamaha_pc <= 47) sub.sub_family = "Brush Drum Kit";
-            else if (yamaha_pc <= 55) {
+            if (yamaha_pc <= 7) {
+                sub.sub_family = isPercTarget ? "Standard Percussion Kit" : "Standard Drum Kit";
+            } else if (yamaha_pc <= 15) {
+                sub.sub_family = "Room Drum Kit";
+            } else if (yamaha_pc <= 23) {
+                sub.family = TimbreFamily::DrumKit;
+                sub.sub_family = "Rock / Power Drum Kit";
+            } else if (yamaha_pc <= 31) {
+                sub.family = TimbreFamily::DrumKit;
+                sub.sub_family = "Electronic / Analog Drum Kit";
+            } else if (yamaha_pc <= 39) {
+                sub.family = TimbreFamily::DrumKit;
+                sub.sub_family = "Jazz Drum Kit";
+            } else if (yamaha_pc <= 47) {
+                sub.family = TimbreFamily::DrumKit;
+                sub.sub_family = "Brush Drum Kit";
+            } else if (yamaha_pc <= 55) {
                 sub.family = isDrumTarget ? TimbreFamily::DrumKit : TimbreFamily::PercussionKit;
                 sub.sub_family = "Orchestra / Latin Kit";
             } else if (yamaha_pc >= 112) {
@@ -1224,8 +1245,10 @@ inline TrackTimbreProfile profileTrackTimbre(
             }
 
             if (gm.family != TimbreFamily::Unknown) {
-                // Refine sub-family with explicit track-name nuance when family agrees (e.g. Wurlitzer vs Rhodes).
-                if (kw.confidence > 0 && kw.sub.family == gm.family) {
+                // Refine sub-family with explicit track-name nuance when family agrees (e.g. Wurlitzer vs Rhodes),
+                // but NEVER let a generic keyword ("Guitar", "Bass", "Piano") overwrite a specific GM sub-family.
+                if (kw.confidence > 0 && kw.sub.family == gm.family &&
+                    !timbre_detail::isGenericKeywordRule(kw.matched_rule)) {
                     gm.sub_family = kw.sub.sub_family;
                 }
                 prof.inferred = std::move(gm);
@@ -1234,6 +1257,13 @@ inline TrackTimbreProfile profileTrackTimbre(
                                      ? "yamaha-bank:0-gm-xg"
                                      : (isSArt ? "yamaha-bank:8-sart"
                                                : (yamaha_msb == 8 ? "yamaha-bank:8-panel" : "yamaha-bank:104-live-cool-sweet"));
+                return prof;
+            }
+            if (yamaha_msb == 0 && yamaha_pc >= 120 && kw.confidence == 0) {
+                // Explicit GM Sound Effects (PC 120..127) must fail closed rather than falling into Signal-3.
+                prof.inferred = {TimbreFamily::Unknown, "Sound Effect", false};
+                prof.confidence = 0;
+                prof.rationale = "yamaha-bank:0-gm-sfx-unsupported";
                 return prof;
             }
         }
@@ -1284,11 +1314,27 @@ inline TrackTimbreProfile profileTrackTimbre(
         return prof;
     }
 
+    // An explicit non-standard vendor-private bank MSB that went unrecognized by Signal-1
+    // AND had no Signal-2 keyword match must fail closed (confidence <= 35) instead of
+    // auto-selecting Piano/Strings/Pad purely from polyphony heuristics.
+    const bool isRecognizedBankMsb =
+        (yamaha_msb == 0 || yamaha_msb == 8 || yamaha_msb == 62 || yamaha_msb == 63 ||
+         yamaha_msb == 104 || yamaha_msb == 120 || yamaha_msb == 121 ||
+         yamaha_msb == 126 || yamaha_msb == 127);
+    const bool unrecognizedPrivateBank = (yamaha_msb >= 0 && !isRecognizedBankMsb);
+    auto capPrivateBank = [&](TrackTimbreProfile& p) noexcept {
+        if (unrecognizedPrivateBank) {
+            p.confidence = std::min<uint8_t>(p.confidence, uint8_t{35});
+            p.rationale += "+private-bank-cap";
+        }
+    };
+
     if (sig.note_count > 0) {
         if (sig.max_polyphony <= 1 && sig.pitch_median <= 48) {
             prof.inferred = {TimbreFamily::ElectricBass, "Signal-Inferred Bass", nameDnc};
             prof.confidence = 68;
             prof.rationale = "signal:mono-low-bass";
+            capPrivateBank(prof);
             return prof;
         }
         if (sig.max_polyphony >= 3 && sig.mean_duration_beats >= 1.8) {
@@ -1301,6 +1347,7 @@ inline TrackTimbreProfile profileTrackTimbre(
                 prof.confidence = 65;
                 prof.rationale = "signal:sustained-strings";
             }
+            capPrivateBank(prof);
             return prof;
         }
         if (sig.max_polyphony >= 3 && sig.mean_duration_beats < 0.75) {
@@ -1313,6 +1360,7 @@ inline TrackTimbreProfile profileTrackTimbre(
                 prof.confidence = 64;
                 prof.rationale = "signal:staccato-poly-piano";
             }
+            capPrivateBank(prof);
             return prof;
         }
         if (sig.max_polyphony >= 3) {
@@ -1325,6 +1373,7 @@ inline TrackTimbreProfile profileTrackTimbre(
                 prof.confidence = 60;
                 prof.rationale = "signal:poly-piano";
             }
+            capPrivateBank(prof);
             return prof;
         }
     }
@@ -1333,6 +1382,7 @@ inline TrackTimbreProfile profileTrackTimbre(
         prof.inferred = {TimbreFamily::SynthPad, "Role-Inferred Pad", nameDnc};
         prof.confidence = 58;
         prof.rationale = "role:pad";
+        capPrivateBank(prof);
         return prof;
     }
 

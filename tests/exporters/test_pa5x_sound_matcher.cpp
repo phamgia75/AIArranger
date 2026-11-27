@@ -821,6 +821,81 @@ int main() {
         }
     }
 
+    // ── 11. Mission 4b Regression Tests (P0-3, P1-2, P1-6, P1-7) ──
+    {
+        SoundMatchOptions opt{};
+        opt.enable_factory_catalog = true;
+
+        // P1-7a: Orchestra Kit GM2 (120/0/48), SFX Perc Kit GM2 (120/0/56), Timpani GM2 (121/0/47)
+        const auto orchProf = profileTrackTimbre(127, 0, 48, "OrchPerc", TrackRole::Drum, {}, {}, 9, kDrumCh);
+        const auto mOrch = matchTrackSound(orchProf, {}, nullptr, opt);
+        TEST("Mission4b P1-7: EXP09 OrchPerc (127/0/48) -> Orchestra Kit GM2 (120/0/48, DOCUMENTED_NOT_HW_VERIFIED)",
+             mOrch.selected.has_value() &&
+             mOrch.selected->msb == 120 && mOrch.selected->lsb == 0 && mOrch.selected->pc == 48 &&
+             mOrch.top_candidates[0].display_name == "Orchestra Kit GM2" &&
+             mOrch.selected_epistemic_tag == kEpistemicFactoryDocumented &&
+             !mOrch.top_candidates[0].hardware_verified);
+
+        const auto timpProf = profileTrackTimbre(0, 0, 47, "Timpani", TrackRole::Accompaniment, {}, {}, 15, 15);
+        const auto mTimp = matchTrackSound(timpProf, {}, nullptr, opt);
+        TEST("Mission4b P1-7: EXP09 Timpani (0/0/47) -> Timpani GM2 (121/0/47, not Vibraphone)",
+             mTimp.selected.has_value() &&
+             mTimp.selected->msb == 121 && mTimp.selected->lsb == 0 && mTimp.selected->pc == 47 &&
+             mTimp.top_candidates[0].display_name == "Timpani GM2");
+
+        // P1-7b: EXP12 SfxPerc (126/0/0) on kPercCh with Main B (126/0/40) & Main C (127/0/40) kit switches!
+        auto sfxProf = profileTrackTimbre(126, 0, 0, "SfxPerc", TrackRole::Percussion, {}, {}, 9, kPercCh);
+        sfxProf.element_yamaha_voices[SectionType::Main1] = {126, 0, 0};
+        sfxProf.element_yamaha_voices[SectionType::Main2] = {126, 0, 40};
+        sfxProf.element_yamaha_voices[SectionType::Main3] = {127, 0, 40};
+        const auto mSfx = matchTrackSound(sfxProf, {}, nullptr, opt);
+        TEST("Mission4b P1-7: EXP12 SfxPerc (126/0/0) -> SFX Perc Kit GM2 (120/0/56) & preserves Main B + Main C switches",
+             mSfx.selected.has_value() &&
+             mSfx.selected->msb == 120 && mSfx.selected->lsb == 0 && mSfx.selected->pc == 56 &&
+             mSfx.element_selected.count(SectionType::Main2) == 1 &&
+             mSfx.element_selected.at(SectionType::Main2).pc == 64 &&
+             mSfx.element_selected.count(SectionType::Main3) == 1 &&
+             mSfx.element_selected.at(SectionType::Main3).pc == 40);
+
+        // Generic Percussion Kit without SFX token still maps to Standard Perc Kit (120/0/69), not SFX!
+        const auto genPerc = makeProfile(TimbreFamily::PercussionKit, "Percussion Kit", kPercCh, 70);
+        const auto mGenPerc = matchTrackSound(genPerc, {}, nullptr, opt);
+        TEST("Mission4b P1-7: generic Percussion Kit still resolves to Standard Perc Kit (120/0/69, not SFX)",
+             mGenPerc.selected.has_value() && mGenPerc.selected->pc == 69);
+
+        // P1-2: EXP09 Contrabass (0/0/43) -> Acoustic Bass 1 (121/13/32, NEVER Solo Violin GM2!)
+        const auto cbProf = profileTrackTimbre(0, 0, 43, "ContraBs", TrackRole::Bass, {}, {}, 10, kBassCh);
+        const auto mCb = matchTrackSound(cbProf, {}, nullptr, opt);
+        TEST("Mission4b P1-2: EXP09 Contrabass (0/0/43) maps to Acoustic Bass 1 (121/13/32, not Solo Violin)",
+             mCb.selected.has_value() &&
+             mCb.selected->msb == 121 && mCb.selected->lsb == 13 && mCb.selected->pc == 32 &&
+             mCb.top_candidates[0].display_name == "Acoustic Bass 1");
+
+        // P1-6: EXP11 Steel Guitar ("Guitar", 0/0/25) -> Steel Guitar1 DNC (121/47/25, NEVER Classic Gtr 1 DNC!)
+        const auto steelProf = profileTrackTimbre(0, 0, 25, "Guitar", TrackRole::Chord, {}, {}, 12, 12);
+        const auto mSteel = matchTrackSound(steelProf, {}, nullptr, opt);
+        TEST("Mission4b P1-6: EXP11 'Guitar' (0/0/25) maps to Steel Guitar1 DNC (121/47/25, not Classic Gtr)",
+             mSteel.selected.has_value() &&
+             mSteel.selected->msb == 121 && mSteel.selected->lsb == 47 && mSteel.selected->pc == 25 &&
+             mSteel.top_candidates[0].display_name == "Steel Guitar1 DNC");
+
+        // P0-3: EXP15 unknown vendor-private banks (65/12/45, 66/7/122) fail closed UNRESOLVED!
+        const std::vector<NoteSpan> triad = {
+            {0, 480, 60, 82, false}, {0, 480, 64, 82, false}, {0, 480, 67, 82, false}
+        };
+        const std::vector<NoteSpan> padChord = {
+            {0, 1920, 48, 68, false}, {0, 1920, 52, 68, false}, {0, 1920, 55, 68, false}
+        };
+        const auto priv1 = profileTrackTimbre(65, 12, 45, "Track 1", TrackRole::Chord, triad, {}, 11, 11);
+        const auto priv2 = profileTrackTimbre(66, 7, 122, "Part 3", TrackRole::Pad, padChord, {}, 13, 13);
+        const auto mPriv1 = matchTrackSound(priv1, {}, nullptr, opt);
+        const auto mPriv2 = matchTrackSound(priv2, {}, nullptr, opt);
+        TEST("Mission4b P0-3: EXP15 unknown private banks 65/12/45 & 66/7/122 fail closed UNRESOLVED (score <= 65)",
+             !mPriv1.selected.has_value() && !mPriv2.selected.has_value() &&
+             (mPriv1.top_candidates.empty() || mPriv1.top_candidates[0].score <= 65) &&
+             (mPriv2.top_candidates.empty() || mPriv2.top_candidates[0].score <= 65));
+    }
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

@@ -180,7 +180,7 @@ int main() {
             if (pc <= 23) return TimbreFamily::Accordion;
             if (pc <= 25) return TimbreFamily::AcousticGuitar;
             if (pc <= 31) return TimbreFamily::ElectricGuitar;
-            if (pc == 32) return TimbreFamily::AcousticBass;
+            if (pc == 32 || pc == 43) return TimbreFamily::AcousticBass;
             if (pc <= 37) return TimbreFamily::ElectricBass;
             if (pc <= 39) return TimbreFamily::SynthBass;
             if (pc == 46) return TimbreFamily::PluckedStrings;
@@ -519,6 +519,65 @@ int main() {
                  kwProf("DX7").inferred.family == TimbreFamily::ElectricPiano &&
                  kwProf("B3").inferred.family == TimbreFamily::Organ);
         }
+    }
+
+    // ── 10. Mission 4b Regression Tests (P0-3 Private Banks, P1-2 Contrabass, P1-6 Generic Keyword Guard, P1-7 Timpani/Brush) ──
+    {
+        // P0-3: Unrecognized vendor-private banks (EXP15 65/12/45 "Track 1", 66/7/122 "Part 3") cap confidence <= 35!
+        const std::vector<NoteSpan> triad = {
+            makeNote(0, 480, 60), makeNote(0, 480, 64), makeNote(0, 480, 67)
+        };
+        const std::vector<NoteSpan> padSustained = {
+            makeNote(0, 1920, 48), makeNote(0, 1920, 52), makeNote(0, 1920, 55)
+        };
+        const auto priv1 = profileTrackTimbre(65, 12, 45, "Track 1", TrackRole::Chord, triad, {}, 11, 11);
+        const auto priv2 = profileTrackTimbre(66, 7, 122, "Part 3", TrackRole::Pad, padSustained, {}, 13, 13);
+        TEST("Mission4b P0-3: unknown private bank 65/12/45 caps signal-only confidence <= 35",
+             priv1.confidence <= 35 && priv1.rationale.find("private-bank-cap") != std::string::npos);
+        TEST("Mission4b P0-3: unknown private bank 66/7/122 caps sustained-pad confidence <= 35",
+             priv2.confidence <= 35 && priv2.rationale.find("private-bank-cap") != std::string::npos);
+
+        // Verify standard GM (MSB=0) SFX PC 125 even with polyphony stays Unknown (conf=0)
+        const auto gmSfxPoly = profileTrackTimbre(0, 0, 125, "FX Ring", TrackRole::Chord, triad, {}, 14, 14);
+        TEST("Mission4b P0-3: GM SFX 0/0/125 with polyphonic notes still fails closed (Unknown, conf=0)",
+             gmSfxPoly.inferred.family == TimbreFamily::Unknown && gmSfxPoly.confidence == 0);
+
+        // Verify no-bank (-1/-1/-1) Signal-3 still works at normal confidence (>= 60)
+        const auto noBankTriad = profileTrackTimbre(-1, -1, -1, "Track 1", TrackRole::Chord, triad, {}, 11, 11);
+        TEST("Mission4b P0-3: no-bank (-1/-1/-1) signal heuristic retains confidence >= 60",
+             noBankTriad.inferred.family == TimbreFamily::Piano && noBankTriad.confidence >= 60);
+
+        // P1-2: GM PC 43 Contrabass -> AcousticBass ("Contrabass")
+        const auto cb = profileTrackTimbre(0, 0, 43, "ContraBs", TrackRole::Bass, {}, {}, 10, kBassCh);
+        TEST("Mission4b P1-2: GM PC 43 'ContraBs' profiles as AcousticBass (not Strings)",
+             cb.inferred.family == TimbreFamily::AcousticBass && cb.confidence >= 90);
+
+        // P1-6: Generic keyword ("Guitar", "Bass", "Piano") must NOT overwrite specific GM PC sub-family!
+        const auto steelGtr = profileTrackTimbre(0, 0, 25, "Guitar", TrackRole::Chord, {}, {}, 12, 12);
+        const auto slapBass = profileTrackTimbre(0, 0, 36, "Bass", TrackRole::Bass, {}, {}, 10, kBassCh);
+        const auto brightPno = profileTrackTimbre(0, 0, 1, "Piano", TrackRole::Chord, {}, {}, 11, 11);
+        const auto wurliRefined = profileTrackTimbre(0, 0, 4, "Wurlitzer", TrackRole::Chord, {}, {}, 11, 11);
+        TEST("Mission4b P1-6: generic 'Guitar' preserves GM PC 25 'Steel Acoustic Guitar'",
+             steelGtr.inferred.family == TimbreFamily::AcousticGuitar &&
+             steelGtr.inferred.sub_family == "Steel Acoustic Guitar");
+        TEST("Mission4b P1-6: generic 'Bass' preserves GM PC 36 'Slap Bass 1'",
+             slapBass.inferred.family == TimbreFamily::ElectricBass &&
+             slapBass.inferred.sub_family == "Slap Bass 1");
+        TEST("Mission4b P1-6: generic 'Piano' preserves GM PC 1 'Bright Acoustic Piano'",
+             brightPno.inferred.family == TimbreFamily::Piano &&
+             brightPno.inferred.sub_family == "Bright Acoustic Piano");
+        TEST("Mission4b P1-6: specific 'Wurlitzer' still refines GM PC 4 Rhodes -> 'Wurlitzer EP'",
+             wurliRefined.inferred.family == TimbreFamily::ElectricPiano &&
+             wurliRefined.inferred.sub_family == "Wurlitzer EP");
+
+        // P1-7 helper: Timpani keyword retains "Timpani" sub-family; XG 127/0/40 on kPercCh stays Brush DrumKit
+        const auto timp = profileTrackTimbre(0, 0, 47, "Timpani", TrackRole::Accompaniment, {}, {}, 15, 15);
+        const auto brushOnPerc = profileTrackTimbre(127, 0, 40, "", TrackRole::Percussion, {}, {}, 9, kPercCh);
+        TEST("Mission4b P1-7: 'Timpani' (0/0/47) retains sub_family 'Timpani' (not Vibraphone)",
+             timp.inferred.family == TimbreFamily::MalletPerc && timp.inferred.sub_family == "Timpani");
+        TEST("Mission4b P1-7: XG 127/0/40 on kPercCh profiles as Brush DrumKit for exact GM2 match",
+             brushOnPerc.inferred.family == TimbreFamily::DrumKit &&
+             brushOnPerc.inferred.sub_family == "Brush Drum Kit");
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

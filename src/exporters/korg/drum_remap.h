@@ -456,15 +456,21 @@ inline RhythmSwapDecision detectRhythmTrackSwap(const std::vector<NoteSpan>& ch8
     scoreNotes(ch8_notes, d.ch8_kit_score, d.ch8_perc_score);
     scoreNotes(ch9_notes, d.ch9_kit_score, d.ch9_perc_score);
 
-    const bool ch8IsMainKit = (ch8_notes.size() >= 8) && (d.ch8_kit_score >= 0.45);
-    const bool ch9EmptyOrPerc =
-        ch9_notes.empty() || (d.ch9_kit_score < 0.20 && d.ch9_perc_score >= 0.40);
+    const bool ch8IsMainKit =
+        (ch8_notes.size() >= 8) &&
+        (d.ch8_kit_score >= 0.45) &&
+        (d.ch8_kit_score > d.ch9_kit_score + 0.25);
+    const bool ch9NonPrimary = ch9_notes.empty() || (d.ch9_kit_score < 0.20);
 
-    if (ch8IsMainKit && ch9EmptyOrPerc) {
+    if (ch8IsMainKit && ch9NonPrimary) {
         d.swap_drum_and_perc = true;
-        d.reason = ch9_notes.empty()
-                       ? "Rhythm1 (ch8) carries main kit and Rhythm2 (ch9) is empty -> route ch8 to Korg Drum"
-                       : "Rhythm1 (ch8) carries main kit while Rhythm2 (ch9) carries hand percussion -> swap to ch8=Drum, ch9=Perc";
+        if (ch9_notes.empty()) {
+            d.reason = "Rhythm1 (ch8) carries main kit and Rhythm2 (ch9) is empty -> route ch8 to Korg Drum";
+        } else if (d.ch9_perc_score >= 0.40) {
+            d.reason = "Rhythm1 (ch8) carries main kit while Rhythm2 (ch9) carries hand percussion -> swap to ch8=Drum, ch9=Perc";
+        } else {
+            d.reason = "Rhythm1 (ch8) carries main kit while Rhythm2 (ch9) carries secondary SFX/extended percussion -> swap to ch8=Drum, ch9=Perc";
+        }
     } else {
         d.swap_drum_and_perc = false;
         d.reason = "Default routing preserved (ch8=Perc, ch9=Drum)";

@@ -225,7 +225,7 @@ inline const std::vector<Pa5xFactorySoundEntry>& pa5xFactoryCatalog() {
         {TimbreFamily::PluckedStrings, "Orchestral Harp GM2",    "harp orchestral plucked strings",            {121,  0, 46}, false, false, "MAN5 p.1578 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
 
         // ── Acoustic Bass ──
-        {TimbreFamily::AcousticBass, "Acoustic Bass 1",          "acoustic upright double wood bass",          {121, 13, 32}, false, false, "MAN5 p.1588", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
+        {TimbreFamily::AcousticBass, "Acoustic Bass 1",          "acoustic upright double contrabass wood bass", {121, 13, 32}, false, false, "MAN5 p.1588", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
 
         // ── Electric Bass ──
         {TimbreFamily::ElectricBass, "JBass Fing DN1",           "finger jbass electric bass",                 {121, 29, 33}, false, true,  "MAN5 p.1588", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
@@ -267,6 +267,7 @@ inline const std::vector<Pa5xFactorySoundEntry>& pa5xFactoryCatalog() {
         // ── Mallet / Chromatic Percussion ──
         {TimbreFamily::MalletPerc, "Vibraphone GM2",             "vibraphone vibe marimba mallet bell celesta", {121,  0, 11}, false, false, "MAN5 p.1574 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
         {TimbreFamily::MalletPerc, "Marimba GM2",                "marimba xylophone glockenspiel mallet",       {121,  0, 12}, false, false, "MAN5 p.1574 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
+        {TimbreFamily::MalletPerc, "Timpani GM2",                "timpani kettledrum orchestral mallet",        {121,  0, 47}, false, false, "MAN5 p.1578 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
 
         // ── Ethnic Melodic ──
         {TimbreFamily::EthnicMelodic, "Sitar / Ethnic GM2",      "sitar oud koto shamisen banjo ethnic melodic", {121,  0, 104}, false, false, "MAN5 p.1586 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
@@ -277,11 +278,13 @@ inline const std::vector<Pa5xFactorySoundEntry>& pa5xFactoryCatalog() {
         {TimbreFamily::DrumKit, "Rock / Power Kit GM2",          "rock power heavy stadium drum kit",               {120, 0,  16}, true, false, "MAN5 p.1621 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
         {TimbreFamily::DrumKit, "Electronic / Analog Kit GM2",   "electronic analog 808 909 dance edm drum kit",    {120, 0,  24}, true, false, "MAN5 p.1621 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
         {TimbreFamily::DrumKit, "Jazz Drum Kit GM2",             "jazz swing drum kit",                             {120, 0,  32}, true, false, "MAN5 p.1621 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
-        {TimbreFamily::DrumKit, "Ethnic / Oriental Drum Kit GM2","ethnic oriental arabic tabla drum kit",           {120, 0,  48}, true, false, "MAN5 p.1622 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
+        {TimbreFamily::DrumKit, "Orchestra Kit GM2",             "orchestra orchestral symphony symphonic latin drum kit", {120, 0, 48}, true, false, "MAN5 p.1622 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
+        {TimbreFamily::DrumKit, "Ethnic / Oriental Drum Kit GM2","ethnic oriental arabic tabla drum kit",           {120, 0, 112}, true, false, "MAN5 p.1622 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
 
         // ── Percussion Kits (MSB 120 LSB 0) ──
         {TimbreFamily::PercussionKit, "Standard Perc Kit",       "standard latin percussion conga bongo shaker kit", {120, 0,  69}, true, false, "MAN5 p.1622", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
-        {TimbreFamily::PercussionKit, "Ethnic / Oriental Perc Kit", "ethnic oriental arabic sfx percussion kit",     {120, 0,  56}, true, false, "MAN5 p.1622 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested}
+        {TimbreFamily::PercussionKit, "SFX Perc Kit GM2",        "sfx fx effects perc kit",                          {120, 0,  56}, true, false, "MAN5 p.1622 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
+        {TimbreFamily::PercussionKit, "Ethnic / Oriental Perc Kit", "ethnic oriental arabic tabla darbuka perc kit", {120, 0,  64}, true, false, "MAN5 p.1622 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested}
     };
     return kCatalog;
 }
