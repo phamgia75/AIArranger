@@ -66,6 +66,11 @@ inline std::string defaultKitName(const media::graph::ResourceId& sound) {
     return "USERDK/" + std::to_string(sound.number);
 }
 
+inline double clampUnitFinite(double score01) noexcept {
+    if (!std::isfinite(score01)) return 0.0;
+    return std::clamp(score01, 0.0, 1.0);
+}
+
 inline uint8_t clampGmScorePercent(double score01) noexcept {
     if (!std::isfinite(score01) || score01 <= 0.0) return 0u;
     if (score01 >= 1.0) return 100u;
@@ -102,7 +107,7 @@ inline DrumKitKeySummaryView buildUserdkSummaryView(
     const media::graph::DrumKitKeyMap* raw_key_map = nullptr) {
     DrumKitKeySummaryView view{};
     view.kit_name = kit_name.empty() ? target_adapter_detail::defaultKitName(profile.sound) : kit_name;
-    view.gm_alignment_score = std::clamp(profile.gmAlignmentScore, 0.0, 1.0);
+    view.gm_alignment_score = target_adapter_detail::clampUnitFinite(profile.gmAlignmentScore);
 
     for (uint32_t k = 0; k < 128u; ++k) {
         const media::graph::DrumKitKeyProfile& kp = profile.keys[k];

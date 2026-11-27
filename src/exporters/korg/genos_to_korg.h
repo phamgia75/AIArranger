@@ -9,6 +9,7 @@
 
 #include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 // Canonical (UASF) style -> Korg Pa5X style semantic model. Input is the
@@ -45,9 +46,13 @@ struct MapOptions {
     bool enable_sound_matching = true;                              // Stage 5: TimbreProfiler + Pa5XSoundMatcher (fail-closed <40 / <min_score)
     bool prefer_target_user_sounds = false;                         // Stage 5: prefer in-spec read-only Target KST User sounds when supplied
     uint8_t min_sound_match_score = 70;                             // Stage 5: fail-closed minimum auto-select score (0..100)
-    const quality::IDrumKitKeyMap* target_drum_key_map = nullptr;   // Optional read-only target kit (nullptr -> Factory Pa5X GM2)
+    const quality::IDrumKitKeyMap* target_drum_key_map = nullptr;   // Optional read-only target kit for kDrumCh ONLY (nullptr -> lookup/Factory)
+    const quality::IDrumKitKeyMap* target_perc_key_map = nullptr;   // Optional read-only target kit for kPercCh ONLY (nullptr -> lookup/Factory)
+    const std::map<std::tuple<uint8_t, uint8_t, uint8_t>, quality::UserdkDrumKitKeyMap>* target_drum_key_maps = nullptr; // Optional read-only (msb,lsb,pc)->UserdkDrumKitKeyMap lookup (Track A bridge)
     const quality::TargetSoundCatalogView* target_sound_catalog = nullptr; // Optional read-only Target KST catalog view
     const std::vector<quality::TargetSoundEntry>* target_sounds = nullptr; // Optional direct read-only Target KST sound entries
+    bool capture_soundmap_dump = false;                             // When true, populate Report::soundmap_dump from exact Stage-5 matches
+    std::string soundmap_style_name;                                // Display filename for Report::soundmap_dump (basename only)
 
     // Default quality pipeline (Stages 1–5 enabled).
     static MapOptions quality() noexcept {
@@ -136,6 +141,7 @@ struct Report {
     SoundMatchStats sound_match_stats;
     std::map<uint8_t, SoundRef> resolved_sounds;
     std::map<std::pair<uasf::SectionType, uint8_t>, SoundRef> resolved_element_sounds;
+    std::string soundmap_dump; // Populated when MapOptions::capture_soundmap_dump == true (exact Stage-5 single source of truth)
 };
 
 struct MapResult {

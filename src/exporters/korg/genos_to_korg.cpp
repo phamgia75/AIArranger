@@ -225,13 +225,17 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
     };
 
     // ── Stage 5 (Q4-Wire): Timbre Profiler -> Pa5X Sound Matcher (post-swap aware, fail-closed) ──
+    // Runs whenever sound matching is enabled OR when caller requests `capture_soundmap_dump`
+    // (single source of truth so `--dump-soundmap` can NEVER diverge from SMF Bank/PC emission!).
     std::map<uint8_t, SoundRef> effectiveSounds = opt.sounds;
     std::map<std::pair<SectionType, uint8_t>, SoundRef> effectiveElementSounds = opt.element_sounds;
     std::map<uint8_t, quality::TrackSoundMatch> matchBySrcCh;
     std::map<uint8_t, quality::TrackSoundMatch> matchByKorgCh;
     std::map<std::pair<SectionType, uint8_t>, std::string> elementSoundLabels;
+    quality::StyleSoundMatchResult stage5StyleMatch;
+    quality::SoundMatchOptions stage5MatchOpt{};
 
-    if (opt.enable_sound_matching) {
+    if (opt.enable_sound_matching || opt.capture_soundmap_dump) {
         struct ProfileAccum {
             uint8_t src_ch = 0;
             uint8_t korg_ch = 0xFF;
@@ -250,7 +254,14 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
 
         const uint32_t tempoMpqn = r.style.mpqn ? r.style.mpqn : 500000u;
         std::map<uint8_t, ProfileAccum> bySrc;
+        std::set<SectionType> seenProfiledSectionTypes;
         for (const auto& sec : style.sections) {
+            const bool sectionExportable = (korgMarkerFor(sec.type, opt.break_policy) != nullptr && sec.bars > 0);
+            // Match the exporter's first-wins duplicate-section-type rule (P2-1):
+            // never let a dropped duplicate SectionType overwrite an already-recorded element voice or pollute profiles.
+            if (sectionExportable && !seenProfiledSectionTypes.insert(sec.type).second) {
+                continue;
+            }
             const uint32_t secPpqn = sec.resolution ? sec.resolution : (style.resolution ? style.resolution : 480u);
             const uint64_t sNum = sec.beats_per_bar ? uint64_t{sec.beats_per_bar} : 4u;
             const uint64_t sDen = sec.beat_note ? uint64_t{sec.beat_note} : 4u;
@@ -259,7 +270,6 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             const uint64_t secEnd64 = (secBars64 > uint64_t{UINT32_MAX} / barTicks64)
                                           ? uint64_t{UINT32_MAX}
                                           : (secBars64 * barTicks64);
-            const bool sectionExportable = (korgMarkerFor(sec.type, opt.break_policy) != nullptr && sec.bars > 0);
 
             for (const auto& tr : sec.tracks) {
                 const uint8_t srcCh = tr.midi_channel;
@@ -286,7 +296,8 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 const auto [vMsb, vLsb, vPc] = voice;
                 if (vMsb >= 0 || vLsb >= 0 || vPc >= 0) {
                     if (sectionExportable) {
-                        acc.element_voices[sec.type] = voice;
+                        // First-wins per (srcCh, SectionType): never silently clobber an already-recorded element voice.
+                        acc.element_voices.try_emplace(sec.type, voice);
                     }
                     if (vPc >= 0) {
                         acc.voice_freq[voice]++;
@@ -351,78 +362,83 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             targetCatalogPtr = &localTargetCatalog;
         }
 
-        quality::SoundMatchOptions smOpt{};
-        smOpt.enable_factory_catalog = true;
-        smOpt.prefer_target_user_sounds = opt.prefer_target_user_sounds;
-        smOpt.min_auto_select_score = std::max<uint8_t>(opt.min_sound_match_score, uint8_t{40u});
+        stage5MatchOpt.enable_factory_catalog = opt.enable_sound_matching;
+        stage5MatchOpt.prefer_target_user_sounds = opt.enable_sound_matching && opt.prefer_target_user_sounds;
+        stage5MatchOpt.min_auto_select_score = std::max<uint8_t>(opt.min_sound_match_score, uint8_t{40u});
 
-        auto styleMatch = quality::matchStyleSounds(
-            profiles, opt.sounds, targetCatalogPtr, smOpt, opt.element_sounds);
+        stage5StyleMatch = quality::matchStyleSounds(
+            profiles, opt.sounds, targetCatalogPtr, stage5MatchOpt, opt.element_sounds);
 
-        rep.sound_match_stats.unsupported += styleMatch.target_entries_skipped_oos;
-        if (styleMatch.target_entries_skipped_oos > 0) {
-            addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_TARGET_KST_OUT_OF_SPEC_SKIPPED");
-        }
-        if (styleMatch.target_partial_inspect) {
-            addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_TARGET_KST_PARTIAL_INSPECT");
-            if (!styleMatch.target_partial_notice.empty()) {
-                rep.warnings.push_back("Target KST partial inspect: " + styleMatch.target_partial_notice);
+        if (opt.enable_sound_matching) {
+            rep.sound_match_stats.unsupported += stage5StyleMatch.target_entries_skipped_oos;
+            if (stage5StyleMatch.target_entries_skipped_oos > 0) {
+                addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_TARGET_KST_OUT_OF_SPEC_SKIPPED");
             }
-        }
-
-        // Defense-in-depth fail-closed audit:
-        //   1. NEVER auto-select any non-user sound when profile.confidence < 40.
-        //   2. NEVER allow melodic-to-drum (MSB 120 on melodic) or drum-to-melodic (MSB 121 on drum/perc).
-        //   3. Explicit user --sound-map / element_sounds ALWAYS take highest precedence.
-        effectiveSounds = opt.sounds;
-        effectiveElementSounds = opt.element_sounds;
-
-        for (auto& m : styleMatch.tracks) {
-            if (m.korg_ch == 0xFF) continue;
-            const bool isDrumKch = (m.korg_ch == kDrumCh || m.korg_ch == kPercCh);
-
-            if (m.selected.has_value() && m.selected_origin != quality::MatchOrigin::UserSoundMap) {
-                const bool lowConf = (m.profile.confidence < 40u);
-                const bool msbOk = isDrumKch ? (m.selected->msb == 120u) : (m.selected->msb == 121u);
-                if (lowConf || !msbOk) {
-                    m.selected.reset();
-                    m.selected_epistemic_tag.clear();
-                    if (lowConf) addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_LOW_CONFIDENCE_REJECTED");
-                    if (!msbOk) addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_CROSS_FAMILY_REJECTED");
+            if (stage5StyleMatch.target_partial_inspect) {
+                addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_TARGET_KST_PARTIAL_INSPECT");
+                if (!stage5StyleMatch.target_partial_notice.empty()) {
+                    rep.warnings.push_back("Target KST partial inspect: " + stage5StyleMatch.target_partial_notice);
                 }
             }
 
-            if (m.selected.has_value() &&
-                (m.selected_origin == quality::MatchOrigin::UserSoundMap || !effectiveSounds.count(m.korg_ch))) {
-                effectiveSounds[m.korg_ch] = *m.selected;
-            }
+            // Defense-in-depth fail-closed audit:
+            //   1. NEVER auto-select any non-user sound when profile.confidence < 40.
+            //   2. NEVER allow melodic-to-drum (MSB 120 on melodic) or drum-to-melodic (MSB 121 on drum/perc).
+            //   3. Explicit user --sound-map / element_sounds ALWAYS take highest precedence.
+            effectiveSounds = opt.sounds;
+            effectiveElementSounds = opt.element_sounds;
 
-            for (auto it = m.element_selected.begin(); it != m.element_selected.end(); ) {
-                const SectionType st = it->first;
-                const SoundRef& elRef = it->second;
-                const bool userEl = opt.element_sounds.count({st, m.korg_ch}) > 0;
-                const bool msbOk = isDrumKch ? (elRef.msb == 120u) : (elRef.msb == 121u);
-                if (!userEl && !msbOk) {
-                    addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_CROSS_FAMILY_REJECTED");
-                    it = m.element_selected.erase(it);
-                    continue;
-                }
-                if (!userEl && !effectiveElementSounds.count({st, m.korg_ch})) {
-                    effectiveElementSounds[{st, m.korg_ch}] = elRef;
-                    if (const auto cit = m.element_candidates.find(st); cit != m.element_candidates.end()) {
-                        elementSoundLabels[{st, m.korg_ch}] = cit->second.display_name;
+            for (auto& m : stage5StyleMatch.tracks) {
+                if (m.korg_ch == 0xFF) continue;
+                const bool isDrumKch = (m.korg_ch == kDrumCh || m.korg_ch == kPercCh);
+
+                if (m.selected.has_value() && m.selected_origin != quality::MatchOrigin::UserSoundMap) {
+                    const bool lowConf = (m.profile.confidence < 40u);
+                    const bool msbOk = isDrumKch ? (m.selected->msb == 120u) : (m.selected->msb == 121u);
+                    if (lowConf || !msbOk) {
+                        m.selected.reset();
+                        m.selected_epistemic_tag.clear();
+                        if (lowConf) addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_LOW_CONFIDENCE_REJECTED");
+                        if (!msbOk) addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_CROSS_FAMILY_REJECTED");
                     }
                 }
-                ++it;
+
+                if (m.selected.has_value() &&
+                    (m.selected_origin == quality::MatchOrigin::UserSoundMap || !effectiveSounds.count(m.korg_ch))) {
+                    effectiveSounds[m.korg_ch] = *m.selected;
+                }
+
+                for (auto it = m.element_selected.begin(); it != m.element_selected.end(); ) {
+                    const SectionType st = it->first;
+                    const SoundRef& elRef = it->second;
+                    const bool userEl = opt.element_sounds.count({st, m.korg_ch}) > 0;
+                    const bool msbOk = isDrumKch ? (elRef.msb == 120u) : (elRef.msb == 121u);
+                    if (!userEl && !msbOk) {
+                        addUniqueDiag(rep.quality_diagnostics, "STYLE_QUAL_SOUND_CROSS_FAMILY_REJECTED");
+                        it = m.element_selected.erase(it);
+                        continue;
+                    }
+                    if (!userEl && !effectiveElementSounds.count({st, m.korg_ch})) {
+                        effectiveElementSounds[{st, m.korg_ch}] = elRef;
+                        if (const auto cit = m.element_candidates.find(st); cit != m.element_candidates.end()) {
+                            elementSoundLabels[{st, m.korg_ch}] = cit->second.display_name;
+                        }
+                    }
+                    ++it;
+                }
+
+                matchBySrcCh[m.profile.src_ch] = m;
+                auto kit = matchByKorgCh.find(m.korg_ch);
+                if (kit == matchByKorgCh.end() ||
+                    m.selected_origin == quality::MatchOrigin::UserSoundMap ||
+                    (m.selected.has_value() && !kit->second.selected.has_value())) {
+                    matchByKorgCh[m.korg_ch] = m;
+                }
             }
 
-            matchBySrcCh[m.profile.src_ch] = m;
-            auto kit = matchByKorgCh.find(m.korg_ch);
-            if (kit == matchByKorgCh.end() ||
-                m.selected_origin == quality::MatchOrigin::UserSoundMap ||
-                (m.selected.has_value() && !kit->second.selected.has_value())) {
-                matchByKorgCh[m.korg_ch] = m;
-            }
+            // Keep `stage5StyleMatch` resolved maps synchronized with the audited `effective*` maps.
+            stage5StyleMatch.resolved_sounds = effectiveSounds;
+            stage5StyleMatch.element_sounds = effectiveElementSounds;
         }
     }
 
@@ -621,9 +637,32 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                         secVoice.msb, secVoice.lsb, secVoice.pc, tr.name, drumRole);
                     const bool isRevo = (secVoice.msb == 62 && secVoice.lsb == 100);
                     quality::FactoryPa5xDrumKitKeyMap factoryKit(cat);
+                    // P1-2: Scope target_drum_key_map strictly to kDrumCh, and target_perc_key_map strictly to kPercCh.
+                    // When target_drum_key_maps (Track A read-only bridge) is provided, bind each channel independently
+                    // ONLY when that channel's own resolved sound points to a comparable target USERDK kit.
+                    const quality::IDrumKitKeyMap* resolvedTargetKit = nullptr;
+                    auto lookupBridgeKit = [&](uint8_t ch) -> const quality::IDrumKitKeyMap* {
+                        if (!opt.target_drum_key_maps) return nullptr;
+                        const SoundRef* refPtr = nullptr;
+                        if (const auto elit = effectiveElementSounds.find({sec.type, ch});
+                            elit != effectiveElementSounds.end()) {
+                            refPtr = &elit->second;
+                        } else if (const auto sit = effectiveSounds.find(ch); sit != effectiveSounds.end()) {
+                            refPtr = &sit->second;
+                        }
+                        if (!refPtr) return nullptr;
+                        const auto kitIt = opt.target_drum_key_maps->find(
+                            std::make_tuple(refPtr->msb, refPtr->lsb, refPtr->pc));
+                        return kitIt == opt.target_drum_key_maps->end() ? nullptr : &kitIt->second;
+                    };
+                    if (kch == kDrumCh) {
+                        resolvedTargetKit = opt.target_drum_key_map ? opt.target_drum_key_map : lookupBridgeKit(kDrumCh);
+                    } else if (kch == kPercCh) {
+                        resolvedTargetKit = opt.target_perc_key_map ? opt.target_perc_key_map : lookupBridgeKit(kPercCh);
+                    }
                     const quality::IDrumKitKeyMap& targetKit =
-                        opt.target_drum_key_map ? *opt.target_drum_key_map
-                                                : static_cast<const quality::IDrumKitKeyMap&>(factoryKit);
+                        resolvedTargetKit ? *resolvedTargetKit
+                                          : static_cast<const quality::IDrumKitKeyMap&>(factoryKit);
                     const auto dr = quality::remapDrumTrack(boundedNotes, cat, targetKit, isRevo, dst);
                     rep.drum_notes_remapped_exact += dr.stats.passthrough_notes;
                     rep.drum_notes_remapped_approx += dr.stats.remapped_notes;
@@ -778,12 +817,17 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 if (key.first == sec.type) {
                     sounds[key.second] = s;
                     emittedElementSwitches.insert(key);
+                    const bool isUserEl = opt.element_sounds.count(key) > 0;
                     std::string line = bucket.marker + " " + korgTrackName(key.second) + ": MSB " +
                                        std::to_string(s.msb) + " LSB " + std::to_string(s.lsb) +
                                        " PC " + std::to_string(s.pc);
-                    if (const auto lit = elementSoundLabels.find(key);
-                        lit != elementSoundLabels.end() && !lit->second.empty()) {
-                        line += " (" + lit->second + ", auto)";
+                    if (!isUserEl) {
+                        if (const auto lit = elementSoundLabels.find(key);
+                            lit != elementSoundLabels.end() && !lit->second.empty()) {
+                            line += " (" + lit->second + ", auto match)";
+                        } else {
+                            line += " (auto match)";
+                        }
                     }
                     rep.element_sounds.push_back(std::move(line));
                 }
@@ -917,6 +961,12 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         if (std::none_of(rep.tracks.begin(), rep.tracks.end(), [&](const TrackRow& t) { return t.korg_ch == kch; }))
             rep.warnings.push_back(std::string("sound map sets Korg ") + korgTrackName(kch) +
                                    " but no Genos part plays it (bank/PC still written)");
+    if (opt.capture_soundmap_dump) {
+        const std::string dumpName = opt.soundmap_style_name.empty() ? style.name : opt.soundmap_style_name;
+        rep.soundmap_dump = quality::formatSoundMapTemplateWithRecommendations(
+            rep, stage5StyleMatch, dumpName, stage5MatchOpt);
+    }
+
     if (r.style.elements.empty()) { r.error = "no section maps to a Korg style element"; return r; }
     r.ok = true;
     return r;
@@ -941,7 +991,16 @@ std::string formatReport(const Report& r, const Style& s) {
              std::to_string(t.pc) + " | " + t.family + " -> " + korgTrackName(t.korg_ch) + " | " + t.target);
     line("");
     if (!r.element_sounds.empty()) {
-        line("Element-specific Pa5X sounds (user map, in that element only):");
+        bool anyAuto = false;
+        bool anyUser = false;
+        for (const auto& e : r.element_sounds) {
+            if (e.find("auto match)") != std::string::npos) anyAuto = true;
+            else anyUser = true;
+        }
+        const char* originDesc = (anyAuto && anyUser) ? "user map / auto match"
+                               : anyAuto              ? "auto match"
+                                                      : "user map";
+        line(std::string("Element-specific Pa5X sounds (") + originDesc + ", in that element only):");
         for (const auto& e : r.element_sounds) line("  " + e);
         line("");
     }

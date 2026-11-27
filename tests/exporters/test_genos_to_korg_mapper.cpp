@@ -298,6 +298,7 @@ static void runQ23WireE2eTests() {
         quality::UserdkDrumKitKeyMap sparseKit(sparseSummary);
         MapOptions customOpt = opt;
         customOpt.target_drum_key_map = &sparseKit;
+        customOpt.target_perc_key_map = &sparseKit;
         MapResult customKr;
         const bool customOk = loadAndMapFixture("SYNTH_REVO_XG_DRUMS.sty", customOpt, pr, mr, customKr);
         bool allInSparseKit = customOk;
@@ -716,9 +717,224 @@ static void runQ4WireE2eTests() {
              rcQRawPlusAuto == 1 && rcBothAutoFlags == 1 && rcNoAutoPlusPref == 1 &&
              !fs::exists(failMid));
 
+        // Audit P1-1: Verify --dump-soundmap matches SMF tick-0 Bank/PC 100% identically on BOTH
+        // normal SFF2 (SYNTH_POP_SFF2, where Rhythm2 has role=Percussion) AND Rhythm1/2 swapped (SYNTH_REVO_XG_DRUMS)!
+        {
+            auto extractTick0Sounds = [](const Element& el) {
+                std::map<uint8_t, SoundRef> out;
+                std::map<uint8_t, int> msb, lsb, pc;
+                for (const auto& e : el.events) {
+                    if (e.tick != 0) break;
+                    const uint8_t hi = e.status & 0xF0;
+                    const uint8_t ch = e.status & 0x0F;
+                    if (hi == 0xB0 && e.d1 == 0) msb[ch] = e.d2;
+                    else if (hi == 0xB0 && e.d1 == 32) lsb[ch] = e.d2;
+                    else if (hi == 0xC0) pc[ch] = e.d1;
+                }
+                for (const auto& [ch, p] : pc) {
+                    if (msb.count(ch) && lsb.count(ch)) {
+                        out[ch] = SoundRef{static_cast<uint8_t>(msb[ch]), static_cast<uint8_t>(lsb[ch]), static_cast<uint8_t>(p)};
+                    }
+                }
+                return out;
+            };
+
+            const auto smfPopSounds = extractTick0Sounds(pAuto.style.elements[0]);
+            bool popExactMatch = (smfPopSounds.size() == parsedDump.sounds.size() &&
+                                  parsedDump.sounds.count(kDrumCh) == 1 &&
+                                  parsedDump.sounds.at(kDrumCh).msb == 120 &&
+                                  parsedDump.sounds.at(kDrumCh).lsb == 0 &&
+                                  parsedDump.sounds.at(kDrumCh).pc == 100);
+            for (const auto& [ch, ref] : smfPopSounds) {
+                auto it = parsedDump.sounds.find(ch);
+                if (it == parsedDump.sounds.end() ||
+                    it->second.msb != ref.msb || it->second.lsb != ref.lsb || it->second.pc != ref.pc) {
+                    popExactMatch = false;
+                }
+            }
+
+            const fs::path revoMid = tmpDir / "revo.mid";
+            const fs::path revoDump = tmpDir / "revo.soundmap";
+            const std::string inRevo = "\"" + fixturePath("SYNTH_REVO_XG_DRUMS.sty") + "\"";
+            const int rcRevo = runCli("--input " + inRevo + " --target pa5x --output \"" + revoMid.string() +
+                                      "\" --break-policy cap --auto-sound-map --dump-soundmap \"" + revoDump.string() + "\"");
+            const auto pRevo = parse(readBytes(revoMid));
+            std::ifstream revoDumpIn(revoDump);
+            const auto parsedRevoDump = parseSoundMap(revoDumpIn, "revo.soundmap");
+            bool revoExactMatch = (rcRevo == 0 && pRevo.ok && parsedRevoDump.ok &&
+                                   parsedRevoDump.sounds.count(kDrumCh) == 1 &&
+                                   parsedRevoDump.sounds.at(kDrumCh).msb == 120 &&
+                                   parsedRevoDump.sounds.at(kDrumCh).pc == 100);
+            if (pRevo.ok && !pRevo.style.elements.empty()) {
+                const auto smfRevoSounds = extractTick0Sounds(pRevo.style.elements[0]); // i1cv1 has style-wide sounds
+                if (smfRevoSounds.size() != parsedRevoDump.sounds.size()) revoExactMatch = false;
+                for (const auto& [ch, ref] : smfRevoSounds) {
+                    auto it = parsedRevoDump.sounds.find(ch);
+                    if (it == parsedRevoDump.sounds.end() ||
+                        it->second.msb != ref.msb || it->second.lsb != ref.lsb || it->second.pc != ref.pc) {
+                        revoExactMatch = false;
+                    }
+                }
+            }
+            TEST("P1-1 CLI Parity: --dump-soundmap matches SMF Bank/PC 100% identically on SYNTH_POP_SFF2 (drum=120/0/100) & swapped SYNTH_REVO_XG_DRUMS",
+                 popExactMatch && revoExactMatch);
+        }
+
         fs::remove_all(tmpDir);
     }
 #endif
+
+    // 7. Audit P1-1 & P1-2: Target-KST DrumKit binding on normal SFF2 (Rhythm2 role=Percussion) AND strict kDrumCh vs kPercCh isolation
+    {
+        // P1-2 direct isolation test: target_drum_key_map set to sparse {36, 38, 42} ONLY;
+        // kPercCh has Factory Perc notes 60 (Hi Bongo) & 70 (Maracas) and MUST remain 100% unmangled!
+        quality::DrumKitKeySummaryView sparseDrum;
+        sparseDrum.kit_name = "USERDK01/2";
+        sparseDrum.gm_alignment_score = 1.0;
+        for (uint8_t n : {uint8_t(36), uint8_t(38), uint8_t(42)}) {
+            auto& slot = sparseDrum.keys[n];
+            slot.populated = true;
+            slot.layer_count = 1;
+            slot.vel_tops[0] = 127;
+            slot.resolved_family = quality::drum_detail::gm2DefaultFamily(n);
+            slot.choke_group = quality::drum_detail::gm2DefaultChokeGroup(n);
+        }
+        quality::UserdkDrumKitKeyMap sparseUserdk(sparseDrum);
+
+        auto mkNote = [](uint8_t ch, uint8_t p, uint64_t on, uint64_t off) {
+            return std::vector<uasf::MidiEvent>{
+                ev(MidiEventType::NoteOn, ch, p, 95, on),
+                ev(MidiEventType::NoteOff, ch, p, 0, off),
+            };
+        };
+        std::vector<uasf::MidiEvent> drumEvs;
+        for (auto e : mkNote(9, 36, 0, 240)) drumEvs.push_back(e);
+        for (auto e : mkNote(9, 13, 480, 720)) drumEvs.push_back(e); // extended key -> remaps into sparseUserdk {36,38,42}
+        std::vector<uasf::MidiEvent> percEvs;
+        for (auto e : mkNote(8, 60, 0, 240)) percEvs.push_back(e);   // Hi Bongo (Factory Perc!)
+        for (auto e : mkNote(8, 70, 480, 720)) percEvs.push_back(e); // Maracas (Factory Perc!)
+
+        auto trDrum = track(9, std::move(drumEvs), uasf::TrackRole::Drum);
+        trDrum.name = "Rhythm2";
+        auto trPerc = track(8, std::move(percEvs), uasf::TrackRole::Percussion);
+        trPerc.name = "Rhythm1";
+        auto stIso = styleOf({section(SectionType::Main1, "Main A", 1, {trDrum, trPerc})});
+
+        MapOptions isoOpt = MapOptions::quality();
+        isoOpt.target_drum_key_map = &sparseUserdk;
+        isoOpt.target_perc_key_map = nullptr; // kPercCh stays on Factory Percussion!
+        const auto krIso = mapToKorg(stIso, isoOpt);
+        const Element* v1Iso = find(krIso.style, "v1cv1");
+        bool drumAllInSparse = (v1Iso != nullptr);
+        if (v1Iso) {
+            for (const auto& e : v1Iso->events) {
+                if (e.status == (0x90 | kDrumCh) && e.d2 > 0 && !sparseUserdk.hasKey(e.d1)) {
+                    drumAllInSparse = false;
+                }
+            }
+        }
+        TEST("P1-2 Isolation: target_drum_key_map applies ONLY to kDrumCh; Factory kPercCh notes 60/70 stay 100% unmangled (not mapped to 42)",
+             krIso.ok && validate(krIso.style).empty() && v1Iso &&
+             drumAllInSparse &&
+             count(*v1Iso, 0x90 | kPercCh, 60) == 1 &&
+             count(*v1Iso, 0x90 | kPercCh, 70) == 1 &&
+             count(*v1Iso, 0x90 | kPercCh, 42) == 0);
+
+        // P1-1 Target-KST DrumKit binding via target_drum_key_maps on SYNTH_POP_SFF2 (normal SFF2 where sff1_mapper sets role=Percussion on Rhythm2)
+        importers::sff1::ParseResult pr;
+        importers::sff1::SffToUasfResult mr;
+        MapResult krBind;
+        quality::TargetSoundCatalogView targetCat{};
+        {
+            quality::TargetSoundEntry te{};
+            te.msb = 120; te.lsb = 64; te.pc = 2; // USERDK01/2
+            te.is_drum_kit = true; te.in_spec = true;
+            te.display_name = "Synthetic Pop Studio Drum Kit";
+            te.slot_address = quality::TargetSlotAddress{true, 1, 2};
+            te.gm_alignment_score = 100;
+            te.family_bitmask = quality::timbreFamilyBit(quality::TimbreFamily::DrumKit);
+            targetCat.entries.push_back(te);
+        }
+        std::map<std::tuple<uint8_t, uint8_t, uint8_t>, quality::UserdkDrumKitKeyMap> bridgeKits;
+        bridgeKits.emplace(std::make_tuple(uint8_t{120}, uint8_t{64}, uint8_t{2}), sparseUserdk);
+
+        MapOptions bindOpt = MapOptions::quality();
+        bindOpt.ppqn = 384;
+        bindOpt.break_policy = BreakPolicy::Yamaha1BarCap;
+        bindOpt.prefer_target_user_sounds = true;
+        bindOpt.target_sound_catalog = &targetCat;
+        bindOpt.target_drum_key_maps = &bridgeKits;
+        const bool bindOk = loadAndMapFixture("SYNTH_POP_SFF2.sty", bindOpt, pr, mr, krBind);
+        bool popDrumBoundToUserdk = bindOk && krBind.report.resolved_sounds.count(kDrumCh) == 1 &&
+                                    krBind.report.resolved_sounds.at(kDrumCh).msb == 120 &&
+                                    krBind.report.resolved_sounds.at(kDrumCh).lsb == 64 &&
+                                    krBind.report.resolved_sounds.at(kDrumCh).pc == 2;
+        bool popPercStayedFactory = krBind.report.resolved_sounds.count(kPercCh) == 1 &&
+                                    krBind.report.resolved_sounds.at(kPercCh).msb == 120 &&
+                                    krBind.report.resolved_sounds.at(kPercCh).lsb == 0 &&
+                                    krBind.report.resolved_sounds.at(kPercCh).pc == 69;
+        for (const auto& el : krBind.style.elements) {
+            for (const auto& e : el.events) {
+                if (e.status == (0x90 | kDrumCh) && e.d2 > 0 && !sparseUserdk.hasKey(e.d1)) {
+                    popDrumBoundToUserdk = false;
+                }
+            }
+        }
+        TEST("P1-1+P1-2 Target-KST Bridge: SYNTH_POP_SFF2 binds USERDK01/2 strictly to kDrumCh while kPercCh stays on Factory Perc (120/0/69)",
+             popDrumBoundToUserdk && popPercStayedFactory && validate(krBind.style).empty());
+    }
+
+    // 8. Audit P2-1 & P2-2: Duplicate SectionType first-wins protection + accurate "(auto match)" vs "(user map)" report headers
+    {
+        // P2-1: Duplicate SectionType::Main1 (dropped by exporter) must NOT overwrite the first Main1's Piano voice with Brass!
+        std::vector<uasf::MidiEvent> pnoEvs = {
+            ev(MidiEventType::ControlChange, 11, 0, 0, 0),
+            ev(MidiEventType::ControlChange, 11, 32, 0, 0),
+            ev(MidiEventType::ProgramChange, 11, 0, 0, 0), // Piano
+            ev(MidiEventType::NoteOn, 11, 60, 90, 0),
+            ev(MidiEventType::NoteOff, 11, 60, 0, 480),
+        };
+        std::vector<uasf::MidiEvent> brsEvs = {
+            ev(MidiEventType::ControlChange, 11, 0, 0, 0),
+            ev(MidiEventType::ControlChange, 11, 32, 0, 0),
+            ev(MidiEventType::ProgramChange, 11, 61, 0, 0), // Brass (in dropped duplicate section!)
+            ev(MidiEventType::NoteOn, 11, 60, 90, 0),
+            ev(MidiEventType::NoteOff, 11, 60, 0, 480),
+        };
+        auto t1 = track(11, std::move(pnoEvs), uasf::TrackRole::Chord); t1.name = "Chord1";
+        auto t2 = track(11, std::move(brsEvs), uasf::TrackRole::Chord); t2.name = "Chord1";
+        auto stDup = styleOf({
+            section(SectionType::Main1, "Main A", 1, {t1}),
+            section(SectionType::Main1, "Main A Dup", 1, {t2}),
+        });
+        const auto krDup = mapToKorg(stDup, MapOptions::quality());
+        TEST("P2-1 Duplicate SectionType: first Main1 Piano (121/20/0) preserved; dropped duplicate Brass ignored",
+             krDup.ok && krDup.report.resolved_sounds.count(11) == 1 &&
+             krDup.report.resolved_sounds.at(11).msb == 121 &&
+             krDup.report.resolved_sounds.at(11).lsb == 20 &&
+             krDup.report.resolved_sounds.at(11).pc == 0);
+
+        // P2-2: Auto-matched element switches say "(auto match)", explicit user element switches say "(user map)"
+        importers::sff1::ParseResult pr;
+        importers::sff1::SffToUasfResult mr;
+        MapResult krAutoEl;
+        MapOptions autoElOpt = MapOptions::quality();
+        autoElOpt.ppqn = 384;
+        autoElOpt.break_policy = BreakPolicy::Yamaha1BarCap;
+        const bool okAutoEl = loadAndMapFixture("SYNTH_MULTI_ZONE_SART_OTS.sty", autoElOpt, pr, mr, krAutoEl);
+        const std::string autoRepTxt = formatReport(krAutoEl.report, krAutoEl.style);
+
+        MapOptions userElOpt = MapOptions::raw();
+        userElOpt.element_sounds[{SectionType::Main1, 11}] = SoundRef{121, 5, 10};
+        const auto krUserEl = mapToKorg(stDup, userElOpt);
+        const std::string userRepTxt = formatReport(krUserEl.report, krUserEl.style);
+
+        TEST("P2-2 Element-Sound Header: auto-matched reports '(auto match)' and user-only reports '(user map)'",
+             okAutoEl &&
+             autoRepTxt.find("Element-specific Pa5X sounds (auto match, in that element only):") != std::string::npos &&
+             autoRepTxt.find("(MK I Stage, auto match)") != std::string::npos &&
+             userRepTxt.find("Element-specific Pa5X sounds (user map, in that element only):") != std::string::npos);
+    }
 }
 
 int main() {

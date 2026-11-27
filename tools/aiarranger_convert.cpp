@@ -219,6 +219,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         opt.target_sound_catalog = &targetBridge->catalog;
+        if (!targetBridge->drum_key_maps.empty()) {
+            opt.target_drum_key_maps = &targetBridge->drum_key_maps;
+        }
     }
 
     importers::sff1::Sff1Reader reader;
@@ -229,50 +232,16 @@ int main(int argc, char** argv) {
     if (!canon.success) { std::cerr << "import failed: " << canon.error << "\n"; return 1; }
 
     opt.route = routeFromCasm(parsed);
-
-    // If a read-only Target KST bridge has a comparable USERDK key map for the Drum track's
-    // chosen target sound (explicit user map or preferred target USERDK), attach it read-only to Q3.
-    if (targetBridge.has_value() && !targetBridge->drum_key_maps.empty()) {
-        if (const auto uit = opt.sounds.find(kDrumCh); uit != opt.sounds.end()) {
-            opt.target_drum_key_map = targetBridge->findDrumKeyMap(uit->second);
-        } else if (opt.enable_sound_matching && opt.prefer_target_user_sounds) {
-            quality::SoundMatchOptions preOpt{};
-            preOpt.enable_factory_catalog = true;
-            preOpt.prefer_target_user_sounds = true;
-            preOpt.min_auto_select_score = opt.min_sound_match_score;
-            const auto preProfs = quality::profileStyleTracks(canon.style, opt.route);
-            const auto preMatch = quality::matchStyleSounds(
-                preProfs, opt.sounds, &targetBridge->catalog, preOpt, opt.element_sounds);
-            if (const auto dit = preMatch.resolved_sounds.find(kDrumCh); dit != preMatch.resolved_sounds.end()) {
-                opt.target_drum_key_map = targetBridge->findDrumKeyMap(dit->second);
-            }
-        }
+    const std::string baseStyleName = std::filesystem::path(input).filename().string();
+    if (!dumpSoundMapPath.empty()) {
+        opt.capture_soundmap_dump = true;
+        opt.soundmap_style_name = baseStyleName;
     }
 
     const auto mapped = mapToKorg(canon.style, opt);
     if (!mapped.ok) { std::cerr << "conversion failed: " << mapped.error << "\n"; return 2; }
-    const std::string baseStyleName = std::filesystem::path(input).filename().string();
     if (!templatePath.empty() && !writeText(templatePath, soundMapTemplate(mapped.report, baseStyleName))) return 1;
-
-    if (!dumpSoundMapPath.empty()) {
-        std::map<uint8_t, uint8_t> dumpRoute = opt.route;
-        if (mapped.report.rhythm_tracks_swapped) {
-            for (const auto& tr : mapped.report.tracks) {
-                if (tr.korg_ch == kDrumCh) dumpRoute[tr.src_ch] = 9;
-                else if (tr.korg_ch == kPercCh) dumpRoute[tr.src_ch] = 8;
-            }
-        }
-        quality::SoundMatchOptions dumpOpt{};
-        dumpOpt.enable_factory_catalog = opt.enable_sound_matching;
-        dumpOpt.prefer_target_user_sounds = opt.prefer_target_user_sounds;
-        dumpOpt.min_auto_select_score = opt.min_sound_match_score;
-        const auto dumpProfs = quality::profileStyleTracks(canon.style, dumpRoute);
-        const auto dumpMatch = quality::matchStyleSounds(
-            dumpProfs, opt.sounds, opt.target_sound_catalog, dumpOpt, opt.element_sounds);
-        const std::string dumped = quality::formatSoundMapTemplateWithRecommendations(
-            mapped.report, dumpMatch, baseStyleName, dumpOpt);
-        if (!writeText(dumpSoundMapPath, dumped)) return 1;
-    }
+    if (!dumpSoundMapPath.empty() && !writeText(dumpSoundMapPath, mapped.report.soundmap_dump)) return 1;
 
     // Write -> re-parse with the independent reader -> validate what was written.
     const auto written = write(mapped.style);

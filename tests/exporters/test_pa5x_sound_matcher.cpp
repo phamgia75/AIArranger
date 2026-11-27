@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -792,6 +793,31 @@ int main() {
                  !missing.valid && okEmpty.valid && symlinkRefused &&
                  fs::is_empty(tmpDir / "Valid.KST" / "SOUND"));
             fs::remove_all(tmpDir);
+        }
+
+        // Audit P2-3: NaN / +Inf / -Inf gmAlignmentScore fail-closed clamping (0 UBSan issues)
+        {
+            auto baseProf = graph::profileDrumKit(makeKeyMap("USERDK01", 2, false));
+            const double badVals[3] = {
+                std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity()
+            };
+            bool allNonFiniteSafe = true;
+            for (double bv : badVals) {
+                auto p = baseProf;
+                p.gmAlignmentScore = bv;
+                const auto v = buildUserdkSummaryView(p, "SYNTH_NONFINITE");
+                const auto km = buildComparableUserdkKeyMap(p, "SYNTH_NONFINITE");
+                const uint8_t pct = target_adapter_detail::clampGmScorePercent(bv);
+                if (!std::isfinite(v.gm_alignment_score) || v.gm_alignment_score != 0.0 ||
+                    !km.has_value() || !std::isfinite(km->gmAlignmentScore()) || km->gmAlignmentScore() != 0.0 ||
+                    pct != 0u) {
+                    allNonFiniteSafe = false;
+                }
+            }
+            TEST("P2-3: NaN/+Inf/-Inf gmAlignmentScore fails closed deterministically to 0.0 (0 UBSan issues)",
+                 allNonFiniteSafe);
         }
     }
 
