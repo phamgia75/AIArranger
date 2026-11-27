@@ -624,6 +624,37 @@ int main() {
              res_ext.ok && !res_ext.actions.empty() &&
              v_high == 127u &&
              v_low > 10u && v_low <= 16u);
+
+        // (c) Cumulative bound across Sub-steps 1/2 (snare/hat shaping) + Sub-step 3 (Fill crescendo):
+        //     1-bar 4/4 Fill with flat snare & closed hi-hat at vel=80, max_drum_vel_delta=6.
+        //     Every note must satisfy cumulative |new_vel - 80| <= 6 (never 80 -> 84 -> 90)!
+        Style combo_fill;
+        combo_fill.ppqn = 384; combo_fill.mpqn = 500000;
+        Element f_combo{"f1cv1", 4, 4, 1536, {}};
+        addVoice(f_combo, kDrumCh, 120, 0, 0);
+        // Flat snare on beats 2 & 4 + offbeat 16th in 1st & 2nd half (triggers Sub-step 1)
+        addNote(f_combo, kDrumCh, 288, 350, 38, 80);   // offbeat 1st half
+        addNote(f_combo, kDrumCh, 384, 500, 38, 80);   // beat 2 backbeat
+        addNote(f_combo, kDrumCh, 960, 1040, 38, 80);  // offbeat 2nd half
+        addNote(f_combo, kDrumCh, 1152, 1270, 38, 80); // beat 4 backbeat (previously 80->84->90!)
+        // Flat closed hi-hat on 8ths (triggers Sub-step 2)
+        for (uint32_t e = 0; e < 8u; ++e) {
+            addNote(f_combo, kDrumCh, e * 192u, e * 192u + 90u, 42, 80);
+        }
+        sortEl(f_combo);
+        combo_fill.elements.push_back(std::move(f_combo));
+
+        const auto res_combo = enhanceStyle(combo_fill, opt);
+        const auto combo_after = style_enhancer_detail::extractChannelNotes(res_combo.style.elements[0], kDrumCh);
+        bool all_within_cumulative_bound = !combo_after.empty();
+        for (const auto& n : combo_after) {
+            if (std::abs(static_cast<int>(n.vel) - 80) > 6) {
+                all_within_cumulative_bound = false;
+            }
+        }
+        TEST("P1-1 residual: 1-bar 4/4 Fill cumulative |new_vel - orig_vel| <= max_drum_vel_delta (6) on every note",
+             res_combo.ok && !res_combo.actions.empty() && all_within_cumulative_bound &&
+             enhanceStyle(res_combo.style, opt).actions.empty());
     }
 
     // ── 13. Audit Regression P2-1: Mid-Ending dip+crescendo vs trailing fade snap-back accuracy ──

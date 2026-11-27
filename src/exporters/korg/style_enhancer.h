@@ -848,6 +848,12 @@ inline void applyDrumGhostDynamics(Style& style,
         const uint32_t bar_ticks = barTicksFor(style.ppqn, el.num, el.den);
         if (bar_ticks == 0u) continue;
 
+        // Snapshot pre-rule velocities so cumulative delta across Sub-steps 1..3
+        // never exceeds max_drum_vel_delta on any note.
+        std::vector<uint8_t> orig_vel;
+        orig_vel.reserve(notes.size());
+        for (const auto& n : notes) orig_vel.push_back(n.vel);
+
         std::vector<size_t> snare_idx, hat_idx;
         std::vector<uint8_t> snare_v, hat_v;
         uint32_t ghost_snares = 0;
@@ -1004,7 +1010,9 @@ inline void applyDrumGhostDynamics(Style& style,
                                     static_cast<double>(lift_lo) +
                                     frac * static_cast<double>(lift_hi - lift_lo))),
                                 1, max_delta);
-                            new_h2.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + add, 1u, 127u));
+                            const uint8_t lo_bound = clampMidi7(static_cast<int>(orig_vel[idx]) - max_delta, 1u, 127u);
+                            const uint8_t hi_bound = clampMidi7(static_cast<int>(orig_vel[idx]) + max_delta, 1u, 127u);
+                            new_h2.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + add, lo_bound, hi_bound));
                         }
                         const double m2_after = computeMeanVel(new_h2);
                         if (m2_after > m1) {
