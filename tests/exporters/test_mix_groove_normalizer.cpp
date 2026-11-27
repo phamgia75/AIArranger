@@ -859,12 +859,12 @@ int main() {
              pad_vel == 78 &&
              validate(Style{480, 500000, {el_edm}}).empty());
 
-        // Loop-boundary CC11 fade-out reset (< 32):
+        // Loop-boundary CC11 fade-out reset (< 32) on looping Variation (v1cv1):
         //  - ch 13: tick-0 CC11=106 -> fades down to 14 -> restored to 106 at len - 1
         //  - ch 14: no tick-0 CC11 (implicit 127) -> drops to 18 -> restored to 127 at len - 1
         //  - NRPN CC96/97 stripped while in_nrpn; XG SysEx variation_send blends 30% into CC93
         Element el_fade;
-        el_fade.marker = "e1cv1";
+        el_fade.marker = "v1cv1";
         el_fade.num = 4;
         el_fade.den = 4;
         el_fade.length = 1920;
@@ -897,7 +897,7 @@ int main() {
                 if (ev.d1 == 11u && (ev.status & 0x0Fu) == 14u) last_cc11_14 = ev.d2;
             }
         }
-        TEST("CC11 fade-out (<32) restores at len-1, NRPN CC96/97 stripped, XG variation_send blends to CC93",
+        TEST("CC11 fade-out (<32) restores at len-1 on looping v1cv1, NRPN CC96/97 stripped, XG variation_send blends to CC93",
              fade_stats.expression_resets_added == 2 &&
              fade_stats.proprietary_ccs_stripped == 4 &&
              fade_stats.xg_params_translated == 1 &&
@@ -924,6 +924,75 @@ int main() {
              pass2.expression_resets_added == 0 &&
              pass2.tracks_gain_adjusted == 0 &&
              pass2.xg_params_translated == 0);
+
+        // P3-M4 regression (EXP05): One-shot Endings (e1cv1..e3cv1) MUST preserve intentional
+        // CC11 fade-outs (106 -> 68 -> 32 -> 14) with ZERO snap-back pop at len-1, while still
+        // resetting open CC64=127 & uncentered PitchBend at len-1, AND non-Ending Fill/Intro/Break
+        // elements STILL restore faded CC11 < 32 at len-1!
+        bool endingsClean = true;
+        for (const char* endMk : {"e1cv1", "e2cv1", "e3cv1"}) {
+            Element end_el;
+            end_el.marker = endMk;
+            end_el.num = 6;
+            end_el.den = 8;
+            end_el.length = 4608; // EXP05 3-bar 6/8 @ 384 PPQN -> 3456; 4608 @ 512 PPQN
+            end_el.events = {
+                {0,    0xB0 | 13, 7,  80},
+                {0,    0xB0 | 13, 11, 106},
+                {0,    0xB0 | 13, 64, 127},       // open sustain -> MUST still reset!
+                {240,  0xE0 | 13, 0x00, 0x60},    // off-center PB -> MUST still reset!
+                {0,    0x90 | 13, 48, 72},
+                {1536, 0xB0 | 13, 11, 68},
+                {3072, 0xB0 | 13, 11, 32},
+                {4548, 0xB0 | 13, 11, 14},        // intentional fade-out!
+                {4548, 0x80 | 13, 48, 0},
+            };
+            const auto est = normalizeElementMix(end_el, {});
+            int final_cc11 = -1;
+            uint32_t final_cc11_tick = 0;
+            for (const auto& ev : end_el.events) {
+                if (ev.status == (0xB0 | 13) && ev.d1 == 11) {
+                    final_cc11 = ev.d2;
+                    final_cc11_tick = ev.tick;
+                }
+            }
+            const auto est2 = normalizeElementMix(end_el, {});
+            if (est.expression_resets_added != 0 ||
+                est.sustain_resets_added != 1 ||
+                est.pitchbend_resets_added != 1 ||
+                final_cc11 != 14 || final_cc11_tick != 4548 ||
+                hasLoopBoundaryIssues(end_el) ||
+                !validate(Style{512, 500000, {end_el}}).empty() ||
+                est2.expression_resets_added != 0 || est2.sustain_resets_added != 0) {
+                endingsClean = false;
+            }
+        }
+        TEST("P3-M4 EXP05: one-shot Endings (e1cv1..e3cv1) preserve CC11 fade-out (14, zero pop) while resetting CC64/PB",
+             endingsClean);
+
+        bool nonEndingsRestored = true;
+        for (const char* mk : {"i1cv1", "v2cv1", "f1cv1", "br"}) {
+            Element el_ne;
+            el_ne.marker = mk;
+            el_ne.num = 4;
+            el_ne.den = 4;
+            el_ne.length = 1920;
+            el_ne.events = {
+                {0,    0xB0 | 13, 7,  90},
+                {0,    0xB0 | 13, 11, 106},
+                {0,    0x90 | 13, 60, 82},
+                {1860, 0xB0 | 13, 11, 14},
+                {1860, 0x80 | 13, 60, 0},
+            };
+            const auto st_ne = normalizeElementMix(el_ne, {});
+            int last_val = -1;
+            for (const auto& ev : el_ne.events) {
+                if (ev.status == (0xB0 | 13) && ev.d1 == 11) last_val = ev.d2;
+            }
+            if (st_ne.expression_resets_added != 1 || last_val != 106) nonEndingsRestored = false;
+        }
+        TEST("P3-M4: looping/chaining elements (i1cv1, v2cv1, f1cv1, br) still restore faded CC11 < 32 at len-1",
+             nonEndingsRestored);
     }
 
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);

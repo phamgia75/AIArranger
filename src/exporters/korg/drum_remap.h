@@ -683,11 +683,36 @@ inline DrumRemapRule lookupDrumRemapRule(uint8_t note,
 
         case DrumKitCategory::Sfx:
             if ((note >= 27 && note <= 34) || (note >= 82 && note <= 87)) {
+                // Valid GM2 SFX/extended keys 27..34 & 82..87: preserve 1:1 untouched.
                 r.target_note    = note;
                 r.fallback_note  = 0;
                 r.vel_scale      = 1.0;
                 r.drop_if_absent = true;
+            } else if (note >= 88 && note <= 104) {
+                // P3-M4: Documented Yamaha XG SFX/extended percussion keys 88..104 ->
+                // populated GM2/Pa5X SFX/Percussion equivalents inside 27..87 (never dropped silently).
+                switch (note) {
+                    case 88:  r = {75, 85, 'L', 0, 0.90, false, false}; break; // Claves / Castanets FX
+                    case 89:  r = {76, 75, 'L', 0, 0.90, false, false}; break; // Hi Wood Block FX
+                    case 90:  r = {80, 81, 'L', 5, 0.90, false, false}; break; // Mute Triangle FX
+                    case 91:  r = {81, 80, 'L', 5, 0.90, false, false}; break; // Open Triangle FX
+                    case 92:  r = {70, 82, 'L', 0, 0.90, false, false}; break; // Maracas / Shaker FX
+                    case 93:  r = {69, 70, 'L', 0, 0.90, false, false}; break; // Cabasa FX
+                    case 94:  r = {54, 70, 'L', 0, 0.90, false, false}; break; // Tambourine FX
+                    case 95:  r = {73, 74, 'L', 3, 0.90, false, false}; break; // Short Guiro FX
+                    case 96:  r = {54, 56, 'L', 0, 0.90, false, false}; break; // Tambourine / Cowbell FX
+                    case 97:  r = {56, 67, 'L', 0, 0.90, false, false}; break; // Cowbell FX
+                    case 98:  r = {67, 68, 'L', 0, 0.90, false, false}; break; // High Agogo FX
+                    case 99:  r = {68, 67, 'L', 0, 0.90, false, false}; break; // Low Agogo FX
+                    case 100: r = {76, 77, 'L', 0, 0.90, false, false}; break; // Hi Wood Block FX
+                    case 101: r = {77, 76, 'L', 0, 0.90, false, false}; break; // Low Wood Block FX
+                    case 102: r = {69, 70, 'L', 0, 0.90, false, false}; break; // Cabasa FX
+                    case 103: r = {75, 76, 'L', 0, 0.90, false, false}; break; // Claves FX
+                    case 104: r = {81, 80, 'L', 5, 0.90, false, false}; break; // Open Triangle stinger FX
+                    default:  break;
+                }
             } else {
+                // Extreme unassigned SFX keys (<27 or >=105) remain fail-closed dropped.
                 r.target_note    = note;
                 r.fallback_note  = 0;
                 r.family         = 'X';

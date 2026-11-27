@@ -468,6 +468,145 @@ int main() {
         TEST_EQ("StylePlayer honors CASM ntt_bass + On-Bass C/E (bass 36 -> 40)", gotBass, 40);
     }
 
+    // ── P3-M4 Regression Lock: Absolute-Octave vs Pitch-Class NTT Transposition ──
+    {
+        // 1. Exhaustive root-octave invariance across ALL 10 mandated chord types
+        //    (Major, Minor, Dom7, Maj7, Min7, Dim7, Aug, Sus4, Power, On-Bass slash chords)
+        //    AND srcRootMidi octave invariance.
+        const ChordType allTenBaseTypes[] = {
+            ChordType::Major, ChordType::Minor, ChordType::Dom7, ChordType::Maj7,
+            ChordType::Min7,  ChordType::Dim7,  ChordType::Aug,  ChordType::Sus4,
+            ChordType::Power
+        };
+        const NttMode nttModes[] = {
+            NttMode::Bass, NttMode::Chord, NttMode::Melody, NttMode::Guitar,
+            NttMode::NaturalMinor, NttMode::HarmonicMinor, NttMode::MelodicMinor, NttMode::Dorian
+        };
+        const NtrRule ntrRules[] = {
+            NtrRule::RootTransposition, NtrRule::RootFixed, NtrRule::Guitar
+        };
+        const RegisterLimits hk5{5, 0, 127};
+
+        bool allTypesOctaveInvariant = true;
+        bool srcRootOctaveInvariant = true;
+        for (ChordType t : allTenBaseTypes) {
+            for (int pc = 0; pc < 12; ++pc) {
+                for (NttMode m : nttModes) {
+                    for (NtrRule r : ntrRules) {
+                        for (uint8_t note : {uint8_t(36), uint8_t(47), uint8_t(48), uint8_t(60), uint8_t(64), uint8_t(67), uint8_t(71), uint8_t(84)}) {
+                            const Chord ref{t, static_cast<uint8_t>(60 + pc), 0, 0};
+                            const uint8_t want11 = transpose(note, ref, r, m, 60);
+                            const uint8_t want5  = transpose(note, ref, r, m, 60, hk5);
+                            for (int rootOct = 0; rootOct <= 9; ++rootOct) {
+                                const int rMidi = rootOct * 12 + pc;
+                                if (rMidi > 127) continue;
+                                const Chord c{t, static_cast<uint8_t>(rMidi), 0, 0};
+                                if (transpose(note, c, r, m, 60) != want11) allTypesOctaveInvariant = false;
+                                if (transpose(note, c, r, m, 60, hk5) != want5) allTypesOctaveInvariant = false;
+                            }
+                            for (uint8_t srcC : {uint8_t(24), uint8_t(36), uint8_t(48), uint8_t(60), uint8_t(72)}) {
+                                if (transpose(note, ref, r, m, srcC) != want11) srcRootOctaveInvariant = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        TEST("P3-M4 NTT lock: all 9 chord qualities x 12 roots x 8 NTT x 3 NTR are 100% root-octave invariant",
+             allTypesOctaveInvariant);
+        TEST("P3-M4 NTT lock: srcRootMidi octave (C1..C5) never shifts output octave",
+             srcRootOctaveInvariant);
+
+        // 2. On-Bass slash-chord octave invariance across root & bass octaves 1..7
+        struct SlashSpec { ChordType type; int rootPc; int bassPc; };
+        const SlashSpec slashSpecs[] = {
+            {ChordType::Major, 0, 4},  // C/E
+            {ChordType::Major, 0, 7},  // C/G
+            {ChordType::Dom7,  7, 11}, // G7/B
+            {ChordType::Minor, 9, 7},  // Am/G
+            {ChordType::Major, 5, 9},  // F/A
+            {ChordType::Major, 2, 6},  // D/F#
+        };
+        bool slashOctaveInvariant = true;
+        for (const auto& sp : slashSpecs) {
+            const Chord ref{sp.type, static_cast<uint8_t>(60 + sp.rootPc), static_cast<uint8_t>(48 + sp.bassPc), 0};
+            const uint8_t wantBass11 = transpose(36, ref, NtrRule::RootTransposition, NttMode::Bass, 60);
+            const uint8_t wantBass5  = transpose(36, ref, NtrRule::RootTransposition, NttMode::Bass, 60, hk5);
+            for (int ro = 2; ro <= 6; ++ro) {
+                for (int bo = 1; bo <= 6; ++bo) {
+                    const Chord c{sp.type, static_cast<uint8_t>(ro * 12 + sp.rootPc),
+                                  static_cast<uint8_t>(bo * 12 + sp.bassPc), 0};
+                    if (transpose(36, c, NtrRule::RootTransposition, NttMode::Bass, 60) != wantBass11) {
+                        slashOctaveInvariant = false;
+                    }
+                    if (transpose(36, c, NtrRule::RootTransposition, NttMode::Bass, 60, hk5) != wantBass5) {
+                        slashOctaveInvariant = false;
+                    }
+                }
+            }
+        }
+        TEST("P3-M4 NTT lock: On-Bass slash chords (C/E, C/G, G7/B, Am/G, F/A, D/F#) are root & bass octave invariant",
+             slashOctaveInvariant);
+
+        // 3. Explicit cross-octave-boundary preservation (B2 -> C3, C4 -> Bb3, G#3 -> C#4, D3 -> B2)
+        TEST_EQ("P3-M4 NTT lock: cross-octave up B2 (47) on Db Maj7 -> C3 (48)",
+                transpose(47, Chord{ChordType::Maj7, 61, 0, 0}, NtrRule::RootTransposition, NttMode::Melody, 60), 48);
+        TEST_EQ("P3-M4 NTT lock: cross-octave up B2 (47) on C#2 Maj7 (low root oct) -> C3 (48)",
+                transpose(47, Chord{ChordType::Maj7, 37, 0, 0}, NtrRule::RootTransposition, NttMode::Melody, 60), 48);
+        TEST_EQ("P3-M4 NTT lock: cross-octave down C4 (60) on Bb Major (highKey=5) -> Bb3 (58)",
+                transpose(60, Chord{ChordType::Major, 70, 0, 0}, NtrRule::RootTransposition, NttMode::Melody, 60, hk5), 58);
+        TEST_EQ("P3-M4 NTT lock: cross-octave down C4 (60) on Bb1 Major (low root oct, highKey=5) -> Bb3 (58)",
+                transpose(60, Chord{ChordType::Major, 34, 0, 0}, NtrRule::RootTransposition, NttMode::Melody, 60, hk5), 58);
+        TEST_EQ("P3-M4 NTT lock: cross-octave up B2 (47, srcRoot=B) on C Major -> C3 (48)",
+                transpose(47, Chord{ChordType::Major, 60, 0, 0}, NtrRule::RootTransposition, NttMode::Bass, 59), 48);
+        TEST_EQ("P3-M4 NTT lock: cross-octave down D3 (50) on A Minor (highKey=8) -> B2 (47)",
+                transpose(50, Chord{ChordType::Minor, 69, 0, 0}, NtrRule::RootTransposition, NttMode::Melody, 60, RegisterLimits{8, 0, 127}), 47);
+
+        // 4. Multi-octave voicing spacing & monotonic octave preservation (never collapses or inverts mod-12)
+        //    Source voicing: C3(48), E3(52), G3(55), C4(60), E4(64), G4(67), C5(72)
+        const uint8_t multiOctIn[7] = {48, 52, 55, 60, 64, 67, 72};
+        bool multiOctPreserved = true;
+        for (ChordType t : {ChordType::Major, ChordType::Minor, ChordType::Dom7, ChordType::Maj7,
+                            ChordType::Min7, ChordType::Dim7, ChordType::Aug, ChordType::Sus4}) {
+            for (int pc = 0; pc < 12; ++pc) {
+                uint8_t out[7] = {};
+                const Chord target{t, static_cast<uint8_t>(36 + pc), 0, 0}; // low root octave
+                const size_t nOut = transposeVoicing(multiOctIn, 7, out, target,
+                                                     NtrRule::RootTransposition, NttMode::Chord, 60, hk5);
+                if (nOut != 7) { multiOctPreserved = false; break; }
+                // Strict ascending order preserved across all 3 octaves (no octave collapse or mod-12 inversion)
+                for (size_t i = 0; i + 1 < nOut; ++i) {
+                    if (!(out[i] < out[i + 1])) multiOctPreserved = false;
+                }
+                // Exact 12-semitone octave doubling preserved between C3/C4/C5, E3/E4, G3/G4!
+                if ((out[3] - out[0]) != 12 || (out[6] - out[3]) != 12 ||
+                    (out[4] - out[1]) != 12 || (out[5] - out[2]) != 12) {
+                    multiOctPreserved = false;
+                }
+            }
+        }
+        TEST("P3-M4 NTT lock: 3-octave chord voicings preserve exact +12 octave spacing & ascending order across all 8 triadic/7th qualities x 12 roots",
+             multiOctPreserved);
+
+        // Power chord multi-octave voicing: {36, 43, 48, 55, 60} stays strictly ascending with +12 octave pairs
+        {
+            const uint8_t pwrIn[5] = {36, 43, 48, 55, 60};
+            bool pwrOk = true;
+            for (int pc = 0; pc < 12; ++pc) {
+                uint8_t out[5] = {};
+                const Chord target{ChordType::Power, static_cast<uint8_t>(24 + pc), 0, 0};
+                const size_t nOut = transposeVoicing(pwrIn, 5, out, target,
+                                                     NtrRule::RootTransposition, NttMode::Chord, 60, hk5);
+                if (nOut != 5 || (out[2] - out[0]) != 12 || (out[4] - out[2]) != 12 || (out[3] - out[1]) != 12) {
+                    pwrOk = false;
+                }
+                for (size_t i = 0; i + 1 < nOut; ++i) if (!(out[i] < out[i + 1])) pwrOk = false;
+            }
+            TEST("P3-M4 NTT lock: Power chord multi-octave voicing preserves exact +12 spacing across all 12 roots",
+                 pwrOk);
+        }
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }

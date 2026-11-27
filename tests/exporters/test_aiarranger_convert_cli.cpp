@@ -312,18 +312,31 @@ int main(int argc, char** argv) {
             s.tracks.push_back(std::move(tr));
             return s;
         };
-        st.sections.push_back(makeSec(uasf::SectionType::Main1, "Main A", 126, 0, 0));  // SFX Kit -> >87 conservatively dropped
-        st.sections.push_back(makeSec(uasf::SectionType::Main2, "Main B", 126, 0, 40)); // Ethnic switch -> must NOT be dropped!
-        st.sections.push_back(makeSec(uasf::SectionType::Main3, "Main C", 127, 0, 40)); // Brush switch -> must NOT be dropped!
+        st.sections.push_back(makeSec(uasf::SectionType::Main1, "Main A", 126, 0, 0));  // SFX Kit -> 88/92/96/104 remapped onto populated SFX/Perc keys (P3-M4)
+        st.sections.push_back(makeSec(uasf::SectionType::Main2, "Main B", 126, 0, 40)); // Ethnic switch -> must NOT be overridden by "SfxPerc"!
+        st.sections.push_back(makeSec(uasf::SectionType::Main3, "Main C", 127, 0, 40)); // Brush switch -> must NOT be overridden by "SfxPerc"!
 
         MapOptions mopt = MapOptions::quality();
         mopt.ppqn = 384;
         mopt.capture_soundmap_dump = true;
         mopt.soundmap_style_name = "EXP12_STALE_NAME_TEST.sty";
         const auto mres = mapToKorg(st, mopt);
-        TEST("EXP12 stale-track-name fix: Main B & Main C keep all 8 switched-kit hits (only 4 Main A SFX hits dropped)",
-             mres.ok && mres.report.drum_notes_unsupported == 4u &&
-             (mres.report.drum_notes_remapped_exact + mres.report.drum_notes_remapped_approx) == 8u);
+        auto firstNotePitch = [&](const char* marker) -> int {
+            for (const auto& el : mres.style.elements) {
+                if (el.marker != marker) continue;
+                for (const auto& ev : el.events) {
+                    if ((ev.status & 0xF0u) == 0x90u && ev.d2 > 0u) return ev.d1;
+                }
+            }
+            return -1;
+        };
+        // Main A (Sfx): 88 -> 75 (Claves); Main B (Ethnic): 88 -> 60 (Darbuka/Bongo); Main C (Brush): 88 -> 40 (Brush Snare).
+        TEST("EXP12 stale-track-name & P3-M4 SFX fix: Main A/B/C use distinct Sfx/Ethnic/Brush maps and keep all 12 hits (0 drops)",
+             mres.ok && mres.report.drum_notes_unsupported == 0u &&
+             (mres.report.drum_notes_remapped_exact + mres.report.drum_notes_remapped_approx) == 12u &&
+             firstNotePitch("v1cv1") == 75 &&
+             firstNotePitch("v2cv1") == 60 &&
+             firstNotePitch("v3cv1") == 40);
 
         // P1-W2 round-trip: dumped soundmap contains per-element v2.perc / v3.perc lines,
         // and reloading with --no-auto-sound-map produces byte-identical SMF!
