@@ -1056,7 +1056,7 @@ static void runQ5WireE2eTests() {
         bool rpnOrderExact = true;
         bool nrpnFullyStripped = true;
         bool cc93Blended = true;
-        bool cc11Restored = true;
+        bool cc11PolicyExact = true;
         for (const auto& el : kr.style.elements) {
             if (hasOpenSustainOrPb(el)) allFourClean = false;
             std::vector<std::pair<uint8_t, uint8_t>> bassRpn;
@@ -1081,13 +1081,18 @@ static void runQ5WireE2eTests() {
             };
             if (bassRpn != expectedRpn) rpnOrderExact = false;
             if (accCc93 != 15) cc93Blended = false;
-            if (accLastCc11 != 104) cc11Restored = false;
+            // P3-M4: Looping/chaining Intro/Main/Fill restore CC11 -> 104, while one-shot Ending
+            // preserves its intentional fade-out at CC11 == 16 without a snap-back pop!
+            const bool isEnding = (el.marker.size() >= 2 && el.marker[0] == 'e' &&
+                                   el.marker[1] >= '1' && el.marker[1] <= '3');
+            const int wantCc11 = isEnding ? 16 : 104;
+            if (accLastCc11 != wantCc11) cc11PolicyExact = false;
         }
-        TEST("Q5-Wire RPN/NRPN & Var/Fill/Intro/Ending resets: valid RPN order kept, NRPN 99/98/6/38/96/97 stripped, CC64/PB/CC11 reset across all 4 element types",
-             allFourClean && rpnOrderExact && nrpnFullyStripped && cc93Blended && cc11Restored &&
+        TEST("Q5-Wire RPN/NRPN & Var/Fill/Intro/Ending resets: valid RPN order kept, NRPN stripped, CC64/PB reset on all 4, CC11 restored on Intro/Main/Fill & fade preserved on Ending",
+             allFourClean && rpnOrderExact && nrpnFullyStripped && cc93Blended && cc11PolicyExact &&
              kr.report.sustain_resets_added == 4 &&
              kr.report.pitchbend_resets_added == 4 &&
-             kr.report.expression_resets_added == 4 &&
+             kr.report.expression_resets_added == 3 &&
              kr.report.proprietary_ccs_stripped == 28);
     }
 
@@ -1425,6 +1430,83 @@ int main() {
     runQ23WireE2eTests();
     runQ4WireE2eTests();
     runQ5WireE2eTests();
+
+    // ── P3-M4 Regression Locks: EXP15 Fail-Closed (5/5 UNRESOLVED) & EXP12 Swapped Revo!/SFX >87 ──
+    {
+        auto voiceEvs = [](uint8_t ch, int msb, int lsb, int pc, std::vector<uasf::MidiEvent> body) {
+            std::vector<uasf::MidiEvent> out;
+            if (msb >= 0) out.push_back(ev(MidiEventType::ControlChange, ch, 0, static_cast<uint8_t>(msb), 0));
+            if (lsb >= 0) out.push_back(ev(MidiEventType::ControlChange, ch, 32, static_cast<uint8_t>(lsb), 0));
+            if (pc  >= 0) out.push_back(ev(MidiEventType::ProgramChange, ch, static_cast<uint8_t>(pc), 0, 0));
+            out.insert(out.end(), body.begin(), body.end());
+            return out;
+        };
+
+        // 1. EXP15 fail-closed lock: 2 known tracks resolve, ALL 5 vendor-private/GM-SFX/unbanked
+        //    tracks MUST remain UNRESOLVED with ZERO emitted CC0/CC32/PC bytes!
+        auto trDrum = track(9,  voiceEvs(9, 127, 0, 0, cat(note(9, 36, 0, 240, 108), note(9, 38, 1920, 2160, 98))), uasf::TrackRole::Drum);
+        trDrum.name = "Rhythm2";
+        auto trBass = track(10, voiceEvs(10, 0, 0, 33, cat(note(10, 36, 0, 1920, 100), note(10, 43, 3840, 5760, 92))), uasf::TrackRole::Bass);
+        trBass.name = "Bass";
+        auto trU1 = track(11, voiceEvs(11, 65, 12, 45, cat(note(11, 60, 1920, 3840, 82), cat(note(11, 64, 1920, 3840, 82), note(11, 67, 1920, 3840, 82)))), uasf::TrackRole::Chord);
+        trU1.name = "Track 1";
+        auto trU2 = track(12, voiceEvs(12, 71, 33, 99, cat(note(12, 60, 0, 960, 80), note(12, 67, 1920, 2880, 80))), uasf::TrackRole::Chord);
+        trU2.name = "CustomSy";
+        auto trU3 = track(13, voiceEvs(13, 66, 7, 122, cat(note(13, 48, 0, 7440, 68), cat(note(13, 52, 0, 7440, 68), note(13, 55, 0, 7440, 68)))), uasf::TrackRole::Pad);
+        trU3.name = "Part 3";
+        auto trU4 = track(14, voiceEvs(14, 0, 0, 125, note(14, 60, 3840, 4800, 84)), uasf::TrackRole::Accompaniment);
+        trU4.name = "FX Ring";
+        auto trU5 = track(15, voiceEvs(15, -1, -1, -1, note(15, 64, 5760, 6720, 78)), uasf::TrackRole::Phrase1);
+        trU5.name = "User 5";
+
+        auto exp15Style = styleOf({section(T::Main1, "Main A", 1, {trDrum, trBass, trU1, trU2, trU3, trU4, trU5})});
+        const auto r15 = mapToKorg(exp15Style, MapOptions::quality());
+        const Element* v1_15 = find(r15.style, "v1cv1");
+        bool zeroGuessedOnAll5 = (v1_15 != nullptr);
+        if (v1_15) {
+            for (uint8_t ch = 11; ch <= 15; ++ch) {
+                if (count(*v1_15, static_cast<uint8_t>(0xB0 | ch), 0) != 0 ||
+                    count(*v1_15, static_cast<uint8_t>(0xB0 | ch), 32) != 0 ||
+                    count(*v1_15, static_cast<uint8_t>(0xC0 | ch)) != 0) {
+                    zeroGuessedOnAll5 = false;
+                }
+            }
+        }
+        TEST("P3-M4 EXP15 lock: 5/5 unknown vendor-private/GM-SFX/unbanked tracks stay UNRESOLVED (0 guessed Bank/PC)",
+             r15.ok && validate(r15.style).empty() &&
+             r15.report.sound_match_stats.tracks_evaluated == 7 &&
+             r15.report.sound_match_stats.factory_matches == 2 &&
+             r15.report.sound_match_stats.unresolved == 5 &&
+             r15.report.sound_match_stats.low_confidence_auto_selects == 0 &&
+             zeroGuessedOnAll5);
+
+        // 2. EXP12 swapped Revo! + SFX >87 lock: 0 unsupported drum/SFX drops, valid GM2 27/29/32/84 kept 1:1
+        std::vector<uasf::MidiEvent> r1Revo = voiceEvs(8, 62, 100, 1, {});
+        for (int i = 0; i < 8; ++i) {
+            const uint8_t p = (i % 4 == 0) ? 36 : ((i % 4 == 2) ? 38 : 42);
+            auto n = note(8, p, static_cast<uint64_t>(i) * 960, static_cast<uint64_t>(i) * 960 + 240, 100);
+            r1Revo.insert(r1Revo.end(), n.begin(), n.end());
+        }
+        std::vector<uasf::MidiEvent> r2Sfx = voiceEvs(9, 126, 0, 0, {});
+        const uint8_t sfxP[8] = {27, 29, 32, 84, 88, 92, 96, 104};
+        for (int i = 0; i < 8; ++i) {
+            auto n = note(9, sfxP[i], static_cast<uint64_t>(i) * 960 + 120, static_cast<uint64_t>(i) * 960 + 360,
+                          static_cast<uint8_t>(64 + 4 * i));
+            r2Sfx.insert(r2Sfx.end(), n.begin(), n.end());
+        }
+        auto trR1Sw = track(8, r1Revo, uasf::TrackRole::Drum); trR1Sw.name = "RevoKit";
+        auto trR2Sw = track(9, r2Sfx, uasf::TrackRole::Percussion); trR2Sw.name = "SfxPerc";
+        auto exp12Style = styleOf({section(T::Main1, "Main A", 1, {trR1Sw, trR2Sw})});
+        const auto r12 = mapToKorg(exp12Style, MapOptions::quality());
+        const Element* v1_12 = find(r12.style, "v1cv1");
+        TEST("P3-M4 EXP12 lock: swapped Revo!/SFX preserves GM2 27/29/32/84 1:1 & remaps 88/92/96/104 with 0 drops",
+             r12.ok && validate(r12.style).empty() && r12.report.rhythm_tracks_swapped &&
+             r12.report.drum_notes_unsupported == 0 && v1_12 &&
+             count(*v1_12, 0x90 | kPercCh, 27) == 1 && count(*v1_12, 0x90 | kPercCh, 29) == 1 &&
+             count(*v1_12, 0x90 | kPercCh, 32) == 1 && count(*v1_12, 0x90 | kPercCh, 84) == 1 &&
+             count(*v1_12, 0x90 | kPercCh, 75) == 1 && count(*v1_12, 0x90 | kPercCh, 70) == 1 &&
+             count(*v1_12, 0x90 | kPercCh, 54) == 1 && count(*v1_12, 0x90 | kPercCh, 81) == 1);
+    }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

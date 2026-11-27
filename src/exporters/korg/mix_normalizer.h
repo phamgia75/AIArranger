@@ -181,6 +181,16 @@ inline std::string escapeMarkdownCell(std::string_view text) {
     return out;
 }
 
+// True for one-shot Pa5X Ending markers ("e1cv1".."e3cv6", "e1".."e3").
+// Endings terminate playback instead of looping/chaining into a Variation, so
+// intentional trailing CC11 fade-outs (< 32) must NOT snap back at el.length - 1.
+inline bool isOneShotEndingMarker(std::string_view marker) noexcept {
+    if (marker.size() < 2u) return false;
+    const char c0 = marker[0];
+    const char c1 = marker[1];
+    return (c0 == 'e' || c0 == 'E') && (c1 >= '1' && c1 <= '3');
+}
+
 } // namespace mix_detail
 
 // Cleans proprietary/invalid CCs, injects missing tick-0 XG mix CCs, balances
@@ -520,6 +530,7 @@ inline MixNormalizeStats normalizeElementMix(
             }
 
             const uint32_t reset_tick = el.length - 1u;
+            const bool is_one_shot_ending = mix_detail::isOneShotEndingMarker(el.marker);
             for (uint8_t ch = 0; ch < 16u; ++ch) {
                 if (last_cc64[ch] >= 64u) {
                     el.events.push_back(Event{reset_tick, static_cast<uint8_t>(0xB0u | ch), 64u, 0u});
@@ -529,7 +540,7 @@ inline MixNormalizeStats normalizeElementMix(
                     el.events.push_back(Event{reset_tick, static_cast<uint8_t>(0xE0u | ch), 0x00u, 0x40u});
                     ++stats.pitchbend_resets_added;
                 }
-                if (saw_mid_cc11[ch] && last_cc11[ch] < 32u) {
+                if (!is_one_shot_ending && saw_mid_cc11[ch] && last_cc11[ch] < 32u) {
                     uint8_t restore = 127u;
                     if (had_t0_cc11[ch] && t0_cc11[ch] >= 32u) {
                         restore = t0_cc11[ch];
