@@ -913,7 +913,7 @@ inline void applyDrumGhostDynamics(Style& style,
                     // Differentiate primary vs secondary backbeat so std rises cleanly >= 3.0.
                     d = ((cls == 2) || (cls == 0 && (k % 2u == 0u))) ? hi_d : -lo_d;
                 }
-                cand_v.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + d, 24u, 122u));
+                cand_v.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + d, 1u, 127u));
             }
             const double new_std = computeStddevVel(cand_v);
             if (new_std >= 3.0 && new_std > snare_std) {
@@ -949,7 +949,7 @@ inline void applyDrumGhostDynamics(Style& style,
                 const uint32_t rem = notes[hat_idx[k]].on_tick % q;
                 const bool on_beat = (rem <= beat_tol || (q - rem) <= beat_tol);
                 const int d = on_beat ? hi_d : -lo_d;
-                cand_v.push_back(clampMidi7(static_cast<int>(notes[hat_idx[k]].vel) + d, 24u, 122u));
+                cand_v.push_back(clampMidi7(static_cast<int>(notes[hat_idx[k]].vel) + d, 1u, 127u));
             }
             const double new_std = computeStddevVel(cand_v);
             if (new_std >= 3.0 && new_std > hat_std) {
@@ -975,8 +975,8 @@ inline void applyDrumGhostDynamics(Style& style,
             }
         }
 
-        // 3. Optional gentle 2nd-half Fill turnaround crescendo (zero invented notes)
-        if (opt.enhance_fill_crescendo && isFillMarker(el.marker) && el.length >= 2u) {
+        // 3. Optional gentle 2nd-half Fill turnaround crescendo (zero invented notes; skips dynamic drums!)
+        if (!already_dynamic_drum && opt.enhance_fill_crescendo && isFillMarker(el.marker) && el.length >= 2u) {
             const uint32_t half = el.length / 2u;
             std::vector<uint8_t> h1, h2;
             std::vector<size_t> h2_idx;
@@ -999,10 +999,12 @@ inline void applyDrumGhostDynamics(Style& style,
                             const double frac = (span > 0.0)
                                 ? (static_cast<double>(notes[idx].on_tick - half) / span)
                                 : 1.0;
-                            const int add = static_cast<int>(std::lround(
-                                static_cast<double>(lift_lo) +
-                                frac * static_cast<double>(lift_hi - lift_lo)));
-                            new_h2.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + add, 24u, 122u));
+                            const int add = std::clamp(
+                                static_cast<int>(std::lround(
+                                    static_cast<double>(lift_lo) +
+                                    frac * static_cast<double>(lift_hi - lift_lo))),
+                                1, max_delta);
+                            new_h2.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + add, 1u, 127u));
                         }
                         const double m2_after = computeMeanVel(new_h2);
                         if (m2_after > m1) {
@@ -1216,17 +1218,23 @@ inline void applyEndingFadePopGuard(Style& style,
             }
             if (seq.size() < 2u) continue;
 
+            uint32_t last_note_on_tick = 0u;
+            bool has_note_on = false;
+            for (const auto& ev : el.events) {
+                if ((ev.status & 0xF0u) == 0x90u && (ev.status & 0x0Fu) == ch && ev.d2 > 0u) {
+                    if (!has_note_on || ev.tick > last_note_on_tick) last_note_on_tick = ev.tick;
+                    has_note_on = true;
+                }
+            }
+
             if (is_ending) {
                 const auto& last = seq.back();
-                bool faded_low_late = false;
-                uint8_t low_v = 127u;
-                for (size_t k = 0; k + 1u < seq.size(); ++k) {
-                    if (seq[k].tick >= el.length / 2u && seq[k].val < 32u) {
-                        faded_low_late = true;
-                        if (seq[k].val < low_v) low_v = seq[k].val;
-                    }
-                }
-                if (faded_low_late && last.tick + 2u >= el.length && last.val >= 64u) {
+                const auto& prev = seq[seq.size() - 2u];
+                const bool trailing_fade_low = (prev.tick >= el.length / 2u && prev.val < 32u && prev.tick < last.tick);
+                const bool boundary_snapback = (last.tick + 2u >= el.length && last.val >= 64u &&
+                                                (static_cast<int>(last.val) - static_cast<int>(prev.val)) >= 32 &&
+                                                (!has_note_on || last.tick > last_note_on_tick));
+                if (trailing_fade_low && boundary_snapback) {
                     remove_indices.insert(last.idx);
                     ++stats.cc_events_removed;
 
@@ -1238,9 +1246,9 @@ inline void applyEndingFadePopGuard(Style& style,
                     act.bar = bar1Based(last.tick, bar_ticks);
                     act.tick = last.tick;
                     act.before_summary = "CC11@" + std::to_string(last.tick) + "=" + std::to_string(last.val) +
-                                         " after fade to " + std::to_string(low_v);
+                                         " after trailing fade to " + std::to_string(prev.val);
                     act.after_summary = "removed final-tick CC11 snap-back (fade ends cleanly at CC11=" +
-                                        std::to_string(low_v) + ")";
+                                        std::to_string(prev.val) + ")";
                     act.musical_reason = "Prevents audible reverb/release tail-swell pop on one-shot Ending fade-out";
                     act.reversible = true;
                     actions.push_back(std::move(act));
@@ -1249,18 +1257,26 @@ inline void applyEndingFadePopGuard(Style& style,
                 const auto& last = seq.back();
                 const auto& prev = seq[seq.size() - 2u];
                 const int delta = static_cast<int>(last.val) - static_cast<int>(prev.val);
-                if (last.tick >= loop_win_start && std::abs(delta) >= jump_thresh && last.tick > prev.tick + 1u) {
-                    const uint32_t min_steps_needed = static_cast<uint32_t>(std::abs(delta) / jump_thresh);
+                const int abs_delta = std::abs(delta);
+                if (last.tick >= loop_win_start && abs_delta >= jump_thresh && last.tick > prev.tick + 1u) {
+                    const int max_step_allowed = std::max(1, jump_thresh - 1);
+                    const uint32_t intervals_needed = static_cast<uint32_t>(
+                        (abs_delta + max_step_allowed - 1) / max_step_allowed);
+                    const uint32_t min_steps_needed = (intervals_needed > 1u) ? (intervals_needed - 1u) : 1u;
                     const uint32_t target_steps = std::clamp<uint32_t>(
-                        std::max<uint32_t>(ramp_steps, min_steps_needed), 2u, 6u);
+                        std::max<uint32_t>(ramp_steps, min_steps_needed), 1u, 6u);
                     const uint32_t win = std::max<uint32_t>(sixteenth_bar, target_steps + 1u);
                     const uint32_t desired_start = (last.tick > win) ? (last.tick - win) : (prev.tick + 1u);
                     const uint32_t ramp_start = std::max(prev.tick + 1u, desired_start);
                     if (last.tick > ramp_start) {
                         const uint32_t span = last.tick - ramp_start;
                         const uint32_t steps = std::min<uint32_t>(target_steps, span);
-                        if (steps >= 1u && (std::abs(delta) / static_cast<int>(steps + 1u)) < jump_thresh) {
-                            uint32_t inserted = 0;
+                        const int ceil_step = (abs_delta + static_cast<int>(steps)) / static_cast<int>(steps + 1u);
+                        if (steps >= 1u && ceil_step < jump_thresh) {
+                            std::vector<Event> cand_ramp;
+                            cand_ramp.reserve(steps);
+                            uint8_t prev_pt = prev.val;
+                            int max_actual_step = 0;
                             for (uint32_t s = 1u; s <= steps; ++s) {
                                 const uint32_t t = ramp_start + (span * (s - 1u)) / steps;
                                 if (t <= prev.tick || t >= last.tick) continue;
@@ -1269,11 +1285,18 @@ inline void applyEndingFadePopGuard(Style& style,
                                     static_cast<int>(std::lround(static_cast<double>(prev.val) +
                                                                  frac * static_cast<double>(delta))),
                                     0u, 127u);
-                                added_events.push_back(Event{t, static_cast<uint8_t>(0xB0u | ch), 11u, v});
-                                ++inserted;
-                                ++stats.cc_events_added;
+                                const int step_diff = std::abs(static_cast<int>(v) - static_cast<int>(prev_pt));
+                                if (step_diff > max_actual_step) max_actual_step = step_diff;
+                                prev_pt = v;
+                                cand_ramp.push_back(Event{t, static_cast<uint8_t>(0xB0u | ch), 11u, v});
                             }
-                            if (inserted > 0u) {
+                            const int final_diff = std::abs(static_cast<int>(last.val) - static_cast<int>(prev_pt));
+                            if (final_diff > max_actual_step) max_actual_step = final_diff;
+                            if (!cand_ramp.empty() && max_actual_step < jump_thresh) {
+                                for (const auto& ev : cand_ramp) {
+                                    added_events.push_back(ev);
+                                    ++stats.cc_events_added;
+                                }
                                 EnhancementAction act;
                                 act.rule_id = "ending_fade_pop_guard";
                                 act.section = el.marker;
@@ -1283,7 +1306,7 @@ inline void applyEndingFadePopGuard(Style& style,
                                 act.tick = last.tick;
                                 act.before_summary = "single-step CC11 jump " + std::to_string(prev.val) +
                                                      " -> " + std::to_string(last.val) + " at tick " + std::to_string(last.tick);
-                                act.after_summary = "inserted " + std::to_string(inserted) +
+                                act.after_summary = "inserted " + std::to_string(cand_ramp.size()) +
                                                     "-step CC11 de-click ramp preserving loop reset target " +
                                                     std::to_string(last.val);
                                 act.musical_reason = "Smooths abrupt loop-boundary CC11 recovery while preserving loop reset";

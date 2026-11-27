@@ -577,6 +577,152 @@ int main() {
              mode_b_converged == 12u);
     }
 
+    // ── 12. Audit Regression P1-1: Dynamic Fill skipped + extreme vel=10/127 bounded <= max_delta ──
+    {
+        // (a) Already-dynamic Fill with ghost snare MUST be untouched (0 actions)
+        Style dyn_fill;
+        dyn_fill.ppqn = 384; dyn_fill.mpqn = 500000;
+        Element f_dyn{"f1cv1", 4, 4, 1536, {}};
+        addVoice(f_dyn, kDrumCh, 120, 0, 0);
+        addNote(f_dyn, kDrumCh, 0, 150, 38, 112);    // strong snare
+        addNote(f_dyn, kDrumCh, 384, 520, 38, 42);   // ghost snare (<55) -> already_dynamic_drum!
+        addNote(f_dyn, kDrumCh, 768, 920, 45, 76);
+        addNote(f_dyn, kDrumCh, 1152, 1300, 48, 74); // m2 < m1, but dynamic drum MUST skip
+        sortEl(f_dyn);
+        dyn_fill.elements.push_back(std::move(f_dyn));
+
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_drum_ghost_dynamics = true;
+        opt.max_drum_vel_delta = 6;
+        const auto res_dyn_fill = enhanceStyle(dyn_fill, opt);
+        TEST("P1-1: already-dynamic Fill drum track is skipped untouched (0 actions, byte-exact)",
+             res_dyn_fill.ok && res_dyn_fill.actions.empty() &&
+             write(res_dyn_fill.style).bytes == write(dyn_fill).bytes);
+
+        // (b) Extreme vel=10 and vel=127 Fill notes: strictly |delta| <= max_drum_vel_delta, NEVER 127->122 or 10->24!
+        Style ext_fill;
+        ext_fill.ppqn = 384; ext_fill.mpqn = 500000;
+        Element f_ext{"f1cv1", 4, 4, 1536, {}};
+        addVoice(f_ext, kDrumCh, 120, 0, 0);
+        // No snares (flat/non-dynamic trigger); 1st half mean = 69, 2nd half = (10 + 127) / 2 = 68.5 (gap = 1 < 6)
+        addNote(f_ext, kDrumCh, 0, 150, 45, 69);
+        addNote(f_ext, kDrumCh, 384, 520, 45, 69);
+        addNote(f_ext, kDrumCh, 768, 920, 43, 10);    // extreme soft vel=10
+        addNote(f_ext, kDrumCh, 1152, 1300, 49, 127); // extreme max accent vel=127
+        sortEl(f_ext);
+        ext_fill.elements.push_back(std::move(f_ext));
+
+        const auto res_ext = enhanceStyle(ext_fill, opt);
+        const auto after_notes = style_enhancer_detail::extractChannelNotes(res_ext.style.elements[0], kDrumCh);
+        uint8_t v_low = 0, v_high = 0;
+        for (const auto& n : after_notes) {
+            if (n.on_tick == 768u) v_low = n.vel;
+            if (n.on_tick == 1152u) v_high = n.vel;
+        }
+        TEST("P1-1: extreme Fill notes respect |delta|<=max_drum_vel_delta (127 stays 127, 10<=16)",
+             res_ext.ok && !res_ext.actions.empty() &&
+             v_high == 127u &&
+             v_low > 10u && v_low <= 16u);
+    }
+
+    // ── 13. Audit Regression P2-1: Mid-Ending dip+crescendo vs trailing fade snap-back accuracy ──
+    {
+        // (a) Mid-Ending dip to 20 then intentional crescendo -> 0 actions!
+        Style cresc_end;
+        cresc_end.ppqn = 384; cresc_end.mpqn = 500000;
+        Element e1{"e1cv1", 6, 8, 4608, {}};
+        addVoice(e1, kAcc1Ch + 2u, 121, 0, 48);
+        addCc(e1, 0, kAcc1Ch + 2u, 11, 100);
+        addCc(e1, 2400, kAcc1Ch + 2u, 11, 20);
+        addCc(e1, 3200, kAcc1Ch + 2u, 11, 56);
+        addCc(e1, 4000, kAcc1Ch + 2u, 11, 92);
+        addCc(e1, 4607, kAcc1Ch + 2u, 11, 110);
+        addNote(e1, kAcc1Ch + 2u, 0, 4400, 60, 84);
+        sortEl(e1);
+        cresc_end.elements.push_back(std::move(e1));
+
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_ending_fade_pop_guard = true;
+        const auto res_cresc = enhanceStyle(cresc_end, opt);
+        TEST("P2-1: mid-Ending dip followed by intentional crescendo untouched (0 actions)",
+             res_cresc.ok && res_cresc.actions.empty() &&
+             write(res_cresc.style).bytes == write(cresc_end).bytes);
+
+        // (b) Trailing fade (106 -> 14 -> 22) then snap-back 106 -> after_summary MUST report CC11=22 (not 14!)
+        Style trail_end;
+        trail_end.ppqn = 384; trail_end.mpqn = 500000;
+        Element e2{"e1cv1", 6, 8, 4608, {}};
+        addVoice(e2, kAcc1Ch + 2u, 121, 0, 48);
+        addCc(e2, 0, kAcc1Ch + 2u, 11, 106);
+        addCc(e2, 2600, kAcc1Ch + 2u, 11, 14);
+        addCc(e2, 3600, kAcc1Ch + 2u, 11, 22);
+        addCc(e2, 4607, kAcc1Ch + 2u, 11, 106);
+        addNote(e2, kAcc1Ch + 2u, 0, 3200, 60, 82);
+        sortEl(e2);
+        trail_end.elements.push_back(std::move(e2));
+
+        const auto res_trail = enhanceStyle(trail_end, opt);
+        TEST("P2-1: trailing fade snap-back fixed and after_summary accurately reports CC11=22",
+             res_trail.ok && res_trail.actions.size() == 1u &&
+             res_trail.actions[0].after_summary.find("CC11=22") != std::string::npos);
+    }
+
+    // ── 14. Audit Regression P2-3: Looping CC11 ramp ceiling-step boundary (no floor-div off-by-one) ──
+    {
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_ending_fade_pop_guard = true;
+        opt.cc11_declick_jump_threshold = 48;
+        opt.cc11_ramp_steps = 2;
+
+        // (a) delta = 95 (10 -> 105) with only 1 intermediate tick available (3069 -> 3071):
+        //     ceil(95 / 2) == 48 (NOT < 48), so floor-div off-by-one must NOT emit a broken 1-step ramp!
+        Style tight_span;
+        tight_span.ppqn = 384; tight_span.mpqn = 500000;
+        Element v1_tight{"v1cv1", 4, 4, 3072, {}};
+        addCc(v1_tight, 0, kAcc1Ch, 11, 100);
+        addCc(v1_tight, 3069, kAcc1Ch, 11, 10);
+        addCc(v1_tight, 3071, kAcc1Ch, 11, 105); // delta = 95, span = 1 tick (only tick 3070 fits)
+        addNote(v1_tight, kAcc1Ch, 0, 2900, 60, 80);
+        sortEl(v1_tight);
+        tight_span.elements.push_back(std::move(v1_tight));
+
+        const auto res_tight = enhanceStyle(tight_span, opt);
+        TEST("P2-3: 1-tick span with delta=95 & thresh=48 avoids floor-div off-by-one broken ramp",
+             res_tight.ok && res_tight.actions.empty());
+
+        // (b) Same delta=95 (10 -> 105) with >= 2 ticks available (3068 -> 3071): emits clean 2-step ramp
+        //     where EVERY consecutive CC11 delta is strictly < 48 and pass 2 is idempotent!
+        Style ok_span;
+        ok_span.ppqn = 384; ok_span.mpqn = 500000;
+        Element v1_ok{"v1cv1", 4, 4, 3072, {}};
+        addCc(v1_ok, 0, kAcc1Ch, 11, 100);
+        addCc(v1_ok, 3068, kAcc1Ch, 11, 10);
+        addCc(v1_ok, 3071, kAcc1Ch, 11, 105); // delta = 95, 2 ticks (3069, 3070) fit -> ceil(95/3)=32 < 48!
+        addNote(v1_ok, kAcc1Ch, 0, 2900, 60, 80);
+        sortEl(v1_ok);
+        ok_span.elements.push_back(std::move(v1_ok));
+
+        const auto res_ok = enhanceStyle(ok_span, opt);
+        std::vector<uint8_t> cc_vals;
+        for (const auto& ev : res_ok.style.elements[0].events) {
+            if ((ev.status & 0xF0u) == 0xB0u && ev.d1 == 11u && ev.tick >= 3068u) {
+                cc_vals.push_back(ev.d2);
+            }
+        }
+        bool all_steps_strictly_lt_48 = (cc_vals.size() == 4u && cc_vals.front() == 10u && cc_vals.back() == 105u);
+        for (size_t i = 1u; all_steps_strictly_lt_48 && i < cc_vals.size(); ++i) {
+            if (std::abs(static_cast<int>(cc_vals[i]) - static_cast<int>(cc_vals[i - 1u])) >= 48) {
+                all_steps_strictly_lt_48 = false;
+            }
+        }
+        TEST("P2-3: 2-tick span with delta=95 emits exact ramp (every step <48) and converges on pass 2",
+             res_ok.ok && res_ok.actions.size() == 1u && all_steps_strictly_lt_48 &&
+             enhanceStyle(res_ok.style, opt).actions.empty());
+    }
+
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }

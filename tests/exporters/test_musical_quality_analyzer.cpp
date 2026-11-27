@@ -635,6 +635,55 @@ int main() {
              analyzed_ok == 12u);
     }
 
+    // ── 15. Audit Regression P2-1: Mid-Ending dip + crescendo != snap-back ──
+    {
+        Style cresc_end;
+        cresc_end.ppqn = 384; cresc_end.mpqn = 500000;
+        Element e1{"e1cv1", 6, 8, 4608, {}};
+        addVoice(e1, kAcc1Ch + 2u, 121, 0, 48);
+        // Mid-ending dip to 20 followed by genuine musical crescendo (56 -> 92 -> 110)
+        addCc(e1, 0, kAcc1Ch + 2u, 11, 100);
+        addCc(e1, 2400, kAcc1Ch + 2u, 11, 20);
+        addCc(e1, 3200, kAcc1Ch + 2u, 11, 56);
+        addCc(e1, 4000, kAcc1Ch + 2u, 11, 92);
+        addCc(e1, 4607, kAcc1Ch + 2u, 11, 110);
+        addNote(e1, kAcc1Ch + 2u, 0, 4400, 60, 84);
+        sortEl(e1);
+        cresc_end.elements.push_back(std::move(e1));
+
+        const auto rep = analyzeMusicalQuality(cresc_end);
+        TEST("P2-1: mid-Ending dip followed by intentional crescendo has 0 false snap-back warnings",
+             rep.dimensions[5].metrics.at("ending_cc11_snapback_count") == 0.0 &&
+             !hasFindingCode(rep, "MQ_D06_ENDING_CC11_SNAPBACK") &&
+             !hasFindingCode(rep, "MQ_D11_ENDING_FADE_POP_RISK"));
+    }
+
+    // ── 16. Audit Regression P2-2: Symmetric D07 acoustic<->synth timbre swap ──
+    {
+        auto makeSwapStyle = [](uint8_t pc_v1, uint8_t pc_v2) {
+            Style s;
+            s.ppqn = 384; s.mpqn = 500000;
+            Element v1{"v1cv1", 4, 4, 1536, {}};
+            addVoice(v1, kAcc1Ch, 121, 0, pc_v1);
+            addNote(v1, kAcc1Ch, 0, 700, 60, 84);
+            sortEl(v1);
+            Element v2{"v2cv1", 4, 4, 1536, {}};
+            addVoice(v2, kAcc1Ch, 121, 0, pc_v2);
+            addNote(v2, kAcc1Ch, 0, 700, 60, 84);
+            sortEl(v2);
+            s.elements.push_back(std::move(v1));
+            s.elements.push_back(std::move(v2));
+            return s;
+        };
+        const auto rep_a2s = analyzeMusicalQuality(makeSwapStyle(0, 88));  // Acoustic Piano -> Synth Pad
+        const auto rep_s2a = analyzeMusicalQuality(makeSwapStyle(88, 0));  // Synth Pad -> Acoustic Piano
+        TEST("P2-2: D07 detects BOTH acoustic->synth AND synth->acoustic cross-variation timbre swaps",
+             rep_a2s.dimensions[6].metrics.at("cross_variation_timbre_swaps") == 1.0 &&
+             hasFindingCode(rep_a2s, "MQ_D07_CROSS_VAR_TIMBRE_SWAP") &&
+             rep_s2a.dimensions[6].metrics.at("cross_variation_timbre_swaps") == 1.0 &&
+             hasFindingCode(rep_s2a, "MQ_D07_CROSS_VAR_TIMBRE_SWAP"));
+    }
+
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }

@@ -1349,21 +1349,24 @@ inline MusicalQualityReport analyzeMusicalQuality(
                     if (seq.size() >= 2u && len > 0u) {
                         if (is_ending) {
                             const auto [last_t, last_v] = seq.back();
-                            bool faded_low_late = false;
-                            uint8_t low_v = 127u;
-                            for (size_t k = 0; k + 1u < seq.size(); ++k) {
-                                if (seq[k].first >= len / 2u && seq[k].second < 32u) {
-                                    faded_low_late = true;
-                                    if (seq[k].second < low_v) low_v = seq[k].second;
-                                }
+                            const auto [prev_t, prev_v] = seq[seq.size() - 2u];
+                            uint32_t last_note_on_t = 0u;
+                            bool has_note_ch = false;
+                            for (const auto& n : ep.by_ch[ch]) {
+                                if (!has_note_ch || n.on_tick > last_note_on_t) last_note_on_t = n.on_tick;
+                                has_note_ch = true;
                             }
-                            if (faded_low_late && last_t + 2u >= len && last_v >= 64u) {
+                            const bool trailing_fade_low = (prev_t >= len / 2u && prev_v < 32u && prev_t < last_t);
+                            const bool boundary_snapback = (last_t + 2u >= len && last_v >= 64u &&
+                                                            (static_cast<int>(last_v) - static_cast<int>(prev_v)) >= 32 &&
+                                                            (!has_note_ch || last_t > last_note_on_t));
+                            if (trailing_fade_low && boundary_snapback) {
                                 ++ending_snapbacks;
                                 addFinding(MusicalDimensionId::D06_ExpressionControllers,
                                            MusicalFindingSeverity::Warning,
                                            "MQ_D06_ENDING_CC11_SNAPBACK", ep.el->marker, ch,
                                            barNumber1Based(last_t, ep.bar_ticks), last_t,
-                                           "One-shot Ending CC11 fades to " + std::to_string(low_v) +
+                                           "One-shot Ending CC11 fades to " + std::to_string(prev_v) +
                                            " then snaps back to " + std::to_string(last_v) +
                                            " at tick " + std::to_string(last_t) + " (risks tail-swell pop)",
                                            "ending_fade_pop_guard");
@@ -1467,13 +1470,14 @@ inline MusicalQualityReport analyzeMusicalQuality(
                 }
             }
 
-            // Cross-variation timbre coherence (v1..v4)
+            // Cross-variation timbre coherence (v1..v4): classify strictly per-element PC
+            // so acoustic->synth AND synth->acoustic swaps are detected symmetrically.
             std::array<std::set<std::string>, 16> var_classes{};
             for (const auto& ep : parsed) {
                 if (!isVariationMarker(ep.el->marker) || cvNumberOf(ep.el->marker) != 1u) continue;
                 for (uint8_t ch = kAcc1Ch; ch <= 15u; ++ch) {
                     if (ep.pc0[ch] >= 0) {
-                        const std::string cls = timbreBroadClass(ep.pc0[ch], inferredFamilyFor(ch));
+                        const std::string cls = timbreBroadClass(ep.pc0[ch], "");
                         if (cls != "unknown") var_classes[ch].insert(cls);
                     }
                 }
