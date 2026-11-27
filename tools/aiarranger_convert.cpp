@@ -13,8 +13,11 @@
 // differs.
 
 #include "exporters/korg/genos_to_korg.h"
+#include "exporters/korg/pa5x_sound_matcher.h"
 #include "exporters/korg/sff1_route.h"
 #include "exporters/korg/sound_map.h"
+#include "exporters/korg/target_kst_drum_adapter.h"
+#include "exporters/korg/timbre_profiler.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "importers/sff1/sff1_reader.h"
 
@@ -22,6 +25,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 
 using namespace ai_arranger;
 using namespace ai_arranger::exporters::korg;
@@ -30,9 +34,11 @@ namespace {
 int usage() {
     std::cerr << "usage: aiarranger-convert --input <file.sty> --target pa5x --output <file.mid>\n"
                  "                          [--ppqn N] [--sound-map FILE] [--sound-template FILE] [--report FILE]\n"
-                 "                          [--break-policy <cap|withhold>] [--quality-mode <quality|raw>]\n"
+                 "                          [--break-policy <cap|withhold>] [--quality-mode <quality|raw>] [--raw]\n"
                  "                          [--megavoice-mode <auto|sanitize|preserve>] [--drum-remap <on|off>]\n"
                  "                          [--cv-split <on|off>] [--normalize-source-chord <on|off>]\n"
+                 "                          [--auto-sound-map | --no-auto-sound-map]\n"
+                 "                          [--target-kst <dir>] [--prefer-target-user-sounds] [--dump-soundmap FILE]\n"
                  "       aiarranger-convert --compare <ours.mid> --with <pa5x_export.mid>\n"
                  "sound-map lines: <bass|drum|perc|acc1..acc5> <msb> <lsb> <pc> | <track> unresolved   (# comments)\n";
     return 1;
@@ -70,10 +76,39 @@ int compareMode(const std::string& ours, const std::string& theirs) {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string input, output, target, soundMap, reportPath, templatePath, compareA, compareB;
+    std::string input, output, target, soundMap, reportPath, templatePath, dumpSoundMapPath, targetKstPath, compareA, compareB;
     MapOptions opt;
+    bool rawModeRequested = false;
+    bool explicitAutoSoundMap = false;
+    bool explicitNoAutoSoundMap = false;
+    bool preferTargetUserSounds = false;
+
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
+        // Boolean flags (no trailing value argument)
+        if (a == "--raw") {
+            rawModeRequested = true;
+            opt.enable_cv_split = false;
+            opt.enable_drum_remap = false;
+            opt.megavoice_mode = quality::MegaVoiceMode::Preserve;
+            opt.enable_source_chord_normalization = false;
+            opt.enable_sound_matching = false;
+            opt.prefer_target_user_sounds = false;
+            continue;
+        }
+        if (a == "--auto-sound-map") {
+            explicitAutoSoundMap = true;
+            continue;
+        }
+        if (a == "--no-auto-sound-map") {
+            explicitNoAutoSoundMap = true;
+            continue;
+        }
+        if (a == "--prefer-target-user-sounds") {
+            preferTargetUserSounds = true;
+            continue;
+        }
+
         if (i + 1 >= argc) return usage();
         const std::string v = argv[++i];
         if (a == "--input") input = v;
@@ -82,6 +117,8 @@ int main(int argc, char** argv) {
         else if (a == "--sound-map") soundMap = v;
         else if (a == "--report") reportPath = v;
         else if (a == "--sound-template") templatePath = v;
+        else if (a == "--dump-soundmap") dumpSoundMapPath = v;
+        else if (a == "--target-kst") targetKstPath = v;
         else if (a == "--compare") compareA = v;
         else if (a == "--with") compareB = v;
         else if (a == "--ppqn") {
@@ -98,15 +135,20 @@ int main(int argc, char** argv) {
             else return usage();
         } else if (a == "--quality-mode") {
             if (v == "raw") {
+                rawModeRequested = true;
                 opt.enable_cv_split = false;
                 opt.enable_drum_remap = false;
                 opt.megavoice_mode = quality::MegaVoiceMode::Preserve;
                 opt.enable_source_chord_normalization = false;
+                opt.enable_sound_matching = false;
+                opt.prefer_target_user_sounds = false;
             } else if (v == "quality") {
+                rawModeRequested = false;
                 opt.enable_cv_split = true;
                 opt.enable_drum_remap = true;
                 opt.megavoice_mode = quality::MegaVoiceMode::Auto;
                 opt.enable_source_chord_normalization = true;
+                opt.enable_sound_matching = true;
             } else return usage();
         } else if (a == "--megavoice-mode") {
             if (v == "auto") opt.megavoice_mode = quality::MegaVoiceMode::Auto;
@@ -134,12 +176,49 @@ int main(int argc, char** argv) {
     if (input.empty() || output.empty() || target.empty()) return usage();
     if (target != "pa5x") { std::cerr << "unsupported target '" << target << "' (supported: pa5x)\n"; return 1; }
 
+    // Fail-closed CLI flag-combination checks.
+    if (explicitAutoSoundMap && explicitNoAutoSoundMap) {
+        std::cerr << "invalid flags: --auto-sound-map and --no-auto-sound-map are mutually exclusive\n";
+        return 1;
+    }
+    if (rawModeRequested && explicitAutoSoundMap) {
+        std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --auto-sound-map\n";
+        return 1;
+    }
+    if (rawModeRequested && preferTargetUserSounds) {
+        std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --prefer-target-user-sounds\n";
+        return 1;
+    }
+    if (preferTargetUserSounds && targetKstPath.empty()) {
+        std::cerr << "invalid flags: --prefer-target-user-sounds requires --target-kst <dir>\n";
+        return 1;
+    }
+    if (explicitNoAutoSoundMap && preferTargetUserSounds) {
+        std::cerr << "invalid flags: --no-auto-sound-map cannot be combined with --prefer-target-user-sounds\n";
+        return 1;
+    }
+
+    if (explicitAutoSoundMap) opt.enable_sound_matching = true;
+    if (explicitNoAutoSoundMap) opt.enable_sound_matching = false;
+    opt.prefer_target_user_sounds = preferTargetUserSounds;
+
     if (!soundMap.empty()) {
         std::ifstream in(soundMap);
         if (!in) { std::cerr << "cannot open sound map " << soundMap << "\n"; return 1; }
         auto sm = parseSoundMap(in, soundMap);
         if (!sm.ok) { std::cerr << sm.error << "\n"; return 1; }
         opt.sounds = std::move(sm.sounds);
+    }
+
+    // Optional strictly read-only Target KST inspection (Track A -> Track B adapter; NEVER writes to target KST).
+    std::optional<quality::TargetKstReadOnlyBridge> targetBridge;
+    if (!targetKstPath.empty()) {
+        targetBridge = quality::inspectTargetKstReadOnly(targetKstPath);
+        if (!targetBridge->valid) {
+            std::cerr << "target KST inspection failed (read-only fail-closed): " << targetBridge->error << "\n";
+            return 1;
+        }
+        opt.target_sound_catalog = &targetBridge->catalog;
     }
 
     importers::sff1::Sff1Reader reader;
@@ -150,9 +229,50 @@ int main(int argc, char** argv) {
     if (!canon.success) { std::cerr << "import failed: " << canon.error << "\n"; return 1; }
 
     opt.route = routeFromCasm(parsed);
+
+    // If a read-only Target KST bridge has a comparable USERDK key map for the Drum track's
+    // chosen target sound (explicit user map or preferred target USERDK), attach it read-only to Q3.
+    if (targetBridge.has_value() && !targetBridge->drum_key_maps.empty()) {
+        if (const auto uit = opt.sounds.find(kDrumCh); uit != opt.sounds.end()) {
+            opt.target_drum_key_map = targetBridge->findDrumKeyMap(uit->second);
+        } else if (opt.enable_sound_matching && opt.prefer_target_user_sounds) {
+            quality::SoundMatchOptions preOpt{};
+            preOpt.enable_factory_catalog = true;
+            preOpt.prefer_target_user_sounds = true;
+            preOpt.min_auto_select_score = opt.min_sound_match_score;
+            const auto preProfs = quality::profileStyleTracks(canon.style, opt.route);
+            const auto preMatch = quality::matchStyleSounds(
+                preProfs, opt.sounds, &targetBridge->catalog, preOpt, opt.element_sounds);
+            if (const auto dit = preMatch.resolved_sounds.find(kDrumCh); dit != preMatch.resolved_sounds.end()) {
+                opt.target_drum_key_map = targetBridge->findDrumKeyMap(dit->second);
+            }
+        }
+    }
+
     const auto mapped = mapToKorg(canon.style, opt);
     if (!mapped.ok) { std::cerr << "conversion failed: " << mapped.error << "\n"; return 2; }
-    if (!templatePath.empty() && !writeText(templatePath, soundMapTemplate(mapped.report, std::filesystem::path(input).filename().string()))) return 1;
+    const std::string baseStyleName = std::filesystem::path(input).filename().string();
+    if (!templatePath.empty() && !writeText(templatePath, soundMapTemplate(mapped.report, baseStyleName))) return 1;
+
+    if (!dumpSoundMapPath.empty()) {
+        std::map<uint8_t, uint8_t> dumpRoute = opt.route;
+        if (mapped.report.rhythm_tracks_swapped) {
+            for (const auto& tr : mapped.report.tracks) {
+                if (tr.korg_ch == kDrumCh) dumpRoute[tr.src_ch] = 9;
+                else if (tr.korg_ch == kPercCh) dumpRoute[tr.src_ch] = 8;
+            }
+        }
+        quality::SoundMatchOptions dumpOpt{};
+        dumpOpt.enable_factory_catalog = opt.enable_sound_matching;
+        dumpOpt.prefer_target_user_sounds = opt.prefer_target_user_sounds;
+        dumpOpt.min_auto_select_score = opt.min_sound_match_score;
+        const auto dumpProfs = quality::profileStyleTracks(canon.style, dumpRoute);
+        const auto dumpMatch = quality::matchStyleSounds(
+            dumpProfs, opt.sounds, opt.target_sound_catalog, dumpOpt, opt.element_sounds);
+        const std::string dumped = quality::formatSoundMapTemplateWithRecommendations(
+            mapped.report, dumpMatch, baseStyleName, dumpOpt);
+        if (!writeText(dumpSoundMapPath, dumped)) return 1;
+    }
 
     // Write -> re-parse with the independent reader -> validate what was written.
     const auto written = write(mapped.style);
