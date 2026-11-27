@@ -664,6 +664,7 @@ SmfExport exportPa5xSmf(const StyleDefinition& style, uint16_t ppqn) {
     k::MapOptions opt;
     opt.ppqn = ppqn;
     opt.enable_sound_matching = false;  // Style Studio manages explicit user korg_export.sounds/element_sounds directly
+    opt.enable_mix_groove_normalization = false;  // Style Studio preserves explicit user edits byte-for-byte on round-trip
     opt.route = style.korg_export.route;
     for (const auto& [ch, snd] : style.korg_export.sounds) opt.sounds[ch] = {snd.msb, snd.lsb, snd.pc};
     for (const auto& [key, snd] : style.korg_export.element_sounds) opt.element_sounds[key] = {snd.msb, snd.lsb, snd.pc};

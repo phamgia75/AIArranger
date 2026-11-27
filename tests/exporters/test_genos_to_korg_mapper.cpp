@@ -937,6 +937,333 @@ static void runQ4WireE2eTests() {
     }
 }
 
+static void runQ5WireE2eTests() {
+    std::printf("\n── Wave-4b Q5-Wire Mix/Loop-Boundary/Groove, XG SysEx & CLI E2E Tests ──\n");
+
+    auto hasSamePitchOverlap = [](const Element& el) {
+        std::map<uint16_t, int> open;
+        for (const auto& e : el.events) {
+            const uint8_t hi = e.status & 0xF0;
+            const uint8_t ch = e.status & 0x0F;
+            const uint16_t k = static_cast<uint16_t>((ch << 8) | e.d1);
+            if (hi == 0x90 && e.d2 > 0) {
+                if (open[k] > 0) return true;
+                ++open[k];
+            } else if (hi == 0x80 || (hi == 0x90 && e.d2 == 0)) {
+                if (open[k] > 0) --open[k];
+            }
+        }
+        return false;
+    };
+
+    auto hasOpenSustainOrPb = [](const Element& el) {
+        std::map<uint8_t, uint8_t> cc64;
+        std::map<uint8_t, uint16_t> pb;
+        for (const auto& e : el.events) {
+            const uint8_t hi = e.status & 0xF0;
+            const uint8_t ch = e.status & 0x0F;
+            if (hi == 0xB0 && e.d1 == 64) cc64[ch] = e.d2;
+            else if (hi == 0xE0) pb[ch] = static_cast<uint16_t>(e.d1 | (static_cast<uint16_t>(e.d2) << 7));
+        }
+        for (const auto& [ch, v] : cc64) if (v >= 64) return true;
+        for (const auto& [ch, v] : pb) if (v != 8192) return true;
+        return false;
+    };
+
+    // 1. SYNTH_MIX_SYSEX_CC_HYGIENE.sty: 0 loop errors, 0 NRPN/CC94 leaks, live XG SysEx wired, Style Edit Sheet
+    {
+        importers::sff1::ParseResult pr;
+        importers::sff1::SffToUasfResult mr;
+        MapResult kr;
+        MapOptions opt = MapOptions::quality();
+        opt.ppqn = 384;
+        opt.break_policy = BreakPolicy::Yamaha1BarCap;
+        opt.capture_style_edit_sheet = true;
+        opt.soundmap_style_name = "SYNTH_MIX_SYSEX_CC_HYGIENE.sty";
+
+        const bool ok = loadAndMapFixture("SYNTH_MIX_SYSEX_CC_HYGIENE.sty", opt, pr, mr, kr);
+        const auto w = write(kr.style);
+        const auto back = parse(w.bytes);
+
+        bool zeroLoopErr = true, zeroUnsafeCc = true, zeroOverlap = true;
+        if (back.ok) {
+            for (const auto& el : back.style.elements) {
+                if (hasOpenSustainOrPb(el)) zeroLoopErr = false;
+                if (hasSamePitchOverlap(el)) zeroOverlap = false;
+                for (const auto& e : el.events) {
+                    if ((e.status & 0xF0) == 0xB0 && (e.d1 == 98 || e.d1 == 99 || e.d1 == 94)) zeroUnsafeCc = false;
+                }
+            }
+        }
+        TEST("Q5-Wire SYNTH_MIX_SYSEX_CC_HYGIENE: 0 loop errors, 0 NRPN/CC94 leaks, 0 overlaps, XG SysEx tracked",
+             ok && w.ok && back.ok && validate(back.style).empty() &&
+             zeroLoopErr && zeroUnsafeCc && zeroOverlap &&
+             kr.report.sustain_resets_added >= 2 &&
+             kr.report.pitchbend_resets_added >= 2 &&
+             kr.report.proprietary_ccs_stripped >= 6 &&
+             kr.report.xg_sysex_seen == 6 &&
+             kr.report.xg_sysex_recognized == 6 &&
+             kr.report.xg_sysex_malformed == 0);
+
+        TEST("Q5-Wire Style Edit Parameter Sheet: deterministic Markdown with epistemic tags, XG FX & EQ",
+             !kr.report.style_edit_sheet_md.empty() &&
+             kr.report.style_edit_sheet_md.find("hardwareVerified: false") != std::string::npos &&
+             kr.report.style_edit_sheet_md.find("L3 = NOT_TESTED") != std::string::npos &&
+             kr.report.style_edit_sheet_md.find("SYNTH_MIX_SYSEX_CC_HYGIENE.sty") != std::string::npos &&
+             kr.report.style_edit_sheet_md.find("0x0100") != std::string::npos &&
+             kr.report.style_edit_sheet_md.find("seen=6, recognized=6, unrecognized=0, malformed=0") != std::string::npos);
+    }
+
+    // 2. Same-tick RPN vs NRPN protocol order preservation + Var/Fill/Intro/Ending CC64/PB/CC11 resets
+    {
+        std::vector<uasf::MidiEvent> bassEvs = {
+            // Valid RPN Pitch Bend Sensitivity = +/- 2 semitones at tick 0 (MUST stay in exact order!)
+            ev(MidiEventType::ControlChange, 10, 101, 0, 0),
+            ev(MidiEventType::ControlChange, 10, 100, 0, 0),
+            ev(MidiEventType::ControlChange, 10, 6, 2, 0),
+            ev(MidiEventType::ControlChange, 10, 101, 127, 0),
+            ev(MidiEventType::ControlChange, 10, 100, 127, 0),
+            ev(MidiEventType::PitchBend, 10, 0x00, 0x60, 480), // uncentered PB -> reset at len-1
+            ev(MidiEventType::NoteOn, 10, 36, 96, 0),
+            ev(MidiEventType::NoteOff, 10, 36, 0, 960),
+        };
+        std::vector<uasf::MidiEvent> accEvs = {
+            // Yamaha NRPN (99, 98, 6, 38, 96, 97) + CC94=50 at tick 0 -> ALL stripped, CC94->CC93=15!
+            ev(MidiEventType::ControlChange, 11, 99, 24, 0),
+            ev(MidiEventType::ControlChange, 11, 98, 36, 0),
+            ev(MidiEventType::ControlChange, 11, 6, 70, 0),
+            ev(MidiEventType::ControlChange, 11, 38, 12, 0),
+            ev(MidiEventType::ControlChange, 11, 96, 1, 0),
+            ev(MidiEventType::ControlChange, 11, 97, 1, 0),
+            ev(MidiEventType::ControlChange, 11, 94, 50, 0),
+            ev(MidiEventType::ControlChange, 11, 11, 104, 0),
+            ev(MidiEventType::ControlChange, 11, 64, 127, 240), // open CC64 -> reset at len-1
+            ev(MidiEventType::ControlChange, 11, 11, 16, 7000), // fade below 32 -> restored to 104 at len-1
+            ev(MidiEventType::NoteOn, 11, 60, 90, 0),
+            ev(MidiEventType::NoteOff, 11, 60, 0, 4000),
+        };
+        auto trB = track(10, bassEvs, uasf::TrackRole::Bass); trB.name = "Bass";
+        auto trA = track(11, accEvs, uasf::TrackRole::Chord); trA.name = "Piano";
+
+        auto st = styleOf({
+            section(SectionType::Intro1, "Intro A", 1, {trB, trA}),
+            section(SectionType::Main1, "Main A", 1, {trB, trA}),
+            section(SectionType::Fill1, "Fill In AA", 1, {trB, trA}),
+            section(SectionType::Ending1, "Ending A", 1, {trB, trA}),
+        });
+        const auto kr = mapToKorg(st, MapOptions::quality());
+        bool allFourClean = (kr.ok && validate(kr.style).empty() && kr.style.elements.size() == 4);
+        bool rpnOrderExact = true;
+        bool nrpnFullyStripped = true;
+        bool cc93Blended = true;
+        bool cc11Restored = true;
+        for (const auto& el : kr.style.elements) {
+            if (hasOpenSustainOrPb(el)) allFourClean = false;
+            std::vector<std::pair<uint8_t, uint8_t>> bassRpn;
+            int accCc93 = -1;
+            int accLastCc11 = -1;
+            for (const auto& e : el.events) {
+                if ((e.status & 0xF0) != 0xB0) continue;
+                const uint8_t ch = e.status & 0x0F;
+                if (ch == kBassCh && (e.d1 == 101 || e.d1 == 100 || e.d1 == 6)) {
+                    bassRpn.emplace_back(e.d1, e.d2);
+                }
+                if (ch == 11) {
+                    if (e.d1 == 99 || e.d1 == 98 || e.d1 == 6 || e.d1 == 38 || e.d1 == 96 || e.d1 == 97 || e.d1 == 94) {
+                        nrpnFullyStripped = false;
+                    }
+                    if (e.tick == 0 && e.d1 == 93) accCc93 = e.d2;
+                    if (e.d1 == 11) accLastCc11 = e.d2;
+                }
+            }
+            const std::vector<std::pair<uint8_t, uint8_t>> expectedRpn = {
+                {101, 0}, {100, 0}, {6, 2}, {101, 127}, {100, 127}
+            };
+            if (bassRpn != expectedRpn) rpnOrderExact = false;
+            if (accCc93 != 15) cc93Blended = false;
+            if (accLastCc11 != 104) cc11Restored = false;
+        }
+        TEST("Q5-Wire RPN/NRPN & Var/Fill/Intro/Ending resets: valid RPN order kept, NRPN 99/98/6/38/96/97 stripped, CC64/PB/CC11 reset across all 4 element types",
+             allFourClean && rpnOrderExact && nrpnFullyStripped && cc93Blended && cc11Restored &&
+             kr.report.sustain_resets_added == 4 &&
+             kr.report.pitchbend_resets_added == 4 &&
+             kr.report.expression_resets_added == 4 &&
+             kr.report.proprietary_ccs_stripped == 28);
+    }
+
+    // 3. XG SysEx -> tick-0 CC7/10/91/93 synthesis respecting Rhythm1/Rhythm2 swap + active-span CC11 EDM guard
+    {
+        // Put primary kit (36/38/42) on ch 8 (Rhythm1) and hand perc (60/70) on ch 9 (Rhythm2) -> triggers swap!
+        std::vector<uasf::MidiEvent> r1Evs;
+        for (int b = 0; b < 4; ++b) {
+            r1Evs.push_back(ev(MidiEventType::NoteOn, 8, (b % 2 == 0) ? 36 : 38, 100, b * 1920));
+            r1Evs.push_back(ev(MidiEventType::NoteOff, 8, (b % 2 == 0) ? 36 : 38, 0, b * 1920 + 480));
+            r1Evs.push_back(ev(MidiEventType::NoteOn, 8, 42, 80, b * 1920 + 960));
+            r1Evs.push_back(ev(MidiEventType::NoteOff, 8, 42, 0, b * 1920 + 1200));
+        }
+        std::vector<uasf::MidiEvent> r2Evs = {
+            ev(MidiEventType::NoteOn, 9, 60, 75, 0), ev(MidiEventType::NoteOff, 9, 60, 0, 480),
+            ev(MidiEventType::NoteOn, 9, 70, 72, 1920), ev(MidiEventType::NoteOff, 9, 70, 0, 2400),
+        };
+        // Sidechain-ducked Pad on ch 13 (tick-0 CC11=24 -> offbeat CC11=116, XG SysEx Vol=82, Pan=74, Rev=44, Var=40)
+        std::vector<uasf::MidiEvent> padEvs = {
+            ev(MidiEventType::ControlChange, 13, 11, 24, 0),
+            ev(MidiEventType::NoteOn, 13, 48, 78, 0),
+            ev(MidiEventType::NoteOn, 13, 52, 78, 0),
+            ev(MidiEventType::ControlChange, 13, 11, 116, 960),
+            ev(MidiEventType::NoteOff, 13, 48, 0, 7000),
+            ev(MidiEventType::NoteOff, 13, 52, 0, 7000),
+        };
+        auto trR1 = track(8, r1Evs, uasf::TrackRole::Drum); trR1.name = "Rhythm1";
+        auto trR2 = track(9, r2Evs, uasf::TrackRole::Percussion); trR2.name = "Rhythm2";
+        auto trPad = track(13, padEvs, uasf::TrackRole::Pad); trPad.name = "ScPad";
+
+        auto st = styleOf({section(SectionType::Main1, "Main A", 1, {trR1, trR2, trPad})});
+        st.xg_sysex.total_sysex_seen = 6;
+        st.xg_sysex.recognized_xg_count = 6;
+        st.xg_sysex.parts[8].volume = 112;      // Rhythm1 -> swapped to kDrumCh (9)!
+        st.xg_sysex.parts[9].volume = 86;       // Rhythm2 -> swapped to kPercCh (10)!
+        st.xg_sysex.parts[13].volume = 82;
+        st.xg_sysex.parts[13].pan = 74;
+        st.xg_sysex.parts[13].reverb_send = 44;
+        st.xg_sysex.parts[13].variation_send = 40; // blends 30% -> CC93=12
+
+        const auto kr = mapToKorg(st, MapOptions::quality());
+        const Element* v1 = find(kr.style, "v1cv1");
+        auto t0cc = [&](uint8_t ch, uint8_t cc) -> int {
+            int val = -1;
+            if (!v1) return val;
+            for (const auto& e : v1->events) {
+                if (e.tick > 0) break;
+                if (e.status == (0xB0 | ch) && e.d1 == cc) val = e.d2;
+            }
+            return val;
+        };
+        TEST("Q5-Wire XG SysEx + Swap + EDM Sidechain: swapped ch8/9 volumes follow kDrumCh/kPercCh, Pad gets XG CCs without sidechain over-boost",
+             kr.ok && validate(kr.style).empty() && kr.report.rhythm_tracks_swapped &&
+             t0cc(kDrumCh, 7) == 112 &&
+             t0cc(kPercCh, 7) == 86 &&
+             t0cc(13, 7) == 82 && t0cc(13, 10) == 74 && t0cc(13, 91) == 44 && t0cc(13, 93) == 12 &&
+             t0cc(13, 11) == 24 &&
+             kr.report.tracks_gain_adjusted == 0 &&
+             kr.report.xg_sysex_params_translated == 6);
+    }
+
+    // 4. Groove: same-pitch de-overlap, swing/microtiming preservation (non-robotic!), zero-dur fix, raw() bypass
+    {
+        std::vector<uasf::MidiEvent> gEvs = {
+            // Overlapping same-pitch notes at humanized/swing ticks (+17, +31, -9)
+            ev(MidiEventType::NoteOn, 11, 60, 90, 17),
+            ev(MidiEventType::NoteOn, 11, 60, 88, 1951),  // +31 swing offset, overlaps first note!
+            ev(MidiEventType::NoteOff, 11, 60, 0, 2200),
+            ev(MidiEventType::NoteOff, 11, 60, 0, 3400),
+            // Zero-duration note at humanized tick 3831 (-9 ticks)
+            ev(MidiEventType::NoteOn, 11, 64, 84, 3831),
+            ev(MidiEventType::NoteOff, 11, 64, 0, 3831),
+            // Final-tick anticipation at 7679 (len = 7680)
+            ev(MidiEventType::NoteOn, 11, 67, 86, 7679),
+            ev(MidiEventType::NoteOff, 11, 67, 0, 7720),
+        };
+        auto trG = track(11, gEvs, uasf::TrackRole::Chord); trG.name = "E.Piano";
+        auto st = styleOf({section(SectionType::Main1, "Main A", 1, {trG})});
+
+        const auto krQ = mapToKorg(st, MapOptions::quality());
+        const auto krR = mapToKorg(st, MapOptions::raw());
+        const Element* v1q = find(krQ.style, "v1cv1");
+        const Element* v1r = find(krR.style, "v1cv1");
+
+        bool keptTick17 = false, keptTick1951 = false, keptTick3831 = false, snappedAntic0 = false;
+        if (v1q) {
+            for (const auto& e : v1q->events) {
+                if (e.status == (0x90 | 11) && e.d2 > 0) {
+                    if (e.d1 == 60 && e.tick == 17) keptTick17 = true;
+                    if (e.d1 == 60 && e.tick == 1951) keptTick1951 = true;
+                    if (e.d1 == 64 && e.tick == 3831) keptTick3831 = true;
+                    if (e.d1 == 67 && e.tick == 0) snappedAntic0 = true;
+                }
+            }
+        }
+        TEST("Q5-Wire Groove: de-overlaps same pitch, preserves exact swing/microtiming ticks, fixes 0-dur & preserves anticipation",
+             krQ.ok && validate(krQ.style).empty() && v1q &&
+             !hasSamePitchOverlap(*v1q) &&
+             keptTick17 && keptTick1951 && keptTick3831 && snappedAntic0 &&
+             krQ.report.same_pitch_overlaps_fixed >= 1 &&
+             krQ.report.zero_length_notes_fixed >= 1 &&
+             krQ.report.anticipations_preserved >= 1);
+
+        TEST("Q5-Wire raw(): completely bypasses groove & mix normalization (0 overlaps fixed, 0 CCs stripped, 0 resets)",
+             krR.ok && validate(krR.style).empty() && v1r &&
+             hasSamePitchOverlap(*v1r) &&
+             krR.report.same_pitch_overlaps_fixed == 0 &&
+             krR.report.proprietary_ccs_stripped == 0 &&
+             krR.report.sustain_resets_added == 0 &&
+             krR.report.pitchbend_resets_added == 0);
+    }
+
+    // 5. CLI Q5 flags, --style-edit-sheet & fail-closed validation on aiarranger-convert
+#if defined(CONVERT_BIN) && !defined(_WIN32)
+    {
+        namespace fs = std::filesystem;
+        const fs::path tmpDir = fs::temp_directory_path() / ("aiarr_q5_cli_" + std::to_string(::getpid()));
+        fs::remove_all(tmpDir);
+        fs::create_directories(tmpDir);
+
+        const fs::path okMid = tmpDir / "q5_ok.mid";
+        const fs::path noMixMid = tmpDir / "q5_nomix.mid";
+        const fs::path sheetPath = tmpDir / "sheet.md";
+        const fs::path reportPath = tmpDir / "report.txt";
+        const fs::path failMid = tmpDir / "fail_q5.mid";
+
+        auto runCli = [](const std::string& args) {
+            const std::string cmd = std::string("\"") + CONVERT_BIN + "\" " + args + " >/dev/null 2>&1";
+            const int st = std::system(cmd.c_str());
+            return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        };
+
+        const std::string inMix = "\"" + fixturePath("SYNTH_MIX_SYSEX_CC_HYGIENE.sty") + "\"";
+        const int rcOk = runCli("--input " + inMix + " --target pa5x --output \"" + okMid.string() +
+                                "\" --break-policy cap --mix-normalize on --groove-normalize on "
+                                "--xg-sysex-mix on --headroom-normalize on --style-edit-sheet \"" +
+                                sheetPath.string() + "\" --report \"" + reportPath.string() + "\"");
+        const int rcNoMix = runCli("--input " + inMix + " --target pa5x --output \"" + noMixMid.string() +
+                                   "\" --break-policy cap --mix-normalize off --groove-normalize off");
+        const int rcBadRawMix = runCli("--input " + inMix + " --target pa5x --output \"" + failMid.string() +
+                                       "\" --raw --mix-normalize on");
+        const int rcBadVal = runCli("--input " + inMix + " --target pa5x --output \"" + failMid.string() +
+                                    "\" --mix-normalize maybe");
+
+        auto readText = [](const fs::path& p) {
+            std::ifstream f(p);
+            return std::string((std::istreambuf_iterator<char>(f)), {});
+        };
+        auto readBytes = [](const fs::path& p) {
+            std::ifstream f(p, std::ios::binary);
+            return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
+        };
+        const auto pOk = parse(readBytes(okMid));
+        const auto pNoMix = parse(readBytes(noMixMid));
+        const std::string sheetTxt = readText(sheetPath);
+        const std::string repTxt = readText(reportPath);
+
+        bool okHasLoopErr = false, noMixHasLoopErr = false;
+        if (pOk.ok) for (const auto& el : pOk.style.elements) if (hasOpenSustainOrPb(el)) okHasLoopErr = true;
+        if (pNoMix.ok) for (const auto& el : pNoMix.style.elements) if (hasOpenSustainOrPb(el)) noMixHasLoopErr = true;
+
+        TEST("Q5-Wire CLI: Q5 knobs, --style-edit-sheet, report Stages 1-6 & fail-closed raw+mix rejection",
+             rcOk == 0 && rcNoMix == 0 && rcBadRawMix == 1 && rcBadVal == 1 &&
+             !fs::exists(failMid) &&
+             pOk.ok && validate(pOk.style).empty() && !okHasLoopErr &&
+             pNoMix.ok && validate(pNoMix.style).empty() && noMixHasLoopErr &&
+             sheetTxt.find("# Korg Pa5X Style Edit Parameter Sheet") != std::string::npos &&
+             sheetTxt.find("hardwareVerified: false") != std::string::npos &&
+             repTxt.find("Groove & timing (Stage 6a):") != std::string::npos &&
+             repTxt.find("Mix, loop-boundary & XG SysEx (Stage 6b):") != std::string::npos);
+
+        fs::remove_all(tmpDir);
+    }
+#endif
+}
+
 int main() {
     std::printf("Test: Genos (UASF) -> Korg Pa5X mapper\n");
     using T = SectionType;
@@ -1094,9 +1421,10 @@ int main() {
              rRaw.report.tracks.size() == 1 && rRaw.report.tracks[0].chord_range_dropped == 1);
     }
 
-    // ── Wave-2B Q23-Wire & Wave-3 Q4-Wire E2E tests on real CC0 synthetic fixtures ──
+    // ── Wave-2B Q23-Wire, Wave-3 Q4-Wire & Wave-4b Q5-Wire E2E tests on real CC0 synthetic fixtures ──
     runQ23WireE2eTests();
     runQ4WireE2eTests();
+    runQ5WireE2eTests();
 
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;

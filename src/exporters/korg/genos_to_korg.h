@@ -54,12 +54,20 @@ struct MapOptions {
     bool capture_soundmap_dump = false;                             // When true, populate Report::soundmap_dump from exact Stage-5 matches
     std::string soundmap_style_name;                                // Display filename for Report::soundmap_dump (basename only)
 
-    // Default quality pipeline (Stages 1–5 enabled).
+    // ── Wave-4b Q5-Wire Mix, Loop-Boundary, Groove & XG SysEx Pipeline Controls ──
+    bool enable_mix_groove_normalization = true;                    // Stage 6a+6b master switch (disable in raw() or Style Studio round-trip)
+    bool enable_groove_normalization = true;                        // Stage 6a: groove_normalizer.h (same-pitch de-overlap, anticipation preservation)
+    bool enable_mix_normalization = true;                           // Stage 6b: mix_normalizer.h (NRPN/CC94 hygiene, loop CC64/PB/CC11 resets)
+    bool enable_xg_sysex_mix_injection = true;                      // Stage 6b: synthesize missing tick-0 CC7/10/91/93 from style.xg_sysex
+    bool enable_headroom_normalization = true;                      // Stage 6b: active-span CC11 effective loudness headroom [0.20, 0.92]
+    bool capture_style_edit_sheet = false;                          // When true, populate Report::style_edit_sheet_md via formatPa5xStyleEditSheetMd()
+
+    // Default quality pipeline (Stages 1–6 enabled).
     static MapOptions quality() noexcept {
         return MapOptions{};
     }
 
-    // Raw passthrough mode: disables Q2–Q4 musical transforms while keeping structural mapping intact.
+    // Raw passthrough mode: disables Q2–Q5 musical transforms while keeping structural mapping intact.
     static MapOptions raw() noexcept {
         MapOptions o;
         o.enable_cv_split = false;
@@ -68,6 +76,11 @@ struct MapOptions {
         o.enable_source_chord_normalization = false;
         o.enable_sound_matching = false;
         o.prefer_target_user_sounds = false;
+        o.enable_mix_groove_normalization = false;
+        o.enable_groove_normalization = false;
+        o.enable_mix_normalization = false;
+        o.enable_xg_sysex_mix_injection = false;
+        o.enable_headroom_normalization = false;
         return o;
     }
 };
@@ -142,6 +155,21 @@ struct Report {
     std::map<uint8_t, SoundRef> resolved_sounds;
     std::map<std::pair<uasf::SectionType, uint8_t>, SoundRef> resolved_element_sounds;
     std::string soundmap_dump; // Populated when MapOptions::capture_soundmap_dump == true (exact Stage-5 single source of truth)
+
+    // ── Wave-4b Q5-Wire Mix, Loop-Boundary, Groove & XG SysEx Summary ──
+    uint32_t same_pitch_overlaps_fixed = 0;        // Stage 6a: same-pitch overlapping spans de-overlapped
+    uint32_t zero_length_notes_fixed = 0;          // Stage 6a: zero-duration notes expanded to >= 1 tick
+    uint32_t anticipations_preserved = 0;          // Stage 6a: anticipated downbeats preserved cleanly
+    uint32_t proprietary_ccs_stripped = 0;         // Stage 6b: NRPN (CC98/99+6/38/96/97), CC94, invalid >=128 stripped
+    uint32_t sustain_resets_added = 0;             // Stage 6b: CC64=0 loop-boundary resets appended at len-1
+    uint32_t pitchbend_resets_added = 0;           // Stage 6b: Pitch Bend=8192 loop-boundary resets appended at len-1
+    uint32_t expression_resets_added = 0;          // Stage 6b: CC11 fade-out (<32) loop-boundary resets appended at len-1
+    uint32_t tracks_gain_adjusted = 0;             // Stage 6b: melodic/bass tracks headroom-adjusted (active-span CC11)
+    uint32_t xg_sysex_params_translated = 0;       // Stage 6b: tick-0 mix CCs synthesized from XG SysEx / CC94->CC93
+    uint32_t xg_sysex_seen = 0;                    // Total SysEx messages carried in style.xg_sysex
+    uint32_t xg_sysex_recognized = 0;              // Recognized XG/GM/GS SysEx messages
+    uint32_t xg_sysex_malformed = 0;               // Malformed SysEx count reported by importer
+    std::string style_edit_sheet_md;               // Populated when MapOptions::capture_style_edit_sheet == true
 };
 
 struct MapResult {

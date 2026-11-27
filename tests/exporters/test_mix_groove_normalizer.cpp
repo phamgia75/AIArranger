@@ -826,6 +826,106 @@ int main() {
              validate(st_p21).empty());
     }
 
+    // ── 13. Wave-4b Q5-Wire Regressions (P1-3 Active-Span CC11, Fade Reset, NRPN 96/97, Idempotency) ─
+    {
+        // P1-3: EDM sidechain-ducked pad (tick-0 CC11=24 -> offbeat CC11=116 during held pad)
+        // must NOT be falsely over-boosted!
+        Element el_edm;
+        el_edm.marker = "v1cv1";
+        el_edm.num = 4;
+        el_edm.den = 4;
+        el_edm.length = 1920;
+        el_edm.events = {
+            {0,    0xB0 | 13, 7,  84},
+            {0,    0xB0 | 13, 11, 24},   // downbeat sidechain duck
+            {0,    0x90 | 13, 48, 78},
+            {0,    0x90 | 13, 52, 78},
+            {120,  0xB0 | 13, 11, 76},
+            {240,  0xB0 | 13, 11, 116},  // offbeat release peak while pad is sounding!
+            {360,  0xB0 | 13, 11, 110},
+            {1800, 0x80 | 13, 48, 0},
+            {1800, 0x80 | 13, 52, 0},
+        };
+        const auto edm_stats = normalizeElementMix(el_edm, {});
+        uint8_t pad_vel = 0;
+        for (const auto& ev : el_edm.events) {
+            if (ev.status == (0x90 | 13) && ev.d1 == 48) pad_vel = ev.d2;
+        }
+        TEST("P1-3 EDM sidechain pad (tick-0 CC11=24 -> 116) is NOT over-boosted and keeps ducking intact",
+             edm_stats.tracks_gain_adjusted == 0 &&
+             edm_stats.expression_resets_added == 0 &&
+             findLastTick0Cc(el_edm, 13, 7) == 84 &&
+             findLastTick0Cc(el_edm, 13, 11) == 24 &&
+             pad_vel == 78 &&
+             validate(Style{480, 500000, {el_edm}}).empty());
+
+        // Loop-boundary CC11 fade-out reset (< 32):
+        //  - ch 13: tick-0 CC11=106 -> fades down to 14 -> restored to 106 at len - 1
+        //  - ch 14: no tick-0 CC11 (implicit 127) -> drops to 18 -> restored to 127 at len - 1
+        //  - NRPN CC96/97 stripped while in_nrpn; XG SysEx variation_send blends 30% into CC93
+        Element el_fade;
+        el_fade.marker = "e1cv1";
+        el_fade.num = 4;
+        el_fade.den = 4;
+        el_fade.length = 1920;
+        el_fade.events = {
+            {0,    0xB0 | 13, 7,  90},
+            {0,    0xB0 | 13, 11, 106},
+            {0,    0x90 | 13, 60, 82},
+            {960,  0xB0 | 13, 11, 40},
+            {1860, 0xB0 | 13, 11, 14},   // faded below 32!
+            {1860, 0x80 | 13, 60, 0},
+            {0,    0xB0 | 14, 7,  88},
+            {0,    0xB0 | 14, 99, 1},
+            {0,    0xB0 | 14, 98, 2},
+            {0,    0xB0 | 14, 96, 1},    // NRPN Data Inc -> strip
+            {0,    0xB0 | 14, 97, 1},    // NRPN Data Dec -> strip
+            {0,    0x90 | 14, 64, 84},
+            {1440, 0xB0 | 14, 11, 18},   // faded below 32 with no tick-0 CC11!
+            {1800, 0x80 | 14, 64, 0},
+        };
+        std::map<uint8_t, XgPartMixParams> xg_var;
+        xg_var[14].variation_send = 40;  // 30% -> CC93=12
+        const auto fade_stats = normalizeElementMix(el_fade, xg_var);
+
+        int last_cc11_13 = -1, last_cc11_14 = -1;
+        bool saw_96_or_97 = false;
+        for (const auto& ev : el_fade.events) {
+            if ((ev.status & 0xF0u) == 0xB0u) {
+                if (ev.d1 == 96u || ev.d1 == 97u) saw_96_or_97 = true;
+                if (ev.d1 == 11u && (ev.status & 0x0Fu) == 13u) last_cc11_13 = ev.d2;
+                if (ev.d1 == 11u && (ev.status & 0x0Fu) == 14u) last_cc11_14 = ev.d2;
+            }
+        }
+        TEST("CC11 fade-out (<32) restores at len-1, NRPN CC96/97 stripped, XG variation_send blends to CC93",
+             fade_stats.expression_resets_added == 2 &&
+             fade_stats.proprietary_ccs_stripped == 4 &&
+             fade_stats.xg_params_translated == 1 &&
+             !saw_96_or_97 &&
+             last_cc11_13 == 106 &&
+             last_cc11_14 == 127 &&
+             findLastTick0Cc(el_fade, 14, 93) == 12 &&
+             validate(Style{480, 500000, {el_fade}}).empty());
+
+        // Strict idempotency (second pass changes nothing!)
+        const auto snapshot = el_fade.events;
+        const auto pass2 = normalizeElementMix(el_fade, xg_var);
+        bool same_events = (el_fade.events.size() == snapshot.size());
+        for (size_t i = 0; same_events && i < snapshot.size(); ++i) {
+            const auto& a = el_fade.events[i];
+            const auto& b = snapshot[i];
+            if (a.tick != b.tick || a.status != b.status || a.d1 != b.d1 || a.d2 != b.d2) same_events = false;
+        }
+        TEST("normalizeElementMix is strictly idempotent on second pass (zero double-normalization)",
+             same_events &&
+             pass2.proprietary_ccs_stripped == 0 &&
+             pass2.sustain_resets_added == 0 &&
+             pass2.pitchbend_resets_added == 0 &&
+             pass2.expression_resets_added == 0 &&
+             pass2.tracks_gain_adjusted == 0 &&
+             pass2.xg_params_translated == 0);
+    }
+
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }
