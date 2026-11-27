@@ -156,12 +156,50 @@ int main() {
         TEST("EthnicArabic on Factory maps to populated keys & emits advisory",
              rEthFac.notes.size() == 2 && ethKit.hasKey(rEthFac.notes[0].pitch) && hasExtDiag);
 
-        // SFX: populated 27..34 stay 1:1; unpopulated 105 dropped cleanly (never turned into snare/tom)
+        // SFX: populated 27..34 & 82..87 stay 1:1; XG SFX/perc 88..104 remap onto populated 27..87;
+        // unassigned extreme keys (<27 or >=105) drop cleanly (never turned into snare/tom).
         FactoryPa5xDrumKitKeyMap sfxKit(DrumKitCategory::Sfx);
         const auto rSfx = remapDrumTrack({mkDrum(0, 240, 27, 90), mkDrum(240, 480, 105, 90)},
                                          126, 0, 0, "SFX1", uasf::TrackRole::Drum, sfxKit, 480);
         TEST("SFX keeps populated 27 1:1 and drops unpopulated 105 cleanly",
              rSfx.notes.size() == 1 && rSfx.notes[0].pitch == 27 && rSfx.stats.notes_dropped == 1);
+
+        // P3-M4 regression (EXP12): XG SFX/extended percussion notes 88..104 remap cleanly onto
+        // populated GM2/Pa5X SFX/Perc keys (27..87) while valid GM2 keys 27, 29, 32, 84 stay 1:1!
+        const std::vector<NoteSpan> exp12Sfx = {
+            mkDrum(0,    120, 27,  64), mkDrum(120,  240, 29,  68),
+            mkDrum(240,  360, 32,  72), mkDrum(360,  480, 84,  76),
+            mkDrum(480,  600, 88,  80), mkDrum(600,  720, 92,  84),
+            mkDrum(720,  840, 96,  88), mkDrum(840,  960, 104, 92),
+        };
+        const auto rExp12Sfx = remapDrumTrack(exp12Sfx, 126, 0, 0, "SfxPerc", uasf::TrackRole::Percussion, sfxKit, 480);
+        bool exp12AllPop = (rExp12Sfx.notes.size() == 8 && rExp12Sfx.stats.notes_dropped == 0);
+        for (const auto& s : rExp12Sfx.notes) {
+            if (!sfxKit.hasKey(s.pitch)) exp12AllPop = false;
+        }
+        TEST("P3-M4 EXP12 SFX: 27/29/32/84 stay 1:1 and 88/92/96/104 remap onto populated SFX/Perc keys (0 drops)",
+             exp12AllPop &&
+             rExp12Sfx.notes[0].pitch == 27 && rExp12Sfx.notes[1].pitch == 29 &&
+             rExp12Sfx.notes[2].pitch == 32 && rExp12Sfx.notes[3].pitch == 84 &&
+             rExp12Sfx.notes[4].pitch == 75 && rExp12Sfx.notes[5].pitch == 70 &&
+             rExp12Sfx.notes[6].pitch == 54 && rExp12Sfx.notes[7].pitch == 81 &&
+             rExp12Sfx.stats.passthrough_notes == 4 && rExp12Sfx.stats.remapped_notes == 4);
+
+        // Full 88..104 sweep on Sfx kit + fail-closed drops on <27 and >=105
+        std::vector<NoteSpan> fullSfxRange;
+        uint32_t st = 0;
+        for (uint8_t n = 88; n <= 104; ++n, st += 60) fullSfxRange.push_back(mkDrum(st, st + 60, n, 90));
+        const auto rFullSfx = remapDrumTrack(fullSfxRange, DrumKitCategory::Sfx, sfxKit, false, 480);
+        bool fullSfxOk = (rFullSfx.notes.size() == 17 && rFullSfx.stats.notes_dropped == 0 &&
+                          rFullSfx.stats.family_preserved_notes == 17);
+        for (const auto& s : rFullSfx.notes) {
+            if (!sfxKit.hasKey(s.pitch) || sfxKit.familyOf(s.pitch) != 'L') fullSfxOk = false;
+        }
+        const auto rExtremeSfx = remapDrumTrack(
+            {mkDrum(0, 120, 12, 80), mkDrum(120, 240, 26, 80), mkDrum(240, 360, 105, 80), mkDrum(360, 480, 120, 80)},
+            DrumKitCategory::Sfx, sfxKit, false, 480);
+        TEST("P3-M4 SFX sweep: all 17 keys 88..104 remap cleanly ('L' family, 0 drops) while <27 & >=105 fail-closed drop",
+             fullSfxOk && rExtremeSfx.notes.empty() && rExtremeSfx.stats.notes_dropped == 4);
     }
 
     // ── 3. TxperfDrumKitKeyMap zero-copy adapter over media::sound::DrumKit ──
