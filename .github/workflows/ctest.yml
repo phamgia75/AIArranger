@@ -52,17 +52,21 @@ jobs:
     # SDK, and runs it under sanitizers — the lock-free queues and cross-thread
     # facade are only race-checked here.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: release
             flags: ""
+            cmake_extra_args: ""
           - name: asan-ubsan
             flags: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+            # Google ASan/UBSan recommended -O1 -g avoids GCC -O2 inlining compile-time blowup while keeping full instrumentation.
+            cmake_extra_args: '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O1 -g -DNDEBUG" -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O1 -g -DNDEBUG"'
           - name: tsan
             flags: "-fsanitize=thread -fno-omit-frame-pointer"
+            cmake_extra_args: ""
     name: portable-core-linux (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
@@ -79,7 +83,8 @@ jobs:
           -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
           -DCMAKE_C_FLAGS="${{ matrix.flags }}"
           -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+          ${{ matrix.cmake_extra_args }}
       - name: Build
         run: cmake --build build
       - name: CTest
-        run: ctest --test-dir build --output-on-failure --timeout 300
+        run: ctest --test-dir build --output-on-failure --parallel "$(nproc)" --timeout 300
