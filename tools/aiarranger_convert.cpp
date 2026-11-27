@@ -30,6 +30,9 @@ namespace {
 int usage() {
     std::cerr << "usage: aiarranger-convert --input <file.sty> --target pa5x --output <file.mid>\n"
                  "                          [--ppqn N] [--sound-map FILE] [--sound-template FILE] [--report FILE]\n"
+                 "                          [--break-policy <cap|withhold>] [--quality-mode <quality|raw>]\n"
+                 "                          [--megavoice-mode <auto|sanitize|preserve>] [--drum-remap <on|off>]\n"
+                 "                          [--cv-split <on|off>] [--normalize-source-chord <on|off>]\n"
                  "       aiarranger-convert --compare <ours.mid> --with <pa5x_export.mid>\n"
                  "sound-map lines: <bass|drum|perc|acc1..acc5> <msb> <lsb> <pc> | <track> unresolved   (# comments)\n";
     return 1;
@@ -89,6 +92,39 @@ int main(int argc, char** argv) {
                 opt.ppqn = static_cast<uint16_t>(n);
             }
             catch (...) { return usage(); }
+        } else if (a == "--break-policy") {
+            if (v == "cap") opt.break_policy = BreakPolicy::Yamaha1BarCap;
+            else if (v == "withhold") opt.break_policy = BreakPolicy::Withhold;
+            else return usage();
+        } else if (a == "--quality-mode") {
+            if (v == "raw") {
+                opt.enable_cv_split = false;
+                opt.enable_drum_remap = false;
+                opt.megavoice_mode = quality::MegaVoiceMode::Preserve;
+                opt.enable_source_chord_normalization = false;
+            } else if (v == "quality") {
+                opt.enable_cv_split = true;
+                opt.enable_drum_remap = true;
+                opt.megavoice_mode = quality::MegaVoiceMode::Auto;
+                opt.enable_source_chord_normalization = true;
+            } else return usage();
+        } else if (a == "--megavoice-mode") {
+            if (v == "auto") opt.megavoice_mode = quality::MegaVoiceMode::Auto;
+            else if (v == "sanitize") opt.megavoice_mode = quality::MegaVoiceMode::Sanitize;
+            else if (v == "preserve") opt.megavoice_mode = quality::MegaVoiceMode::Preserve;
+            else return usage();
+        } else if (a == "--drum-remap") {
+            if (v == "on") opt.enable_drum_remap = true;
+            else if (v == "off") opt.enable_drum_remap = false;
+            else return usage();
+        } else if (a == "--cv-split") {
+            if (v == "on") opt.enable_cv_split = true;
+            else if (v == "off") opt.enable_cv_split = false;
+            else return usage();
+        } else if (a == "--normalize-source-chord") {
+            if (v == "on") opt.enable_source_chord_normalization = true;
+            else if (v == "off") opt.enable_source_chord_normalization = false;
+            else return usage();
         } else return usage();
     }
     if (!compareA.empty() || !compareB.empty()) {

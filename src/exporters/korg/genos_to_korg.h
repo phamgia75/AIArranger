@@ -2,7 +2,10 @@
 #define AI_ARRANGER_EXPORTERS_GENOS_TO_KORG_H
 
 #include "engine/uasf/types.h"
+#include "exporters/korg/drum_remap.h"
 #include "exporters/korg/korg_style_smf.h"
+#include "exporters/korg/megavoice_sanitizer.h"
+#include "exporters/korg/source_chord_normalizer.h"
 
 #include <map>
 #include <string>
@@ -28,6 +31,23 @@ struct MapOptions {
     // (section type, Korg channel) -> that element's sound, written instead of `sounds` in that element only.
     std::map<std::pair<uasf::SectionType, uint8_t>, SoundRef> element_sounds;
     BreakPolicy break_policy = BreakPolicy::Withhold;
+
+    // ── Wave-2B Q23-Wire Quality Pipeline Controls (enabled by default; use raw() for legacy passthrough) ──
+    bool enable_cv_split = true;                                    // Stage 1: CASM chord-mute -> Pa5X CV1..CV6
+    bool enable_drum_remap = true;                                  // Stage 2: Rhythm1/2 swap + XG/Revo! drum remap
+    quality::MegaVoiceMode megavoice_mode = quality::MegaVoiceMode::Auto; // Stage 3: MegaVoice/S.Art/Guitar
+    bool enable_source_chord_normalization = true;                  // Stage 4: Ctb2[18..19] -> C Maj/Min + register audit
+    const quality::IDrumKitKeyMap* target_drum_key_map = nullptr;   // Optional read-only target kit (nullptr -> Factory Pa5X GM2)
+
+    // Raw passthrough mode: disables Q2–Q3 musical transforms while keeping structural mapping intact.
+    static MapOptions raw() noexcept {
+        MapOptions o;
+        o.enable_cv_split = false;
+        o.enable_drum_remap = false;
+        o.megavoice_mode = quality::MegaVoiceMode::Preserve;
+        o.enable_source_chord_normalization = false;
+        return o;
+    }
 };
 
 struct SectionRow {
@@ -62,6 +82,21 @@ struct Report {
     std::map<uint8_t, uint32_t> non_gm_drum_notes;  // drum/perc note outside GM 35..81 -> count
     std::vector<std::string> warnings;
     std::vector<std::string> element_sounds;       // "marker Track: msb/lsb/pc" written for one element only
+
+    // ── Wave-2B Q23-Wire Structured Quality Counters & Pa5X Style Edit Advice ──
+    uint32_t cv_splits_created = 0;                // additional CV elements emitted beyond cv1
+    uint32_t shadowed_tracks_dropped = 0;          // mutually exclusive tracks dropped when CV slots exhausted
+    uint32_t megavoice_tracks_sanitized = 0;       // section-tracks modified by MegaVoice/S.Art/Guitar sanitization
+    uint32_t megavoice_fx_notes_stripped = 0;      // FX/key-switch/noise-zone notes stripped (excluding 0..11 chord range)
+    uint32_t megavoice_vel_reshaped = 0;           // notes whose velocity zone curve was reshaped
+    uint32_t drum_notes_remapped_exact = 0;        // drum notes kept 1:1 on exact populated GM1/GM2/native key
+    uint32_t drum_notes_remapped_approx = 0;       // extended XG/Revo! notes remapped to family-preserving approximate/fallback key
+    uint32_t drum_notes_unsupported = 0;           // unmappable extended/SFX drum hits dropped cleanly
+    bool     rhythm_tracks_swapped = false;        // true iff Rhythm1 (ch8) & Rhythm2 (ch9) were swapped to keep main kit on Drum
+    uint32_t tracks_source_chord_normalized = 0;   // (section, cv, track) patterns normalized from non-C / non-target chord
+    uint32_t register_violations_fixed = 0;        // 12-root register / LIL mud violations fixed during normalization
+    std::vector<quality::Pa5xTrackEditAdvice> track_edit_advice; // per-Korg-track Pa5X Style Edit recommendations
+    std::vector<std::string> quality_diagnostics;  // deduplicated STYLE_QUAL_* diagnostic codes emitted
 };
 
 struct MapResult {
