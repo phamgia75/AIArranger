@@ -1,5 +1,7 @@
 #include "exporters/korg/genos_to_korg.h"
 #include "exporters/korg/cv_splitter.h"
+#include "exporters/korg/groove_normalizer.h"
+#include "exporters/korg/mix_normalizer.h"
 #include "exporters/korg/pa5x_sound_matcher.h"
 #include "exporters/korg/timbre_profiler.h"
 
@@ -164,6 +166,65 @@ quality::CasmTrackView buildCasmTrackView(const uasf::TrackDefinition& tr, uint8
     return v;
 }
 
+importers::sff1::XgPartMixParams toXgPartMixParams(const uasf::XgPartMetadata& p) noexcept {
+    importers::sff1::XgPartMixParams out{};
+    out.volume = p.volume;
+    out.pan = p.pan;
+    out.dry_level = p.dry_level;
+    out.chorus_send = p.chorus_send;
+    out.reverb_send = p.reverb_send;
+    out.variation_send = p.variation_send;
+    out.eq_low_gain_db = p.eq_low_gain_db;
+    out.eq_high_gain_db = p.eq_high_gain_db;
+    out.eq_mid_gain_db = p.eq_mid_gain_db;
+    out.bank_msb = p.bank_msb;
+    out.bank_lsb = p.bank_lsb;
+    out.program = p.program;
+    out.part_mode = p.part_mode;
+    out.filter_cutoff_offset = p.filter_cutoff_offset;
+    out.filter_res_offset = p.filter_res_offset;
+    out.megavoice_hint = p.megavoice_hint;
+    out.revo_drum_hint = p.revo_drum_hint;
+    return out;
+}
+
+importers::sff1::XgSysExSummary toXgSysExSummary(const uasf::XgSysExMetadata& m) {
+    importers::sff1::XgSysExSummary out{};
+    out.total_sysex_seen = m.total_sysex_seen;
+    out.recognized_xg_count = m.recognized_xg_count;
+    out.unrecognized_count = m.unrecognized_count;
+    out.malformed_count = m.malformed_count;
+    out.dsp_sysex_count = m.dsp_sysex_count;
+    out.xg_system_on = m.xg_system_on;
+    out.gm1_system_on = m.gm1_system_on;
+    out.gm2_system_on = m.gm2_system_on;
+    out.gs_reset = m.gs_reset;
+    out.reverb_type = m.reverb_type;
+    out.chorus_type = m.chorus_type;
+    out.variation_type = m.variation_type;
+    out.master_volume = m.master_volume;
+    out.master_eq_type = m.master_eq_type;
+    out.master_eq_low_gain_db = m.master_eq_low_gain_db;
+    out.master_eq_mid_gain_db = m.master_eq_mid_gain_db;
+    out.master_eq_high_gain_db = m.master_eq_high_gain_db;
+    for (const auto& [part, pm] : m.parts) {
+        out.parts.emplace(part, toXgPartMixParams(pm));
+    }
+    out.drum_overrides.reserve(m.drum_overrides.size());
+    for (const auto& d : m.drum_overrides) {
+        importers::sff1::XgDrumKeyOverride ov{};
+        ov.drum_setup = d.drum_setup;
+        ov.key = d.key;
+        ov.level = d.level;
+        ov.pan = d.pan;
+        ov.reverb_send = d.reverb_send;
+        ov.pitch_coarse = d.pitch_coarse;
+        out.drum_overrides.push_back(ov);
+    }
+    out.advisory_codes = m.advisory_codes;
+    return out;
+}
+
 } // namespace
 
 MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
@@ -175,6 +236,18 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
     r.style.ppqn = static_cast<uint16_t>(dst);
     if (style.tempo_bpm) r.style.mpqn = (60'000'000u + style.tempo_bpm / 2) / style.tempo_bpm;
     else rep.warnings.push_back("style has no tempo; set it on Pa5X");
+
+    // Record live XG SysEx telemetry from UASF style metadata.
+    rep.xg_sysex_seen = style.xg_sysex.total_sysex_seen;
+    rep.xg_sysex_recognized = style.xg_sysex.recognized_xg_count;
+    rep.xg_sysex_malformed = style.xg_sysex.malformed_count;
+    if (opt.enable_mix_groove_normalization) {
+        for (const auto& code : style.xg_sysex.advisory_codes) {
+            addUniqueDiag(rep.quality_diagnostics, code);
+        }
+    }
+    const bool grooveEnabled = opt.enable_mix_groove_normalization && opt.enable_groove_normalization;
+    const bool mixEnabled = opt.enable_mix_groove_normalization && opt.enable_mix_normalization;
 
     // Pre-scan initial Yamaha Bank/PC per source channel so sections after SInt/Intro
     // still know their active Yamaha voice (MegaVoice 63/120, 63/60, S.Art 8/64..127,
@@ -603,6 +676,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             }
 
             const bool drum = (kch == kDrumCh || kch == kPercCh);
+            const uint32_t barTicks = static_cast<uint32_t>(barNum / den);
             std::vector<quality::NoteSpan> boundedNotes;
             boundedNotes.reserve(rawNotes.size());
             for (auto n : rawNotes) {
@@ -619,9 +693,24 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                     boundedNotes.push_back(n);
                     continue;
                 }
-                if (len < 2 || n.on_tick >= len - 1) {
+                if (len < 2 || n.on_tick >= len) {
                     ++rep.dropped[kDropLastTick];
                     continue;
+                }
+                if (n.on_tick == len - 1) {
+                    if (!grooveEnabled || n.off_tick <= n.on_tick) {
+                        ++rep.dropped[kDropLastTick];
+                        continue;
+                    }
+                    // Preserve genuine final-tick anticipation (orig_dur > 0) for Stage 6a groove_normalizer.
+                    n.off_tick = (n.off_tick == UINT32_MAX)
+                                     ? len
+                                     : std::min<uint32_t>(n.off_tick, len + barTicks);
+                    boundedNotes.push_back(n);
+                    continue;
+                }
+                if (grooveEnabled && n.off_tick <= n.on_tick) {
+                    ++rep.zero_length_notes_fixed;
                 }
                 // A note past the last tick makes Pa append a measure: end it inside.
                 n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
@@ -673,7 +762,7 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                     pt.notes = std::move(boundedNotes);
                 }
                 for (auto& n : pt.notes) {
-                    if (len >= 2) {
+                    if (!grooveEnabled && len >= 2) {
                         n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
                     }
                     if (n.pitch < 35 || n.pitch > 81) ++rep.non_gm_drum_notes[n.pitch];
@@ -714,8 +803,10 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                         ++tr_row.chord_range_dropped;
                         continue;
                     }
-                    if (len < 2 || n.on_tick >= len - 1) continue;
-                    n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
+                    if (len < 2 || (!grooveEnabled && n.on_tick >= len - 1) || n.on_tick >= len) continue;
+                    if (!grooveEnabled) {
+                        n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
+                    }
                     pt.notes.push_back(n);
                 }
             }
@@ -768,6 +859,8 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
             el.length = len;
 
             std::map<uint8_t, uint8_t> owner; // Korg channel -> first source channel in this CV bucket
+            std::map<uint8_t, std::vector<quality::NoteSpan>> bucketNotesByKch;
+            std::map<uint8_t, importers::sff1::XgPartMixParams> bucketXgParams;
             for (const auto* inp : bucket.tracks) {
                 const auto idxIt = inputToPreparedIdx.find(inp);
                 if (idxIt == inputToPreparedIdx.end()) continue;
@@ -778,6 +871,13 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                     rep.warnings.push_back("Genos channels " + std::to_string(own->second + 1) + " and " +
                                            std::to_string(pt.srcCh + 1) + " both play Korg " + korgTrackName(pt.kch) +
                                            " (merged; their NTR/NTT may differ)");
+                }
+                if (mixEnabled && opt.enable_xg_sysex_mix_injection) {
+                    if (const auto xgit = style.xg_sysex.parts.find(pt.srcCh);
+                        xgit != style.xg_sysex.parts.end()) {
+                        // Keyed by post-route, post-swap Korg channel (first source channel wins on merge).
+                        bucketXgParams.try_emplace(pt.kch, toXgPartMixParams(xgit->second));
+                    }
                 }
 
                 for (const auto& ev : pt.nonNoteEvents) {
@@ -802,9 +902,30 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                     }
                 }
 
-                const uint8_t onSt = static_cast<uint8_t>(0x90 | pt.kch);
-                const uint8_t offSt = static_cast<uint8_t>(0x80 | pt.kch);
-                for (auto n : *emitNotes) {
+                auto& dstNotes = bucketNotesByKch[pt.kch];
+                dstNotes.insert(dstNotes.end(), emitNotes->begin(), emitNotes->end());
+            }
+
+            // ── Stage 6a (Q5-Wire groove_normalizer.h) — ONCE per (CV bucket, Korg track) before NoteOn/NoteOff ──
+            const uint32_t barTicks = static_cast<uint32_t>(barNum / den);
+            quality::GrooveNormalizeOptions gopt{};
+            gopt.preserve_anticipations = true;
+            gopt.deoverlap_same_pitch = true;
+            gopt.bake_rubato = false; // Preserve intentional Ending rubato/ritardando & swing microtiming
+            gopt.is_looping_main = (sec.type >= SectionType::Main1 && sec.type <= SectionType::Main4);
+            gopt.base_mpqn = r.style.mpqn ? r.style.mpqn : 500000u;
+            gopt.ppqn = dst;
+
+            for (auto& [kch, kchNotes] : bucketNotesByKch) {
+                if (grooveEnabled) {
+                    const auto gstats = quality::normalizeTrackGroove(kchNotes, len, barTicks, {}, gopt);
+                    rep.same_pitch_overlaps_fixed += gstats.same_pitch_overlaps_fixed;
+                    rep.zero_length_notes_fixed += gstats.zero_length_notes_fixed;
+                    rep.anticipations_preserved += gstats.anticipations_preserved;
+                }
+                const uint8_t onSt = static_cast<uint8_t>(0x90 | kch);
+                const uint8_t offSt = static_cast<uint8_t>(0x80 | kch);
+                for (auto n : kchNotes) {
                     if (len < 2 || n.on_tick >= len - 1) continue;
                     n.off_tick = std::max(std::min(n.off_tick, len - 1), n.on_tick + 1);
                     el.events.push_back({n.on_tick, onSt, n.pitch, n.vel});
@@ -837,13 +958,31 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
                 el.events.push_back({0, static_cast<uint8_t>(0xB0 | kch), 32, s.lsb});
                 el.events.push_back({0, static_cast<uint8_t>(0xC0 | kch), s.pc, 0});
             }
-            // Stable and without d2: same-tick duplicates (a doubled pitch with two
-            // velocities, two CC values) keep source order, so NoteOff pairing and
-            // "last value wins" match the source.
+            // Stable and without d2; keep exact source order for same-tick CCs/PitchBend
+            // (rank == 3) on the same channel so multi-CC RPN/NRPN sequences (101->100->6->38
+            // and 99->98->6->38) are NEVER scrambled before Stage 6b mix hygiene.
             std::stable_sort(el.events.begin(), el.events.end(), [](const Event& a, const Event& b) {
-                return std::make_tuple(a.tick, rank(a), a.status, a.d1) <
-                       std::make_tuple(b.tick, rank(b), b.status, b.d1);
+                const int ra = rank(a);
+                const int rb = rank(b);
+                return std::make_tuple(a.tick, ra, a.status, ra == 3 ? uint8_t{0} : a.d1) <
+                       std::make_tuple(b.tick, rb, b.status, rb == 3 ? uint8_t{0} : b.d1);
             });
+
+            // ── Stage 6b (Q5-Wire mix_normalizer.h) — ONCE per assembled element ──
+            if (mixEnabled) {
+                quality::MixNormalizeOptions mopt{};
+                mopt.filter_proprietary_ccs = true;
+                mopt.enforce_loop_resets = true;
+                mopt.normalize_headroom = opt.enable_headroom_normalization;
+                mopt.inject_xg_mix_ccs = opt.enable_xg_sysex_mix_injection;
+                const auto mstats = quality::normalizeElementMix(el, bucketXgParams, mopt);
+                rep.proprietary_ccs_stripped += mstats.proprietary_ccs_stripped;
+                rep.sustain_resets_added += mstats.sustain_resets_added;
+                rep.pitchbend_resets_added += mstats.pitchbend_resets_added;
+                rep.expression_resets_added += mstats.expression_resets_added;
+                rep.tracks_gain_adjusted += mstats.tracks_gain_adjusted;
+                rep.xg_sysex_params_translated += mstats.xg_params_translated;
+            }
 
             SectionRow cvRow = row;
             cvRow.marker = bucket.marker;
@@ -966,6 +1105,76 @@ MapResult mapToKorg(const uasf::StyleDefinition& style, const MapOptions& opt) {
         rep.soundmap_dump = quality::formatSoundMapTemplateWithRecommendations(
             rep, stage5StyleMatch, dumpName, stage5MatchOpt);
     }
+    if (opt.capture_style_edit_sheet) {
+        std::map<uint8_t, uint8_t> kchToSrcCh;
+        for (const auto& tr : rep.tracks) {
+            if (tr.korg_ch != 0xFF) kchToSrcCh.try_emplace(tr.korg_ch, tr.src_ch);
+        }
+        std::vector<quality::StyleEditSheetTrackView> sheetTracks;
+        sheetTracks.reserve(rep.track_edit_advice.size());
+        for (const auto& adv : rep.track_edit_advice) {
+            quality::StyleEditSheetTrackView tv{};
+            tv.korg_ch = adv.korg_ch;
+            tv.track_name = korgTrackName(adv.korg_ch);
+            tv.pa5x_ntt_type = adv.pa5x_ntt_type;
+            tv.pa5x_ntt_table = adv.pa5x_ntt_table;
+            tv.wrap_around = adv.wrap_around;
+            tv.key_range_low = adv.key_range_low;
+            tv.key_range_high = adv.key_range_high;
+            tv.retrigger_mode = adv.retrigger_mode;
+            tv.octave_shift_applied = adv.octave_shift_applied;
+            tv.guitar_mode_candidate = (adv.pa5x_ntt_type == "Guitar Mode");
+            if (const auto sit = kchToSrcCh.find(adv.korg_ch); sit != kchToSrcCh.end()) {
+                if (const auto xgit = style.xg_sysex.parts.find(sit->second);
+                    xgit != style.xg_sysex.parts.end()) {
+                    tv.eq_low_gain_db = xgit->second.eq_low_gain_db;
+                    tv.eq_mid_gain_db = xgit->second.eq_mid_gain_db;
+                    tv.eq_high_gain_db = xgit->second.eq_high_gain_db;
+                }
+            }
+            sheetTracks.push_back(std::move(tv));
+        }
+
+        std::vector<quality::StyleEditSheetSoundView> sheetSounds;
+        for (const auto& tr : rep.tracks) {
+            if (tr.korg_ch == 0xFF) continue;
+            quality::StyleEditSheetSoundView sv{};
+            sv.korg_ch = tr.korg_ch;
+            sv.track_name = korgTrackName(tr.korg_ch);
+            sv.inferred_family = tr.family;
+            if (const auto uit = opt.sounds.find(tr.korg_ch); uit != opt.sounds.end()) {
+                sv.selected_name = "User Sound Map";
+                sv.msb = uit->second.msb;
+                sv.lsb = uit->second.lsb;
+                sv.pc = uit->second.pc;
+                sv.score = 100;
+                sv.origin = "UserSoundMap";
+                sv.epistemic_tag = "USER_EXPLICIT";
+            } else if (const auto mit = matchBySrcCh.find(tr.src_ch);
+                       mit != matchBySrcCh.end() && mit->second.selected.has_value()) {
+                const auto& m = mit->second;
+                sv.msb = m.selected->msb;
+                sv.lsb = m.selected->lsb;
+                sv.pc = m.selected->pc;
+                sv.origin = (m.selected_origin == quality::MatchOrigin::TargetKstUserSound)
+                                ? "TargetKstUserSound"
+                                : "Pa5xFactoryCatalog";
+                sv.epistemic_tag = m.selected_epistemic_tag;
+                for (const auto& c : m.top_candidates) {
+                    if (c.origin == m.selected_origin &&
+                        c.ref.msb == m.selected->msb && c.ref.lsb == m.selected->lsb && c.ref.pc == m.selected->pc) {
+                        sv.selected_name = c.display_name;
+                        sv.score = c.score;
+                        break;
+                    }
+                }
+            }
+            sheetSounds.push_back(std::move(sv));
+        }
+        const std::string sheetName = opt.soundmap_style_name.empty() ? style.name : opt.soundmap_style_name;
+        rep.style_edit_sheet_md = quality::formatPa5xStyleEditSheetMd(
+            sheetTracks, toXgSysExSummary(style.xg_sysex), sheetSounds, sheetName);
+    }
 
     if (r.style.elements.empty()) { r.error = "no section maps to a Korg style element"; return r; }
     r.ok = true;
@@ -1025,7 +1234,7 @@ std::string formatReport(const Report& r, const Style& s) {
     line("Drum/percussion notes outside GM 35..81 (kept; Pa5X kit sound unverified): " +
          std::to_string(nonGm) + (notes.empty() ? "" : " (notes" + notes + ")"));
     line("");
-    line("Quality pipeline (Stages 1-5; offline software-verified only, hardwareVerified=false):");
+    line("Quality pipeline (Stages 1-6; offline software-verified only, hardwareVerified=false):");
     line("  CV splits created: " + std::to_string(r.cv_splits_created) +
          ", shadowed tracks dropped: " + std::to_string(r.shadowed_tracks_dropped));
     line("  MegaVoice/S.Art: " + std::to_string(r.megavoice_tracks_sanitized) + " section-tracks sanitized, " +
@@ -1049,6 +1258,19 @@ std::string formatReport(const Report& r, const Style& s) {
          ", low_conf_fallback=" + std::to_string(r.sound_match_stats.low_confidence_fallbacks) +
          ", unresolved=" + std::to_string(r.sound_match_stats.unresolved) +
          ", unsupported=" + std::to_string(r.sound_match_stats.unsupported));
+    line("  Groove & timing (Stage 6a): overlaps_fixed=" + std::to_string(r.same_pitch_overlaps_fixed) +
+         ", zero_len_fixed=" + std::to_string(r.zero_length_notes_fixed) +
+         ", anticipations_preserved=" + std::to_string(r.anticipations_preserved));
+    line("  Mix, loop-boundary & XG SysEx (Stage 6b): proprietary_ccs_stripped=" +
+         std::to_string(r.proprietary_ccs_stripped) +
+         ", sustain_resets=" + std::to_string(r.sustain_resets_added) +
+         ", pitchbend_resets=" + std::to_string(r.pitchbend_resets_added) +
+         ", cc11_fade_resets=" + std::to_string(r.expression_resets_added) +
+         ", gain_adjusted=" + std::to_string(r.tracks_gain_adjusted) +
+         ", xg_params_translated=" + std::to_string(r.xg_sysex_params_translated) +
+         ", xg_sysex(seen=" + std::to_string(r.xg_sysex_seen) +
+         ", recognized=" + std::to_string(r.xg_sysex_recognized) +
+         ", malformed=" + std::to_string(r.xg_sysex_malformed) + ")");
     if (!r.track_edit_advice.empty()) {
         line("Pa5X Style Edit advice (per Korg track):");
         for (const auto& a : r.track_edit_advice) {

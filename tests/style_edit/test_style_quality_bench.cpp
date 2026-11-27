@@ -566,10 +566,11 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
              rawCs.meanComposite < 85.0 && rawCs.hardInvariantViolations > 0 && rawCs.corpusGrade == bench::kStatusFail);
 
         const auto cs = bench::computeCorpusSummary(allResults);
-        TEST("P1-4 + R2-P1-2 (Q4-Wire live): corpusSummary reports real M6 & composite lift, M2 N/A excluded (9), notTestedItems, corpusGrade=FAIL",
+        TEST("P1-4 + R2-P1-2 (Q5-Wire live): corpusSummary reports hardViol==0, M5/M6/composite lift, M2 N/A excluded (9), notTestedItems, corpusGrade=PASS",
              cs.fixtureCount == 12 && cs.activeComposite < cs.meanComposite &&
-             cs.meanComposite > 85.0 && cs.meanDimensions[5] >= 90.0 &&
-             cs.hardInvariantViolations > 0 && cs.corpusGrade == bench::kStatusFail &&
+             cs.meanComposite >= 94.82 && cs.activeComposite >= 87.52 && cs.minComposite >= 86.57 &&
+             cs.meanDimensions[4] >= 98.0 && cs.meanDimensions[5] >= 99.9 &&
+             cs.hardInvariantViolations == 0 && cs.corpusGrade == bench::kStatusPass &&
              cs.evaluatedDimensionCounts[1] == 3 && cs.naExcludedCounts[1] == 9 &&
              cs.targetKstNotTestedCount == 12 && cs.l3Status == bench::BenchStatus::NotTested &&
              cs.notTestedItems.size() == 2 &&
@@ -692,8 +693,8 @@ static void testAuditCalibrationAndBenchmarkInvariants() {
              s1.find("\"L3_PA5X_HARDWARE_VALIDATION\"") != std::string::npos &&
              s1.find("\"M6_TARGET_KST_OCCUPANCY\"") != std::string::npos &&
              s1.find("\"activeComposite\"") != std::string::npos &&
-             s1.find("\"hardInvariantViolations\"") != std::string::npos &&
-             s1.find("\"corpusGrade\": \"FAIL\"") != std::string::npos);
+             s1.find("\"hardInvariantViolations\": 0") != std::string::npos &&
+             s1.find("\"corpusGrade\": \"PASS\"") != std::string::npos);
         fs::remove_all(tmpDir);
     }
 #endif

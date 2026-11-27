@@ -94,7 +94,7 @@ ParseResult Sff1Reader::parseBufferImpl(const std::vector<uint8_t>& buffer,
             }
 
             // Explicitly record non-note Yamaha metadata chunks (never silently swallowed).
-            if (chunk.chunk_id == "OTSc" || chunk.chunk_id == "OTSm" ||
+            if (chunk.chunk_id == "OTSc" || chunk.chunk_id == "OTSm" || chunk.chunk_id == "OTSM" ||
                 chunk.chunk_id == "OTS"  || chunk.chunk_id == "OTS " ||
                 chunk.chunk_id == "FNRP" || chunk.chunk_id == "MDB"  || chunk.chunk_id == "MDB ") {
                 result_.detected_metadata_chunks.push_back(chunk.chunk_id);
@@ -178,9 +178,14 @@ SffChunk Sff1Reader::readChunk() {
     if (!ensure(4)) return chunk;
     chunk.size = readU32BE();
 
-    // Clamp size to remaining buffer
+    // Clamp size to remaining buffer (never silently — record warning for diagnostics).
     if (chunk.size > size_ - pos_) {
-        chunk.size = static_cast<uint32_t>(size_ - pos_);
+        const uint32_t declared = chunk.size;
+        const size_t avail = size_ - pos_;
+        result_.warnings.push_back("Chunk '" + chunk.chunk_id + "' declares " +
+                                   std::to_string(declared) + " bytes but only " +
+                                   std::to_string(avail) + " remain; clamped");
+        chunk.size = static_cast<uint32_t>(avail);
     }
 
     // Read chunk data
