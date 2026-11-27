@@ -344,10 +344,78 @@ int main() {
              tr.xg_sysex.total_sysex_seen == 1 &&
              !tr.sections.empty() && !tr.sections[0].tracks.empty() &&
              tr.sections[0].tracks[0].events.size() == 2);
+
+        // 3j. P2-1 regression: unterminated 0xF0 interrupted by channel voice message
+        // (0x90 NoteOn) before an escaped 0xF7 (F0 ... F7) SysEx must abort the
+        // unterminated packet cleanly and parse the subsequent escaped SysEx intact.
+        std::vector<uint8_t> interleave_trk;
+        addSysExF0(interleave_trk, 0, {0x43, 0x10, 0x4C, 0x08}, /*addF7=*/false); // unterminated F0
+        addNote(interleave_trk, 24, 0, 60, 100, 96);                              // intervening 0x90/0x80
+        addSysExF7(interleave_trk, 0, {0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x04, 0x5A, 0xF7}); // escaped Master Vol
+        addMetaEoT(interleave_trk, 0);
+
+        const auto ir = reader.parseBuffer(wrapSmf(interleave_trk), "interleaved_unterminated_f0.sty");
+        TEST("P2-1: channel voice message aborts unterminated 0xF0 so subsequent escaped 0xF7 SysEx parses intact",
+             ir.success &&
+             ir.xg_sysex.total_sysex_seen == 2 &&
+             ir.xg_sysex.malformed_count == 1 &&
+             ir.xg_sysex.unrecognized_count == 1 &&
+             ir.xg_sysex.recognized_xg_count == 1 &&
+             ir.xg_sysex.master_volume == 0x5A &&
+             !ir.sections.empty() && !ir.sections[0].tracks.empty() &&
+             ir.sections[0].tracks[0].events.size() == 2 &&
+             ir.sections[0].tracks[0].events[0].tick == 24 &&
+             ir.sections[0].tracks[0].events[1].tick == 120);
     }
 
-    // ── 4. UASF Backward Compatibility & Malformed 'XGSX' Rejection ─────
+    // ── 4. UASF Backward Compatibility, Scalar-Only Propagation & Malformed 'XGSX' ──
     {
+        // P2-2 regression: ParseResult carrying ONLY optional scalar XG fields
+        // (no per-part entries, no mode flags, total_sysex_seen == 0) must still
+        // propagate into UasfStyle and round-trip through XGSX serialization.
+        ParseResult scalar_only{};
+        scalar_only.success = true;
+        scalar_only.file_path = "scalar_only.sty";
+        SffSection sec{};
+        sec.type = SffSectionType::Main1;
+        sec.name = "Main A";
+        sec.bars = 1;
+        sec.resolution = 480;
+        SffTrack trk{};
+        trk.role = SffTrackRole::Phrase1;
+        trk.midi_channel = 0;
+        trk.events.push_back({0, 0x90, 60, 100});
+        trk.events.push_back({480, 0x80, 60, 0});
+        sec.tracks.push_back(trk);
+        scalar_only.sections.push_back(sec);
+        scalar_only.xg_sysex.master_volume = 0x64;
+        scalar_only.xg_sysex.reverb_type = 0x0102u;
+        scalar_only.xg_sysex.master_eq_low_gain_db = -3;
+
+        const auto smr = Sff1ToUasfMapper().map(scalar_only);
+        const auto sser = uasf::UasfSerializer().serialize(smr.style);
+        const auto sback = uasf::UasfDeserializer().deserialize(sser.data);
+        TEST("P2-2: optional-scalar-only XG metadata propagates to UASF and round-trips through XGSX",
+             smr.success && !smr.style.xg_sysex.empty() &&
+             sser.success && sback.success &&
+             sback.style.xg_sysex.master_volume == 0x64 &&
+             sback.style.xg_sysex.reverb_type == 0x0102u &&
+             sback.style.xg_sysex.master_eq_low_gain_db == -3 &&
+             sback.style.xg_sysex.parts.empty());
+
+        // Single optional field alone (reverb_type only) also propagates and round-trips
+        ParseResult rev_only = scalar_only;
+        rev_only.xg_sysex = XgSysExSummary{};
+        rev_only.xg_sysex.reverb_type = 0x0201u;
+        const auto rmr = Sff1ToUasfMapper().map(rev_only);
+        const auto rser = uasf::UasfSerializer().serialize(rmr.style);
+        const auto rback = uasf::UasfDeserializer().deserialize(rser.data);
+        TEST("P2-2: single optional reverb_type without parts/counters propagates and round-trips",
+             rmr.success && !rmr.style.xg_sysex.empty() &&
+             rser.success && rback.success &&
+             rback.style.xg_sysex.reverb_type == 0x0201u &&
+             !rback.style.xg_sysex.master_volume.has_value());
+
         // SysEx-free style writes ZERO 'XGSX' bytes
         std::vector<uint8_t> clean_trk;
         addMetaTempo(clean_trk, 0, 500000);

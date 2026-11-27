@@ -138,36 +138,31 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
     }
 
     // ── Propagate live-parsed XG / GM / GS SysEx metadata into UASF ───────
-    // Purely additive metadata carrier (zero bytes written when no SysEx seen)
-    // so downstream exporters can consume mix defaults, effect types, drum part
+    // Purely additive metadata carrier (zero bytes written when empty) so
+    // downstream exporters can consume mix defaults, effect types, drum part
     // modes, drum key overrides, and MegaVoice/Revo! hints deterministically.
-    if (parseResult.xg_sysex.total_sysex_seen > 0 ||
-        parseResult.xg_sysex.xg_system_on ||
-        parseResult.xg_sysex.gm1_system_on ||
-        parseResult.xg_sysex.gm2_system_on ||
-        parseResult.xg_sysex.gs_reset ||
-        !parseResult.xg_sysex.parts.empty() ||
-        !parseResult.xg_sysex.drum_overrides.empty() ||
-        !parseResult.xg_sysex.advisory_codes.empty()) {
+    // Populate a candidate and commit via !candidate.empty() so every scalar,
+    // optional, flag, counter, and collection field stays in sync with UASF.
+    {
         const auto& src = parseResult.xg_sysex;
-        auto& dst = style.xg_sysex;
-        dst.total_sysex_seen       = src.total_sysex_seen;
-        dst.recognized_xg_count    = src.recognized_xg_count;
-        dst.unrecognized_count     = src.unrecognized_count;
-        dst.malformed_count        = src.malformed_count;
-        dst.dsp_sysex_count        = src.dsp_sysex_count;
-        dst.xg_system_on           = src.xg_system_on;
-        dst.gm1_system_on          = src.gm1_system_on;
-        dst.gm2_system_on          = src.gm2_system_on;
-        dst.gs_reset               = src.gs_reset;
-        dst.reverb_type            = src.reverb_type;
-        dst.chorus_type            = src.chorus_type;
-        dst.variation_type         = src.variation_type;
-        dst.master_volume          = src.master_volume;
-        dst.master_eq_type         = src.master_eq_type;
-        dst.master_eq_low_gain_db  = src.master_eq_low_gain_db;
-        dst.master_eq_mid_gain_db  = src.master_eq_mid_gain_db;
-        dst.master_eq_high_gain_db = src.master_eq_high_gain_db;
+        uasf::XgSysExMetadata candidate;
+        candidate.total_sysex_seen       = src.total_sysex_seen;
+        candidate.recognized_xg_count    = src.recognized_xg_count;
+        candidate.unrecognized_count     = src.unrecognized_count;
+        candidate.malformed_count        = src.malformed_count;
+        candidate.dsp_sysex_count        = src.dsp_sysex_count;
+        candidate.xg_system_on           = src.xg_system_on;
+        candidate.gm1_system_on          = src.gm1_system_on;
+        candidate.gm2_system_on          = src.gm2_system_on;
+        candidate.gs_reset               = src.gs_reset;
+        candidate.reverb_type            = src.reverb_type;
+        candidate.chorus_type            = src.chorus_type;
+        candidate.variation_type         = src.variation_type;
+        candidate.master_volume          = src.master_volume;
+        candidate.master_eq_type         = src.master_eq_type;
+        candidate.master_eq_low_gain_db  = src.master_eq_low_gain_db;
+        candidate.master_eq_mid_gain_db  = src.master_eq_mid_gain_db;
+        candidate.master_eq_high_gain_db = src.master_eq_high_gain_db;
         for (const auto& [part, sp] : src.parts) {
             if (part > 15) continue;
             uasf::XgPartMetadata dp;
@@ -188,9 +183,9 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             dp.eq_high_gain_db      = sp.eq_high_gain_db;
             dp.megavoice_hint       = sp.megavoice_hint;
             dp.revo_drum_hint       = sp.revo_drum_hint;
-            dst.parts.emplace(part, dp);
+            candidate.parts.emplace(part, dp);
         }
-        dst.drum_overrides.reserve(src.drum_overrides.size());
+        candidate.drum_overrides.reserve(src.drum_overrides.size());
         for (const auto& sd : src.drum_overrides) {
             uasf::XgDrumOverrideMetadata dd;
             dd.drum_setup   = sd.drum_setup;
@@ -199,9 +194,12 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             dd.pan          = sd.pan;
             dd.reverb_send  = sd.reverb_send;
             dd.pitch_coarse = sd.pitch_coarse;
-            dst.drum_overrides.push_back(dd);
+            candidate.drum_overrides.push_back(dd);
         }
-        dst.advisory_codes = src.advisory_codes;
+        candidate.advisory_codes = src.advisory_codes;
+        if (!candidate.empty()) {
+            style.xg_sysex = std::move(candidate);
+        }
     }
 
     // ── Source-channel → CASM config map (Task A: per-role splitting) ──

@@ -266,6 +266,14 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
     bool                 sysex_in_progress = false;
     bool                 sysex_overflowed  = false;
     std::vector<uint8_t> sysex_buf;
+    auto abortPendingSysEx = [&]() {
+        if (sysex_in_progress) {
+            recordMalformedSysEx(result_.xg_sysex);
+            sysex_in_progress = false;
+            sysex_overflowed = false;
+            sysex_buf.clear();
+        }
+    };
 
     // Standard MIDI File variable-length quantity (max 4 bytes).
     auto readVlq = [&](uint32_t& out) -> bool {
@@ -352,25 +360,15 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
             uint32_t len = 0;
             running_status = 0;
             if (!readVlq(len) || len > remaining - pos) {
-                if (sysex_in_progress) {
-                    recordMalformedSysEx(result_.xg_sysex);
-                    sysex_in_progress = false;
-                    sysex_overflowed = false;
-                    sysex_buf.clear();
-                }
+                abortPendingSysEx();
                 recordMalformedSysEx(result_.xg_sysex);
                 break;                                 // truncated or invalid SysEx
             }
 
             const uint8_t* pkt = d + pos;
             if (status == 0xF0) {
-                if (sysex_in_progress) {
-                    // Previous divided SysEx was never terminated by 0xF7.
-                    recordMalformedSysEx(result_.xg_sysex);
-                    sysex_in_progress = false;
-                    sysex_overflowed = false;
-                    sysex_buf.clear();
-                }
+                // Previous divided SysEx was never terminated by 0xF7.
+                abortPendingSysEx();
                 if (len == 0) {
                     recordMalformedSysEx(result_.xg_sysex);
                 } else if (pkt[len - 1] == 0xF7u) {
@@ -420,6 +418,10 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
             pos += len;
             continue;
         }
+        // Any non-SysEx/non-meta status (channel voice 0x80..0xEF or invalid >= 0xF0)
+        // terminates an in-progress divided SysEx per MIDI/SMF spec so it never
+        // splices across intervening notes or corrupts a later escaped 0xF7 SysEx.
+        abortPendingSysEx();
         if (status >= 0xF0) break;                     // not valid inside an SMF track
 
         running_status = status;
@@ -436,9 +438,7 @@ std::vector<SffMidiEvent> Sff1Reader::parseMidiEvents(const uint8_t* data,
         events.push_back(ev);
     }
 
-    if (sysex_in_progress) {
-        recordMalformedSysEx(result_.xg_sysex);
-    }
+    abortPendingSysEx();
 
     offset += pos;
     return events;
