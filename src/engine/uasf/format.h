@@ -106,6 +106,12 @@ constexpr uint32_t kExtSectionNames = 0x4D414E53;
 //   [33]     u8 reserved (0)
 // Written only when at least one track has has_casm_meta == true; absent in v1.0/v1.1 files.
 constexpr uint32_t kExtCasm = 0x4D534143;
+// 'XGSX': style-level Yamaha XG / GM / GS SysEx summary metadata (StyleDefinition::xg_sysex),
+// payload = u8 version (1) + 5 x u32 LE counters + u8 mode_flags + u8 opt_flags + optional
+// scalar values + u8 part_count (<=16) + per-part records + u16 LE drum_override_count (<=512)
+// + per-drum records + u8 advisory_count (<=32) + length-prefixed advisory strings (1..64 B).
+// Written only when !style.xg_sysex.empty(); absent in legacy and SysEx-free files.
+constexpr uint32_t kExtXgSysEx = 0x58534758;
 
 // ── Validation constants ───────────────────────────────────────────
 
