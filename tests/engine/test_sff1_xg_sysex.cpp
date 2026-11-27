@@ -486,6 +486,92 @@ int main() {
              fmr.style.xg_sysex.empty());
     }
 
+    // ── 6. Wave-4b Importer Regressions (P1-5 isXgDrumPart + CASM, P2-1 OTSM, P2-4 Chunk Clamp Warning) ─
+    {
+        auto makeChunk = [](const char* id4, const std::vector<uint8_t>& body) {
+            std::vector<uint8_t> b;
+            b.insert(b.end(), id4, id4 + 4);
+            const uint32_t sz = static_cast<uint32_t>(body.size());
+            b.push_back(static_cast<uint8_t>((sz >> 24) & 0xFF));
+            b.push_back(static_cast<uint8_t>((sz >> 16) & 0xFF));
+            b.push_back(static_cast<uint8_t>((sz >> 8) & 0xFF));
+            b.push_back(static_cast<uint8_t>(sz & 0xFF));
+            b.insert(b.end(), body.begin(), body.end());
+            return b;
+        };
+
+        // P1-5: XG DrumS3 (08 07 07 04) on ch 7 WITH a CASM entry ("Perc3" ch7 -> dest 8)
+        // AND XG DrumS1 (08 06 07 02) on ch 6 WITH a CASM entry ("KitX" ch6 -> dest 9)
+        // must both set track.is_drum = true (Percussion for dest 8, Drum for dest 9)!
+        std::vector<uint8_t> trk;
+        addMetaTempo(trk, 0, 500000);
+        addMetaMarker(trk, 0, "SInt");
+        addSysExF0(trk, 0, {0x43, 0x10, 0x4C, 0x08, 0x07, 0x07, 0x04}); // Part 7 -> DrumS3
+        addSysExF0(trk, 0, {0x43, 0x10, 0x4C, 0x08, 0x06, 0x07, 0x02}); // Part 6 -> DrumS1
+        addMetaMarker(trk, 480, "Main A");
+        addNote(trk, 0, 7, 54, 80, 120);
+        addNote(trk, 0, 6, 36, 100, 120);
+        addMetaEoT(trk, 1440);
+
+        auto makeCtb2 = [&](uint8_t srcCh, const char* name8, uint8_t destCh) {
+            std::vector<uint8_t> c(40, 0);
+            c[0] = srcCh;
+            std::memcpy(&c[1], name8, 8);
+            c[9] = destCh;
+            c[21] = 127;
+            c[28] = 1; // NTR fixed
+            c[31] = 0; c[32] = 127;
+            return makeChunk("Ctb2", c);
+        };
+        std::vector<uint8_t> csegBody;
+        auto sdec = makeChunk("Sdec", {'M', 'a', 'i', 'n', ' ', 'A'});
+        auto c7 = makeCtb2(7, "Perc3   ", 8);
+        auto c6 = makeCtb2(6, "KitX    ", 9);
+        csegBody.insert(csegBody.end(), sdec.begin(), sdec.end());
+        csegBody.insert(csegBody.end(), c7.begin(), c7.end());
+        csegBody.insert(csegBody.end(), c6.begin(), c6.end());
+
+        std::vector<uint8_t> sty = wrapSmf(trk);
+        auto casm = makeChunk("CASM", makeChunk("CSEG", csegBody));
+        auto otsm = makeChunk("OTSM", {0x00, 0x01, 0x02, 0x03}); // P2-1 uppercase OTSM
+        sty.insert(sty.end(), casm.begin(), casm.end());
+        sty.insert(sty.end(), otsm.begin(), otsm.end());
+
+        Sff1Reader reader;
+        const auto pr = reader.parseBuffer(sty, "p15_otsm.sty");
+        const auto mr = Sff1ToUasfMapper().map(pr);
+        bool ch7PercDrum = false, ch6Drum = false;
+        if (mr.success && !mr.style.sections.empty()) {
+            for (const auto& t : mr.style.sections[0].tracks) {
+                if (t.midi_channel == 7 && t.role == uasf::TrackRole::Percussion && t.is_drum) ch7PercDrum = true;
+                if (t.midi_channel == 6 && t.role == uasf::TrackRole::Drum && t.is_drum) ch6Drum = true;
+            }
+        }
+        bool casmCh7PercDrum = false;
+        if (mr.success && !mr.casm_sections.empty()) {
+            for (const auto& t : mr.casm_sections[0].tracks) {
+                if (t.midi_channel == 7 && t.role == uasf::TrackRole::Percussion && t.is_drum) casmCh7PercDrum = true;
+            }
+        }
+        bool sawOtsmMeta = false;
+        for (const auto& cid : pr.detected_metadata_chunks) if (cid == "OTSM") sawOtsmMeta = true;
+        TEST("P1-5: isXgDrumPart promotes CASM Accompaniment tracks (ch7->Percussion, ch6->Drum, is_drum=true)",
+             pr.success && mr.success && ch7PercDrum && ch6Drum && casmCh7PercDrum);
+        TEST("P2-1: uppercase OTSM recognized as known Yamaha metadata chunk (unknown_chunks==0)",
+             sawOtsmMeta && pr.unknown_chunks == 0);
+
+        // P2-4: Truncated chunk declaring size > remaining appends warning in Sff1Reader::readChunk()
+        std::vector<uint8_t> truncSty = wrapSmf(trk);
+        truncSty.insert(truncSty.end(), {'C', 'A', 'S', 'M', 0x00, 0x00, 0xFF, 0xFF, 0x01, 0x02, 0x03, 0x04});
+        const auto tpr = reader.parseBuffer(truncSty, "p24_trunc_casm.sty");
+        bool sawClampWarn = false;
+        for (const auto& w : tpr.warnings) {
+            if (w.find("CASM") != std::string::npos && w.find("clamped") != std::string::npos) sawClampWarn = true;
+        }
+        TEST("P2-4: truncated chunk-size clamping appends explicit warning in ParseResult::warnings",
+             tpr.success && sawClampWarn);
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }

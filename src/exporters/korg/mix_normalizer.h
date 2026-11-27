@@ -31,11 +31,12 @@ struct MixNormalizeOptions {
 };
 
 struct MixNormalizeStats {
-    uint32_t proprietary_ccs_stripped = 0; // NRPN 98/99 (+ paired 6/38), stray CC94, invalid >=128
+    uint32_t proprietary_ccs_stripped = 0; // NRPN 98/99 (+ paired 6/38/96/97), stray CC94, invalid >=128
     uint32_t sustain_resets_added     = 0; // CC64=0 inserted at len-1
     uint32_t pitchbend_resets_added   = 0; // 0xE0 0x00 0x40 inserted at len-1
     uint32_t tracks_gain_adjusted     = 0; // melodic/bass tracks boosted or attenuated
     uint32_t xg_params_translated     = 0; // tick-0 mix CCs synthesized from XG SysEx or CC94->CC93 blend
+    uint32_t expression_resets_added  = 0; // CC11 restored at len-1 if element faded below CC11 < 32
 };
 
 // Lightweight POD summary views for formatPa5xStyleEditSheetMd so Q4/Q5 wiring
@@ -203,7 +204,7 @@ inline MixNormalizeStats normalizeElementMix(
                         cleaned.push_back(ev);
                         continue;
                     }
-                    if ((ev.d1 == 6u || ev.d1 == 38u) && in_nrpn[ch]) {
+                    if ((ev.d1 == 6u || ev.d1 == 38u || ev.d1 == 96u || ev.d1 == 97u) && in_nrpn[ch]) {
                         ++stats.proprietary_ccs_stripped;
                         continue;
                     }
@@ -273,6 +274,16 @@ inline MixNormalizeStats normalizeElementMix(
                     has_t0_cc93[ch] = true;
                     has_any_cc93[ch] = true;
                     ++stats.xg_params_translated;
+                } else if (params.variation_send.has_value() && *params.variation_send > 0u &&
+                           !has_any_cc93[ch] && !has_t0_cc93[ch] && cc94_val[ch] <= 0) {
+                    const uint8_t blended = static_cast<uint8_t>(
+                        std::min<int>(127, (static_cast<int>(*params.variation_send) * 30) / 100));
+                    if (blended > 0u) {
+                        tick0_synth.push_back(Event{0u, cc_status, 93u, blended});
+                        has_t0_cc93[ch] = true;
+                        has_any_cc93[ch] = true;
+                        ++stats.xg_params_translated;
+                    }
                 }
             }
         }
@@ -296,6 +307,9 @@ inline MixNormalizeStats normalizeElementMix(
 
         // ── 3. Effective Loudness Proxy Headroom (M5.3 >= 95%) ───────────
         // Applies ONLY to active chord-driven melodic/bass channels (NEVER Drum/Perc!).
+        // P1-3: Evaluate effective CC11 across active sounding note spans (peak CC11
+        // during sounding notes) rather than tick-0-only CC11 so EDM sidechain-ducked
+        // pads (e.g. tick-0 CC11=24 -> offbeat CC11=116) are NEVER falsely over-boosted!
         if (opt.normalize_headroom) {
             constexpr double kMinHealthyL = 0.20;
             constexpr double kTargetLowL  = 0.24;
@@ -305,38 +319,66 @@ inline MixNormalizeStats normalizeElementMix(
             for (uint8_t ch = kBassCh; ch <= 15u; ++ch) {
                 if (!isChordDriven(ch)) continue;
 
-                uint8_t cc7  = 100u;
-                uint8_t cc11 = 127u;
+                uint8_t cc7 = 100u;
+                uint8_t tick0_cc11 = 127u;
+                uint8_t cur_cc11 = 127u;
+                bool has_mid_cc11 = false;
+                uint8_t max_active_cc11 = 0u;
+                bool sampled_active_cc11 = false;
+                int active_notes = 0;
                 double sum_sq = 0.0;
                 uint32_t note_ct = 0;
 
                 for (const auto& ev : el.events) {
                     if ((ev.status & 0x0Fu) != ch) continue;
                     const uint8_t hi = ev.status & 0xF0u;
-                    if (ev.tick == 0 && hi == 0xB0u) {
-                        if (ev.d1 == 7u)  cc7  = std::min<uint8_t>(ev.d2, 127u);
-                        if (ev.d1 == 11u) cc11 = std::min<uint8_t>(ev.d2, 127u);
+                    if (hi == 0xB0u) {
+                        if (ev.tick == 0u && ev.d1 == 7u) {
+                            cc7 = std::min<uint8_t>(ev.d2, 127u);
+                        } else if (ev.d1 == 11u) {
+                            const uint8_t val = std::min<uint8_t>(ev.d2, 127u);
+                            cur_cc11 = val;
+                            if (ev.tick == 0u) {
+                                tick0_cc11 = val;
+                            } else {
+                                has_mid_cc11 = true;
+                            }
+                            if (active_notes > 0) {
+                                if (!sampled_active_cc11 || val > max_active_cc11) {
+                                    max_active_cc11 = val;
+                                    sampled_active_cc11 = true;
+                                }
+                            }
+                        }
                     } else if (hi == 0x90u && ev.d2 > 0u) {
+                        ++active_notes;
+                        if (!sampled_active_cc11 || cur_cc11 > max_active_cc11) {
+                            max_active_cc11 = cur_cc11;
+                            sampled_active_cc11 = true;
+                        }
                         const double v = static_cast<double>(std::min<uint8_t>(ev.d2, 127u));
                         sum_sq += v * v;
                         ++note_ct;
+                    } else if (hi == 0x80u || (hi == 0x90u && ev.d2 == 0u)) {
+                        if (active_notes > 0) --active_notes;
                     }
                 }
                 if (note_ct == 0) continue;
 
+                uint8_t eff_cc11 = sampled_active_cc11 ? max_active_cc11 : tick0_cc11;
                 const double rms_vel = std::sqrt(sum_sq / static_cast<double>(note_ct));
                 const double loudness = (static_cast<double>(cc7) / 127.0) *
-                                        (static_cast<double>(cc11) / 127.0) *
+                                        (static_cast<double>(eff_cc11) / 127.0) *
                                         (rms_vel / 127.0);
 
                 if (loudness < kMinHealthyL) {
-                    // Guard against silent tick-0 CC11=0 which blocks any CC7/vel boost.
-                    if (cc11 == 0u) {
-                        cc11 = 100u;
-                        mix_detail::upsertTick0Cc(el.events, ch, 11u, cc11);
+                    // Guard against silent CC11=0 across all active notes which blocks any CC7/vel boost.
+                    if (eff_cc11 == 0u) {
+                        eff_cc11 = 100u;
+                        mix_detail::upsertTick0Cc(el.events, ch, 11u, eff_cc11);
                     }
 
-                    const double denom_no_cc7 = (static_cast<double>(cc11) / 127.0) *
+                    const double denom_no_cc7 = (static_cast<double>(eff_cc11) / 127.0) *
                                                 (rms_vel / 127.0);
                     uint8_t new_cc7 = cc7;
                     if (cc7 < 120u) {
@@ -367,11 +409,11 @@ inline MixNormalizeStats normalizeElementMix(
                         }
                         const double new_rms = std::sqrt(new_sum_sq / static_cast<double>(note_ct));
                         double after_vel_l = (static_cast<double>(new_cc7) / 127.0) *
-                                             (static_cast<double>(cc11) / 127.0) *
+                                             (static_cast<double>(eff_cc11) / 127.0) *
                                              (new_rms / 127.0);
                         // If tiny CC11 still kept L below 0.24 even at max vel, lift CC7 (and CC11 if needed).
                         if (after_vel_l < kTargetLowL && new_cc7 < 127u) {
-                            const double f = (static_cast<double>(cc11) / 127.0) * (new_rms / 127.0);
+                            const double f = (static_cast<double>(eff_cc11) / 127.0) * (new_rms / 127.0);
                             const int lift_cc7 = (f > 1e-9)
                                 ? static_cast<int>(std::ceil(kTargetLowL * 127.0 / f))
                                 : 127;
@@ -379,18 +421,31 @@ inline MixNormalizeStats normalizeElementMix(
                             mix_detail::upsertTick0Cc(el.events, ch, 7u, new_cc7);
                             after_vel_l = (static_cast<double>(new_cc7) / 127.0) * f;
                         }
-                        if (after_vel_l < kTargetLowL && cc11 < 127u) {
+                        if (after_vel_l < kTargetLowL && eff_cc11 < 127u) {
                             const double f = (static_cast<double>(new_cc7) / 127.0) * (new_rms / 127.0);
                             const int lift_cc11 = (f > 1e-9)
                                 ? static_cast<int>(std::ceil(kTargetLowL * 127.0 / f))
                                 : 127;
-                            cc11 = static_cast<uint8_t>(std::clamp(lift_cc11, static_cast<int>(cc11), 127));
-                            mix_detail::upsertTick0Cc(el.events, ch, 11u, cc11);
+                            const uint8_t target_cc11 = static_cast<uint8_t>(
+                                std::clamp(lift_cc11, static_cast<int>(eff_cc11), 127));
+                            if (!has_mid_cc11) {
+                                mix_detail::upsertTick0Cc(el.events, ch, 11u, target_cc11);
+                            } else if (eff_cc11 > 0u) {
+                                const double cc11_scale =
+                                    static_cast<double>(target_cc11) / static_cast<double>(eff_cc11);
+                                for (auto& ev : el.events) {
+                                    if ((ev.status & 0x0Fu) == ch && (ev.status & 0xF0u) == 0xB0u && ev.d1 == 11u) {
+                                        const int sv = static_cast<int>(
+                                            std::lround(static_cast<double>(ev.d2) * cc11_scale));
+                                        ev.d2 = static_cast<uint8_t>(std::clamp(sv, 1, 127));
+                                    }
+                                }
+                            }
                         }
                     }
                     ++stats.tracks_gain_adjusted;
                 } else if (loudness > kMaxHealthyL) {
-                    const double denom_no_cc7 = (static_cast<double>(cc11) / 127.0) *
+                    const double denom_no_cc7 = (static_cast<double>(eff_cc11) / 127.0) *
                                                 (rms_vel / 127.0);
                     const int desired_cc7 = (denom_no_cc7 > 1e-9)
                         ? static_cast<int>(std::floor(kTargetHighL * 127.0 / denom_no_cc7))
@@ -402,17 +457,34 @@ inline MixNormalizeStats normalizeElementMix(
             }
         }
 
-        // ── 4. Loop-Boundary Safety (M3.3 == 0) ──────────────────────────
+        // ── 4. Loop-Boundary Safety (M3.3 == 0 & CC11 Fade-Out Reset) ────
         if (opt.enforce_loop_resets) {
             std::array<uint8_t, 16>  last_cc64{};
             std::array<uint16_t, 16> last_pb{};
             last_pb.fill(8192u);
+            std::array<bool, 16>     had_t0_cc11{};
+            std::array<uint8_t, 16>  t0_cc11{};
+            t0_cc11.fill(127u);
+            std::array<bool, 16>     saw_mid_cc11{};
+            std::array<uint8_t, 16>  last_cc11{};
+            last_cc11.fill(127u);
+            std::array<uint8_t, 16>  max_cc11{};
 
             for (const auto& ev : el.events) {
                 const uint8_t hi = ev.status & 0xF0u;
                 const uint8_t ch = ev.status & 0x0Fu;
                 if (hi == 0xB0u && ev.d1 == 64u) {
                     last_cc64[ch] = ev.d2;
+                } else if (hi == 0xB0u && ev.d1 == 11u) {
+                    const uint8_t v = std::min<uint8_t>(ev.d2, 127u);
+                    if (ev.tick == 0u) {
+                        had_t0_cc11[ch] = true;
+                        t0_cc11[ch] = v;
+                    } else {
+                        saw_mid_cc11[ch] = true;
+                    }
+                    last_cc11[ch] = v;
+                    if (v > max_cc11[ch]) max_cc11[ch] = v;
                 } else if (hi == 0xE0u) {
                     last_pb[ch] = static_cast<uint16_t>(
                         static_cast<uint16_t>(ev.d1 & 0x7Fu) |
@@ -429,6 +501,18 @@ inline MixNormalizeStats normalizeElementMix(
                 if (last_pb[ch] != 8192u) {
                     el.events.push_back(Event{reset_tick, static_cast<uint8_t>(0xE0u | ch), 0x00u, 0x40u});
                     ++stats.pitchbend_resets_added;
+                }
+                if (saw_mid_cc11[ch] && last_cc11[ch] < 32u) {
+                    uint8_t restore = 127u;
+                    if (had_t0_cc11[ch] && t0_cc11[ch] >= 32u) {
+                        restore = t0_cc11[ch];
+                    } else if (!had_t0_cc11[ch]) {
+                        restore = 127u;
+                    } else {
+                        restore = std::min<uint8_t>(std::max<uint8_t>(max_cc11[ch], 100u), 127u);
+                    }
+                    el.events.push_back(Event{reset_tick, static_cast<uint8_t>(0xB0u | ch), 11u, restore});
+                    ++stats.expression_resets_added;
                 }
             }
         }
@@ -525,6 +609,7 @@ inline std::string formatPa5xStyleEditSheetMd(
         out << "- **SysEx Summary:** seen=" << xg.total_sysex_seen
             << ", recognized=" << xg.recognized_xg_count
             << ", unrecognized=" << xg.unrecognized_count
+            << ", malformed=" << xg.malformed_count
             << ", dsp_sysex=" << xg.dsp_sysex_count << "\n";
         out << "- **Master Volume:** "
             << (xg.master_volume.has_value() ? std::to_string(*xg.master_volume) : "not set") << "\n";

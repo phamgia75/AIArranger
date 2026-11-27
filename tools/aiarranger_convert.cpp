@@ -37,6 +37,9 @@ int usage() {
                  "                          [--break-policy <cap|withhold>] [--quality-mode <quality|raw>] [--raw]\n"
                  "                          [--megavoice-mode <auto|sanitize|preserve>] [--drum-remap <on|off>]\n"
                  "                          [--cv-split <on|off>] [--normalize-source-chord <on|off>]\n"
+                 "                          [--mix-normalize <on|off>] [--groove-normalize <on|off>]\n"
+                 "                          [--xg-sysex-mix <on|off>] [--headroom-normalize <on|off>]\n"
+                 "                          [--style-edit-sheet FILE]\n"
                  "                          [--auto-sound-map | --no-auto-sound-map]\n"
                  "                          [--target-kst <dir>] [--prefer-target-user-sounds] [--dump-soundmap FILE]\n"
                  "       aiarranger-convert --compare <ours.mid> --with <pa5x_export.mid>\n"
@@ -76,12 +79,13 @@ int compareMode(const std::string& ours, const std::string& theirs) {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string input, output, target, soundMap, reportPath, templatePath, dumpSoundMapPath, targetKstPath, compareA, compareB;
+    std::string input, output, target, soundMap, reportPath, templatePath, dumpSoundMapPath, styleEditSheetPath, targetKstPath, compareA, compareB;
     MapOptions opt;
     bool rawModeRequested = false;
     bool explicitAutoSoundMap = false;
     bool explicitNoAutoSoundMap = false;
     bool preferTargetUserSounds = false;
+    bool explicitQ5Enable = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -94,6 +98,11 @@ int main(int argc, char** argv) {
             opt.enable_source_chord_normalization = false;
             opt.enable_sound_matching = false;
             opt.prefer_target_user_sounds = false;
+            opt.enable_mix_groove_normalization = false;
+            opt.enable_groove_normalization = false;
+            opt.enable_mix_normalization = false;
+            opt.enable_xg_sysex_mix_injection = false;
+            opt.enable_headroom_normalization = false;
             continue;
         }
         if (a == "--auto-sound-map") {
@@ -118,6 +127,7 @@ int main(int argc, char** argv) {
         else if (a == "--report") reportPath = v;
         else if (a == "--sound-template") templatePath = v;
         else if (a == "--dump-soundmap") dumpSoundMapPath = v;
+        else if (a == "--style-edit-sheet") styleEditSheetPath = v;
         else if (a == "--target-kst") targetKstPath = v;
         else if (a == "--compare") compareA = v;
         else if (a == "--with") compareB = v;
@@ -142,6 +152,11 @@ int main(int argc, char** argv) {
                 opt.enable_source_chord_normalization = false;
                 opt.enable_sound_matching = false;
                 opt.prefer_target_user_sounds = false;
+                opt.enable_mix_groove_normalization = false;
+                opt.enable_groove_normalization = false;
+                opt.enable_mix_normalization = false;
+                opt.enable_xg_sysex_mix_injection = false;
+                opt.enable_headroom_normalization = false;
             } else if (v == "quality") {
                 rawModeRequested = false;
                 opt.enable_cv_split = true;
@@ -149,6 +164,11 @@ int main(int argc, char** argv) {
                 opt.megavoice_mode = quality::MegaVoiceMode::Auto;
                 opt.enable_source_chord_normalization = true;
                 opt.enable_sound_matching = true;
+                opt.enable_mix_groove_normalization = true;
+                opt.enable_groove_normalization = true;
+                opt.enable_mix_normalization = true;
+                opt.enable_xg_sysex_mix_injection = true;
+                opt.enable_headroom_normalization = true;
             } else return usage();
         } else if (a == "--megavoice-mode") {
             if (v == "auto") opt.megavoice_mode = quality::MegaVoiceMode::Auto;
@@ -166,6 +186,22 @@ int main(int argc, char** argv) {
         } else if (a == "--normalize-source-chord") {
             if (v == "on") opt.enable_source_chord_normalization = true;
             else if (v == "off") opt.enable_source_chord_normalization = false;
+            else return usage();
+        } else if (a == "--mix-normalize") {
+            if (v == "on") { opt.enable_mix_normalization = true; explicitQ5Enable = true; }
+            else if (v == "off") opt.enable_mix_normalization = false;
+            else return usage();
+        } else if (a == "--groove-normalize") {
+            if (v == "on") { opt.enable_groove_normalization = true; explicitQ5Enable = true; }
+            else if (v == "off") opt.enable_groove_normalization = false;
+            else return usage();
+        } else if (a == "--xg-sysex-mix") {
+            if (v == "on") { opt.enable_xg_sysex_mix_injection = true; explicitQ5Enable = true; }
+            else if (v == "off") opt.enable_xg_sysex_mix_injection = false;
+            else return usage();
+        } else if (a == "--headroom-normalize") {
+            if (v == "on") { opt.enable_headroom_normalization = true; explicitQ5Enable = true; }
+            else if (v == "off") opt.enable_headroom_normalization = false;
             else return usage();
         } else return usage();
     }
@@ -187,6 +223,10 @@ int main(int argc, char** argv) {
     }
     if (rawModeRequested && preferTargetUserSounds) {
         std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --prefer-target-user-sounds\n";
+        return 1;
+    }
+    if (rawModeRequested && explicitQ5Enable) {
+        std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with Q5 normalization enable flags\n";
         return 1;
     }
     if (preferTargetUserSounds && targetKstPath.empty()) {
@@ -237,11 +277,16 @@ int main(int argc, char** argv) {
         opt.capture_soundmap_dump = true;
         opt.soundmap_style_name = baseStyleName;
     }
+    if (!styleEditSheetPath.empty()) {
+        opt.capture_style_edit_sheet = true;
+        if (opt.soundmap_style_name.empty()) opt.soundmap_style_name = baseStyleName;
+    }
 
     const auto mapped = mapToKorg(canon.style, opt);
     if (!mapped.ok) { std::cerr << "conversion failed: " << mapped.error << "\n"; return 2; }
     if (!templatePath.empty() && !writeText(templatePath, soundMapTemplate(mapped.report, baseStyleName))) return 1;
     if (!dumpSoundMapPath.empty() && !writeText(dumpSoundMapPath, mapped.report.soundmap_dump)) return 1;
+    if (!styleEditSheetPath.empty() && !writeText(styleEditSheetPath, mapped.report.style_edit_sheet_md)) return 1;
 
     // Write -> re-parse with the independent reader -> validate what was written.
     const auto written = write(mapped.style);
@@ -250,8 +295,21 @@ int main(int argc, char** argv) {
     std::vector<std::string> errs = back.ok ? validate(back.style) : std::vector<std::string>{back.error};
 
     std::string report = "Input: " + input + "\nTarget: Korg Pa5X Style SMF separated by markers (format 0)\n" +
-                         formatReport(mapped.report, mapped.style) + "\nValidator: " +
-                         (errs.empty() ? "PASS (" + std::to_string(back.style.elements.size()) + " elements)" : "FAIL") + "\n";
+                         formatReport(mapped.report, mapped.style);
+    if (!parsed.warnings.empty() || parsed.xg_sysex.malformed_count > 0 || !parsed.detected_metadata_chunks.empty()) {
+        report += "\nImporter diagnostics (Sff1Reader):\n";
+        if (parsed.xg_sysex.malformed_count > 0) {
+            report += "  malformed XG/MIDI SysEx count: " + std::to_string(parsed.xg_sysex.malformed_count) + "\n";
+        }
+        if (!parsed.detected_metadata_chunks.empty()) {
+            report += "  metadata chunks (read-only):";
+            for (const auto& cid : parsed.detected_metadata_chunks) report += " " + cid;
+            report += "\n";
+        }
+        for (const auto& w : parsed.warnings) report += "  " + w + "\n";
+    }
+    report += "\nValidator: " +
+              (errs.empty() ? "PASS (" + std::to_string(back.style.elements.size()) + " elements)" : "FAIL") + "\n";
     for (const auto& e : errs) report += "  " + e + "\n";
     std::cout << report;
     if (!reportPath.empty() && !writeText(reportPath, report)) return 1;

@@ -218,7 +218,7 @@ struct ParseResult {
 // ── Supported Chunk IDs ───────────────────────────────────────────
 constexpr const char* kKnownChunks[] = {
     "CASM", "OTS", "OTS ", "MDB", "MDB ", "FNRP", "STY", "SFF1", "SInt", "SAct", "SArt",
-    "Midi", "Sect", "Trk", "MThd", "MTrk", "OTSc", "OTSm"
+    "Midi", "Sect", "Trk", "MThd", "MTrk", "OTSc", "OTSm", "OTSM"
 };
 
 constexpr size_t kKnownChunkCount = sizeof(kKnownChunks) / sizeof(kKnownChunks[0]);

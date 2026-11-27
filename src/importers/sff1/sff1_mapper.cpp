@@ -282,6 +282,10 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
         if (cfg) {
             track.name = cfg->name;
             track.role = mapCasmTrackRole(*cfg);
+            if (track.role == uasf::TrackRole::Accompaniment && isXgDrumPart(ch)) {
+                track.role = (cfg->dest_channel == 9) ? uasf::TrackRole::Drum
+                                                      : uasf::TrackRole::Percussion;
+            }
             setCasmArticulation(track.articulation, *cfg);
         } else {
             // No CASM metadata for this channel: honor explicit XG Drum Part Mode
@@ -552,6 +556,10 @@ SffToUasfResult Sff1ToUasfMapper::map(const ParseResult& parseResult) noexcept {
             track.name = t.name;
             track.midi_channel = t.source_channel;
             track.role = mapCasmTrackRole(t);
+            if (track.role == uasf::TrackRole::Accompaniment && isXgDrumPart(t.source_channel)) {
+                track.role = (t.dest_channel == 9) ? uasf::TrackRole::Drum
+                                                   : uasf::TrackRole::Percussion;
+            }
             track.is_drum = (track.role == uasf::TrackRole::Drum ||
                              track.role == uasf::TrackRole::Percussion);
             track.articulation.profile = isMegaVoiceChannel(t.source_channel, track.name, track.is_drum)
