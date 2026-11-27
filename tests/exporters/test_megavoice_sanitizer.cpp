@@ -723,6 +723,11 @@ int main() {
         TEST("Mission4b P1-4: Ghost mode maps vel=14 -> soft 29 (<=34, never 79) & preserves M2.3",
              r_e14_ghost.notes.size() == 7 && r_e14_ghost.notes[0].vel == 29 &&
              r_e14_ghost.stats.normal_zone_rms_vel > r_e14_ghost.stats.upper_zone_rms_vel);
+
+        // Audit P2: normal_zone_rms_vel strictly averages source [21..64], completely unaffected by ghosted Zone 0 (<= 20)
+        TEST("Mission4b Audit P2: normal_zone_rms_vel excludes ghosted Zone 0 (vel <= 20) when drop_noise_zone=false",
+             r_e14_ghost.stats.normal_zone_rms_vel == r_e14_drop.stats.normal_zone_rms_vel &&
+             r_e14_ghost.stats.normal_zone_rms_vel >= 68.0);
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

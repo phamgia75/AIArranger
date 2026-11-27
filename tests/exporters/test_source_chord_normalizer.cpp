@@ -346,6 +346,21 @@ int main() {
         TEST("Mission4b P0-1: Major triad normalized to CV6 (Power) yields only {0, 7} pitch classes",
              rCv6Maj.quality_remapped == 1 && allPwrPcs);
 
+        // Audit P1: 4-voice [60, 64, 67, 72] under Power forces the 4th fallback delta on E4 (64 -> G3 55, NEVER B3 59!)
+        const std::vector<NoteSpan> maj4ToPwr = {
+            mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67), mkNote(0, 480, 72)
+        };
+        const auto rCv6Maj4 = normalizeTrackToPa5xReference(maj4ToPwr, kAcc1Ch, uasf::TrackRole::Chord, casm, ChordType::Power);
+        bool allPwr4Ok = (rCv6Maj4.notes.size() == 4);
+        bool hasBClash = false;
+        for (const auto& s : rCv6Maj4.notes) {
+            const uint8_t pc = static_cast<uint8_t>(s.pitch % 12);
+            if (pc == 11) hasBClash = true;
+            if (pc != 0 && pc != 7) allPwr4Ok = false;
+        }
+        TEST("Mission4b Audit P1: 4-voice [60,64,67,72] -> CV6 (Power) maps E4(64)->G3(55), strictly {0,7} & zero pc=11 clash",
+             rCv6Maj4.quality_remapped == 1 && allPwr4Ok && !hasBClash && rCv6Maj4.notes[1].pitch == 55);
+
         // P1-1: SFF2 Guitar Stroke (NTR=2, NTT=1) in Maj7 is NOT treated as Melody -> snaps B (pc 11) in CV1!
         CasmTrackView casmGtrStroke{};
         casmGtrStroke.has_casm = true;

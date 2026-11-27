@@ -97,7 +97,7 @@ struct SanitizeStats {
     uint32_t guitar_voices_trimmed = 0;  // excess >6 simultaneous voices pruned on NTR=2
     uint32_t guitar_span_folded    = 0;  // notes folded within <=24 st fretboard span
     bool     guitar_mode_candidate = false;
-    double   normal_zone_rms_vel   = 0.0; // post-sanitize mean vel of source [1..64]
+    double   normal_zone_rms_vel   = 0.0; // post-sanitize mean vel of source [21..64] (excludes Zone 0 fret-noise 1..20)
     double   upper_zone_rms_vel    = 0.0; // post-sanitize mean vel of source [65..127] surviving notes
 };
 
@@ -967,10 +967,10 @@ inline SanitizeResult sanitizeMegaVoiceTrack(
     res.notes.reserve(tracked.size());
     for (const auto& item : tracked) {
         res.notes.push_back(item.note);
-        if (item.src_vel <= 64) {
+        if (item.src_vel >= 21 && item.src_vel <= 64) {
             norm_sum += item.note.vel;
             ++norm_ct;
-        } else {
+        } else if (item.src_vel >= 65) {
             upper_sum += item.note.vel;
             ++upper_ct;
         }

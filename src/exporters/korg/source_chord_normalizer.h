@@ -558,7 +558,7 @@ inline NormalizeResult normalizeTrackToPa5xReference(
                     // Target CV is C Power / 1+5 (cv6): {0, 7} — preserves {0, 7} untouched.
                     if (src.raw_type != 0x1E && src.raw_type != 0x1F) {
                         if ((src.is_major_family || src.is_dominant_family) && pc == 4 && isChordOrBass && !isMelodyNtt) {
-                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+3, -4, +8, -5}); // E -> G/C
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+3, -4, +8, -9}); // E -> G/C
                         } else if (src.is_minor_family && pc == 3 && isChordOrBass && !isMelodyNtt) {
                             delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-3, +4, +9, -8}); // Eb -> C/G
                         } else if ((src.has_min7 || src.is_dominant_family) && pc == 10) {
