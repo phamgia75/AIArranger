@@ -772,31 +772,70 @@ inline void applyPianoMudVoicing(Style& style,
                         }
                         before_ss << "]";
 
-                        uint32_t moved = 0;
-                        // Keep lowest anchor tone low_idx[0] untouched; open-voice colliding upper tones.
-                        uint8_t prev_kept = notes[low_idx[0]].pitch;
-                        for (size_t k = 1u; k < low_idx.size(); ++k) {
-                            const size_t idx = low_idx[k];
-                            const uint8_t p = notes[idx].pitch;
-                            if (p > prev_kept && (p - prev_kept) <= 4u) {
-                                const int lifted_i = static_cast<int>(p) + 12;
-                                if (lifted_i <= 84 &&
-                                    !hasSimultaneousPitchIn(notes, idx, t0, onset_win,
-                                                            static_cast<uint8_t>(lifted_i))) {
-                                    notes[idx].pitch = static_cast<uint8_t>(lifted_i);
-                                    ch_changed = true;
-                                    ++moved;
-                                    ++stats.notes_pitch_adjusted;
-                                    continue;
+                        const std::vector<size_t> orig_low_idx = low_idx;
+                        std::vector<uint8_t> orig_cluster_pitches;
+                        orig_cluster_pitches.reserve(j - i);
+                        for (size_t idx = i; idx < j; ++idx) {
+                            orig_cluster_pitches.push_back(notes[idx].pitch);
+                        }
+
+                        // Iterate to fixed point within this chord cluster so sub-C2 (< MIDI 36)
+                        // close clusters (e.g. [32, 35, 44] -> [32, 44, 47] -> [32, 44, 59])
+                        // converge cleanly in a single enhanceStyle() pass.
+                        for (int iter = 0; iter < 6; ++iter) {
+                            std::vector<size_t> cur_low;
+                            for (size_t idx = i; idx < j; ++idx) {
+                                if (notes[idx].pitch < ceil_midi) cur_low.push_back(idx);
+                            }
+                            if (cur_low.size() < 2u) break;
+                            std::sort(cur_low.begin(), cur_low.end(),
+                                      [&](size_t a, size_t b) { return notes[a].pitch < notes[b].pitch; });
+
+                            bool cur_has_mud = false;
+                            for (size_t k = 1u; k < cur_low.size(); ++k) {
+                                const uint8_t p_prev = notes[cur_low[k - 1u]].pitch;
+                                const uint8_t p_curr = notes[cur_low[k]].pitch;
+                                if (p_curr > p_prev && (p_curr - p_prev) <= 4u) {
+                                    cur_has_mud = true;
+                                    break;
                                 }
                             }
-                            prev_kept = p;
+                            if (!cur_has_mud) break;
+
+                            uint32_t moved_in_iter = 0u;
+                            // Keep lowest anchor tone cur_low[0] untouched; open-voice colliding upper tones.
+                            uint8_t prev_kept = notes[cur_low[0]].pitch;
+                            for (size_t k = 1u; k < cur_low.size(); ++k) {
+                                const size_t idx = cur_low[k];
+                                const uint8_t p = notes[idx].pitch;
+                                if (p > prev_kept && (p - prev_kept) <= 4u) {
+                                    const int lifted_i = static_cast<int>(p) + 12;
+                                    if (lifted_i <= 84 &&
+                                        !hasSimultaneousPitchIn(notes, idx, t0, onset_win,
+                                                                static_cast<uint8_t>(lifted_i))) {
+                                        notes[idx].pitch = static_cast<uint8_t>(lifted_i);
+                                        ++moved_in_iter;
+                                        continue;
+                                    }
+                                }
+                                prev_kept = p;
+                            }
+                            if (moved_in_iter == 0u) break;
+                        }
+
+                        uint32_t moved = 0u;
+                        for (size_t idx = i; idx < j; ++idx) {
+                            if (notes[idx].pitch != orig_cluster_pitches[idx - i]) {
+                                ++moved;
+                            }
                         }
 
                         if (moved > 0u) {
+                            ch_changed = true;
+                            stats.notes_pitch_adjusted += moved;
                             std::vector<uint8_t> post_pitches;
-                            post_pitches.reserve(low_idx.size());
-                            for (size_t idx : low_idx) post_pitches.push_back(notes[idx].pitch);
+                            post_pitches.reserve(orig_low_idx.size());
+                            for (size_t idx : orig_low_idx) post_pitches.push_back(notes[idx].pitch);
                             std::sort(post_pitches.begin(), post_pitches.end());
                             after_ss << "[";
                             for (size_t k = 0; k < post_pitches.size(); ++k) {
@@ -873,10 +912,13 @@ inline void applyDrumGhostDynamics(Style& style,
         const double snare_std = computeStddevVel(snare_v);
         const double hat_std   = computeStddevVel(hat_v);
         const bool already_dynamic_drum = (snare_std >= 3.0 || ghost_snares > 0u);
+        const bool is_fill = isFillMarker(el.marker);
+        double current_hat_std = hat_std;
         bool el_changed = false;
 
-        // 1. Flat snare velocity shaping (strictly skips already-dynamic drums!)
-        if (!already_dynamic_drum && snare_idx.size() >= 2u) {
+        // 1. Flat snare velocity shaping (strictly skips already-dynamic drums AND Fill elements,
+        //    since Fills are turnaround rolls/crescendos rather than backbeat grooves!)
+        if (!is_fill && !already_dynamic_drum && snare_idx.size() >= 2u) {
             auto isBackbeat = [&](uint32_t tick) -> int {
                 const uint32_t in_bar = tick % bar_ticks;
                 const uint32_t beat_len = (el.den == 8u) ? (q / 2u) : q;
@@ -965,6 +1007,7 @@ inline void applyDrumGhostDynamics(Style& style,
                         ++stats.notes_velocity_adjusted;
                     }
                 }
+                current_hat_std = new_std;
                 el_changed = true;
                 EnhancementAction act;
                 act.rule_id = "drum_ghost_dynamics";
@@ -982,7 +1025,7 @@ inline void applyDrumGhostDynamics(Style& style,
         }
 
         // 3. Optional gentle 2nd-half Fill turnaround crescendo (zero invented notes; skips dynamic drums!)
-        if (!already_dynamic_drum && opt.enhance_fill_crescendo && isFillMarker(el.marker) && el.length >= 2u) {
+        if (!already_dynamic_drum && opt.enhance_fill_crescendo && is_fill && el.length >= 2u) {
             const uint32_t half = el.length / 2u;
             std::vector<uint8_t> h1, h2;
             std::vector<size_t> h2_idx;
@@ -1015,7 +1058,18 @@ inline void applyDrumGhostDynamics(Style& style,
                             new_h2.push_back(clampMidi7(static_cast<int>(notes[idx].vel) + add, lo_bound, hi_bound));
                         }
                         const double m2_after = computeMeanVel(new_h2);
-                        if (m2_after > m1) {
+                        // Guard Pass-2 idempotence: never let Sub-step 3 collapse hat_std back < 3.0.
+                        bool preserves_hat_std = true;
+                        if (hat_idx.size() >= 2u && current_hat_std >= 3.0) {
+                            std::vector<uint8_t> post_vel(notes.size());
+                            for (size_t i = 0; i < notes.size(); ++i) post_vel[i] = notes[i].vel;
+                            for (size_t k = 0; k < h2_idx.size(); ++k) post_vel[h2_idx[k]] = new_h2[k];
+                            std::vector<uint8_t> post_hat;
+                            post_hat.reserve(hat_idx.size());
+                            for (size_t idx : hat_idx) post_hat.push_back(post_vel[idx]);
+                            if (computeStddevVel(post_hat) < 3.0) preserves_hat_std = false;
+                        }
+                        if (m2_after > m1 && preserves_hat_std) {
                             for (size_t k = 0; k < h2_idx.size(); ++k) {
                                 if (notes[h2_idx[k]].vel != new_h2[k]) {
                                     notes[h2_idx[k]].vel = new_h2[k];
@@ -1055,10 +1109,13 @@ inline void applyVariationEnergyCurve(Style& style,
                                       EnhanceStats& stats,
                                       std::vector<EnhancementAction>& actions) {
     struct VarInfo {
-        char     digit = '1';
-        double   mean_vel = 0.0;
-        double   notes_per_bar = 0.0;
-        uint32_t note_count = 0;
+        char                    digit = '1';
+        double                  mean_vel = 0.0;
+        double                  equal_track_mean = 0.0;
+        double                  notes_per_bar = 0.0;
+        uint32_t                note_count = 0;
+        std::array<double, 8>   ch_mean_vel{};
+        std::array<bool, 8>     ch_active{};
     };
 
     std::map<char, VarInfo> var_map;
@@ -1067,9 +1124,15 @@ inline void applyVariationEnergyCurve(Style& style,
         const uint32_t bt = barTicksFor(style.ppqn, el.num, el.den);
         const uint32_t bars = (bt > 0u && el.length >= bt) ? (el.length / bt) : 1u;
         std::vector<uint8_t> vels;
+        std::array<std::vector<uint8_t>, 8> ch_vels;
         for (const auto& ev : el.events) {
             if ((ev.status & 0xF0u) == 0x90u && ev.d2 > 0u) {
-                vels.push_back(static_cast<uint8_t>(ev.d2 & 0x7Fu));
+                const uint8_t v = static_cast<uint8_t>(ev.d2 & 0x7Fu);
+                vels.push_back(v);
+                const uint8_t ch = static_cast<uint8_t>(ev.status & 0x0Fu);
+                if (ch >= kBassCh && ch <= 15u) {
+                    ch_vels[ch - kBassCh].push_back(v);
+                }
             }
         }
         if (vels.empty()) continue;
@@ -1078,6 +1141,17 @@ inline void applyVariationEnergyCurve(Style& style,
         vi.mean_vel = computeMeanVel(vels);
         vi.notes_per_bar = static_cast<double>(vels.size()) / static_cast<double>(bars);
         vi.note_count = static_cast<uint32_t>(vels.size());
+        double track_sum = 0.0;
+        uint32_t active_tracks = 0u;
+        for (size_t c = 0u; c < 8u; ++c) {
+            if (!ch_vels[c].empty()) {
+                vi.ch_active[c] = true;
+                vi.ch_mean_vel[c] = computeMeanVel(ch_vels[c]);
+                track_sum += vi.ch_mean_vel[c];
+                ++active_tracks;
+            }
+        }
+        vi.equal_track_mean = (active_tracks > 0u) ? (track_sum / static_cast<double>(active_tracks)) : vi.mean_vel;
         var_map[vi.digit] = vi;
     }
 
@@ -1089,28 +1163,67 @@ inline void applyVariationEnergyCurve(Style& style,
         vars.push_back(vi);
     }
 
+    // Equal-weight pairwise step over shared active channels (immune to Simpson's paradox
+    // when later Variations add dense soft percussion or backing layers).
+    auto sharedTrackDelta = [](const VarInfo& a, const VarInfo& b) -> double {
+        double sum = 0.0;
+        uint32_t count = 0u;
+        for (size_t c = 0u; c < 8u; ++c) {
+            if (a.ch_active[c] && b.ch_active[c]) {
+                sum += (b.ch_mean_vel[c] - a.ch_mean_vel[c]);
+                ++count;
+            }
+        }
+        if (count > 0u) return sum / static_cast<double>(count);
+        return b.equal_track_mean - a.equal_track_mean;
+    };
+
     // Exempt any Variation with intentional sparse-fortissimo contrast (>= +6.0 above V1).
     const double v1_vel = vars.front().mean_vel;
     std::vector<size_t> eligible_idx;
     for (size_t i = 0; i < vars.size(); ++i) {
-        if (i > 0u && vars[i].mean_vel >= v1_vel + 6.0 && vars[i].notes_per_bar < vars[0].notes_per_bar * 0.90) {
+        if (i > 0u && vars[i].notes_per_bar < vars[0].notes_per_bar * 0.90 &&
+            (vars[i].mean_vel >= v1_vel + 6.0 || sharedTrackDelta(vars[0], vars[i]) >= 6.0)) {
             continue;
         }
         eligible_idx.push_back(i);
     }
     if (eligible_idx.size() < 2u) return;
 
-    double min_v = 127.0, max_v = 0.0;
+    // Build chained equal-weight shared-track energy curve across eligible Variations.
+    const size_t n = eligible_idx.size();
+    std::vector<double> eff_vel(n, 0.0);
+    eff_vel[0] = vars[eligible_idx[0]].equal_track_mean;
+    double min_v = eff_vel[0], max_v = eff_vel[0];
     bool has_inversion = false;
-    for (size_t k = 0; k < eligible_idx.size(); ++k) {
-        const auto& cur = vars[eligible_idx[k]];
-        if (cur.mean_vel < min_v) min_v = cur.mean_vel;
-        if (cur.mean_vel > max_v) max_v = cur.mean_vel;
-        if (k > 0u) {
-            const auto& prev = vars[eligible_idx[k - 1u]];
-            if (cur.mean_vel < prev.mean_vel - 2.0 && cur.notes_per_bar >= prev.notes_per_bar) {
-                has_inversion = true;
+    for (size_t k = 1u; k < n; ++k) {
+        const auto& prev = vars[eligible_idx[k - 1u]];
+        const auto& cur  = vars[eligible_idx[k]];
+        const double step = sharedTrackDelta(prev, cur);
+        eff_vel[k] = eff_vel[k - 1u] + step;
+        if (eff_vel[k] < min_v) min_v = eff_vel[k];
+        if (eff_vel[k] > max_v) max_v = eff_vel[k];
+        if (step < -2.0 && cur.notes_per_bar >= prev.notes_per_bar) {
+            has_inversion = true;
+        }
+    }
+
+    // Exempt styles with an already-strong monotonic arrangement-density arc (e.g., EDM build-up
+    // escalating >= 1.5x notes/bar across V1..V4 without velocity inversion).
+    if (!has_inversion) {
+        const double first_npb = vars[eligible_idx.front()].notes_per_bar;
+        const double last_npb  = vars[eligible_idx.back()].notes_per_bar;
+        if (first_npb > 0.0 && last_npb >= first_npb * 1.5 &&
+            eff_vel.back() >= eff_vel.front() - 1.5) {
+            bool monotonic_density = true;
+            for (size_t k = 1u; k < n; ++k) {
+                if (vars[eligible_idx[k]].notes_per_bar <
+                    vars[eligible_idx[k - 1u]].notes_per_bar * 0.95) {
+                    monotonic_density = false;
+                    break;
+                }
             }
+            if (monotonic_density) return;
         }
     }
 
@@ -1125,7 +1238,6 @@ inline void applyVariationEnergyCurve(Style& style,
     // Compute per-variation bounded additive delta (preserves track velocity std-dev 100%
     // verbatim without dynamic compression, capped within +/-12 MIDI velocity units).
     std::map<char, int> var_delta;
-    const size_t n = eligible_idx.size();
     const double avg_v = 0.5 * (min_v + max_v);
     for (size_t k = 0; k < n; ++k) {
         const double frac = (n > 1u) ? (2.0 * static_cast<double>(k) / static_cast<double>(n - 1u) - 1.0) : 0.0;
@@ -1134,7 +1246,7 @@ inline void applyVariationEnergyCurve(Style& style,
         if (avg_v * 2.0 * half_span < 4.5) {
             target_mean = avg_v + frac * 2.5;
         }
-        int delta = static_cast<int>(std::lround(target_mean - vi.mean_vel));
+        int delta = static_cast<int>(std::lround(target_mean - eff_vel[k]));
         delta = std::clamp(delta, -12, 12);
         var_delta[vi.digit] = delta;
     }
@@ -1208,9 +1320,7 @@ inline void applyEndingFadePopGuard(Style& style,
         if (el.length < 2u) continue;
         const uint32_t bar_ticks = barTicksFor(style.ppqn, el.num, el.den);
         const bool is_ending = isEndingMarker(el.marker);
-        const uint32_t eighth_bar = (bar_ticks >= 8u) ? (bar_ticks / 8u) : 1u;
         const uint32_t sixteenth_bar = (bar_ticks >= 16u) ? (bar_ticks / 16u) : 1u;
-        const uint32_t loop_win_start = (el.length > eighth_bar) ? (el.length - eighth_bar) : 0u;
 
         std::set<size_t> remove_indices;
         std::vector<Event> added_events;
@@ -1266,7 +1376,23 @@ inline void applyEndingFadePopGuard(Style& style,
                 const auto& prev = seq[seq.size() - 2u];
                 const int delta = static_cast<int>(last.val) - static_cast<int>(prev.val);
                 const int abs_delta = std::abs(delta);
-                if (last.tick >= loop_win_start && abs_delta >= jump_thresh && last.tick > prev.tick + 1u) {
+                // Detect intentional periodic EDM sidechain pumping (repeated CC11 dip-release
+                // cycles across beats/bars) so rhythmic sidechain envelopes are never ramped.
+                uint32_t earlier_large_jumps = 0u;
+                uint32_t earlier_up_jumps = 0u;
+                uint32_t earlier_down_jumps = 0u;
+                for (size_t k = 1u; k + 1u < seq.size(); ++k) {
+                    const int step = static_cast<int>(seq[k].val) - static_cast<int>(seq[k - 1u].val);
+                    if (std::abs(step) >= jump_thresh) {
+                        ++earlier_large_jumps;
+                        if (step > 0) ++earlier_up_jumps;
+                        else ++earlier_down_jumps;
+                    }
+                }
+                const bool periodic_sidechain_pump =
+                    (earlier_large_jumps >= 4u && earlier_up_jumps >= 2u && earlier_down_jumps >= 2u);
+                if (last.tick + 2u >= el.length && !periodic_sidechain_pump &&
+                    abs_delta >= jump_thresh && last.tick > prev.tick + 1u) {
                     const int max_step_allowed = std::max(1, jump_thresh - 1);
                     const uint32_t intervals_needed = static_cast<uint32_t>(
                         (abs_delta + max_step_allowed - 1) / max_step_allowed);

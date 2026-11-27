@@ -754,6 +754,187 @@ int main() {
              enhanceStyle(res_ok.style, opt).actions.empty());
     }
 
+    // ── 15. Phase 3 P3-M6b F1: Rising Fill snare turnaround preserved & Pass-2 idempotent ──
+    {
+        // Reproduces P3_01-like 1-bar 4/4 Fill with rising 16th-note off-beat snare turnaround
+        // (1344:v87 -> 1440:v90) plus 1st-half kick/tom slightly louder so Sub-step 3 triggers.
+        Style fill_turn;
+        fill_turn.ppqn = 384; fill_turn.mpqn = 500000;
+        Element f1{"f1cv1", 4, 4, 1536, {}};
+        addVoice(f1, kDrumCh, 120, 0, 0);
+        addNote(f1, kDrumCh, 0, 120, 36, 94);
+        addNote(f1, kDrumCh, 384, 500, 45, 92);
+        addNote(f1, kDrumCh, 768, 880, 43, 88);
+        addNote(f1, kDrumCh, 1152, 1260, 41, 88);
+        addNote(f1, kDrumCh, 1344, 1410, 38, 87); // off-beat 16th snare 1
+        addNote(f1, kDrumCh, 1440, 1510, 38, 90); // off-beat 16th snare 2 (rising!)
+        sortEl(f1);
+        fill_turn.elements.push_back(std::move(f1));
+
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_drum_ghost_dynamics = true;
+        opt.max_drum_vel_delta = 6;
+
+        const auto p1 = enhanceStyle(fill_turn, opt);
+        const auto p2 = enhanceStyle(p1.style, opt);
+        const auto orig_n = style_enhancer_detail::extractChannelNotes(fill_turn.elements[0], kDrumCh);
+        const auto p1_n   = style_enhancer_detail::extractChannelNotes(p1.style.elements[0], kDrumCh);
+        uint8_t s1_v = 0, s2_v = 0;
+        bool delta_bounded = (orig_n.size() == p1_n.size());
+        for (size_t i = 0; delta_bounded && i < orig_n.size(); ++i) {
+            if (std::abs(static_cast<int>(p1_n[i].vel) - static_cast<int>(orig_n[i].vel)) > 6) {
+                delta_bounded = false;
+            }
+            if (p1_n[i].on_tick == 1344u && p1_n[i].pitch == 38u) s1_v = p1_n[i].vel;
+            if (p1_n[i].on_tick == 1440u && p1_n[i].pitch == 38u) s2_v = p1_n[i].vel;
+        }
+        TEST("P3-M6b F1: rising Fill snare turnaround (87->90) NEVER inverted, bounded <=6, Pass-2 idempotent",
+             p1.ok && delta_bounded && s1_v > 0u && s2_v > s1_v &&
+             p2.ok && p2.actions.empty() && write(p2.style).bytes == write(p1.style).bytes);
+    }
+
+    // ── 16. Phase 3 P3-M6b F2: Periodic EDM sidechain CC11 exempt; real boundary snap still de-clicks ──
+    {
+        Style edm_sc;
+        edm_sc.ppqn = 384; edm_sc.mpqn = 468750;
+
+        // (a) 4-bar 4/4 EDM loop with periodic beat-by-beat sidechain pumping (final release at 5952)
+        Element v3{"v3cv1", 4, 4, 6144, {}};
+        addVoice(v3, kAcc1Ch, 121, 0, 81);
+        for (uint32_t beat = 0; beat < 16u; ++beat) {
+            addCc(v3, beat * 384u, kAcc1Ch, 11, 36);
+            addCc(v3, beat * 384u + 192u, kAcc1Ch, 11, 118); // final beat release at 5952
+        }
+        addNote(v3, kAcc1Ch, 0, 6000, 60, 92);
+        sortEl(v3);
+        edm_sc.elements.push_back(std::move(v3));
+
+        // (b) Periodic sidechain that ALSO has a boundary tick jump at len-1 -> still exempt as periodic pump!
+        Element v4{"v4cv1", 4, 4, 3072, {}};
+        addVoice(v4, kAcc1Ch, 121, 0, 81);
+        for (uint32_t beat = 0; beat < 8u; ++beat) {
+            addCc(v4, beat * 384u, kAcc1Ch, 11, 36);
+            addCc(v4, beat * 384u + 192u, kAcc1Ch, 11, 118);
+        }
+        addCc(v4, 3071, kAcc1Ch, 11, 36);
+        addNote(v4, kAcc1Ch, 0, 2950, 60, 92);
+        sortEl(v4);
+        edm_sc.elements.push_back(std::move(v4));
+
+        // (c) Real non-periodic boundary reset at len-1 on v1cv1 MUST still de-click cleanly!
+        Element v1{"v1cv1", 4, 4, 3072, {}};
+        addVoice(v1, kAcc1Ch, 121, 0, 48);
+        addCc(v1, 0, kAcc1Ch, 11, 120);
+        addCc(v1, 1536, kAcc1Ch, 11, 20);
+        addCc(v1, 3071, kAcc1Ch, 11, 120);
+        addNote(v1, kAcc1Ch, 0, 2900, 60, 84);
+        sortEl(v1);
+        edm_sc.elements.push_back(std::move(v1));
+
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_ending_fade_pop_guard = true;
+        const auto res = enhanceStyle(edm_sc, opt);
+        const auto res2 = enhanceStyle(res.style, opt);
+        TEST("P3-M6b F2: 0 false ramps on periodic EDM sidechain (v3/v4), real boundary snap (v1) still ramps",
+             res.ok && res.actions.size() == 1u &&
+             res.actions[0].section == "v1cv1" &&
+             res2.ok && res2.actions.empty());
+    }
+
+    // ── 17. Phase 3 P3-M6b F3: Simpson's paradox (P3_06) & density-driven EDM arc (P3_04) exempt ──
+    {
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_variation_energy_curve = true;
+
+        // (a) P3_06-like Simpson's paradox: every existing track rises +3 per Variation,
+        //     while V3/V4 add dense soft hand percussion (vel=64) dragging pooled mean flat/down
+        //     (with overall notes/bar ratio < 1.5x so this directly proves per-track immunity!).
+        Style bossa;
+        bossa.ppqn = 384; bossa.mpqn = 500000;
+        const char* vm[4] = {"v1cv1", "v2cv1", "v3cv1", "v4cv1"};
+        for (uint32_t v = 0; v < 4u; ++v) {
+            Element el{vm[v], 4, 4, 1536, {}};
+            addVoice(el, kDrumCh, 120, 0, 0);
+            addVoice(el, kPercCh, 120, 0, 0);
+            addVoice(el, kAcc1Ch, 121, 0, 4);
+            addVoice(el, kAcc1Ch + 1u, 121, 0, 24);
+            for (uint32_t i = 0; i < 4u; ++i) {
+                addNote(el, kDrumCh, i * 384u, i * 384u + 150u, 38, static_cast<uint8_t>(91u + v * 3u));
+                addNote(el, kAcc1Ch, i * 384u, i * 384u + 250u, 60, static_cast<uint8_t>(79u + v * 3u));
+                addNote(el, kAcc1Ch + 1u, i * 384u, i * 384u + 250u, 64, static_cast<uint8_t>(88u + v * 3u));
+            }
+            // V1/V2: 12 soft perc hits; V3/V4: 20 soft perc hits (drags pooled mean down on V3!)
+            const uint32_t perc_n = (v < 2u) ? 12u : 20u;
+            for (uint32_t i = 0; i < perc_n; ++i) {
+                const uint32_t t = (i * 1536u) / perc_n;
+                addNote(el, kPercCh, t, t + 40u, 70, (v < 2u) ? 67u : 64u);
+            }
+            sortEl(el);
+            bossa.elements.push_back(std::move(el));
+        }
+        const auto res_bossa = enhanceStyle(bossa, opt);
+        TEST("P3-M6b F3: Simpson's-paradox monotonic Latin V1..V4 untouched (0 false actions)",
+             res_bossa.ok && res_bossa.actions.empty() &&
+             write(res_bossa.style).bytes == write(bossa).bytes);
+
+        // (b) P3_04-like density-driven EDM arc: constant club-punch velocity (90) across V1..V4,
+        //     but arrangement density escalates 3.5x (8 -> 16 -> 20 -> 28 notes/bar).
+        Style edm_arc;
+        edm_arc.ppqn = 384; edm_arc.mpqn = 468750;
+        const uint32_t npb_counts[4] = {8u, 16u, 20u, 28u};
+        for (uint32_t v = 0; v < 4u; ++v) {
+            Element el{vm[v], 4, 4, 1536, {}};
+            addVoice(el, kBassCh, 121, 0, 38);
+            addVoice(el, kAcc1Ch, 121, 0, 81);
+            for (uint32_t i = 0; i < 4u; ++i) {
+                addNote(el, kBassCh, i * 384u, i * 384u + 200u, 36, 90);
+            }
+            const uint32_t acc_n = npb_counts[v] - 4u;
+            for (uint32_t i = 0; i < acc_n; ++i) {
+                const uint32_t t = (i * 1536u) / acc_n;
+                addNote(el, kAcc1Ch, t, t + 40u, 60, 90);
+            }
+            sortEl(el);
+            edm_arc.elements.push_back(std::move(el));
+        }
+        const auto res_edm = enhanceStyle(edm_arc, opt);
+        TEST("P3-M6b F3: density-driven EDM V1..V4 arc (3.5x notes/bar) untouched (0 false actions)",
+             res_edm.ok && res_edm.actions.empty() &&
+             write(res_edm.style).bytes == write(edm_arc).bytes);
+    }
+
+    // ── 18. Phase 3 P3-M6b F4a: piano_mud_voicing 1-pass convergence on < MIDI 36 ([32, 35, 44]) ──
+    {
+        Style sub_c2;
+        sub_c2.ppqn = 384; sub_c2.mpqn = 500000;
+        Element v1{"v1cv1", 4, 4, 1536, {}};
+        addVoice(v1, kAcc1Ch, 121, 0, 0); // Acoustic Piano
+        addNote(v1, kAcc1Ch, 0, 700, 32, 84);
+        addNote(v1, kAcc1Ch, 0, 700, 35, 82);
+        addNote(v1, kAcc1Ch, 0, 700, 44, 80);
+        sortEl(v1);
+        sub_c2.elements.push_back(std::move(v1));
+
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_piano_mud_voicing = true;
+        const auto p1 = enhanceStyle(sub_c2, opt);
+        const auto p2 = enhanceStyle(p1.style, opt);
+        const auto post_n = style_enhancer_detail::extractChannelNotes(p1.style.elements[0], kAcc1Ch);
+        std::vector<uint8_t> pp;
+        for (const auto& n : post_n) pp.push_back(n.pitch);
+        std::sort(pp.begin(), pp.end());
+        TEST("P3-M6b F4a: [32,35,44] <C2 mud cluster converges to [32,44,59] in 1 pass (Pass-2 0 actions)",
+             p1.ok && p1.actions.size() == 1u &&
+             p1.stats.notes_pitch_adjusted == 1u &&
+             pp == std::vector<uint8_t>({32, 44, 59}) &&
+             p2.ok && p2.actions.empty() &&
+             write(p2.style).bytes == write(p1.style).bytes);
+    }
+
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }
