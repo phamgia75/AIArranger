@@ -206,7 +206,7 @@ inline InstrumentClass inferInstrumentClass(
             return InstrumentClass::GuitarPlucked;
         }
         if (containsAny(lower_name, {"bass", "fingbs", "pickbs", "slapbs",
-                                     "acbs", "fretless", "upright"})) {
+                                     "acbs", "contrabs", "fretless", "upright"})) {
             return InstrumentClass::BassPlucked;
         }
         if (containsAny(lower_name, {"string", "str", "violin", "viola",
@@ -236,13 +236,14 @@ inline InstrumentClass inferInstrumentClass(
             (yamaha_pc >= 104 && yamaha_pc <= 107)) {
             return InstrumentClass::GuitarPlucked;
         }
-        if (yamaha_pc >= 32 && yamaha_pc <= 37) {
+        if ((yamaha_pc >= 32 && yamaha_pc <= 37) || yamaha_pc == 43) {
             return InstrumentClass::BassPlucked;
         }
         if (yamaha_pc == 38 || yamaha_pc == 39) {
             return InstrumentClass::SynthLeadPad;
         }
-        if ((yamaha_pc >= 40 && yamaha_pc <= 45) || (yamaha_pc >= 48 && yamaha_pc <= 51)) {
+        if ((yamaha_pc >= 40 && yamaha_pc <= 42) || yamaha_pc == 44 || yamaha_pc == 45 ||
+            (yamaha_pc >= 48 && yamaha_pc <= 51)) {
             return InstrumentClass::StringsOrchestral;
         }
         // 52..55 Choir Aahs, Voice Oohs, Synth Voice, Orchestra Hit
@@ -292,14 +293,24 @@ inline uint8_t highFxCeiling(InstrumentClass cls, bool is_megavoice_ctx) noexcep
     return 128;
 }
 
-// Piecewise-linear half-up integer velocity mapping for MegaVoice zones 1..4.
-// Guarantees unconditionally: max(surviving 65..127) <= 66 < 68 <= min(1..64).
+// Piecewise-linear half-up integer velocity mapping for MegaVoice zones 0..4.
+// Zone 0 [1..20]  (soft fret-noise/slide ghost) -> [18..34]
+// Zone 1 [21..64] (normal open/plucked notes)   -> [68..106]
+// Zone 2 [65..90] (muted/dead notes)            -> [38..56]
+// Zone 3 [91..100] (harmonics/hammer-on)        -> [50..66]
+// Zone 4 [101..127] (noise ghost mode)          -> [24..30]
+// Guarantees unconditionally: max(surviving 65..127) <= 66 < 68 <= min(21..64).
 inline uint8_t mapMegaVoiceVelocity(uint8_t src_vel) noexcept {
-    if (src_vel <= 64) {
-        // Zone 1 [1..64] -> [68..106]
+    if (src_vel <= 20) {
+        // Zone 0 [1..20] soft fret-noise ghost -> [18..34] (never boosted to loud normal range!)
         const uint32_t v = src_vel < 1 ? 1u : static_cast<uint32_t>(src_vel);
-        const uint32_t num = (v - 1u) * (106u - 68u);
-        return static_cast<uint8_t>(68u + (num * 2u + 63u) / (2u * 63u));
+        const uint32_t num = (v - 1u) * (34u - 18u);
+        return static_cast<uint8_t>(18u + (num * 2u + 19u) / (2u * 19u));
+    }
+    if (src_vel <= 64) {
+        // Zone 1 [21..64] -> [68..106]
+        const uint32_t num = static_cast<uint32_t>(src_vel - 21u) * (106u - 68u);
+        return static_cast<uint8_t>(68u + (num * 2u + 43u) / (2u * 43u));
     }
     if (src_vel <= 90) {
         // Zone 2 [65..90] -> [38..56]
@@ -672,6 +683,7 @@ inline MegaVoiceClassification classifyTrackArticulation(
     uint32_t z1_ct = 0;
     uint32_t z2_ct = 0;
     uint32_t z34_ct = 0;
+    uint32_t very_low_ks_ct = 0; // notes strictly in C0..B0 (12..23)
 
     for (const auto& n : notes) {
         if (n.pitch > 127 || n.vel == 0 || n.vel > 127 ||
@@ -697,8 +709,13 @@ inline MegaVoiceClassification classifyTrackArticulation(
 
         if (n.pitch <= kChordEventNoteMax) {
             ++out.chord_range_ct;
-        } else if (n.pitch < scan_low_floor) {
-            ++out.low_ks_ct;
+        } else {
+            if (n.pitch < scan_low_floor) {
+                ++out.low_ks_ct;
+            }
+            if (n.pitch < 24) {
+                ++very_low_ks_ct;
+            }
         }
         if (n.pitch >= 96) {
             ++out.high_fx_ct;
@@ -741,7 +758,14 @@ inline MegaVoiceClassification classifyTrackArticulation(
     const bool sart_family = (out.family == InstrumentClass::BrassWoodwind ||
                               out.family == InstrumentClass::StringsOrchestral ||
                               out.family == InstrumentClass::GuitarPlucked);
-    out.is_sart = !out.is_megavoice && (has_s2 || (out.low_ks_ct >= 2 && sart_family));
+    // Require explicit S.Art signal / Yamaha Panel bank (msb == 8) before treating
+    // pitches 24..(floor-1) as key-switches; on plain GM tracks only C0..B0 (< 24) triggers S.Art.
+    const bool has_sart_bank_or_name = has_s2 || (yamaha_msb == 8);
+    out.is_sart = !out.is_megavoice &&
+                  (has_s2 ||
+                   (sart_family &&
+                    ((has_sart_bank_or_name && out.low_ks_ct >= 2) ||
+                     very_low_ks_ct >= 2)));
 
     if (out.is_megavoice) {
         out.confidence = static_cast<uint8_t>(score_mega);
@@ -823,7 +847,15 @@ inline SanitizeResult sanitizeMegaVoiceTrack(
         (opt.mode == MegaVoiceMode::Auto && !apply_megavoice && res.classification.is_sart);
 
     const bool is_guitar_ntr = casm.has_casm && casm.ntr == 2;
+    const bool is_guitar_or_bass = (res.classification.family == InstrumentClass::GuitarPlucked ||
+                                    res.classification.family == InstrumentClass::BassPlucked);
+    const std::string lower_name = detail::toLowerAscii(track_name);
+    const bool has_sart_bank_or_name = detail::isSArtSignal2(yamaha_msb, yamaha_lsb, lower_name) ||
+                                       (yamaha_msb == 8);
     const uint8_t low_floor = detail::lowKeySwitchFloor(res.classification.family, apply_megavoice);
+    const uint8_t sart_low_floor = has_sart_bank_or_name
+                                       ? low_floor
+                                       : std::min<uint8_t>(low_floor, uint8_t{24});
     const uint8_t high_ceil = detail::highFxCeiling(res.classification.family, apply_megavoice);
 
     std::vector<detail::TrackedNote> tracked;
@@ -854,12 +886,13 @@ inline SanitizeResult sanitizeMegaVoiceTrack(
             }
 
             const uint8_t src_vel = n.vel;
-            if (src_vel >= 101) {
+            const bool is_fret_noise_low = (src_vel <= 20) && is_guitar_or_bass;
+            if (src_vel >= 101 || is_fret_noise_low) {
                 ++res.stats.noise_zone_stripped;
                 if (opt.drop_noise_zone) {
                     continue;
                 }
-                // Ghost mode: velocity [24..30], duration clamped <= 1/32.
+                // Ghost mode: soft vel ([18..34] for low fret-noise, [24..30] for Zone 4), duration clamped <= 1/32.
                 n.vel = detail::mapMegaVoiceVelocity(src_vel);
                 ++res.stats.vel_reshaped_notes;
                 if (n.off_tick - n.on_tick > ghost_max_dur) {
@@ -888,8 +921,8 @@ inline SanitizeResult sanitizeMegaVoiceTrack(
 
             tracked.push_back({n, src_vel});
         } else if (apply_sart) {
-            // S.Art: strip out-of-range key-switches (< floor) while preserving natural velocities untouched.
-            if (n.pitch < low_floor) {
+            // S.Art: strip out-of-range key-switches (< sart_low_floor) while preserving natural velocities untouched.
+            if (n.pitch < sart_low_floor) {
                 ++res.stats.fx_keys_stripped;
                 continue;
             }

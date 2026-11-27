@@ -262,7 +262,10 @@ int main() {
         for (const auto& n : r_drop.notes) {
             const uint32_t src_v = n.on_tick / 480;
             const uint32_t dur = n.off_tick - n.on_tick;
-            if (src_v <= 64) {
+            if (src_v <= 20) {
+                // Zone 0 [1..20] fret-noise must be stripped on Guitar/Bass when drop_noise_zone == true!
+                monotonic_ok = false;
+            } else if (src_v <= 64) {
                 min_z1 = std::min(min_z1, n.vel);
                 max_z1 = std::max(max_z1, n.vel);
                 if (dur != 480) z1_dur_ok = false;
@@ -286,16 +289,16 @@ int main() {
             }
         }
 
-        TEST("drop_noise_zone=true strips all 27 Zone 4 notes (101..127)",
-             r_drop.notes.size() == 100 && r_drop.stats.noise_zone_stripped == 27 &&
+        TEST("drop_noise_zone=true strips Zone 0 [1..20] (20) + Zone 4 [101..127] (27) = 47 notes",
+             r_drop.notes.size() == 80 && r_drop.stats.noise_zone_stripped == 47 &&
              r_drop.stats.muted_gates_clamped == 26);
-        TEST("Zone 1 [1..64] maps to exact [68..106] with unchanged duration",
+        TEST("Zone 1 [21..64] maps to exact [68..106] with unchanged duration",
              min_z1 == 68 && max_z1 == 106 && z1_dur_ok);
         TEST("Zone 2 [65..90] maps to exact [38..56] with gate clamped <= ppqn/4",
              min_z2 == 38 && max_z2 == 56 && z2_dur_ok);
         TEST("Zone 3 [91..100] maps to exact [50..66] with unchanged duration",
              min_z3 == 50 && max_z3 == 66 && z3_dur_ok);
-        TEST("M2.3 Zero-Inversion Proof: max(65..127) <= 66 < 68 <= min(1..64) & monotonic",
+        TEST("M2.3 Zero-Inversion Proof: max(65..127) <= 66 < 68 <= min(21..64) & monotonic",
              monotonic_ok && std::max(max_z2, max_z3) <= 66 && min_z1 >= 68 &&
              r_drop.stats.upper_zone_rms_vel <= 66.0 && r_drop.stats.normal_zone_rms_vel >= 68.0 &&
              r_drop.stats.upper_zone_rms_vel < r_drop.stats.normal_zone_rms_vel);
@@ -305,18 +308,25 @@ int main() {
         opt_ghost.ppqn = 480;
         opt_ghost.drop_noise_zone = false;
         const auto r_ghost = sanitizeMegaVoiceTrack(all_vels, 63, 120, 21, "MegaGtr", TrackRole::Chord, plain_casm, opt_ghost);
+        uint8_t min_z0 = 127, max_z0 = 0, vel14_mapped = 0;
         uint8_t min_z4 = 127, max_z4 = 0;
-        bool z4_dur_ok = true;
+        bool z0_dur_ok = true, z4_dur_ok = true;
         for (const auto& n : r_ghost.notes) {
             const uint32_t src_v = n.on_tick / 480;
-            if (src_v >= 101) {
+            if (src_v <= 20) {
+                min_z0 = std::min(min_z0, n.vel);
+                max_z0 = std::max(max_z0, n.vel);
+                if (src_v == 14) vel14_mapped = n.vel;
+                if (n.off_tick - n.on_tick != 60) z0_dur_ok = false; // clamped to ppqn/8 = 60
+            } else if (src_v >= 101) {
                 min_z4 = std::min(min_z4, n.vel);
                 max_z4 = std::max(max_z4, n.vel);
                 if (n.off_tick - n.on_tick != 60) z4_dur_ok = false; // clamped to ppqn/8 = 60
             }
         }
-        TEST("drop_noise_zone=false ghosts Zone 4 to [24..30] & duration <= ppqn/8",
-             r_ghost.notes.size() == 127 && r_ghost.stats.noise_zone_stripped == 27 &&
+        TEST("drop_noise_zone=false ghosts Zone 0 [1..20] -> [18..34] (vel14->29, never 79!) & Zone 4 -> [24..30]",
+             r_ghost.notes.size() == 127 && r_ghost.stats.noise_zone_stripped == 47 &&
+             min_z0 == 18 && max_z0 == 34 && vel14_mapped == 29 && z0_dur_ok &&
              min_z4 == 24 && max_z4 == 30 && z4_dur_ok &&
              r_ghost.stats.upper_zone_rms_vel < r_ghost.stats.normal_zone_rms_vel);
     }
@@ -640,6 +650,79 @@ int main() {
              even8 && r_8s.stats.guitar_voices_trimmed == 2 &&
              r_8s.notes[0].pitch == 40 && r_8s.notes[1].pitch == 50 &&
              r_8s.notes[5].pitch == 64);
+    }
+
+    // ── 9. Mission 4b Regression Tests (P1-2 Contrabass & Non-S.Art GM Guard, P1-4 vel 1..20) ──
+    {
+        const CasmTrackView plain_casm{};
+
+        // P1-2a: GM PC 43 Contrabass ("ContraBs", 0/0/43) classifies BassPlucked, NOT S.Art, and keeps low bass notes!
+        const std::vector<NoteSpan> contrabass_notes = {
+            {0, 960, 24, 96, false},
+            {960, 1920, 18, 96, false},
+            {1920, 2880, 24, 96, false},
+            {2880, 3840, 18, 96, false},
+            {3840, 4800, 36, 100, false}
+        };
+        const auto r_cb = sanitizeMegaVoiceTrack(
+            contrabass_notes, 0, 0, 43, "ContraBs", TrackRole::Bass, plain_casm);
+        TEST("Mission4b P1-2: GM PC 43 Contrabass classifies BassPlucked, is_sart=false, 0 notes deleted",
+             r_cb.classification.family == InstrumentClass::BassPlucked &&
+             !r_cb.classification.is_sart && !r_cb.classification.is_megavoice &&
+             r_cb.stats.fx_keys_stripped == 0 && r_cb.notes.size() == 5);
+
+        // Even with generic track name "Part1" and Chord role, GM PC 43 still classifies BassPlucked!
+        const auto c_cb_pc = classifyTrackArticulation(
+            contrabass_notes, 0, 0, 43, "Part1", TrackRole::Chord, plain_casm);
+        TEST("Mission4b P1-2: GM PC 43 with generic name classifies BassPlucked (not StringsOrchestral)",
+             c_cb_pc.family == InstrumentClass::BassPlucked && !c_cb_pc.is_sart);
+
+        // P1-2b: Non-S.Art GM Strings (0/0/48) with low cello notes 24..30 must NOT falsely trigger is_sart!
+        const std::vector<NoteSpan> gm_low_str = {
+            {0, 480, 24, 80, false}, {480, 960, 28, 82, false},
+            {960, 1440, 48, 85, false}, {1440, 1920, 60, 88, false}
+        };
+        const auto r_gm_str = sanitizeMegaVoiceTrack(
+            gm_low_str, 0, 0, 48, "Strings", TrackRole::Pad, plain_casm);
+        TEST("Mission4b P1-2: Non-S.Art GM Strings with pitches 24..28 keep all notes (no false S.Art)",
+             !r_gm_str.classification.is_sart && r_gm_str.stats.fx_keys_stripped == 0 &&
+             r_gm_str.notes.size() == 4);
+
+        // P1-2c: Non-S.Art GM Brass with actual C0..B0 (< 24) key-switches only strips < 24, preserving 24..35!
+        const std::vector<NoteSpan> gm_ks_brass = {
+            {0, 120, 12, 64, false}, {120, 240, 16, 64, false},
+            {240, 720, 28, 90, false}, {720, 1200, 60, 95, false}
+        };
+        const auto r_gm_brs = sanitizeMegaVoiceTrack(
+            gm_ks_brass, 0, 0, 58, "Tuba", TrackRole::Phrase1, plain_casm);
+        TEST("Mission4b P1-2: Plain GM Brass with <24 KS strips only <24 and preserves playable pitch 28",
+             r_gm_brs.classification.is_sart && r_gm_brs.stats.fx_keys_stripped == 2 &&
+             r_gm_brs.notes.size() == 2 && r_gm_brs.notes[0].pitch == 28);
+
+        // P1-4: EXP14 MegaVoice Guitar vel=14 fret-noise trigger is dropped (default) or ghosted soft (never boosted to 79!)
+        const std::vector<NoteSpan> exp14_gtr = {
+            {120, 300, 60, 14, false},  // vel 1..20 fret noise!
+            {240, 720, 52, 44, false},  // normal strum
+            {270, 750, 55, 47, false},
+            {300, 780, 60, 50, false},
+            {330, 810, 64, 53, false},
+            {960, 1200, 52, 82, false}, // muted strum
+            {1920, 2080, 64, 124, false} // Zone 4 dead/slap
+        };
+        const auto r_e14_drop = sanitizeMegaVoiceTrack(
+            exp14_gtr, 63, 120, 21, "MegaGtr", TrackRole::Chord, plain_casm);
+        TEST("Mission4b P1-4: EXP14 MegaVoice Guitar drops vel=14 fret-noise & vel=124 Zone 4 (M2.3 preserved)",
+             r_e14_drop.notes.size() == 5 &&
+             r_e14_drop.stats.noise_zone_stripped == 2 &&
+             r_e14_drop.stats.normal_zone_rms_vel > r_e14_drop.stats.upper_zone_rms_vel);
+
+        SanitizeOptions e14_ghost{};
+        e14_ghost.drop_noise_zone = false;
+        const auto r_e14_ghost = sanitizeMegaVoiceTrack(
+            exp14_gtr, 63, 120, 21, "MegaGtr", TrackRole::Chord, plain_casm, e14_ghost);
+        TEST("Mission4b P1-4: Ghost mode maps vel=14 -> soft 29 (<=34, never 79) & preserves M2.3",
+             r_e14_ghost.notes.size() == 7 && r_e14_ghost.notes[0].vel == 29 &&
+             r_e14_ghost.stats.normal_zone_rms_vel > r_e14_ghost.stats.upper_zone_rms_vel);
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

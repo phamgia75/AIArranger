@@ -294,6 +294,86 @@ int main() {
              !hasDup(rLil.notes) && rLil.notes.size() == 3 && !stillMuddy);
     }
 
+    // ── 10. Mission 4b Regression Tests (P0-1 CV3..CV6 & P1-1 SFF2 Guitar NTR=2, NTT=1) ──
+    {
+        CasmTrackView casm{};
+        casm.has_casm = true;
+        casm.ntr = 0;
+        casm.ntt = 2;
+        casm.source_chord_root = 0;
+
+        // P0-1a: CV3 (Dom7) preserves b7 (pc 10: Bb=70)
+        casm.source_chord_type = 0x13; // Dom7
+        const std::vector<NoteSpan> dom7 = {mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67), mkNote(0, 480, 70)};
+        const auto rCv3 = normalizeTrackToPa5xReference(dom7, kAcc1Ch, uasf::TrackRole::Chord, casm, ChordType::Dom7);
+        TEST("Mission4b P0-1: CV3 (Dom7) preserves b7 (Bb=70) untouched",
+             rCv3.quality_remapped == 0 && rCv3.notes.size() == 4 &&
+             rCv3.notes[0].pitch == 60 && rCv3.notes[1].pitch == 64 &&
+             rCv3.notes[2].pitch == 67 && rCv3.notes[3].pitch == 70);
+
+        // P0-1b: CV4 (Dim/Dim7) preserves b3 (Eb=63), b5 (Gb=66), bb7 (A=69)
+        casm.source_chord_type = 0x12; // Dim7
+        const std::vector<NoteSpan> dim7 = {mkNote(0, 480, 60), mkNote(0, 480, 63), mkNote(0, 480, 66), mkNote(0, 480, 69)};
+        const auto rCv4 = normalizeTrackToPa5xReference(dim7, kAcc1Ch, uasf::TrackRole::Chord, casm, ChordType::Dim);
+        TEST("Mission4b P0-1: CV4 (Dim7) preserves b3(63), b5(66), bb7(69) untouched",
+             rCv4.quality_remapped == 0 && rCv4.notes.size() == 4 &&
+             rCv4.notes[0].pitch == 60 && rCv4.notes[1].pitch == 63 &&
+             rCv4.notes[2].pitch == 66 && rCv4.notes[3].pitch == 69);
+
+        // P0-1c: CV5 (Sus4) preserves 4th (F=65)
+        casm.source_chord_type = 0x20; // Sus4
+        const std::vector<NoteSpan> sus4 = {mkNote(0, 480, 60), mkNote(0, 480, 65), mkNote(0, 480, 67)};
+        const auto rCv5 = normalizeTrackToPa5xReference(sus4, kAcc1Ch, uasf::TrackRole::Chord, casm, ChordType::Sus4);
+        TEST("Mission4b P0-1: CV5 (Sus4) preserves 4th (F=65) untouched",
+             rCv5.quality_remapped == 0 && rCv5.notes.size() == 3 &&
+             rCv5.notes[0].pitch == 60 && rCv5.notes[1].pitch == 65 && rCv5.notes[2].pitch == 67);
+
+        // P0-1d: CV6 (Power) preserves {0, 7} (C/G) and normalizes Major 3rd onto {0, 7} without duplicates
+        casm.source_chord_type = 0x1F; // 1+5 Power
+        const std::vector<NoteSpan> pwr = {mkNote(0, 480, 60), mkNote(0, 480, 67), mkNote(0, 480, 72)};
+        const auto rCv6 = normalizeTrackToPa5xReference(pwr, kAcc1Ch, uasf::TrackRole::Chord, casm, ChordType::Power);
+        TEST("Mission4b P0-1: CV6 (Power) preserves {0, 7} (60,67,72) untouched",
+             rCv6.quality_remapped == 0 && rCv6.notes.size() == 3 &&
+             rCv6.notes[0].pitch == 60 && rCv6.notes[1].pitch == 67 && rCv6.notes[2].pitch == 72);
+
+        casm.source_chord_type = 0x00; // C Major triad normalized into Power CV6 -> only {0, 7} pitch classes
+        const std::vector<NoteSpan> majToPwr = {mkNote(0, 480, 60), mkNote(0, 480, 64), mkNote(0, 480, 67)};
+        const auto rCv6Maj = normalizeTrackToPa5xReference(majToPwr, kAcc1Ch, uasf::TrackRole::Chord, casm, ChordType::Power);
+        bool allPwrPcs = !rCv6Maj.notes.empty();
+        for (const auto& s : rCv6Maj.notes) {
+            if ((s.pitch % 12) != 0 && (s.pitch % 12) != 7) allPwrPcs = false;
+        }
+        TEST("Mission4b P0-1: Major triad normalized to CV6 (Power) yields only {0, 7} pitch classes",
+             rCv6Maj.quality_remapped == 1 && allPwrPcs);
+
+        // P1-1: SFF2 Guitar Stroke (NTR=2, NTT=1) in Maj7 is NOT treated as Melody -> snaps B (pc 11) in CV1!
+        CasmTrackView casmGtrStroke{};
+        casmGtrStroke.has_casm = true;
+        casmGtrStroke.ntr = 2;
+        casmGtrStroke.ntt = 1; // Stroke (NOT Melody!)
+        casmGtrStroke.source_chord_root = 0;
+        casmGtrStroke.source_chord_type = 0x02; // CMaj7
+        const std::vector<NoteSpan> gtrMaj7 = {
+            mkNote(0, 480, 48), mkNote(28, 480, 52), mkNote(56, 480, 55), mkNote(84, 480, 59)
+        };
+        const auto rGtrMaj7 = normalizeTrackToPa5xReference(
+            gtrMaj7, kAcc1Ch + 1, uasf::TrackRole::Chord, casmGtrStroke, ChordType::Major);
+        TEST("Mission4b P1-1: SFF2 Guitar Stroke (NTR=2, NTT=1) snaps Maj7 B(59) -> C(60) in CV1",
+             rGtrMaj7.quality_remapped == 1 && rGtrMaj7.notes.size() == 4 &&
+             rGtrMaj7.notes[3].pitch == 60);
+
+        // Non-C Fmaj7 Guitar Stroke (root=5, type=0x02): E(64) -> shifted -5 to B(59) -> snapped to C(60)!
+        casmGtrStroke.source_chord_root = 5;
+        const std::vector<NoteSpan> fMaj7Gtr = {
+            mkNote(0, 480, 53), mkNote(28, 480, 57), mkNote(56, 480, 60), mkNote(84, 480, 64)
+        };
+        const auto rFMaj7Gtr = normalizeTrackToPa5xReference(
+            fMaj7Gtr, kAcc1Ch + 1, uasf::TrackRole::Chord, casmGtrStroke, ChordType::Major);
+        TEST("Mission4b P1-1: Non-C Fmaj7 Guitar Stroke (NTR=2, NTT=1) transposes & snaps Maj7 -> C(60)",
+             rFMaj7Gtr.normalized_from_non_c && rFMaj7Gtr.quality_remapped == 1 &&
+             rFMaj7Gtr.notes[3].pitch == 60);
+    }
+
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);
     return failures > 0 ? 1 : 0;
 }

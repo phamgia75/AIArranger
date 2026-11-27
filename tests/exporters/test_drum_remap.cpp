@@ -315,6 +315,35 @@ int main() {
         std::vector<NoteSpan> sparseKit(mainKit.begin(), mainKit.begin() + 5);
         const auto dSparse = detectRhythmTrackSwap(sparseKit, handPerc);
         TEST("detectRhythmTrackSwap: ch8 < 8 hits -> swap=false", !dSparse.swap_drum_and_perc);
+
+        // Mission 4b P0-2: ch8=Revo! MainKit + ch9=SFX/extended perc kit (27..34, 88..104 -> low hand-perc score)
+        std::vector<NoteSpan> revoMain = mainKit;
+        for (uint32_t i = 0; i < 8; ++i) {
+            revoMain.push_back(mkDrum(i * 120 + 30, i * 120 + 60, static_cast<uint8_t>(13 + i * 2), 85));
+        }
+        std::vector<NoteSpan> sfxSecondary;
+        const uint8_t sfxPitches[8] = {27, 29, 32, 84, 88, 92, 96, 104};
+        for (uint32_t i = 0; i < 8; ++i) {
+            sfxSecondary.push_back(mkDrum(i * 120, i * 120 + 60, sfxPitches[i], 80));
+        }
+        const auto dSwappedSfx = detectRhythmTrackSwap(revoMain, sfxSecondary);
+        TEST("Mission4b P0-2: ch8=RevoMainKit + ch9=SFX/extended kit -> swap=true",
+             dSwappedSfx.swap_drum_and_perc && dSwappedSfx.ch8_kit_score >= 0.45 &&
+             dSwappedSfx.ch9_kit_score < 0.20 && dSwappedSfx.ch9_perc_score < 0.40);
+
+        // Zero false swap when ch8=SFX/extended secondary kit and ch9=MainKit
+        const auto dNormalSfx = detectRhythmTrackSwap(sfxSecondary, revoMain);
+        TEST("Mission4b P0-2: ch8=SFX/extended + ch9=MainKit -> swap=false (no false swap)",
+             !dNormalSfx.swap_drum_and_perc);
+
+        // Zero false swap when ch9 carries moderate core kit (>= 0.20) alongside ch8
+        std::vector<NoteSpan> mixedCh9 = sfxSecondary;
+        mixedCh9.push_back(mkDrum(1000, 1060, 36, 100));
+        mixedCh9.push_back(mkDrum(1120, 1180, 38, 100));
+        mixedCh9.push_back(mkDrum(1240, 1300, 42, 100)); // 3/11 = 0.273 >= 0.20
+        const auto dMixedCh9 = detectRhythmTrackSwap(revoMain, mixedCh9);
+        TEST("Mission4b P0-2: ch9 with >=20% core kit hits -> swap=false (guards normal dual-kit styles)",
+             !dMixedCh9.swap_drum_and_perc);
     }
 
     std::printf("\nResults: %d passed, %d failed\n", passes, failures);

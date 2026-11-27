@@ -123,11 +123,46 @@ inline std::string mapYamahaRtrToPa5x(uint8_t rtr) noexcept {
 
 namespace norm_detail {
 
-inline bool isMinorTargetChord(arranger::ChordType t) noexcept {
+enum class TargetCvFamily : uint8_t {
+    Major,
+    Minor,
+    Dom7,
+    Dim,
+    Sus4,
+    Power
+};
+
+inline TargetCvFamily classifyTargetCvFamily(arranger::ChordType t) noexcept {
     using CT = arranger::ChordType;
-    return t == CT::Minor  || t == CT::Min7   || t == CT::Min6 ||
-           t == CT::Min9   || t == CT::Min7b5 || t == CT::MinMaj7 ||
-           t == CT::Dim    || t == CT::Dim7;
+    switch (t) {
+        case CT::Dom7:
+        case CT::Dom9:
+        case CT::Dom7Sus4:
+        case CT::Aug7:
+            return TargetCvFamily::Dom7;
+        case CT::Dim:
+        case CT::Dim7:
+            return TargetCvFamily::Dim;
+        case CT::Sus4:
+        case CT::Sus2:
+            return TargetCvFamily::Sus4;
+        case CT::Power:
+            return TargetCvFamily::Power;
+        case CT::Minor:
+        case CT::Min6:
+        case CT::Min7:
+        case CT::Min9:
+        case CT::Min7b5:
+        case CT::MinMaj7:
+            return TargetCvFamily::Minor;
+        default:
+            return TargetCvFamily::Major;
+    }
+}
+
+inline bool isMinorTargetChord(arranger::ChordType t) noexcept {
+    const TargetCvFamily fam = classifyTargetCvFamily(t);
+    return fam == TargetCvFamily::Minor || fam == TargetCvFamily::Dim;
 }
 
 // Fold into [0, 127] by octaves so pitch class is never lost.
@@ -383,10 +418,13 @@ inline NormalizeResult normalizeTrackToPa5xReference(
         }
     }
 
-    // 4. Quality Normalization: source chord quality -> target CV chord (C Maj or C Min).
-    const bool targetMinor = norm_detail::isMinorTargetChord(target_cv_chord);
+    // 4. Quality Normalization: source chord quality -> target CV chord family
+    //    (CV1 Major, CV2 Minor, CV3 Dom7, CV4 Dim/Dim7, CV5 Sus4, CV6 Power).
+    const norm_detail::TargetCvFamily targetFamily = norm_detail::classifyTargetCvFamily(target_cv_chord);
     const uint8_t nttLow = static_cast<uint8_t>(casm.ntt & 0x7Fu);
-    const bool isMelodyNtt = casm.has_casm && !casm.ntt_bass && (nttLow == 1 || nttLow == 3 || nttLow == 4);
+    // SFF2 Guitar Mode (NTR == 2) uses NTT == 1 for Stroke (not Melody), so exclude casm.ntr == 2.
+    const bool isMelodyNtt = casm.has_casm && casm.ntr != 2 && !casm.ntt_bass &&
+                             (nttLow == 1 || nttLow == 3 || nttLow == 4);
     const bool isChordOrBass =
         casm.has_casm
             ? (casm.ntt_bass || nttLow == 2 || casm.ntr == 2 || korg_ch == kBassCh || role == uasf::TrackRole::Bass)
@@ -399,52 +437,143 @@ inline NormalizeResult normalizeTrackToPa5xReference(
             const int pc = static_cast<int>(n.pitch % 12);
             int delta = 0;
 
-            if (!targetMinor) {
-                // Target CV is C Major (cv1).
-                if (src.has_maj7 && pc == 11) {
-                    // Preserve B (pc 11) on Melody NTT; snap B -> C/G on Chord/Bass to prevent C7 clash.
-                    if (isChordOrBass && !isMelodyNtt) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4, +5});
+            switch (targetFamily) {
+                case norm_detail::TargetCvFamily::Major:
+                    // Target CV is C Major (cv1): {0, 4, 7}.
+                    if (src.has_maj7 && pc == 11) {
+                        // Preserve B (pc 11) on Melody NTT; snap B -> C/G on Chord/Bass/Guitar to prevent C7 clash.
+                        if (isChordOrBass && !isMelodyNtt) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4, +5});
+                        }
+                    } else if (src.is_minor_family) {
+                        if (pc == 3) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, +4, -3});  // Eb -> E
+                        } else if (src.has_min7 && pc == 10) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3, +6});  // Bb -> C or G or E
+                        } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12) && pc == 6) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // Gb -> G
+                        } else if (src.raw_type == 0x12 && pc == 9 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-2, +3});      // Dim7 A -> G
+                        }
+                    } else if (src.is_dominant_family) {
+                        if (pc == 10) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3, +6});  // Bb -> C or G or E
+                        } else if (src.raw_type == 0x14 && pc == 5 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // 7sus4 F -> E
+                        } else if (src.raw_type == 0x15 && pc == 6) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // 7b5 Gb -> G
+                        } else if (src.raw_type == 0x1D && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // 7aug G# -> G
+                        }
+                    } else {
+                        // Major-family edge qualities (Aug, Maj7aug, Sus4)
+                        if ((src.raw_type == 0x07 || src.raw_type == 0x1C) && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // Aug G# -> G
+                        } else if (src.raw_type == 0x20 && pc == 5 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // Sus4 F -> E
+                        }
                     }
-                } else if (src.is_minor_family) {
-                    if (pc == 3) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, +4, -3});  // Eb -> E
-                    } else if (src.has_min7 && pc == 10) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3, +6});  // Bb -> C or G or E
+                    break;
+
+                case norm_detail::TargetCvFamily::Minor:
+                    // Target CV is C Minor (cv2): {0, 3, 7}.
+                    if ((src.is_major_family || src.is_dominant_family) && pc == 4) {
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +3});          // E -> Eb
+                    } else if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4, +4});      // B -> C
+                    } else if ((src.raw_type == 0x07 || src.raw_type == 0x1C || src.raw_type == 0x1D) && pc == 8) {
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});          // Aug G# -> G
                     } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12) && pc == 6) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // Gb -> G
-                    } else if (src.raw_type == 0x12 && pc == 9 && isChordOrBass) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-2, +3});      // Dim7 A -> G
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -3});          // Gb -> G
                     }
-                } else if (src.is_dominant_family) {
-                    if (pc == 10) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3, +6});  // Bb -> C or G or E
-                    } else if (src.raw_type == 0x14 && pc == 5 && isChordOrBass) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // 7sus4 F -> E
-                    } else if (src.raw_type == 0x15 && pc == 6) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // 7b5 Gb -> G
-                    } else if (src.raw_type == 0x1D && pc == 8) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // 7aug G# -> G
+                    break;
+
+                case norm_detail::TargetCvFamily::Dom7:
+                    // Target CV is C7 (cv3): {0, 4, 7, 10} — strictly preserves b7 (pc 10).
+                    if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
+                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +1, -4});      // B -> Bb (or C/G)
+                    } else if (src.is_minor_family) {
+                        if (pc == 3) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, +4, -3});  // Eb -> E
+                        } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12) && pc == 6) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // Gb -> G
+                        } else if (src.raw_type == 0x12 && pc == 9 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // Dim7 A -> Bb or G
+                        }
+                    } else if (src.is_dominant_family) {
+                        // Preserve b7 (pc 10) untouched! Only normalize altered 5ths / 7sus4 4th.
+                        if (src.raw_type == 0x14 && pc == 5 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // 7sus4 F -> E
+                        } else if (src.raw_type == 0x15 && pc == 6) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // 7b5 Gb -> G
+                        } else if (src.raw_type == 0x1D && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // 7aug G# -> G
+                        }
+                    } else {
+                        if ((src.raw_type == 0x07 || src.raw_type == 0x1C) && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // Aug G# -> G
+                        } else if (src.raw_type == 0x20 && pc == 5 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // Sus4 F -> E
+                        }
                     }
-                } else {
-                    // Major-family edge qualities (Aug, Maj7aug, Sus4)
-                    if ((src.raw_type == 0x07 || src.raw_type == 0x1C) && pc == 8) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // Aug G# -> G
-                    } else if (src.raw_type == 0x20 && pc == 5 && isChordOrBass) {
-                        delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // Sus4 F -> E
+                    break;
+
+                case norm_detail::TargetCvFamily::Dim:
+                    // Target CV is C Dim / Dim7 (cv4): {0, 3, 6, 9} — strictly preserves b3 (3), b5 (6), bb7 (9).
+                    if (src.raw_type != 0x11 && src.raw_type != 0x12) {
+                        if ((src.is_major_family || src.is_dominant_family) && pc == 4) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // E -> Eb
+                        } else if (pc == 7 && src.raw_type != 0x0B) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // G -> Gb (or A)
+                        } else if ((src.raw_type == 0x07 || src.raw_type == 0x1C || src.raw_type == 0x1D) && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-2, +1});      // G# -> Gb or A
+                        } else if ((src.has_min7 || src.is_dominant_family) && pc == 10) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +2});      // Bb -> A or C
+                        } else if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -2});      // B -> C or A
+                        }
                     }
-                }
-            } else {
-                // Target CV is C Minor (cv2).
-                if ((src.is_major_family || src.is_dominant_family) && pc == 4) {
-                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +3});          // E -> Eb
-                } else if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
-                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4, +4});      // B -> C
-                } else if ((src.raw_type == 0x07 || src.raw_type == 0x1C || src.raw_type == 0x1D) && pc == 8) {
-                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});          // Aug G# -> G
-                } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12) && pc == 6) {
-                    delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -3});          // Gb -> G
-                }
+                    break;
+
+                case norm_detail::TargetCvFamily::Sus4:
+                    // Target CV is C Sus4 (cv5): {0, 5, 7} — strictly preserves 4th (pc 5).
+                    if (src.raw_type != 0x20 && src.raw_type != 0x21) {
+                        if ((src.is_major_family || src.is_dominant_family) && pc == 4) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, +3, -4});  // E -> F (or G/C)
+                        } else if (src.is_minor_family && pc == 3) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, +4, -3});  // Eb -> F (or G/C)
+                        } else if ((src.has_min7 || src.is_dominant_family) && pc == 10) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3});      // Bb -> C or G
+                        } else if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4});      // B -> C or G
+                        } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12 || src.raw_type == 0x15) && pc == 6) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -1});      // Gb -> G or F
+                        } else if ((src.raw_type == 0x07 || src.raw_type == 0x1C || src.raw_type == 0x1D) && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});      // G# -> G or C
+                        }
+                    }
+                    break;
+
+                case norm_detail::TargetCvFamily::Power:
+                    // Target CV is C Power / 1+5 (cv6): {0, 7} — preserves {0, 7} untouched.
+                    if (src.raw_type != 0x1E && src.raw_type != 0x1F) {
+                        if ((src.is_major_family || src.is_dominant_family) && pc == 4 && isChordOrBass && !isMelodyNtt) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+3, -4, +8, -5}); // E -> G/C
+                        } else if (src.is_minor_family && pc == 3 && isChordOrBass && !isMelodyNtt) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-3, +4, +9, -8}); // Eb -> C/G
+                        } else if ((src.has_min7 || src.is_dominant_family) && pc == 10) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -3});         // Bb -> C/G
+                        } else if (src.has_maj7 && pc == 11 && isChordOrBass && !isMelodyNtt) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -4});         // B -> C/G
+                        } else if ((src.raw_type == 0x0B || src.raw_type == 0x11 || src.raw_type == 0x12 || src.raw_type == 0x15) && pc == 6) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+1, -6});         // Gb -> G/C
+                        } else if ((src.raw_type == 0x07 || src.raw_type == 0x1C || src.raw_type == 0x1D) && pc == 8) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {-1, +4});         // G# -> G/C
+                        } else if ((src.raw_type == 0x20 || src.raw_type == 0x14) && pc == 5 && isChordOrBass) {
+                            delta = norm_detail::pickNonCollidingDelta(res.notes, i, {+2, -5});         // F -> G/C
+                        }
+                    }
+                    break;
             }
 
             if (delta != 0) {
