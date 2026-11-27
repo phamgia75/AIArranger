@@ -572,14 +572,18 @@ static void testGroupA_PositiveControls(const SynthUniverse& U) {
         const TargetOccupancyMap occ = inspectTargetKstInput(in);
         const auto* eMix = occ.findOccupied({true, 1, 3});
         const auto* eRom = occ.findOccupied({true, 1, 4});
-        TEST("T3: mixed ROM+Bank2+RAM resolves 1 RAM edge & 0 unresolved; ROM-only is NoKnownReference & InsufficientEvidence",
+        const auto mixEq = eMix ? compareSoundEquivalence(eMix->equivalence, eMix->equivalence) : EquivalenceResult{};
+        TEST("T3: mixed ROM+Bank2+RAM resolves 1 RAM edge & 0 unresolved; Bank-2 downgrades fail-closed to InsufficientEvidence; ROM-only is NoKnownReference & InsufficientEvidence",
              res.ok && res.report.refs.drumKitsAnalysed == 1 && res.report.refs.ramDrumLayers == 1 &&
              res.report.refs.nonRamDrumLayers == 1 && res.report.refs.romDrumLayers == 254 &&
              res.report.refs.unresolved.empty() &&
              res.report.refs.unanalysed.size() == 1 &&
              res.report.refs.unanalysed[0].sound == ResourceId({false, "USERDK01", Kind::Sound, 4}) &&
              res.report.refs.unanalysed[0].why == Gap::NoKnownReference &&
-             eMix != nullptr && eMix->equivalence.provablyComparable() &&
+             eMix != nullptr && eMix->equivalence.analysed &&
+             eMix->equivalence.hasNonRamBank2Layers && !eMix->equivalence.provablyComparable() &&
+             mixEq.verdict == EquivalenceVerdict::InsufficientEvidence &&
+             mixEq.reason.find("contains unverified Bank-2 (0x02) drum layers") != std::string::npos &&
              eRom != nullptr && !eRom->equivalence.provablyComparable() &&
              compareSoundEquivalence(eRom->equivalence, eRom->equivalence).verdict == EquivalenceVerdict::InsufficientEvidence);
     }
@@ -1197,13 +1201,259 @@ static void testGroupD_AuditRound1Regressions(const SynthUniverse& U) {
     }
 }
 
+static void testGroupE_SliceA1EnrichmentAndBank2Guard(const SynthUniverse& U) {
+    std::printf("\n[Group E] Slice A1: DrumKeyOccupancy, Sample Names, Vel Helpers, Target Exposure & Bank-2 Guard (T23..T27)\n");
+
+    // T23: Four-state DrumKeyOccupancy, activeKeyMask/ramKeyMask, isRomOnly, hasBank2Layers & IDrumKitCatalog alias
+    {
+        auto keysMixed = makeDefaultKeys();
+        // Key 36: resolved RAM (2 layers) -> RamPopulated
+        keysMixed[36] = {0x7FFFu, 64, 0, {64, 127}, {
+            {1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)},
+            {1, 1, 0x8000u, 0, 0, makeId(0xD0, 2)},
+        }};
+        // Key 38: ROM non-zero index -> RomOrBank2Populated
+        keysMixed[38].layers = {{0, 142, 0x8000u, 0, 0, {}}};
+        // Key 40: Bank-2 (0x02) -> RomOrBank2Populated
+        keysMixed[40].layers = {{2, 86, 0x8000u, 0, 0, {}}};
+        // Key 44: Dangling RAM -> EmptyOrUnknown
+        keysMixed[44].layers = {{1, 18, 0x8000u, 0, 0, makeId(0xD0, 0xFE)}};
+        // Key 45: ROM layer with non-zero ID8 (contradiction) -> EmptyOrUnknown
+        keysMixed[45].layers = {{0, 0, 0x8000u, 0, 0, makeId(0xD0, 1)}};
+        // All remaining 123 keys: default lc=1, sourceBank=0, tableIndex=0 -> RomIndexZeroPlaceholder
+
+        auto keysRomOnly = makeDefaultKeys();
+        keysRomOnly[36].layers = {{0, 201, 0x8000u, 0, 0, {}}};
+        keysRomOnly[38].layers = {{0, 202, 0x8000u, 0, 0, {}}};
+
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 0, "SYN_OCC_MIX", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysMixed)),   ""},
+                {kProf1005.kind, 4, 11, 1, "SYN_OCC_ROM", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysRomOnly)), ""},
+            })}
+        };
+        const NativeKstResult res = resolveNativeKst(in);
+        const IDrumKitCatalog& catalog = res; // verifies IDrumKitCatalog alias
+        const DrumKitKeyMap* kmMix = catalog.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 0});
+        const DrumKitKeyMap* kmRom = catalog.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 1});
+        TEST("T23: DrumKeyOccupancy classifies RAM, ROM(idx!=0), Bank-2, ROM(idx==0) placeholder & dangling/corrupt accurately",
+             res.ok && kmMix != nullptr && kmRom != nullptr &&
+             kmMix->keys[36].occupancy == DrumKeyOccupancy::RamPopulated &&
+             kmMix->keys[38].occupancy == DrumKeyOccupancy::RomOrBank2Populated &&
+             kmMix->keys[40].occupancy == DrumKeyOccupancy::RomOrBank2Populated &&
+             kmMix->keys[44].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             kmMix->keys[45].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             kmMix->keys[0].occupancy == DrumKeyOccupancy::RomIndexZeroPlaceholder &&
+             kmMix->keys[60].occupancy == DrumKeyOccupancy::RomIndexZeroPlaceholder &&
+             kmMix->activeKeyMask.count() == 3 &&
+             kmMix->activeKeyMask.test(36) && kmMix->activeKeyMask.test(38) && kmMix->activeKeyMask.test(40) &&
+             !kmMix->activeKeyMask.test(0) && !kmMix->activeKeyMask.test(44) && !kmMix->activeKeyMask.test(45) &&
+             kmMix->ramKeyMask.count() == 1 && kmMix->ramKeyMask.test(36) &&
+             kmMix->hasKey(36) && kmMix->hasKey(38) && kmMix->hasKey(40) && !kmMix->hasKey(0) &&
+             kmMix->nonRamBank2LayerCount == 1 && kmMix->hasBank2Layers() && !kmMix->isRomOnly() &&
+             kmRom->isRomOnly() && !kmRom->hasBank2Layers() &&
+             kmRom->activeKeyMask.count() == 2 && kmRom->ramKeyMask.none() &&
+             kmRom->keys[36].occupancy == DrumKeyOccupancy::RomOrBank2Populated &&
+             kmRom->keys[0].occupancy == DrumKeyOccupancy::RomIndexZeroPlaceholder);
+    }
+
+    // T24: advisoryDrumSampleName populated from RAM.KMP on resolved RAM layers (empty on ROM/dangling)
+    {
+        auto keysNames = makeT1Keys();
+        keysNames[50].layers = {{0, 120, 0x8000u, 0, 0, {}}};
+        keysNames[51].layers = {{1, 18, 0x8000u, 0, 0, makeId(0xD0, 0xFE)}};
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 0, "SYN_NAMES", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysNames)), ""}
+            })}
+        };
+        const NativeKstResult res = resolveNativeKst(in);
+        const DrumKitKeyMap* km = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 0});
+        TEST("T24: advisoryDrumSampleName populated from RAM.KMP on resolved RAM layers and empty on ROM/dangling",
+             res.ok && km != nullptr &&
+             km->keys[36].layers[0].advisoryDrumSampleName == "SYN_DRUM_KICK_S" &&
+             km->keys[36].layers[1].advisoryDrumSampleName == "SYN_DRUM_KICK_H" &&
+             km->keys[38].layers[0].advisoryDrumSampleName == "SYN_DRUM_SNARE" &&
+             km->keys[42].layers[0].advisoryDrumSampleName == "SYN_DRUM_HH_CL" &&
+             km->keys[50].layers[0].advisoryDrumSampleName.empty() &&
+             km->keys[51].layers[0].advisoryDrumSampleName.empty());
+    }
+
+    // T25: Pure constexpr velocity helpers: effectiveDistinctLayers(), effectiveMaxVel(), hasDegenerateVelSplit()
+    {
+        DrumKitKeySummary emptyKey;
+        auto keysVel = makeDefaultKeys();
+        keysVel[36] = {0x7FFFu, 64, 0, {64, 127}, {
+            {1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)},
+            {1, 1, 0x8000u, 0, 0, makeId(0xD0, 2)},
+        }};
+        keysVel[38] = {0x7FFFu, 64, 0, {127, 127}, {
+            {1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)},
+            {1, 2, 0x8000u, 0, 0, makeId(0xD0, 3)},
+        }};
+        keysVel[40] = {0x7FFFu, 64, 0, {60, 109}, {
+            {1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)},
+            {1, 2, 0x8000u, 0, 0, makeId(0xD0, 3)},
+        }};
+        keysVel[42] = {0x7FFFu, 64, 1, {64, 64, 120}, {
+            {1, 3, 0x8000u, 0, 0, makeId(0xD0, 4)},
+            {1, 3, 0x8000u, 0, 0, makeId(0xD0, 4)},
+            {1, 4, 0x8000u, 0, 0, makeId(0xD0, 5)},
+        }};
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 0, "SYN_VEL_HELPERS", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysVel)), ""}
+            })}
+        };
+        const NativeKstResult res = resolveNativeKst(in);
+        const DrumKitKeyMap* km = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 0});
+        TEST("T25: effectiveDistinctLayers, effectiveMaxVel & hasDegenerateVelSplit handle normal, [127/127], sub-max ceiling & empty keys",
+             emptyKey.effectiveDistinctLayers() == 0 && emptyKey.effectiveMaxVel() == 0 && !emptyKey.hasDegenerateVelSplit() &&
+             res.ok && km != nullptr &&
+             km->keys[36].effectiveDistinctLayers() == 2 && km->keys[36].effectiveMaxVel() == 127 && !km->keys[36].hasDegenerateVelSplit() &&
+             km->keys[38].effectiveDistinctLayers() == 1 && km->keys[38].effectiveMaxVel() == 127 && km->keys[38].hasDegenerateVelSplit() &&
+             km->keys[40].effectiveDistinctLayers() == 2 && km->keys[40].effectiveMaxVel() == 109 && !km->keys[40].hasDegenerateVelSplit() &&
+             km->keys[42].effectiveDistinctLayers() == 2 && km->keys[42].effectiveMaxVel() == 120 && km->keys[42].hasDegenerateVelSplit());
+    }
+
+    // T26: TargetOccupancyMap::drumKeyMaps exposure & M1AdapterView::drumKeyMaps parity (RAM + ROM-only + Bank-2 kits)
+    {
+        auto keysRam = makeT1Keys();
+        auto keysRom = makeDefaultKeys();
+        keysRom[36].layers = {{0, 100, 0x8000u, 0, 0, {}}};
+        auto keysBank2 = makeDefaultKeys();
+        keysBank2[36].layers = {{1, 0, 0x8000u, 0, 0, makeId(0xD0, 1)}};
+        keysBank2[38].layers = {{2, 42, 0x8000u, 0, 0, {}}};
+
+        NativeKstClosureInput cin;
+        cin.downstream = U.makeBaseInput();
+        cin.downstream.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 0, "SYN_RAM_KIT",   rawKorfPayload(buildSynthUserDkBody(kProf1005, keysRam)),   ""},
+                {kProf1005.kind, 4, 11, 1, "SYN_ROM_KIT",   rawKorfPayload(buildSynthUserDkBody(kProf1005, keysRom)),   ""},
+                {kProf1005.kind, 4, 11, 2, "SYN_BANK2_KIT", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysBank2)), ""},
+            })}
+        };
+
+        const TargetOccupancyMap occDirect = inspectTargetKstInput(cin.downstream);
+        const M1AdapterView view = adaptNativeKstInput(cin);
+        const TargetOccupancyMap occFromAdapter = buildTargetOccupancyFromAdapter(view);
+        const NativeKstClosureResult m1Res = resolveNativeKstClosure(cin);
+        const TargetOccupancyMap occFromM1 = buildTargetOccupancyFromM1Closure(m1Res);
+
+        const SlotAddress s0{true, 1, 0}, s1{true, 1, 1}, s2{true, 1, 2};
+        const ResourceId r0{false, "USERDK01", Kind::Sound, 0};
+        const ResourceId r1{false, "USERDK01", Kind::Sound, 1};
+        const ResourceId r2{false, "USERDK01", Kind::Sound, 2};
+
+        const auto* dKm0 = occDirect.findDrumKitKeyMap(s0);
+        const auto* dKm1 = occDirect.findDrumKitKeyMap(s1);
+        const auto* dKm2 = occDirect.findDrumKitKeyMap(s2);
+        const auto* vKm0 = view.findDrumKitKeyMap(r0);
+        const auto* vKm1 = view.findDrumKitKeyMap(r1);
+        const auto* vKm2 = view.findDrumKitKeyMap(r2);
+        const auto* aKm0 = occFromAdapter.findDrumKitKeyMap(s0);
+        const auto* aKm1 = occFromAdapter.findDrumKitKeyMap(s1);
+        const auto* aKm2 = occFromAdapter.findDrumKitKeyMap(s2);
+        const auto* mKm2 = occFromM1.findDrumKitKeyMap(s2);
+
+        TEST("T26: TargetOccupancyMap & M1AdapterView expose all 3 parsed USERDK keyMaps (including ROM-only) with exact parity",
+             occDirect.drumKeyMaps.size() == 3 && view.drumKeyMaps.size() == 3 &&
+             occFromAdapter.drumKeyMaps.size() == 3 && occFromM1.drumKeyMaps.size() == 3 &&
+             dKm0 && dKm1 && dKm2 && vKm0 && vKm1 && vKm2 && aKm0 && aKm1 && aKm2 && mKm2 &&
+             dKm0->activeKeyMask == vKm0->activeKeyMask && dKm0->activeKeyMask == aKm0->activeKeyMask &&
+             dKm0->keys[36].layers[0].advisoryDrumSampleName == "SYN_DRUM_KICK_S" &&
+             vKm0->keys[36].layers[0].advisoryDrumSampleName == "SYN_DRUM_KICK_S" &&
+             dKm1->isRomOnly() && vKm1->isRomOnly() && aKm1->isRomOnly() &&
+             dKm2->hasBank2Layers() && vKm2->hasBank2Layers() && aKm2->hasBank2Layers() && mKm2->hasBank2Layers() &&
+             dKm2->nonRamBank2LayerCount == 1 && vKm2->nonRamBank2LayerCount == 1);
+
+        // T27: Exact Bank-2 fail-closed equivalence parity across slot_conflicts.h & m1_manifest_adapter.h + CollisionMatrix refusal
+        const auto* directE0 = occDirect.findOccupied(s0);
+        const auto* directE2 = occDirect.findOccupied(s2);
+        const auto* adaptE0 = occFromAdapter.findOccupied(s0);
+        const auto* adaptE2 = occFromAdapter.findOccupied(s2);
+        const auto viewS2 = view.sounds.find(r2);
+
+        const auto eqDirectBank2 = compareSoundEquivalence(directE2->equivalence, directE2->equivalence);
+        const auto eqAdaptBank2 = compareSoundEquivalence(adaptE2->equivalence, adaptE2->equivalence);
+        const auto eqCrossBank2 = compareSoundEquivalence(viewS2->second.equivalence, directE2->equivalence);
+        const auto eqCleanRam = compareSoundEquivalence(directE0->equivalence, adaptE0->equivalence);
+
+        CollisionMatrixInput cmIn;
+        cmIn.policy = ConflictPolicy::BlockWithReport;
+        cmIn.soundRequests.push_back({"pa5x:USERDK01/Sound/2", s2, "SYN_BANK2_KIT", viewS2->second.equivalence, false, {"STYLE/B/S.stg"}});
+        const CollisionMatrixResult cm = evaluateCollisionMatrix(occDirect, cmIn);
+        bool hasInsuffDiag = false, hasUnparsedDiag = false;
+        for (const auto& d : cm.diagnostics) {
+            if (d.code == diag_code::kSoundSlotEquivalenceInsufficient) hasInsuffDiag = true;
+            if (d.code == diag_code::kDrumkitBodyUnparsed) hasUnparsedDiag = true;
+        }
+        TEST("T27: Bank-2 (0x02) kit fails closed to InsufficientEvidence with exact parity across slot_conflicts & m1_manifest_adapter",
+             directE0 && directE2 && adaptE0 && adaptE2 && viewS2 != view.sounds.end() &&
+             !directE0->equivalence.hasNonRamBank2Layers && directE0->equivalence.provablyComparable() &&
+             eqCleanRam.verdict == EquivalenceVerdict::Identical &&
+             directE2->equivalence.analysed && directE2->equivalence.hasNonRamBank2Layers &&
+             !directE2->equivalence.provablyComparable() && directE2->equivalence.equivalenceDigest.empty() &&
+             adaptE2->equivalence.analysed && adaptE2->equivalence.hasNonRamBank2Layers &&
+             !adaptE2->equivalence.provablyComparable() && adaptE2->equivalence.equivalenceDigest.empty() &&
+             viewS2->second.equivalence.hasNonRamBank2Layers && !viewS2->second.equivalence.provablyComparable() &&
+             eqDirectBank2.verdict == EquivalenceVerdict::InsufficientEvidence &&
+             eqDirectBank2.reason.find("contains unverified Bank-2 (0x02) drum layers") != std::string::npos &&
+             eqAdaptBank2.verdict == EquivalenceVerdict::InsufficientEvidence &&
+             eqCrossBank2.verdict == EquivalenceVerdict::InsufficientEvidence &&
+             cm.hasBlockingConflicts() && hasInsuffDiag && !hasUnparsedDiag &&
+             occDirect.targetLibraryKey == occFromAdapter.targetLibraryKey);
+    }
+
+    // T28 (Audit P2-2): Unknown-bank (0x03/0xFF) & corrupt non-zero-ID8 ROM kits MUST NOT report isRomOnly() == true
+    //                   and MUST fail closed to InsufficientEvidence!
+    {
+        auto keysUnknownBank = makeDefaultKeys();
+        keysUnknownBank[36].layers = {{0x03u, 10, 0x8000u, 0, 0, {}}};
+        keysUnknownBank[38].layers = {{0xFFu, 11, 0x8000u, 0, 0, {}}};
+
+        auto keysCorruptRom = makeDefaultKeys();
+        keysCorruptRom[42].layers = {{0x00u, 100, 0x8000u, 0, 0, makeId(0xD0, 1)}}; // ROM layer carrying non-zero ID8!
+
+        NativeKstInput in = U.makeBaseInput();
+        in.soundContainers = {
+            {"SOUND/USERDK01.PCG", "USERDK01", buildKorfContainer({
+                {kProf1005.kind, 4, 11, 10, "SYN_UNK_BANK",   rawKorfPayload(buildSynthUserDkBody(kProf1005, keysUnknownBank)), ""},
+                {kProf1005.kind, 4, 11, 11, "SYN_BAD_ROM_ID", rawKorfPayload(buildSynthUserDkBody(kProf1005, keysCorruptRom)),  ""},
+            })}
+        };
+        const NativeKstResult res = resolveNativeKst(in);
+        const TargetOccupancyMap occ = inspectTargetKstInput(in);
+        const auto* kmUnk = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 10});
+        const auto* kmBad = res.findDrumKitKeyMap({false, "USERDK01", Kind::Sound, 11});
+        const auto* occUnk = occ.findOccupied({true, 1, 10});
+        const auto* occBad = occ.findOccupied({true, 1, 11});
+        TEST("T28 (P2-2): unknown-bank (0x03/0xFF) & corrupt non-zero-ID8 ROM kits track unresolvedNonRamLayerCount, isRomOnly()==false & InsufficientEvidence",
+             res.ok && kmUnk != nullptr && kmBad != nullptr &&
+             kmUnk->unresolvedNonRamLayerCount == 2 && !kmUnk->isRomOnly() &&
+             kmUnk->keys[36].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             kmUnk->keys[38].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             kmBad->unresolvedNonRamLayerCount == 1 && !kmBad->isRomOnly() &&
+             kmBad->keys[42].occupancy == DrumKeyOccupancy::EmptyOrUnknown &&
+             occUnk != nullptr && !occUnk->equivalence.provablyComparable() &&
+             compareSoundEquivalence(occUnk->equivalence, occUnk->equivalence).verdict == EquivalenceVerdict::InsufficientEvidence &&
+             occBad != nullptr && !occBad->equivalence.provablyComparable() &&
+             compareSoundEquivalence(occBad->equivalence, occBad->equivalence).verdict == EquivalenceVerdict::InsufficientEvidence);
+    }
+}
+
 int main() {
-    std::printf("Test: Read-Only USERDK Drum Kit Parser, Resource Graph Integration & Equivalence (T1..T22)\n");
+    std::printf("Test: Read-Only USERDK Drum Kit Parser, Resource Graph Integration & Equivalence (T1..T28)\n");
     const SynthUniverse U;
     testGroupA_PositiveControls(U);
     testGroupB_AnomaliesAndLegacy(U);
     testGroupC_CorruptAndBoundaryRefusals(U);
     testGroupD_AuditRound1Regressions(U);
+    testGroupE_SliceA1EnrichmentAndBank2Guard(U);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }
