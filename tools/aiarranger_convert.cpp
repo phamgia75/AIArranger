@@ -19,11 +19,14 @@
 //       2 = conversion or validation failed (no corrupt SMF written) / round trip differs / batch had failures.
 
 #include "engine/uasf/serializer.h"
+#include "exporters/korg/acceptance_gate.h"
 #include "exporters/korg/conversion_manifest.h"
 #include "exporters/korg/genos_to_korg.h"
+#include "exporters/korg/musical_quality_analyzer.h"
 #include "exporters/korg/pa5x_sound_matcher.h"
 #include "exporters/korg/sff1_route.h"
 #include "exporters/korg/sound_map.h"
+#include "exporters/korg/style_enhancer.h"
 #include "exporters/korg/target_kst_drum_adapter.h"
 #include "exporters/korg/timbre_profiler.h"
 #include "importers/sff1/sff1_mapper.h"
@@ -33,10 +36,12 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -58,11 +63,274 @@ int usage() {
                  "                          [--bake-rubato [on|off]] [--style-edit-sheet FILE]\n"
                  "                          [--auto-sound-map | --no-auto-sound-map]\n"
                  "                          [--target-kst <dir>] [--prefer-target-user-sounds] [--dump-soundmap FILE]\n"
+                 "                          [--enhance <off|recommended>] [--analyze-musical-quality <dir_or_prefix>]\n"
+                 "                          [--listening-record <path.json>] [--validation-bundle <dir>]\n"
                  "       aiarranger-convert --input <file.sty> --out-bundle <dir> [options...]\n"
+                 "       aiarranger-convert --input <file.sty> --validation-bundle <dir> [--enhance off|recommended] [--listening-record FILE] [options...]\n"
                  "       aiarranger-convert --batch-dir <in_dir> --out-dir <out_dir> [--strict-batch] [--flat] [options...]\n"
                  "       aiarranger-convert --compare <ours.mid> --with <pa5x_export.mid>\n"
                  "sound-map lines: <track> <msb> <lsb> <pc> | <section>.<track> <msb> <lsb> <pc> | <key> unresolved\n";
     return 1;
+}
+
+bool readTextFile(const fs::path& path, std::string& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        std::cerr << "cannot open " << path.string() << "\n";
+        return false;
+    }
+    out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (f.bad()) {
+        std::cerr << "error reading " << path.string() << "\n";
+        return false;
+    }
+    return true;
+}
+
+bool ensureParentDir(const fs::path& path) {
+    const fs::path parent = path.parent_path();
+    if (parent.empty()) return true;
+    std::error_code ec;
+    fs::create_directories(parent, ec);
+    if (ec) {
+        std::cerr << "cannot create directory " << parent.string() << ": " << ec.message() << "\n";
+        return false;
+    }
+    return true;
+}
+
+bool resolveAnalyzeOutputPaths(const std::string& arg, fs::path& outJson, fs::path& outMd) {
+    if (arg.empty()) return false;
+    std::error_code ec;
+    const bool endsWithSep = (arg.back() == '/' || arg.back() == '\\');
+    const fs::path p(arg);
+    const bool existsAsDir = fs::exists(p, ec) && fs::is_directory(p, ec);
+    if (endsWithSep || existsAsDir) {
+        if (fs::exists(p, ec) && !fs::is_directory(p, ec)) {
+            std::cerr << "analyze output target exists and is not a directory: " << arg << "\n";
+            return false;
+        }
+        fs::create_directories(p, ec);
+        if (ec) {
+            std::cerr << "cannot create analyze output directory " << arg << ": " << ec.message() << "\n";
+            return false;
+        }
+        outJson = p / "musical_quality.json";
+        outMd = p / "musical_quality.md";
+        return true;
+    }
+    outJson = fs::path(arg + ".json");
+    outMd = fs::path(arg + ".md");
+    return ensureParentDir(outJson);
+}
+
+std::string fmtSigned2(double v) {
+    std::ostringstream o;
+    o << std::fixed << std::setprecision(2) << (v >= 0.0 ? "+" : "") << v;
+    return o.str();
+}
+
+std::string fmtUnsigned2(double v) {
+    std::ostringstream o;
+    o << std::fixed << std::setprecision(2) << v;
+    return o.str();
+}
+
+std::string formatComparisonBvsCMd(
+    const std::string& styleName,
+    const quality::MusicalQualityReport& mqB,
+    const quality::MusicalQualityReport& mqC,
+    const quality::MusicalQualityDelta& delta,
+    const quality::EnhanceResult& enh,
+    const std::string& shaB,
+    const std::string& shaC) {
+    std::ostringstream o;
+    o << "# Candidate B (Mode A Faithful) vs. Candidate C (Mode B Enhanced): " << styleName << "\n\n";
+    o << "- **Epistemic Boundary:** `hardwareVerified: false` | `l3Status: NOT_TESTED` | `independentFromFrozenQ1: true`\n";
+    o << "- **Mode A Integrity:** Candidate B (`candidate_b_faithful/converted.mid`) was **NOT mutated** by Mode B.\n";
+    o << "- **Candidate B SHA-256:** `" << shaB << "`\n";
+    o << "- **Candidate C SHA-256:** `" << shaC << "` ("
+      << (shaB == shaC ? "identical — 0 enhancement edits needed" : "modified by opt-in Mode B rules") << ")\n";
+    o << "- **Overall Musical Quality Score:** `" << fmtUnsigned2(mqB.overall_musical_score)
+      << "` -> `" << fmtUnsigned2(mqC.overall_musical_score)
+      << "` (`" << fmtSigned2(delta.overall_delta) << "`)\n";
+    o << "- **Critical Regressions Introduced:** `" << (delta.any_critical_regression ? "YES" : "NO (0)") << "`\n";
+    o << "- **Enhancement Actions Applied:** `" << enh.stats.actions_applied
+      << "` (`vel=" << enh.stats.notes_velocity_adjusted
+      << "`, `pitch=" << enh.stats.notes_pitch_adjusted
+      << "`, `cc+=" << enh.stats.cc_events_added
+      << "`, `cc-=" << enh.stats.cc_events_removed
+      << "`, `cv+=" << enh.stats.cv_elements_synthesized << "`)\n\n";
+
+    o << "## 12-Dimension Side-by-Side Comparison\n\n";
+    o << "| # | Dimension | Mode A (Faithful) | Mode B (Enhanced) | Delta | Status (A -> B) |\n";
+    o << "|---:|---|---:|---:|---:|---|\n";
+    for (size_t i = 0; i < 12u; ++i) {
+        const auto& db = mqB.dimensions[i];
+        const auto& dc = mqC.dimensions[i];
+        o << "| " << static_cast<unsigned>(db.id)
+          << " | " << db.name
+          << " | " << fmtUnsigned2(db.score)
+          << " | " << fmtUnsigned2(dc.score)
+          << " | `" << fmtSigned2(delta.dimension_deltas[i]) << "`"
+          << " | `" << db.status << "` -> `" << dc.status << "` |\n";
+    }
+
+    o << "\n## Finding Delta\n\n";
+    o << "- **Resolved Findings (" << delta.resolved_finding_codes.size() << "):** ";
+    if (delta.resolved_finding_codes.empty()) {
+        o << "_none_\n";
+    } else {
+        for (size_t i = 0; i < delta.resolved_finding_codes.size(); ++i) {
+            if (i > 0u) o << ", ";
+            o << "`" << delta.resolved_finding_codes[i] << "`";
+        }
+        o << "\n";
+    }
+    o << "- **Newly Introduced Warnings (" << delta.newly_introduced_warnings.size() << "):** ";
+    if (delta.newly_introduced_warnings.empty()) {
+        o << "_none_\n";
+    } else {
+        for (size_t i = 0; i < delta.newly_introduced_warnings.size(); ++i) {
+            if (i > 0u) o << ", ";
+            o << "`" << delta.newly_introduced_warnings[i] << "`";
+        }
+        o << "\n";
+    }
+    o << "\nSee `candidate_c_enhanced/enhancement_actions.md` for every reversible edit record.\n";
+    return o.str();
+}
+
+std::string formatEnhancedManifestJson(
+    const std::string& styleName,
+    const std::string& inputSha256,
+    const std::string& faithfulMidSha256,
+    const quality::EnhanceResult& enh,
+    const std::vector<ArtifactEntry>& artifacts) {
+    using namespace manifest_detail;
+    std::ostringstream o;
+    o << "{\n";
+    o << "  \"schema\": \"aiarranger-enhanced-candidate-manifest/1\",\n";
+    o << "  \"inputFilename\": " << jsonString(styleName) << ",\n";
+    o << "  \"inputSha256\": " << jsonString(inputSha256) << ",\n";
+    o << "  \"faithfulCandidateMidSha256\": " << jsonString(faithfulMidSha256) << ",\n";
+    o << "  \"conversionMode\": " << jsonString(quality::conversionModeName(enh.mode)) << ",\n";
+    o << "  \"ok\": " << (enh.ok ? "true" : "false") << ",\n";
+    o << "  \"hardwareVerified\": false,\n";
+    o << "  \"l3Status\": \"NOT_TESTED\",\n";
+    o << "  \"outputFormat\": \"PA5X_MAPPED_SMF_IMPORT_ARTIFACT\",\n";
+    o << "  \"nativeStyBinaryVerified\": false,\n";
+    o << "  \"independentFromFrozenQ1\": true,\n";
+    o << "  \"enhancementStats\": {\n";
+    o << "    \"actionsApplied\": " << enh.stats.actions_applied << ",\n";
+    o << "    \"notesVelocityAdjusted\": " << enh.stats.notes_velocity_adjusted << ",\n";
+    o << "    \"notesPitchAdjusted\": " << enh.stats.notes_pitch_adjusted << ",\n";
+    o << "    \"ccEventsAdded\": " << enh.stats.cc_events_added << ",\n";
+    o << "    \"ccEventsRemoved\": " << enh.stats.cc_events_removed << ",\n";
+    o << "    \"cvElementsSynthesized\": " << enh.stats.cv_elements_synthesized << ",\n";
+    o << "    \"rolledBackOnGuardrail\": " << (enh.stats.rolled_back_on_guardrail ? "true" : "false") << "\n";
+    o << "  },\n";
+    o << "  \"artifacts\": [\n";
+    for (size_t i = 0; i < artifacts.size(); ++i) {
+        const auto& a = artifacts[i];
+        o << "    {\n";
+        o << "      \"role\": " << jsonString(a.role) << ",\n";
+        o << "      \"relativePath\": " << jsonString(a.relative_path) << ",\n";
+        o << "      \"sizeBytes\": " << a.size_bytes << ",\n";
+        o << "      \"sha256\": " << jsonString(a.sha256) << "\n";
+        o << "    }" << (i + 1u < artifacts.size() ? "," : "") << "\n";
+    }
+    o << "  ]\n";
+    o << "}\n";
+    return o.str();
+}
+
+std::string formatOperatorPrepNotesMd(
+    const std::string& styleName,
+    bool hasEnhanced,
+    const std::string& shaB,
+    const std::string& shaC) {
+    std::ostringstream o;
+    o << "# Hardware Session Staging — Operator Preparation Notes\n\n";
+    o << "**STATUS STAMP:** `OFFLINE_STAGING_ONLY — NO_HARDWARE_WRITES — HARDWARE_AUTHORIZATION_REQUIRED`\n\n";
+    o << "- **Style:** `" << styleName << "`\n";
+    o << "- **Hardware Access Performed by CLI:** `NONE` (zero CoreMIDI, zero USB, zero device writes)\n";
+    o << "- **Candidate B (Mode A Faithful) SMF SHA-256:** `" << shaB << "` (`../candidate_b_faithful/converted.mid`)\n";
+    if (hasEnhanced) {
+        o << "- **Candidate C (Mode B Enhanced) SMF SHA-256:** `" << shaC
+          << "` (`../candidate_c_enhanced/converted.mid`)\n";
+    }
+    o << "\n## Pre-Flight Checklist (Before Authorized Pa5X Hardware Audition)\n\n";
+    o << "1. Verify SHA-256 digests in `SHA256SUMS.txt` before copying any `.mid` to a verified FAT32 USB drive.\n";
+    o << "2. Confirm full verified backup of any user Pa5X library before loading test styles into a temporary User bank slot.\n";
+    o << "3. Review `style_edit_sheet.md` (Section 0 Import SMF & CV1..CV6 Chord Table/Key-Chord setup, Section 1 NTT/Bass Inversion/Wrap/Key Range/EQ, Section 2 Sound assignments, Section 3 XG SysEx advisories).\n";
+    o << "4. On Pa5X: **Style Edit > Menu > Import/Export > Import SMF**, check **Initialize**, press **SHIFT + Execute**.\n";
+    o << "5. Audition Intros, Variations `V1..V4`, Fills `F1..F4`, Break, and Endings across `Maj / Min / 7th / Dim / Sus4` chords";
+    if (hasEnhanced) {
+        o << " — perform blind A/B listening comparing Candidate B (Mode A Faithful) vs. Candidate C (Mode B Enhanced)";
+    }
+    o << ".\n";
+    o << "6. Record honest musician ratings and defects in `LISTENING_RECORD_TEMPLATE.json`, set `\"templatePlaceholder\": false` and `\"hardwareVerified\": true`, save to a new file (e.g., `listening_record_completed.json`), and re-run `aiarranger-convert --validation-bundle ... --listening-record listening_record_completed.json` to compute the hardware-verified Acceptance Gate grade.\n";
+    return o.str();
+}
+
+std::string formatValidationSummaryMd(
+    const std::string& styleName,
+    const ConversionManifest& manifestB,
+    const quality::MusicalQualityReport& mqB,
+    bool hasEnhanced,
+    const quality::MusicalQualityReport* mqC,
+    const quality::MusicalQualityDelta* delta,
+    const quality::EnhanceResult* enh,
+    const quality::AcceptanceReport& acceptance,
+    const std::string& shaB,
+    const std::string& shaC) {
+    std::ostringstream o;
+    o << "# Practical Musician Validation Workflow Summary: " << styleName << "\n\n";
+    o << "- **Workflow Version:** Phase 3 P3-M7/M8 (10-Step Offline Validation Bundle)\n";
+    o << "- **Proposed Acceptance Verdict:** **`" << quality::acceptanceGradeDisplay(acceptance.grade)
+      << "`** (`criteriaStatus: " << acceptance.criteria_status << "`)\n";
+    o << "- **Epistemic Boundary:** `hardwareVerified: " << (acceptance.hardware_verified ? "true" : "false")
+      << "` | `l3Status: " << acceptance.l3_status
+      << "` | `independentFromFrozenQ1: true`\n";
+    o << "- **Mode B Opt-In Enhancement:** `" << (hasEnhanced ? "recommended (Candidate C generated alongside untouched Candidate B)" : "off (Mode A Faithful only)") << "`\n\n";
+
+    o << "## 10-Step Musician Validation Checklist\n\n";
+    o << "| Step | Stage | Status | Artifact |\n";
+    o << "|---:|---|---|---|\n";
+    o << "| 1 | Ingest & Hash Source Style (`SHA-256`) | DONE | `candidate_b_faithful/manifest.json` |\n";
+    o << "| 2 | Mode A Faithful Conversion (`mapToKorg`) | DONE (`" << manifestB.elements_exported << "` elements) | `candidate_b_faithful/converted.mid` |\n";
+    o << "| 3 | Independent SMF Re-Parse & Validator Check | PASS (`0` hard violations) | `candidate_b_faithful/report.md` |\n";
+    o << "| 4 | Sound Resolution & Unresolved Audit | `" << acceptance.offline.unresolved_total_sounds
+      << "` unresolved (`" << acceptance.offline.unresolved_critical_sounds << "` critical) | `candidate_b_faithful/unresolved_sounds.md` |\n";
+    o << "| 5 | Pa5X Style Edit Parameter Sheet (`Section 0..3`) | DONE | `candidate_b_faithful/style_edit_sheet.md` |\n";
+    o << "| 6 | 12-Dimension Read-Only Musical Quality Critique (Mode A) | `"
+      << fmtUnsigned2(mqB.overall_musical_score) << " / 100.00` | `musical_quality_faithful.md` |\n";
+    if (hasEnhanced && mqC && delta && enh) {
+        o << "| 7 | Opt-In Mode B Reversible Enhancement (`--enhance recommended`) | DONE (`"
+          << enh->stats.actions_applied << "` actions, Mode A untouched) | `candidate_c_enhanced/enhancement_actions.md` |\n";
+        o << "| 8 | Side-by-Side Candidate B vs. Candidate C Diff | `"
+          << fmtUnsigned2(mqC->overall_musical_score) << "` (`" << fmtSigned2(delta->overall_delta)
+          << "`) | `comparison_b_vs_c.md` |\n";
+    } else {
+        o << "| 7 | Opt-In Mode B Reversible Enhancement (`--enhance off`) | SKIPPED (default Mode A) | _(re-run with `--enhance recommended` to generate Candidate C)_ |\n";
+        o << "| 8 | Side-by-Side Candidate B vs. Candidate C Diff | N/A | _(generated when `--enhance recommended` is passed)_ |\n";
+    }
+    o << "| 9 | Proposed Production Acceptance Gate (`Grade A-U`) | **`"
+      << quality::acceptanceGradeDisplay(acceptance.grade) << "`** | `acceptance_report.md` / `acceptance_report.json` |\n";
+    o << "| 10 | Offline Hardware Session Staging (Zero HW Writes) | STAGED (`OFFLINE_STAGING_ONLY`) | `hardware_session_staging/OPERATOR_PREP_NOTES.md` |\n\n";
+
+    o << "## Key Digests\n\n";
+    o << "- **Input Style SHA-256:** `" << manifestB.input_sha256 << "`\n";
+    o << "- **Candidate B (`converted.mid`) SHA-256:** `" << shaB << "`\n";
+    if (hasEnhanced) {
+        o << "- **Candidate C (`converted.mid`) SHA-256:** `" << shaC << "`\n";
+    }
+
+    o << "\n## Gate Reasons & Next Actions\n\n";
+    for (const auto& r : acceptance.gate_reasons) o << "- **Reason:** " << r << "\n";
+    for (const auto& a : acceptance.required_next_actions) o << "- **Next Action:** " << a << "\n";
+    return o.str();
 }
 
 bool writeText(const fs::path& path, const std::string& text) {
@@ -149,6 +417,13 @@ struct SingleConvertOutcome {
     int exit_code = 0; // 0 = ok, 1 = input/io error, 2 = conversion/validation failure
     ConversionManifest manifest;
     std::string report_text;
+    // Populated only when captureValidationData == true (avoids extra copies in batch mode).
+    bool has_validation_data = false;
+    Style korg_style;
+    Report map_report;
+    uasf::StyleDefinition source_uasf;
+    std::vector<uint8_t> written_mid_bytes;
+    std::string written_mid_sha256;
 };
 
 SingleConvertOutcome convertOneStyle(
@@ -163,7 +438,9 @@ SingleConvertOutcome convertOneStyle(
     const std::optional<fs::path>& styleEditSheetPath,
     const std::optional<fs::path>& manifestPath,
     const std::optional<fs::path>& unresolvedReportPath,
-    bool quietStdout) {
+    bool quietStdout,
+    bool applyEnhanceRecommended = false,
+    bool captureValidationData = false) {
     SingleConvertOutcome outcome{};
     const std::string baseStyleName = inputPath.filename().string();
 
@@ -225,8 +502,26 @@ SingleConvertOutcome convertOneStyle(
         return outcome;
     }
 
+    // Opt-in Mode B enhancement is invoked ONLY when explicitly requested (`--enhance recommended`).
+    // When applyEnhanceRecommended == false (default Mode A), style_enhancer.h is never called,
+    // guaranteeing bit-for-bit identical bytes to Mode A.
+    const Style* styleToWrite = &mapped.style;
+    std::optional<quality::EnhanceResult> enhancedResult;
+    if (applyEnhanceRecommended) {
+        enhancedResult = quality::enhanceStyle(
+            mapped.style, quality::EnhanceOptions::recommended(), &mapped.report, &canon.style);
+        if (!enhancedResult->ok) {
+            outcome.exit_code = 2;
+            outcome.manifest.ok = false;
+            outcome.manifest.error = "enhancement failed (rolled back): " + enhancedResult->error;
+            if (!quietStdout) std::cerr << outcome.manifest.error << "\n";
+            return outcome;
+        }
+        styleToWrite = &enhancedResult->style;
+    }
+
     // Write -> re-parse with the independent reader -> validate BEFORE writing any output files.
-    const auto written = write(mapped.style);
+    const auto written = write(*styleToWrite);
     if (!written.ok) {
         outcome.exit_code = 2;
         outcome.manifest.ok = false;
@@ -394,6 +689,20 @@ SingleConvertOutcome convertOneStyle(
             return outcome;
         }
         recordTextArtifact("unresolved_sounds", "unresolved_sounds.md", unresolvedMd);
+
+        if (enhancedResult.has_value()) {
+            const std::string enhJson = quality::formatEnhancementAuditJson(*enhancedResult);
+            const std::string enhMd = quality::formatEnhancementAuditMarkdown(*enhancedResult);
+            if (!writeText(*outBundleDir / "enhancement_actions.json", enhJson) ||
+                !writeText(*outBundleDir / "enhancement_actions.md", enhMd)) {
+                outcome.exit_code = 1;
+                outcome.manifest.ok = false;
+                outcome.manifest.error = "cannot write bundle enhancement_actions";
+                return outcome;
+            }
+            recordTextArtifact("enhancement_actions_json", "enhancement_actions.json", enhJson);
+            recordTextArtifact("enhancement_actions_md", "enhancement_actions.md", enhMd);
+        }
     } else {
         if (dumpSoundMapPath.has_value()) {
             recordTextArtifact("soundmap", dumpSoundMapPath->filename().string(), mapped.report.soundmap_dump);
@@ -440,6 +749,15 @@ SingleConvertOutcome convertOneStyle(
         return outcome;
     }
 
+    if (captureValidationData) {
+        outcome.has_validation_data = true;
+        outcome.korg_style = *styleToWrite;
+        outcome.map_report = mapped.report;
+        outcome.source_uasf = canon.style;
+        outcome.written_mid_bytes = written.bytes;
+        outcome.written_mid_sha256 = manifest_detail::sha256Hex(written.bytes.data(), written.bytes.size());
+    }
+
     outcome.exit_code = 0;
     return outcome;
 }
@@ -450,6 +768,8 @@ int main(int argc, char** argv) {
     std::string input, output, target, soundMap, reportPath, templatePath, dumpSoundMapPath,
         styleEditSheetPath, targetKstPath, compareA, compareB;
     std::string outBundleDir, batchDir, outDir, manifestPath, unresolvedReportPath;
+    std::string enhanceMode = "off";
+    std::string analyzeQualityArg, listeningRecordPath, validationBundleDir;
     MapOptions opt;
     bool rawModeRequested = false;
     bool explicitAutoSoundMap = false;
@@ -534,6 +854,15 @@ int main(int argc, char** argv) {
         else if (a == "--unresolved-report") unresolvedReportPath = v;
         else if (a == "--compare") compareA = v;
         else if (a == "--with") compareB = v;
+        else if (a == "--enhance") {
+            if (v == "off" || v == "recommended") enhanceMode = v;
+            else {
+                std::cerr << "invalid flags: --enhance must be 'off' or 'recommended' (got '" << v << "')\n";
+                return 1;
+            }
+        } else if (a == "--analyze-musical-quality") analyzeQualityArg = v;
+        else if (a == "--listening-record") listeningRecordPath = v;
+        else if (a == "--validation-bundle") validationBundleDir = v;
         else if (a == "--ppqn") {
             try {
                 size_t used = 0;
@@ -611,23 +940,27 @@ int main(int argc, char** argv) {
 
     // ── Mode dispatch & fail-closed flag combination validation ──
     if (!compareA.empty() || !compareB.empty()) {
-        if (compareA.empty() || compareB.empty() || !input.empty() || !batchDir.empty() || !outBundleDir.empty()) {
+        if (compareA.empty() || compareB.empty() || !input.empty() || !batchDir.empty() ||
+            !outBundleDir.empty() || !validationBundleDir.empty() ||
+            !analyzeQualityArg.empty() || !listeningRecordPath.empty()) {
             return usage();
         }
         return compareMode(compareA, compareB);
     }
 
+    const bool enhanceRecommended = (enhanceMode == "recommended");
     const bool isBatchMode = !batchDir.empty() || !outDir.empty();
     if (isBatchMode) {
         if (batchDir.empty() || outDir.empty()) {
             std::cerr << "invalid flags: --batch-dir and --out-dir must both be specified\n";
             return 1;
         }
-        if (!input.empty() || !output.empty() || !outBundleDir.empty() ||
+        if (!input.empty() || !output.empty() || !outBundleDir.empty() || !validationBundleDir.empty() ||
+            !analyzeQualityArg.empty() || !listeningRecordPath.empty() ||
             !manifestPath.empty() || !unresolvedReportPath.empty() ||
             !reportPath.empty() || !templatePath.empty() || !dumpSoundMapPath.empty() ||
             !styleEditSheetPath.empty()) {
-            std::cerr << "invalid flags: --batch-dir cannot be combined with single-file input/output flags\n";
+            std::cerr << "invalid flags: --batch-dir cannot be combined with single-file input/output/validation flags\n";
             return 1;
         }
         if (!target.empty() && target != "pa5x") {
@@ -639,13 +972,46 @@ int main(int argc, char** argv) {
             std::cerr << "invalid flags: --strict-batch and --flat require --batch-dir\n";
             return 1;
         }
+        if (!validationBundleDir.empty() && !outBundleDir.empty()) {
+            std::cerr << "invalid flags: --validation-bundle cannot be combined with --out-bundle\n";
+            return 1;
+        }
         if (input.empty()) return usage();
-        if (output.empty() && outBundleDir.empty()) return usage();
-        if (outBundleDir.empty() && target.empty()) return usage();
+        if (output.empty() && outBundleDir.empty() && validationBundleDir.empty() && analyzeQualityArg.empty()) {
+            return usage();
+        }
+        if (outBundleDir.empty() && validationBundleDir.empty() && analyzeQualityArg.empty() && target.empty()) {
+            return usage();
+        }
         if (!target.empty() && target != "pa5x") {
             std::cerr << "unsupported target '" << target << "' (supported: pa5x)\n";
             return 1;
         }
+    }
+
+    if (rawModeRequested && enhanceRecommended) {
+        std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --enhance recommended\n";
+        return 1;
+    }
+    if (!listeningRecordPath.empty() && validationBundleDir.empty()) {
+        std::cerr << "invalid flags: --listening-record requires --validation-bundle <dir>\n";
+        return 1;
+    }
+
+    // Fail-closed pre-validation of optional external human listening record JSON.
+    quality::HumanListeningRecord listeningRecord{};
+    if (!listeningRecordPath.empty()) {
+        std::string rawJson;
+        if (!readTextFile(fs::path(listeningRecordPath), rawJson)) {
+            return 1;
+        }
+        const auto parsedListening = quality::parseHumanListeningRecordJson(rawJson);
+        if (!parsedListening.ok) {
+            std::cerr << "invalid --listening-record (" << listeningRecordPath << "): "
+                      << parsedListening.error << "\n";
+            return 1;
+        }
+        listeningRecord = parsedListening.record;
     }
 
     if (explicitAutoSoundMap && explicitNoAutoSoundMap) {
@@ -716,6 +1082,184 @@ int main(int argc, char** argv) {
     optRecord.manual_soundmap_used = !soundMap.empty();
 
     if (!isBatchMode) {
+        if (!validationBundleDir.empty()) {
+            std::error_code vec;
+            const fs::path vRoot(validationBundleDir);
+            if (fs::exists(vRoot, vec) && !fs::is_directory(vRoot, vec)) {
+                std::cerr << "validation bundle target exists and is not a directory: " << validationBundleDir << "\n";
+                return 1;
+            }
+            fs::create_directories(vRoot, vec);
+            if (vec) {
+                std::cerr << "cannot create validation bundle directory " << validationBundleDir
+                          << ": " << vec.message() << "\n";
+                return 1;
+            }
+
+            // Step 1-5: Always convert Mode A (Faithful) into candidate_b_faithful/ (NEVER mutated by Mode B).
+            const fs::path candBDir = vRoot / "candidate_b_faithful";
+            const auto resB = convertOneStyle(
+                fs::path(input), opt, optRecord,
+                output.empty() ? std::nullopt : std::optional<fs::path>(output),
+                candBDir,
+                reportPath.empty() ? std::nullopt : std::optional<fs::path>(reportPath),
+                templatePath.empty() ? std::nullopt : std::optional<fs::path>(templatePath),
+                dumpSoundMapPath.empty() ? std::nullopt : std::optional<fs::path>(dumpSoundMapPath),
+                styleEditSheetPath.empty() ? std::nullopt : std::optional<fs::path>(styleEditSheetPath),
+                manifestPath.empty() ? std::nullopt : std::optional<fs::path>(manifestPath),
+                unresolvedReportPath.empty() ? std::nullopt : std::optional<fs::path>(unresolvedReportPath),
+                false,
+                /*applyEnhanceRecommended=*/false,
+                /*captureValidationData=*/true);
+            if (resB.exit_code != 0) return resB.exit_code;
+
+            const std::string baseStyleName = fs::path(input).filename().string();
+
+            // Step 6: 12-dimension read-only musical quality analysis on Candidate B (Mode A Faithful).
+            const auto mqB = quality::analyzeMusicalQuality(
+                resB.korg_style, &resB.map_report, &resB.source_uasf);
+            if (!writeText(vRoot / "musical_quality_faithful.json", quality::formatMusicalQualityJson(mqB)) ||
+                !writeText(vRoot / "musical_quality_faithful.md", quality::formatMusicalQualityMarkdown(mqB))) {
+                return 1;
+            }
+
+            // Optional standalone --analyze-musical-quality sidecar if also requested.
+            if (!analyzeQualityArg.empty()) {
+                fs::path aJson, aMd;
+                if (!resolveAnalyzeOutputPaths(analyzeQualityArg, aJson, aMd)) return 1;
+                if (!writeText(aJson, quality::formatMusicalQualityJson(mqB)) ||
+                    !writeText(aMd, quality::formatMusicalQualityMarkdown(mqB))) {
+                    return 1;
+                }
+            }
+
+            // Step 7-8: Opt-in Mode B Enhancement (ONLY when --enhance recommended is explicitly passed).
+            std::optional<quality::EnhanceResult> enhC;
+            std::optional<quality::MusicalQualityReport> mqC;
+            std::optional<quality::MusicalQualityDelta> deltaBC;
+            std::string shaC;
+            uint32_t candidateHardViolations = 0;
+
+            if (enhanceRecommended) {
+                enhC = quality::enhanceStyle(
+                    resB.korg_style, quality::EnhanceOptions::recommended(),
+                    &resB.map_report, &resB.source_uasf);
+                if (!enhC->ok) {
+                    std::cerr << "Mode B enhancement failed (rolled back): " << enhC->error << "\n";
+                    return 2;
+                }
+                const auto wC = write(enhC->style);
+                if (!wC.ok) {
+                    std::cerr << "Mode B SMF write failed: " << wC.error << "\n";
+                    return 2;
+                }
+                const auto pC = parse(wC.bytes);
+                const std::vector<std::string> errsC =
+                    pC.ok ? validate(pC.style) : std::vector<std::string>{pC.error};
+                if (!errsC.empty()) {
+                    std::cerr << "Mode B SMF validation failed: " << errsC.front() << "\n";
+                    return 2;
+                }
+
+                const fs::path candCDir = vRoot / "candidate_c_enhanced";
+                fs::create_directories(candCDir, vec);
+                if (vec) {
+                    std::cerr << "cannot create candidate_c_enhanced directory: " << vec.message() << "\n";
+                    return 1;
+                }
+
+                if (!writeBytes(candCDir / "converted.mid", wC.bytes)) return 1;
+                shaC = manifest_detail::sha256Hex(wC.bytes.data(), wC.bytes.size());
+
+                const std::string enhJson = quality::formatEnhancementAuditJson(*enhC);
+                const std::string enhMd = quality::formatEnhancementAuditMarkdown(*enhC);
+                if (!writeText(candCDir / "enhancement_actions.json", enhJson) ||
+                    !writeText(candCDir / "enhancement_actions.md", enhMd)) {
+                    return 1;
+                }
+
+                std::vector<ArtifactEntry> cArtifacts = {
+                    {"smf", "converted.mid", static_cast<uint64_t>(wC.bytes.size()), shaC},
+                    {"enhancement_actions_json", "enhancement_actions.json",
+                     static_cast<uint64_t>(enhJson.size()), manifest_detail::sha256Hex(enhJson)},
+                    {"enhancement_actions_md", "enhancement_actions.md",
+                     static_cast<uint64_t>(enhMd.size()), manifest_detail::sha256Hex(enhMd)}
+                };
+                const std::string cManifest = formatEnhancedManifestJson(
+                    baseStyleName, resB.manifest.input_sha256, resB.written_mid_sha256, *enhC, cArtifacts);
+                if (!writeText(candCDir / "manifest.json", cManifest)) return 1;
+
+                mqC = quality::analyzeMusicalQuality(enhC->style, &resB.map_report, &resB.source_uasf);
+                if (!writeText(vRoot / "musical_quality_enhanced.json", quality::formatMusicalQualityJson(*mqC)) ||
+                    !writeText(vRoot / "musical_quality_enhanced.md", quality::formatMusicalQualityMarkdown(*mqC))) {
+                    return 1;
+                }
+
+                deltaBC = quality::compareMusicalQuality(mqB, *mqC);
+                if (!writeText(vRoot / "comparison_b_vs_c.md",
+                               formatComparisonBvsCMd(baseStyleName, mqB, *mqC, *deltaBC, *enhC,
+                                                      resB.written_mid_sha256, shaC))) {
+                    return 1;
+                }
+            }
+
+            // Step 9: Proposed Production Acceptance Gate (Grade A / B / C / D / U).
+            const quality::MusicalQualityReport* targetMq = enhanceRecommended && mqC.has_value() ? &(*mqC) : &mqB;
+            const auto offlineEv = quality::buildOfflineAcceptanceEvidence(
+                baseStyleName, resB.manifest, targetMq, enhanceRecommended, candidateHardViolations);
+            const auto acceptance = quality::evaluateAcceptanceGate(offlineEv, listeningRecord);
+            if (!writeText(vRoot / "acceptance_report.json", quality::formatAcceptanceReportJson(acceptance)) ||
+                !writeText(vRoot / "acceptance_report.md", quality::formatAcceptanceReportMd(acceptance))) {
+                return 1;
+            }
+
+            // Step 10: Offline-Only Hardware Session Staging (ZERO hardware writes, ZERO CoreMIDI/USB).
+            const fs::path stageDir = vRoot / "hardware_session_staging";
+            fs::create_directories(stageDir, vec);
+            if (vec) {
+                std::cerr << "cannot create hardware_session_staging directory: " << vec.message() << "\n";
+                return 1;
+            }
+
+            const std::string editSheetSha =
+                manifest_detail::sha256Hex(resB.map_report.style_edit_sheet_md);
+            std::ostringstream shaSums;
+            shaSums << resB.written_mid_sha256 << "  ../candidate_b_faithful/converted.mid\n";
+            shaSums << editSheetSha << "  style_edit_sheet.md\n";
+            if (enhanceRecommended) {
+                shaSums << shaC << "  ../candidate_c_enhanced/converted.mid\n";
+            }
+            if (!writeText(stageDir / "SHA256SUMS.txt", shaSums.str()) ||
+                !writeText(stageDir / "style_edit_sheet.md", resB.map_report.style_edit_sheet_md) ||
+                !writeText(stageDir / "OPERATOR_PREP_NOTES.md",
+                           formatOperatorPrepNotesMd(baseStyleName, enhanceRecommended,
+                                                     resB.written_mid_sha256, shaC)) ||
+                !writeText(stageDir / "LISTENING_RECORD_TEMPLATE.json",
+                           quality::formatListeningRecordTemplateJson(
+                               baseStyleName, acceptance.candidate_label,
+                               enhanceRecommended ? shaC : resB.written_mid_sha256))) {
+                return 1;
+            }
+
+            // Top-level 10-step summary tying all artifacts together.
+            if (!writeText(vRoot / "VALIDATION_SUMMARY.md",
+                           formatValidationSummaryMd(
+                               baseStyleName, resB.manifest, mqB, enhanceRecommended,
+                               mqC.has_value() ? &(*mqC) : nullptr,
+                               deltaBC.has_value() ? &(*deltaBC) : nullptr,
+                               enhC.has_value() ? &(*enhC) : nullptr,
+                               acceptance, resB.written_mid_sha256, shaC))) {
+                return 1;
+            }
+
+            std::cout << "Wrote validation bundle " << vRoot.string()
+                      << " | Grade: " << quality::acceptanceGradeDisplay(acceptance.grade)
+                      << " (" << acceptance.criteria_status << ")"
+                      << " | hardwareVerified=" << (acceptance.hardware_verified ? "true" : "false") << "\n";
+            return 0;
+        }
+
+        const bool needValidationCapture = !analyzeQualityArg.empty();
         const auto res = convertOneStyle(
             fs::path(input), opt, optRecord,
             output.empty() ? std::nullopt : std::optional<fs::path>(output),
@@ -726,8 +1270,24 @@ int main(int argc, char** argv) {
             styleEditSheetPath.empty() ? std::nullopt : std::optional<fs::path>(styleEditSheetPath),
             manifestPath.empty() ? std::nullopt : std::optional<fs::path>(manifestPath),
             unresolvedReportPath.empty() ? std::nullopt : std::optional<fs::path>(unresolvedReportPath),
-            false);
-        return res.exit_code;
+            false,
+            enhanceRecommended,
+            needValidationCapture);
+        if (res.exit_code != 0) return res.exit_code;
+
+        if (!analyzeQualityArg.empty() && res.has_validation_data) {
+            fs::path aJson, aMd;
+            if (!resolveAnalyzeOutputPaths(analyzeQualityArg, aJson, aMd)) return 1;
+            const auto mq = quality::analyzeMusicalQuality(
+                res.korg_style, &res.map_report, &res.source_uasf);
+            if (!writeText(aJson, quality::formatMusicalQualityJson(mq)) ||
+                !writeText(aMd, quality::formatMusicalQualityMarkdown(mq))) {
+                return 1;
+            }
+            std::cout << "Wrote musical quality report " << aJson.string()
+                      << " & " << aMd.string() << "\n";
+        }
+        return 0;
     }
 
     // ── Batch Directory Conversion Mode ──
@@ -803,7 +1363,9 @@ int main(int argc, char** argv) {
             std::nullopt,
             itemDir,
             std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-            true);
+            true,
+            enhanceRecommended,
+            false);
 
         BatchItemSummary item{};
         item.input_relative_path = relStr;

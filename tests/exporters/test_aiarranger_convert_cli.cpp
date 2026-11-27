@@ -348,6 +348,146 @@ int main(int argc, char** argv) {
              rtRes.ok && w1.ok && w2.ok && w1.bytes == w2.bytes);
     }
 
+    // ── Phase 3 P3-M7/M8: --validation-bundle, --enhance, --analyze-musical-quality, --listening-record ──
+    {
+        // Fail-closed flag checks
+        TEST("invalid --enhance value exits 1",
+             run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad1") + " --enhance magic") == 1);
+        TEST("--raw + --enhance recommended fails closed (exit 1)",
+             run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad2") + " --raw --enhance recommended") == 1);
+        TEST("--listening-record missing file fails closed (exit 1)",
+             run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad3") +
+                 " --listening-record " + q(dir / "missing_listening.json")) == 1);
+
+        const fs::path badListening = dir / "malformed_listening.json";
+        std::ofstream(badListening) << R"({"evaluatorId":"m1","overallRating":9,"hardwareVerified":true})";
+        TEST("malformed/out-of-range --listening-record fails closed (exit 1) without writing bundle",
+             run("--input " + q(pop) + " --validation-bundle " + q(dir / "vb_bad4") +
+                 " --listening-record " + q(badListening)) == 1 &&
+             !fs::exists(dir / "vb_bad4" / "acceptance_report.json"));
+
+        // Standalone --analyze-musical-quality prefix
+        const fs::path mqPrefix = dir / "standalone_mq" / "pop_mq";
+        TEST("standalone --analyze-musical-quality exits 0 and emits .json + .md",
+             run("--input " + q(pop) + " --ppqn 384 --break-policy cap --analyze-musical-quality " + q(mqPrefix)) == 0 &&
+             fs::exists(dir / "standalone_mq" / "pop_mq.json") &&
+             fs::exists(dir / "standalone_mq" / "pop_mq.md"));
+        const std::string mqStandaloneJson = readTextFile(dir / "standalone_mq" / "pop_mq.json");
+        TEST("standalone musical quality JSON carries honest offline provenance",
+             mqStandaloneJson.find("\"schema\": \"aiarranger-musical-quality/1\"") != std::string::npos &&
+             mqStandaloneJson.find("\"hardwareVerified\": false") != std::string::npos);
+
+        // --validation-bundle with default --enhance off (Mode A only -> Grade U!)
+        const fs::path vbOff = dir / "vb_off";
+        TEST("--validation-bundle default (--enhance off) exits 0",
+             run("--input " + q(pop) + " --ppqn 384 --break-policy cap --validation-bundle " + q(vbOff)) == 0);
+        const std::vector<std::string> expectedOffFiles = {
+            "candidate_b_faithful/converted.mid",
+            "candidate_b_faithful/style.uasf",
+            "candidate_b_faithful/soundmap.txt",
+            "candidate_b_faithful/style_edit_sheet.md",
+            "candidate_b_faithful/report.md",
+            "candidate_b_faithful/unresolved_sounds.md",
+            "candidate_b_faithful/manifest.json",
+            "musical_quality_faithful.json",
+            "musical_quality_faithful.md",
+            "acceptance_report.json",
+            "acceptance_report.md",
+            "hardware_session_staging/SHA256SUMS.txt",
+            "hardware_session_staging/style_edit_sheet.md",
+            "hardware_session_staging/OPERATOR_PREP_NOTES.md",
+            "hardware_session_staging/LISTENING_RECORD_TEMPLATE.json",
+            "VALIDATION_SUMMARY.md"
+        };
+        bool allOffExist = true;
+        for (const auto& rel : expectedOffFiles) {
+            if (!fs::exists(vbOff / rel)) allOffExist = false;
+        }
+        TEST("--validation-bundle default creates all Mode A + staging artifacts and NO candidate_c_enhanced",
+             allOffExist && !fs::exists(vbOff / "candidate_c_enhanced") && !fs::exists(vbOff / "comparison_b_vs_c.md"));
+
+        // Verify offline-only default yields Grade U (NEVER Grade A), PROPOSED_ACCEPTANCE_CRITERIA, and OFFLINE_STAGING_ONLY
+        const std::string accOffJson = readTextFile(vbOff / "acceptance_report.json");
+        const std::string prepNotes = readTextFile(vbOff / "hardware_session_staging" / "OPERATOR_PREP_NOTES.md");
+        const std::string tmplJson = readTextFile(vbOff / "hardware_session_staging" / "LISTENING_RECORD_TEMPLATE.json");
+        TEST("offline --validation-bundle yields Grade U (never Grade A) & stamps OFFLINE_STAGING_ONLY",
+             accOffJson.find("\"criteriaStatus\": \"PROPOSED_ACCEPTANCE_CRITERIA\"") != std::string::npos &&
+             accOffJson.find("\"grade\": \"U\"") != std::string::npos &&
+             accOffJson.find("\"hardwareVerified\": false") != std::string::npos &&
+             accOffJson.find("\"l3Status\": \"NOT_TESTED\"") != std::string::npos &&
+             prepNotes.find("OFFLINE_STAGING_ONLY") != std::string::npos &&
+             prepNotes.find("NO_HARDWARE_WRITES") != std::string::npos &&
+             prepNotes.find("HARDWARE_AUTHORIZATION_REQUIRED") != std::string::npos &&
+             tmplJson.find("\"templatePlaceholder\": true") != std::string::npos);
+
+        // Template placeholder cannot be blindly fed back to --listening-record
+        TEST("unfilled LISTENING_RECORD_TEMPLATE.json is rejected fail-closed by --listening-record",
+             run("--input " + q(pop) + " --ppqn 384 --validation-bundle " + q(dir / "vb_tmpl_rej") +
+                 " --listening-record " + q(vbOff / "hardware_session_staging" / "LISTENING_RECORD_TEMPLATE.json")) == 1);
+
+        // Verify bit-exact parity of Mode A converted.mid between --out-bundle and --validation-bundle
+        const fs::path refBundle = dir / "pop_ref_bundle";
+        TEST("reference --out-bundle exits 0",
+             run("--input " + q(pop) + " --ppqn 384 --break-policy cap --out-bundle " + q(refBundle)) == 0);
+        TEST("--validation-bundle candidate_b_faithful/converted.mid is bit-identical to --out-bundle",
+             readTextFile(vbOff / "candidate_b_faithful" / "converted.mid") ==
+                 readTextFile(refBundle / "converted.mid"));
+
+        // --validation-bundle with --enhance recommended: produces B (untouched!) AND C + comparison_b_vs_c.md
+        const fs::path vbEnh = dir / "vb_enh";
+        TEST("--validation-bundle --enhance recommended exits 0",
+             run("--input " + q(pop) + " --ppqn 384 --break-policy cap --enhance recommended --validation-bundle " +
+                 q(vbEnh)) == 0);
+        TEST("--enhance recommended emits candidate_c_enhanced, musical_quality_enhanced, comparison_b_vs_c.md & leaves Mode A untouched",
+             fs::exists(vbEnh / "candidate_c_enhanced" / "converted.mid") &&
+             fs::exists(vbEnh / "candidate_c_enhanced" / "enhancement_actions.json") &&
+             fs::exists(vbEnh / "candidate_c_enhanced" / "enhancement_actions.md") &&
+             fs::exists(vbEnh / "candidate_c_enhanced" / "manifest.json") &&
+             fs::exists(vbEnh / "musical_quality_enhanced.json") &&
+             fs::exists(vbEnh / "musical_quality_enhanced.md") &&
+             fs::exists(vbEnh / "comparison_b_vs_c.md") &&
+             readTextFile(vbEnh / "candidate_b_faithful" / "converted.mid") ==
+                 readTextFile(vbOff / "candidate_b_faithful" / "converted.mid"));
+
+        // Valid hardware-verified --listening-record unlocks Grade A
+        const fs::path goodListening = dir / "verified_listening.json";
+        std::ofstream(goodListening) << R"({
+            "schema": "aiarranger-human-listening-record/1",
+            "templatePlaceholder": false,
+            "evaluatorId": "musician-01",
+            "overallRating": 5,
+            "criticalDefectCount": 0,
+            "minorDefectCount": 0,
+            "hardwareVerified": true,
+            "hardwareModel": "Korg Pa5X",
+            "referenceType": "Genos_Direct_AB",
+            "notes": "Verified across all variations and chord types."
+        })";
+        const fs::path vbGradeA = dir / "vb_grade_a";
+        TEST("valid hardware-verified --listening-record yields Grade A",
+             run("--input " + q(pop) + " --ppqn 384 --break-policy cap --validation-bundle " + q(vbGradeA) +
+                 " --listening-record " + q(goodListening)) == 0);
+        const std::string accAJson = readTextFile(vbGradeA / "acceptance_report.json");
+        TEST("Grade A acceptance_report.json records grade A and hardwareVerified=true",
+             accAJson.find("\"grade\": \"A\"") != std::string::npos &&
+             accAJson.find("\"hardwareVerified\": true") != std::string::npos &&
+             accAJson.find("\"l3Status\": \"VERIFIED\"") != std::string::npos);
+
+        // EXP15-style unresolved private-bank style -> Grade C offline -> Grade U after --sound-map!
+        const fs::path exp15Like = dir / "private_bank.sty";
+        const fs::path vbExp15Unres = dir / "vb_exp15_unres";
+        TEST("EXP15-style unresolved sound in --validation-bundle exits 0 and assigns Grade C",
+             run("--input " + q(exp15Like) + " --ppqn 384 --validation-bundle " + q(vbExp15Unres)) == 0 &&
+             readTextFile(vbExp15Unres / "acceptance_report.json").find("\"grade\": \"C\"") != std::string::npos);
+
+        const fs::path manualMap = dir / "manual.soundmap";
+        const fs::path vbExp15Fixed = dir / "vb_exp15_fixed";
+        TEST("EXP15-style resolved via --sound-map moves from Grade C to Grade U (offline)",
+             run("--input " + q(exp15Like) + " --ppqn 384 --sound-map " + q(manualMap) +
+                 " --validation-bundle " + q(vbExp15Fixed)) == 0 &&
+             readTextFile(vbExp15Fixed / "acceptance_report.json").find("\"grade\": \"U\"") != std::string::npos);
+    }
+
     fs::remove_all(dir);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
