@@ -64,7 +64,7 @@ struct SemanticAnalyzeOptions {
     double           min_confidence_margin   = 0.08; // Fail-closed: top1 - top2 margin floor
     double           max_entropy_threshold   = 0.78; // Fail-closed: normalized Shannon entropy cap
     double           genre_abstain_threshold = 0.50; // Fail-closed: genre -> UnknownAbstain below floor
-    bool             use_metadata_hints      = true; // Weak bounded prior (<=0.55 logit); set false for strict content-only ablation
+    bool             use_metadata_hints      = true; // Weak bounded melodic prior (<=0.55 logit) + profile drum-bank consistency check (abstains on conflict); set false for strict content-only ablation
     bool             emit_explainability_trace = true;
     TargetPlatformId target_platform         = TargetPlatformId::KorgPa5X;
 };
@@ -193,12 +193,30 @@ inline SingleClassification classifyTrackFeatures(
         return out;
     }
 
-    const bool explicit_drum_domain = opt.use_metadata_hints &&
-                                      (tr.is_drum ||
-                                       tr.sound_identity.msb == 127 ||
-                                       tr.sound_identity.msb == 126 ||
-                                       tr.sound_identity.msb == 120 ||
-                                       (tr.sound_identity.msb == 62 && tr.sound_identity.lsb == 100));
+    // P1-4: Vendor-neutral drum metadata lookup via TargetCapabilityProfile (zero hardcoded bank magic numbers).
+    // If bank metadata claims drum while musical content is strongly sustained & tonal melodic, fail closed!
+    const bool drum_bank_hint = opt.use_metadata_hints && tr.sound_identity.is_drum_bank;
+    const bool explicit_drum_flag = opt.use_metadata_hints && tr.is_drum;
+    const bool strongly_melodic_content =
+        (f.note_count >= 4u &&
+         ((f.mean_duration_beats >= 0.55 && f.chord_tone_ratio >= 0.72 &&
+           f.drum_hat_cymbal_ratio < 0.15 && f.dissonant_simultaneous_ratio < 0.10) ||
+          (f.max_polyphony <= 1u && f.mean_duration_beats >= 0.50 && f.chord_tone_ratio >= 0.80 &&
+           f.drum_hat_cymbal_ratio < 0.05 && f.drum_aux_perc_ratio < 0.15)));
+
+    if ((drum_bank_hint || explicit_drum_flag) && !tr.is_drum && strongly_melodic_content) {
+        out.abstained = true;
+        out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
+        out.secondary_role = MR::UnknownAbstain;
+        out.confidence = 0.0;
+        out.entropy = 1.0;
+        out.abstain_reason = "metadata_content_conflict";
+        out.evidence.push_back("drum_bank_metadata_contradicts_sustained_tonal_content");
+        return out;
+    }
+
+    const bool explicit_drum_domain = explicit_drum_flag || (drum_bank_hint && !strongly_melodic_content);
 
     const bool is_riser_sweep =
         (f.note_count >= 5u && f.monotonic_ramp_ratio >= 0.70 && f.pitch_span >= 8u &&
@@ -213,8 +231,23 @@ inline SingleClassification classifyTrackFeatures(
     // ── Fail-closed Guard 2: Insufficient note evidence ──
     if (f.note_count <= 2u && !is_sparse_boundary_fx) {
         out.abstained = true;
+        out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
+        out.entropy = 1.0;
         out.abstain_reason = "insufficient_note_evidence";
         out.evidence.push_back("note_count=" + std::to_string(f.note_count) + " (<3 without boundary/FX cue)");
+        return out;
+    }
+
+    // ── Fail-closed Guard 2b (P2-4): Degenerate single-onset cluster (e.g., 6 simultaneous 0-dur notes at tick 0) ──
+    if (!explicit_drum_domain && f.unique_onsets_per_bar <= 1.0 && f.active_bars <= 1u &&
+        f.mean_duration_beats < 1.5 && !is_sparse_boundary_fx) {
+        out.abstained = true;
+        out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
+        out.entropy = 1.0;
+        out.abstain_reason = "single_onset_insufficient_temporal_context";
+        out.evidence.push_back("unique_onsets_per_bar=" + canonical_detail::fmtDouble(f.unique_onsets_per_bar, 2));
         return out;
     }
 
@@ -223,6 +256,9 @@ inline SingleClassification classifyTrackFeatures(
         !is_sparse_boundary_fx && f.pitch_median >= 50u && f.pitch_median <= 78u &&
         f.mean_duration_beats < 1.8) {
         out.abstained = true;
+        out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
+        out.entropy = 1.0;
         out.abstain_reason = "ambiguous_single_pitch_fragment";
         out.evidence.push_back("unique_pitch_count=1, note_count=" + std::to_string(f.note_count));
         return out;
@@ -242,6 +278,7 @@ inline SingleClassification classifyTrackFeatures(
            (f.dissonant_simultaneous_ratio >= 0.18 || (f.downbeat_ratio >= 0.12 && f.backbeat_ratio >= 0.12)))) &&
          (f.non_chord_tone_ratio >= 0.35 || f.dissonant_simultaneous_ratio >= 0.18 || f.staccato_ratio >= 0.72));
 
+    // P2-4: Gate on unique_onsets_per_bar >= 2.5 (not simultaneous notes_per_bar!) so a single chord cluster never matches aux perc.
     const bool content_aux_perc =
         (f.mean_duration_beats <= 0.42 &&
          f.staccato_ratio >= 0.55 &&
@@ -249,7 +286,7 @@ inline SingleClassification classifyTrackFeatures(
          f.drum_aux_perc_ratio >= 0.70 &&
          f.drum_kick_snare_ratio < 0.05 &&
          f.chord_tone_ratio < 0.85 &&
-         f.notes_per_bar >= 2.5 &&
+         f.unique_onsets_per_bar >= 2.5 &&
          (f.max_pitch_dominance >= 0.28 || f.dissonant_simultaneous_ratio >= 0.15 || f.unique_pitch_count <= 4u));
 
     const bool percussive_domain = explicit_drum_domain || content_kick_snare_drum || content_aux_perc;
@@ -679,22 +716,27 @@ inline SingleClassification classifyTrackFeatures(
     if (looks_random_noise) {
         out.abstained = true;
         out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
         out.abstain_reason = "unstructured_or_random_note_distribution";
     } else if (logits[top1] < 2.2) {
         out.abstained = true;
         out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
         out.abstain_reason = "weak_musical_signal_evidence";
     } else if (out.confidence < opt.role_abstain_threshold) {
         out.abstained = true;
         out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
         out.abstain_reason = "low_calibrated_confidence";
     } else if (out.entropy > opt.max_entropy_threshold) {
         out.abstained = true;
         out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
         out.abstain_reason = "high_posterior_entropy";
     } else if (out.margin < opt.min_confidence_margin && !out.is_mixed_role) {
         out.abstained = true;
         out.role = MR::UnknownAbstain;
+        out.primary_role = MR::UnknownAbstain;
         out.abstain_reason = "ambiguous_top2_margin";
     } else {
         out.abstained = false;
@@ -1025,136 +1067,160 @@ inline SemanticArrangementAnalysis analyzeMusicalSemantics(
             dec.abstained = true;
             dec.role = MusicalRole::UnknownAbstain;
             dec.primary_role = MusicalRole::UnknownAbstain;
+            dec.secondary_role = MusicalRole::UnknownAbstain;
+            dec.runner_up_role = MusicalRole::UnknownAbstain;
             dec.abstain_reason = agg.last_abstain_reason.empty() ? "empty_track_zero_notes" : agg.last_abstain_reason;
             dec.uncertainty_entropy = 1.0;
             dec.confidence = 0.0;
+            dec.margin = 0.0;
         } else {
-            // Normalize aggregated posterior probabilities
+            // Normalize aggregated posterior probabilities (P1-3: guard all-zero posteriors from early abstain guards!)
             double p_sum = 0.0;
             for (size_t k = 0; k < kCanonicalSemanticRoleCount; ++k) {
                 dec.role_probabilities[k] = agg.weighted_probs[k] / agg.weight_sum;
                 p_sum += dec.role_probabilities[k];
             }
-            double ent = 0.0;
-            const double log_k = std::log(static_cast<double>(kCanonicalSemanticRoleCount));
-            for (size_t k = 0; k < kCanonicalSemanticRoleCount; ++k) {
-                if (p_sum > 0.0) dec.role_probabilities[k] /= p_sum;
-                if (dec.role_probabilities[k] > 1e-12) {
-                    ent -= dec.role_probabilities[k] * std::log(dec.role_probabilities[k]);
-                }
-            }
-            dec.uncertainty_entropy = canonical_detail::clamp01(ent / log_k);
-
-            // Count confident section-level role votes (and check for substantive distinct roles across sections!)
-            std::map<MusicalRole, double> confident_role_weight;
-            std::map<MusicalRole, bool> role_seen_in_variation;
-            uint32_t non_empty_sections = 0;
-            uint32_t confident_sections = 0;
-            double total_conf_weight = 0.0;
-            for (const auto& ob : agg.obs) {
-                if (ob.notes_per_bar <= 0.0) continue;
-                ++non_empty_sections;
-                if (!ob.abstained && ob.role != MusicalRole::UnknownAbstain) {
-                    ++confident_sections;
-                    const double rw = std::max(0.1, ob.confidence * ob.notes_per_bar);
-                    confident_role_weight[ob.role] += rw;
-                    total_conf_weight += rw;
-                    if (ob.section_type == uasf::SectionType::Main1 ||
-                        ob.section_type == uasf::SectionType::Main2 ||
-                        ob.section_type == uasf::SectionType::Main3 ||
-                        ob.section_type == uasf::SectionType::Main4) {
-                        role_seen_in_variation[ob.role] = true;
-                    }
-                }
-            }
-
-            size_t top1 = 0, top2 = 1;
-            if (dec.role_probabilities[top2] > dec.role_probabilities[top1]) std::swap(top1, top2);
-            for (size_t k = 2; k < kCanonicalSemanticRoleCount; ++k) {
-                if (dec.role_probabilities[k] > dec.role_probabilities[top1]) {
-                    top2 = top1;
-                    top1 = k;
-                } else if (dec.role_probabilities[k] > dec.role_probabilities[top2]) {
-                    top2 = k;
-                }
-            }
-
-            dec.primary_role   = semantic_detail::idxToRole(top1);
-            dec.secondary_role = semantic_detail::idxToRole(top2);
-            dec.runner_up_role = dec.secondary_role;
-            dec.confidence     = dec.role_probabilities[top1];
-            dec.margin         = dec.role_probabilities[top1] - dec.role_probabilities[top2];
-
-            // Cross-section role shift detection: >= 2 substantive confident roles across sections!
-            // Ignore trivial 1-hit Ending/Break cymbal punctuation on a drum foundation track.
-            bool substantive_cross_shift = false;
-            std::vector<std::pair<MusicalRole, double>> ranked(confident_role_weight.begin(),
-                                                               confident_role_weight.end());
-            std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
-                return a.second > b.second;
-            });
-            if (ranked.size() >= 2u && total_conf_weight > 0.0) {
-                const double sec_share = ranked[1].second / total_conf_weight;
-                const bool sec_in_var = role_seen_in_variation[ranked[1].first];
-                const bool trivial_ending_cymbal =
-                    (ranked[0].first == MusicalRole::KickSnareFoundation &&
-                     ranked[1].first == MusicalRole::TransitionalEffects &&
-                     !sec_in_var && sec_share < 0.25);
-                if (!trivial_ending_cymbal && (sec_share >= 0.15 || sec_in_var)) {
-                    substantive_cross_shift = true;
-                }
-            }
-
-            if (substantive_cross_shift) {
-                dec.primary_role = ranked[0].first;
-                dec.secondary_role = ranked[1].first;
-                dec.runner_up_role = ranked[1].first;
-                dec.is_mixed_role = true;
-                dec.section_role_shift_detected = true;
-                dec.mixed_role_reason = std::string("cross_section_role_shift:") +
-                                        musicalRoleName(dec.primary_role) + "->" +
-                                        musicalRoleName(dec.secondary_role);
-                const double p1 = dec.role_probabilities[semantic_detail::roleToIdx(dec.primary_role)];
-                const double p2 = dec.role_probabilities[semantic_detail::roleToIdx(dec.secondary_role)];
-                dec.confidence = std::min(0.95, p1 + p2);
-                dec.abstained = false;
-                dec.role = dec.primary_role;
-            } else if (agg.any_intra_mixed && confident_sections > 0) {
-                dec.is_mixed_role = true;
-                dec.secondary_role = agg.intra_mixed_secondary;
-                dec.runner_up_role = agg.intra_mixed_secondary;
-                dec.mixed_role_reason = agg.intra_mixed_reason;
-                dec.abstained = false;
-                dec.role = dec.primary_role;
-            } else if (confident_sections == 0 ||
-                       dec.confidence < opt.role_abstain_threshold ||
-                       dec.uncertainty_entropy > opt.max_entropy_threshold ||
-                       dec.margin < opt.min_confidence_margin) {
-                dec.abstained = true;
+            if (p_sum <= 1e-12) {
+                dec.role_probabilities.fill(0.0);
+                dec.uncertainty_entropy = 1.0;
                 dec.role = MusicalRole::UnknownAbstain;
-                if (!agg.last_abstain_reason.empty()) {
-                    dec.abstain_reason = agg.last_abstain_reason;
-                } else if (dec.confidence < opt.role_abstain_threshold) {
-                    dec.abstain_reason = "low_calibrated_confidence";
-                } else if (dec.uncertainty_entropy > opt.max_entropy_threshold) {
-                    dec.abstain_reason = "high_posterior_entropy";
-                } else {
-                    dec.abstain_reason = "ambiguous_top2_margin";
-                }
+                dec.primary_role = MusicalRole::UnknownAbstain;
+                dec.secondary_role = MusicalRole::UnknownAbstain;
+                dec.runner_up_role = MusicalRole::UnknownAbstain;
+                dec.confidence = 0.0;
+                dec.margin = 0.0;
+                dec.abstained = true;
+                dec.abstain_reason = agg.last_abstain_reason.empty()
+                                         ? "insufficient_note_evidence"
+                                         : agg.last_abstain_reason;
+                dec.role_stability_ratio = 0.0;
             } else {
-                dec.abstained = false;
-                dec.role = dec.primary_role;
-            }
-
-            // Role stability across active sections
-            if (non_empty_sections > 0) {
-                uint32_t agree = 0;
-                for (const auto& ob : agg.obs) {
-                    if (ob.notes_per_bar > 0.0 && ob.role == dec.primary_role && !ob.abstained) {
-                        ++agree;
+                double ent = 0.0;
+                const double log_k = std::log(static_cast<double>(kCanonicalSemanticRoleCount));
+                for (size_t k = 0; k < kCanonicalSemanticRoleCount; ++k) {
+                    dec.role_probabilities[k] /= p_sum;
+                    if (dec.role_probabilities[k] > 1e-12) {
+                        ent -= dec.role_probabilities[k] * std::log(dec.role_probabilities[k]);
                     }
                 }
-                dec.role_stability_ratio = static_cast<double>(agree) / static_cast<double>(non_empty_sections);
+                dec.uncertainty_entropy = canonical_detail::clamp01(ent / log_k);
+
+                // Count confident section-level role votes (and check for substantive distinct roles across sections!)
+                std::map<MusicalRole, double> confident_role_weight;
+                std::map<MusicalRole, bool> role_seen_in_variation;
+                uint32_t non_empty_sections = 0;
+                uint32_t confident_sections = 0;
+                double total_conf_weight = 0.0;
+                for (const auto& ob : agg.obs) {
+                    if (ob.notes_per_bar <= 0.0) continue;
+                    ++non_empty_sections;
+                    if (!ob.abstained && ob.role != MusicalRole::UnknownAbstain) {
+                        ++confident_sections;
+                        const double rw = std::max(0.1, ob.confidence * ob.notes_per_bar);
+                        confident_role_weight[ob.role] += rw;
+                        total_conf_weight += rw;
+                        if (ob.section_type == uasf::SectionType::Main1 ||
+                            ob.section_type == uasf::SectionType::Main2 ||
+                            ob.section_type == uasf::SectionType::Main3 ||
+                            ob.section_type == uasf::SectionType::Main4) {
+                            role_seen_in_variation[ob.role] = true;
+                        }
+                    }
+                }
+
+                size_t top1 = 0, top2 = 1;
+                if (dec.role_probabilities[top2] > dec.role_probabilities[top1]) std::swap(top1, top2);
+                for (size_t k = 2; k < kCanonicalSemanticRoleCount; ++k) {
+                    if (dec.role_probabilities[k] > dec.role_probabilities[top1]) {
+                        top2 = top1;
+                        top1 = k;
+                    } else if (dec.role_probabilities[k] > dec.role_probabilities[top2]) {
+                        top2 = k;
+                    }
+                }
+
+                dec.primary_role   = semantic_detail::idxToRole(top1);
+                dec.secondary_role = semantic_detail::idxToRole(top2);
+                dec.runner_up_role = dec.secondary_role;
+                dec.confidence     = dec.role_probabilities[top1];
+                dec.margin         = dec.role_probabilities[top1] - dec.role_probabilities[top2];
+
+                // Cross-section role shift detection: >= 2 substantive confident roles across sections!
+                // Ignore trivial 1-hit Ending/Break cymbal punctuation on a drum foundation track.
+                bool substantive_cross_shift = false;
+                std::vector<std::pair<MusicalRole, double>> ranked(confident_role_weight.begin(),
+                                                                   confident_role_weight.end());
+                std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+                    return a.second > b.second;
+                });
+                if (ranked.size() >= 2u && total_conf_weight > 0.0) {
+                    const double sec_share = ranked[1].second / total_conf_weight;
+                    const bool sec_in_var = role_seen_in_variation[ranked[1].first];
+                    const bool trivial_ending_cymbal =
+                        (ranked[0].first == MusicalRole::KickSnareFoundation &&
+                         ranked[1].first == MusicalRole::TransitionalEffects &&
+                         !sec_in_var && sec_share < 0.25);
+                    if (!trivial_ending_cymbal && (sec_share >= 0.15 || sec_in_var)) {
+                        substantive_cross_shift = true;
+                    }
+                }
+
+                if (substantive_cross_shift) {
+                    dec.primary_role = ranked[0].first;
+                    dec.secondary_role = ranked[1].first;
+                    dec.runner_up_role = ranked[1].first;
+                    dec.is_mixed_role = true;
+                    dec.section_role_shift_detected = true;
+                    dec.mixed_role_reason = std::string("cross_section_role_shift:") +
+                                            musicalRoleName(dec.primary_role) + "->" +
+                                            musicalRoleName(dec.secondary_role);
+                    const double p1 = dec.role_probabilities[semantic_detail::roleToIdx(dec.primary_role)];
+                    const double p2 = dec.role_probabilities[semantic_detail::roleToIdx(dec.secondary_role)];
+                    dec.confidence = std::min(0.95, p1 + p2);
+                    dec.abstained = false;
+                    dec.role = dec.primary_role;
+                } else if (agg.any_intra_mixed && confident_sections > 0) {
+                    dec.is_mixed_role = true;
+                    dec.secondary_role = agg.intra_mixed_secondary;
+                    dec.runner_up_role = agg.intra_mixed_secondary;
+                    dec.mixed_role_reason = agg.intra_mixed_reason;
+                    dec.abstained = false;
+                    dec.role = dec.primary_role;
+                } else if (confident_sections == 0 ||
+                           dec.confidence < opt.role_abstain_threshold ||
+                           dec.uncertainty_entropy > opt.max_entropy_threshold ||
+                           dec.margin < opt.min_confidence_margin) {
+                    // P1-3: Abstained tracks ALWAYS set primary_role = UnknownAbstain & honest non-zero entropy!
+                    dec.abstained = true;
+                    dec.role = MusicalRole::UnknownAbstain;
+                    dec.primary_role = MusicalRole::UnknownAbstain;
+                    if (dec.uncertainty_entropy < 1e-6) {
+                        dec.uncertainty_entropy = 1.0;
+                    }
+                    if (!agg.last_abstain_reason.empty()) {
+                        dec.abstain_reason = agg.last_abstain_reason;
+                    } else if (dec.confidence < opt.role_abstain_threshold) {
+                        dec.abstain_reason = "low_calibrated_confidence";
+                    } else if (dec.uncertainty_entropy > opt.max_entropy_threshold) {
+                        dec.abstain_reason = "high_posterior_entropy";
+                    } else {
+                        dec.abstain_reason = "ambiguous_top2_margin";
+                    }
+                } else {
+                    dec.abstained = false;
+                    dec.role = dec.primary_role;
+                }
+
+                // Role stability across active sections
+                if (non_empty_sections > 0 && !dec.abstained) {
+                    uint32_t agree = 0;
+                    for (const auto& ob : agg.obs) {
+                        if (ob.notes_per_bar > 0.0 && ob.role == dec.primary_role && !ob.abstained) {
+                            ++agree;
+                        }
+                    }
+                    dec.role_stability_ratio = static_cast<double>(agree) / static_cast<double>(non_empty_sections);
+                }
             }
         }
 
@@ -1183,15 +1249,57 @@ inline SemanticArrangementAnalysis analyzeMusicalSemantics(
         out.track_roles.push_back(std::move(dec));
     }
 
-    // Update overall inter-track overlap role labels from consolidated decisions
-    out.inter_track = out.canonical_view.inter_track_overall;
-    for (auto& ov : out.inter_track.register_overlaps) {
+    // Recompute role-aware overall inter-track relationships across ALL active sections (P1-1)
+    {
+        std::map<uint8_t, MusicalRole> role_by_ch;
         for (const auto& dec : out.track_roles) {
-            if (dec.source_channel == ov.channel_a) ov.role_a = dec.role;
-            if (dec.source_channel == ov.channel_b) ov.role_b = dec.role;
+            role_by_ch[dec.source_channel] = dec.role;
         }
+        std::map<uint8_t, CanonicalTrackView> ov_track_map;
+        std::map<uint8_t, std::vector<exporters::korg::quality::NoteSpan>> ov_notes_map;
+        uint32_t offset = 0;
+        uint32_t tot_bars = 0;
+        for (size_t sidx = 0; sidx < uasf_style.sections.size() && sidx < out.canonical_view.sections.size(); ++sidx) {
+            const auto& u_sec = uasf_style.sections[sidx];
+            const auto& c_sec = out.canonical_view.sections[sidx];
+            for (size_t tidx = 0; tidx < u_sec.tracks.size() && tidx < c_sec.tracks.size(); ++tidx) {
+                const auto& ut = u_sec.tracks[tidx];
+                const auto& ct = c_sec.tracks[tidx];
+                const auto spans = exporters::korg::quality::extractNoteSpansFromEvents(ut.events, c_sec.length_ticks);
+                if (ov_track_map.find(ct.source_channel) == ov_track_map.end() ||
+                    (ov_track_map[ct.source_channel].features.note_count == 0 && ct.features.note_count > 0)) {
+                    ov_track_map[ct.source_channel] = ct;
+                }
+                for (auto ns : spans) {
+                    ns.on_tick  = canonical_detail::saturatingAddU32(ns.on_tick, offset);
+                    ns.off_tick = canonical_detail::saturatingAddU32(ns.off_tick, offset);
+                    ov_notes_map[ct.source_channel].push_back(ns);
+                }
+            }
+            offset = canonical_detail::saturatingAddU32(offset, c_sec.length_ticks);
+            tot_bars = canonical_detail::saturatingAddU32(tot_bars, c_sec.bars);
+        }
+        std::vector<CanonicalTrackView> ov_tracks;
+        std::vector<std::vector<exporters::korg::quality::NoteSpan>> ov_notes;
+        const uint32_t eff_bars = std::max<uint32_t>(1u, tot_bars);
+        for (auto& [ch, tr] : ov_track_map) {
+            const auto& merged = ov_notes_map[ch];
+            if (!merged.empty()) {
+                canonical_detail::ControllerTrace empty_ctrl{};
+                tr.features = canonical_detail::computeTrackFeatures(
+                    merged, empty_ctrl, out.canonical_view.ppqn, 4u, 4u, eff_bars,
+                    tr.casm.source_chord_root, tr.casm.source_chord_type);
+            }
+            if (auto rit = role_by_ch.find(ch); rit != role_by_ch.end()) {
+                tr.semantic_role = rit->second;
+            }
+            ov_tracks.push_back(tr);
+            ov_notes.push_back(merged);
+        }
+        out.inter_track = canonical_detail::computeInterTrackRelationships(
+            ov_tracks, ov_notes, out.canonical_view.ppqn);
+        out.canonical_view.inter_track_overall = out.inter_track;
     }
-    out.canonical_view.inter_track_overall = out.inter_track;
 
     // Step 3: Groove pocket profile & Variation energy monotonicity
     out.groove.estimated_swing_ratio = (swing_w > 0.0) ? (swing_sum / swing_w) : 0.50;

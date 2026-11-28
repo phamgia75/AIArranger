@@ -215,11 +215,35 @@ int main() {
              pa4x.sound_addressing.melodic_user_bank_max == 4 &&
              pa4x.sound_addressing.drum_user_bank_max == 2);
 
-        TEST("KetronEvent Real Audio Drum + 12 tracks + 2-bar break capability",
-             ketron.tracks.total_style_tracks == 12 &&
+        TEST("KetronEvent Real Audio Drum + 12 max tracks + 2-bar break + collision-free channels",
+             ketron.tracks.total_style_tracks == 8 &&
+             ketron.tracks.max_style_tracks == 12 &&
              ketron.articulation.supports_real_audio_drums &&
              ketron.supportsArticulation(ArticulationFlag::RealAudioDrum) &&
              ketron.sections.break_max_bars == 2);
+
+        // P2-2 Regression: Verify ALL 5 platforms have collision-free style channel topologies
+        bool all_channels_collision_free = true;
+        for (auto pid : supportedTargetPlatforms()) {
+            const auto& pr = targetCapabilityProfile(pid);
+            const auto& t = pr.tracks;
+            if (t.drum_channel == t.perc_channel || t.drum_channel == t.bass_channel ||
+                t.perc_channel == t.bass_channel) {
+                all_channels_collision_free = false;
+            }
+            uint32_t style_ch_count = 0;
+            uint32_t chord_ch_count = 0;
+            for (uint8_t ch = 0; ch < 16; ++ch) {
+                if (pr.isStyleChannel(ch)) ++style_ch_count;
+                if (pr.isChordDrivenChannel(ch)) ++chord_ch_count;
+            }
+            if (style_ch_count != static_cast<uint32_t>(3u + t.acc_track_count) ||
+                chord_ch_count != static_cast<uint32_t>(1u + t.acc_track_count)) {
+                all_channels_collision_free = false;
+            }
+        }
+        TEST("P2-2: all 5 platforms have collision-free drum/perc/bass/acc MIDI channels",
+             all_channels_collision_free);
 
         TEST("RolandArranger chord flags & polyphony",
              roland.tracks.max_polyphony == 128 &&
@@ -258,6 +282,15 @@ int main() {
         TEST("Ketron -> Pa5X detects 2-bar->1-bar Break cap & RealAudioDrum loss",
              ketron_to_pa5x.break_bar_delta == -1 &&
              ketron_to_pa5x.max_severity == CapabilityGapSeverity::LossyAdaptationRequired);
+
+        const auto pa5x_to_genos2 = compareTargetCapabilities(TargetPlatformId::KorgPa5X,
+                                                              TargetPlatformId::YamahaGenos2);
+        bool has_cv_to_casm = false;
+        for (const auto& item : pa5x_to_genos2.items) {
+            if (item.code == "CAP_GAP_CV_TO_CASM_TRANSLATION") has_cv_to_casm = true;
+        }
+        TEST("P2-6: Pa5X -> Genos2 symmetrically reports CAP_GAP_CV_TO_CASM_TRANSLATION",
+             pa5x_to_genos2.cv_count_delta == -6 && has_cv_to_casm);
 
         const auto same = compareTargetCapabilities(TargetPlatformId::KorgPa5X,
                                                     TargetPlatformId::KorgPa5X);
@@ -336,6 +369,85 @@ int main() {
              kview.provenance.source_format == "KorgSMF0" &&
              !kview.sections.empty() &&
              !kview.hardware_verified);
+    }
+
+    // ── 5. Round-2 Adversarial Hardening Regressions (P1-1, P1-2, P2-1, P2-3, P2-5) ──
+    {
+        // P1-1: Silent-in-section-0 high flute melody + drums (NO bass) must NOT fabricate kick-bass lock!
+        StyleDefinition s_p11{};
+        s_p11.name = "P1_1_SilentIntroFlute";
+        s_p11.tempo_bpm = 120;
+        s_p11.resolution = 480;
+
+        SectionDefinition intro{};
+        intro.type = SectionType::Intro1; intro.name = "Intro A";
+        intro.bars = 1; intro.resolution = 480; intro.beats_per_bar = 4; intro.beat_note = 4;
+        TrackDefinition intro_dr{};
+        intro_dr.midi_channel = 9; intro_dr.name = "Drums"; intro_dr.role = TrackRole::Drum; intro_dr.is_drum = true;
+        addNote(intro_dr, 0, 100, 36, 110);
+        addNote(intro_dr, 960, 100, 36, 108);
+        TrackDefinition intro_flute{};
+        intro_flute.midi_channel = 14; intro_flute.name = "Flute"; intro_flute.role = TrackRole::Melody;
+        // Zero notes in Intro!
+        intro.tracks.push_back(intro_dr);
+        intro.tracks.push_back(intro_flute);
+
+        SectionDefinition main1 = intro;
+        main1.type = SectionType::Main1; main1.name = "Main A";
+        addNote(main1.tracks[1], 0,    240, 76, 95);
+        addNote(main1.tracks[1], 480,  240, 79, 92);
+        addNote(main1.tracks[1], 960,  240, 81, 96);
+        addNote(main1.tracks[1], 1440, 240, 84, 94);
+
+        s_p11.sections.push_back(intro);
+        s_p11.sections.push_back(main1);
+
+        const auto v_p11 = buildCanonicalStyleView(s_p11);
+        TEST("P1-1: silent-in-section-0 high melody is NOT misidentified as Bass (kick-bass lock == 0.0)",
+             v_p11.inter_track_overall.kick_bass_lock_correlation == 0.0);
+
+        // P1-2: Note starting past total_ticks must NOT uint32 underflow duty_cycle to 1.0!
+        std::vector<ai_arranger::exporters::korg::quality::NoteSpan> tail_notes = {
+            {2400u, 2410u, 60u, 90u, false}
+        };
+        canonical_detail::ControllerTrace empty_ctrl{};
+        const auto f_tail = canonical_detail::computeTrackFeatures(tail_notes, empty_ctrl, 480u, 4u, 4u, 1u, 0u, 0u);
+        TEST("P1-2: note past total_ticks produces duty_cycle == 0.0 (zero uint32 underflow)",
+             f_tail.duty_cycle <= 0.01);
+
+        // P2-1: NaN / Inf values sanitized cleanly to valid JSON (zero nan/inf numeric literals)
+        CanonicalStyleView nan_view{};
+        nan_view.style_name = "NonFinite_Sanitize_Test";
+        nan_view.inter_track_overall.kick_bass_lock_correlation = std::numeric_limits<double>::quiet_NaN();
+        CanonicalSectionView nan_sec{};
+        nan_sec.name = "Main A";
+        nan_sec.composite_energy = std::numeric_limits<double>::infinity();
+        nan_sec.swing_ratio = -std::numeric_limits<double>::infinity();
+        nan_view.sections.push_back(nan_sec);
+        const std::string nan_json = formatCanonicalStyleJson(nan_view);
+        TEST("P2-1: clamp01(NaN)==0.0 and JSON formatter sanitizes NaN/Inf/-Inf cleanly",
+             canonical_detail::clamp01(std::numeric_limits<double>::quiet_NaN()) == 0.0 &&
+             nan_json.find("\"kickBassLockCorrelation\": 0.0000") != std::string::npos &&
+             nan_json.find("\"compositeEnergy\": 0.00") != std::string::npos &&
+             nan_json.find("\"swingRatio\": 0.0000") != std::string::npos &&
+             nan_json.find(": nan") == std::string::npos &&
+             nan_json.find(": -nan") == std::string::npos &&
+             nan_json.find(": NaN") == std::string::npos &&
+             nan_json.find(": inf") == std::string::npos &&
+             nan_json.find(": -inf") == std::string::npos &&
+             nan_json.find(": Inf") == std::string::npos);
+
+        // P2-3 & P2-5: Extreme tick==UINT32_MAX, ppqn==0x40000000, huge bars==1000000, pitch==255!
+        std::vector<ai_arranger::exporters::korg::quality::NoteSpan> extreme_notes = {
+            {UINT32_MAX, UINT32_MAX, 255u, 100u, false}
+        };
+        const auto f_ext = canonical_detail::computeTrackFeatures(
+            extreme_notes, empty_ctrl, 0x40000000u, 4u, 4u, 1000000u, 0u, 0u);
+        TEST("P2-3 & P2-5: UINT32_MAX tick, huge ppqn/bars, pitch=255 stay overflow/bounds-safe with max_poly==1",
+             f_ext.max_polyphony == 1 &&
+             f_ext.pitch_max == 127 &&
+             std::isfinite(f_ext.mean_polyphony) &&
+             std::isfinite(f_ext.duty_cycle));
     }
 
     std::printf("Summary: %d passed, %d failed\n", passes, failures);

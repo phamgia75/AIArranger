@@ -189,6 +189,11 @@ struct TargetChordCaps {
     bool     supports_cv_tables  = false; // Korg CV1..CV6 chord-variation tables
 };
 
+struct TargetDrumBankRule {
+    int16_t msb = -1; // -1 = unused
+    int16_t lsb = -1; // -1 = any LSB
+};
+
 struct TargetSoundAddressing {
     uint8_t melodic_user_bank_min = 1;
     uint8_t melodic_user_bank_max = 12;
@@ -196,6 +201,20 @@ struct TargetSoundAddressing {
     uint8_t drum_user_bank_max    = 6; // Pa5X in-spec USERDK01..06 (rejects 07..12)
     uint8_t gm2_melodic_msb       = 121;
     uint8_t gm2_drum_msb          = 120;
+    std::array<TargetDrumBankRule, 4> drum_banks{{
+        {120, -1}, {-1, -1}, {-1, -1}, {-1, -1}
+    }};
+
+    bool isDrumBank(int msb, int lsb) const noexcept {
+        if (msb < 0) return false;
+        for (const auto& rule : drum_banks) {
+            if (rule.msb < 0) continue;
+            if (msb == rule.msb && (rule.lsb < 0 || lsb == rule.lsb)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 struct TargetCapabilityProfile {
@@ -516,6 +535,8 @@ inline TargetCapabilityProfile makeYamahaGenos2() {
     p.sound_addressing.drum_user_bank_max = 127;
     p.sound_addressing.gm2_melodic_msb = 0;
     p.sound_addressing.gm2_drum_msb = 127;
+    // Yamaha XG Drum (127/*), XG SFX Drum (126/*), GM2 Drum (120/*), Revo!Drum (62/100)
+    p.sound_addressing.drum_banks = {{{127, -1}, {126, -1}, {120, -1}, {62, 100}}};
 
     p.role_pitch_ranges = defaultRolePitchRanges(0);
     p.hardware_verified = false;
@@ -560,12 +581,12 @@ inline TargetCapabilityProfile makeKetronEvent() {
     p.sections.max_cv_intro_fill_end = 2;
     p.sections.max_cv_break = 1;
 
-    p.tracks.total_style_tracks = 12; // Real Drums + Groove + Live Bass + Live Guitar + Chords 1..5 + Lower
-    p.tracks.max_style_tracks = 12;
+    p.tracks.total_style_tracks = 8; // 8 collision-free MIDI style channels (plus Real Audio/Live layers up to 12)
+    p.tracks.max_style_tracks = 12;  // Real Drums + Groove + Live Bass + Live Guitar + Chords 1..5 + Lower
     p.tracks.drum_channel = 9;
     p.tracks.perc_channel = 10;
     p.tracks.bass_channel = 4;
-    p.tracks.first_acc_channel = 5;
+    p.tracks.first_acc_channel = 11; // Non-overlapping chord channels 11..15 (zero collision with ch 9 drum!)
     p.tracks.acc_track_count = 5;
     p.tracks.chord_event_note_max = 0xFF;
     p.tracks.max_polyphony = 216;
@@ -766,6 +787,25 @@ inline std::vector<TargetPlatformId> supportedTargetPlatforms() {
     };
 }
 
+// Vendor-neutral query across all registered arranger profiles to test whether a
+// (MSB, LSB) bank address corresponds to a documented drum/percussion bank.
+inline bool isKnownArrangerDrumBank(int msb, int lsb) noexcept {
+    if (msb < 0) return false;
+    static constexpr std::array<TargetPlatformId, kTargetPlatformCount> kAll = {
+        TargetPlatformId::KorgPa5X,
+        TargetPlatformId::YamahaGenos2,
+        TargetPlatformId::KorgPa4XPa1000,
+        TargetPlatformId::KetronEvent,
+        TargetPlatformId::RolandEA7BK,
+    };
+    for (TargetPlatformId pid : kAll) {
+        if (targetCapabilityProfile(pid).sound_addressing.isDrumBank(msb, lsb)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline CapabilityGapReport compareTargetCapabilities(
     TargetPlatformId source_platform,
     TargetPlatformId target_platform) {
@@ -814,6 +854,16 @@ inline CapabilityGapReport compareTargetCapabilities(
             "CASM chord-mute masks",
             "CV1..CV" + std::to_string(dst.sections.max_cv_variation) + " tables",
             "Translate mutually exclusive CASM chord-mute tracks into target CV1..CVn elements.",
+        });
+    } else if (src.chords.supports_cv_tables && !dst.chords.supports_cv_tables && dst.chords.supports_casm_mute) {
+        bumpSeverity(CapabilityGapSeverity::Advisory);
+        r.items.push_back({
+            "CAP_GAP_CV_TO_CASM_TRANSLATION",
+            "chord_variation_model",
+            CapabilityGapSeverity::Advisory,
+            "CV1..CV" + std::to_string(src.sections.max_cv_variation) + " tables",
+            "CASM chord-mute masks",
+            "Consolidate CV1..CVn tables into CASM chord-mute track routing masks.",
         });
     } else if (src.sections.max_cv_variation > dst.sections.max_cv_variation && dst.sections.max_cv_variation > 0) {
         bumpSeverity(CapabilityGapSeverity::LossyAdaptationRequired);

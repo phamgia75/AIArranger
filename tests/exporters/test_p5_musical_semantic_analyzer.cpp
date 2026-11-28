@@ -597,6 +597,88 @@ int main() {
              r_odd.groove.compound_meter_detected && r_odd.groove.mixed_meter_detected);
     }
 
+    // ── 7. Round-2 Audit Regressions (P1-1, P1-3, P1-4, P2-4) ──
+    {
+        // P1-3: Abstained sparse & single-pitch tracks MUST report primary_role=UnknownAbstain & entropy > 0.5 (1.0)!
+        auto sparse2 = makeStrippedTrack(7);
+        addNote(sparse2, 0, 200, 62, 80);
+        addNote(sparse2, 960, 200, 65, 80);
+        const auto r_p13 = analyzeMusicalSemantics(wrapSingleTrack("P1_3_Sparse", sparse2));
+        TEST("P1-3: sparse abstained track sets primary_role=UnknownAbstain and entropy==1.0 (never 0.0000)",
+             r_p13.track_roles.size() == 1 &&
+             r_p13.track_roles[0].abstained &&
+             r_p13.track_roles[0].role == MusicalRole::UnknownAbstain &&
+             r_p13.track_roles[0].primary_role == MusicalRole::UnknownAbstain &&
+             r_p13.track_roles[0].uncertainty_entropy >= 0.99);
+
+        // P1-4: Genuine C-major walking bassline (is_drum=false) with drum bank CC0=62, CC32=100
+        // MUST fail closed (metadata_content_conflict), NEVER fabricate 98.7% KickSnareFoundation!
+        auto conflict_bass = gtBassFoundation(10);
+        conflict_bass.is_drum = false;
+        conflict_bass.events.insert(conflict_bass.events.begin(),
+                                    {MidiEventType::ControlChange, 10, 32, 100, 0});
+        conflict_bass.events.insert(conflict_bass.events.begin(),
+                                    {MidiEventType::ControlChange, 10, 0, 62, 0});
+        const auto r_p14_default = analyzeMusicalSemantics(wrapSingleTrack("P1_4_BankConflict", conflict_bass));
+        SemanticAnalyzeOptions no_hints_opt{};
+        no_hints_opt.use_metadata_hints = false;
+        const auto r_p14_nohints = analyzeMusicalSemantics(
+            wrapSingleTrack("P1_4_BankConflict", conflict_bass), nullptr, nullptr, no_hints_opt);
+        TEST("P1-4: drum-bank metadata on walking bassline abstains (metadata_content_conflict), never fabricates Drum",
+             r_p14_default.track_roles.size() == 1 &&
+             r_p14_default.track_roles[0].abstained &&
+             r_p14_default.track_roles[0].role == MusicalRole::UnknownAbstain &&
+             r_p14_default.track_roles[0].primary_role == MusicalRole::UnknownAbstain &&
+             r_p14_default.track_roles[0].abstain_reason == "metadata_content_conflict" &&
+             r_p14_default.track_roles[0].uncertainty_entropy >= 0.99 &&
+             r_p14_nohints.track_roles.size() == 1 &&
+             !r_p14_nohints.track_roles[0].abstained &&
+             r_p14_nohints.track_roles[0].role == MusicalRole::BassFoundation);
+
+        // P2-4: Six simultaneous 0-duration notes (60..65) at tick 0 MUST abstain, NOT 97.4% DrumKitAuxPercussion!
+        auto deg_cluster = makeStrippedTrack(6);
+        for (uint8_t p = 60; p <= 65; ++p) {
+            deg_cluster.events.push_back({MidiEventType::NoteOn, 6, p, 90, 0});
+            deg_cluster.events.push_back({MidiEventType::NoteOff, 6, p, 0, 0});
+        }
+        StyleDefinition s_deg{};
+        s_deg.name = "P2_4_ZeroDurCluster";
+        SectionDefinition sec_deg{};
+        sec_deg.type = SectionType::Main1; sec_deg.name = "Main A";
+        sec_deg.bars = 0; sec_deg.resolution = 0; sec_deg.beats_per_bar = 4; sec_deg.beat_note = 4;
+        sec_deg.tracks.push_back(deg_cluster);
+        s_deg.sections.push_back(sec_deg);
+        const auto r_p24 = analyzeMusicalSemantics(s_deg);
+        TEST("P2-4: degenerate single-onset 0-duration chromatic cluster abstains honestly",
+             r_p24.track_roles.size() == 1 &&
+             r_p24.track_roles[0].abstained &&
+             r_p24.track_roles[0].role == MusicalRole::UnknownAbstain &&
+             r_p24.track_roles[0].primary_role == MusicalRole::UnknownAbstain &&
+             r_p24.track_roles[0].uncertainty_entropy >= 0.99);
+
+        // P1-1 end-to-end inside analyzeMusicalSemantics(): silent-in-Intro1 high flute + drums -> kbLock == 0.0!
+        StyleDefinition s_no_bass{};
+        s_no_bass.name = "P1_1_SemanticNoBass";
+        s_no_bass.tempo_bpm = 120;
+        s_no_bass.resolution = 480;
+        SectionDefinition s0{};
+        s0.type = SectionType::Intro1; s0.name = "Intro A"; s0.bars = 2; s0.resolution = 480;
+        s0.beats_per_bar = 4; s0.beat_note = 4;
+        auto dr0 = gtKickSnareFoundation(9); dr0.is_drum = true; dr0.role = TrackRole::Drum;
+        auto fl0 = makeStrippedTrack(14); // silent in Intro1
+        s0.tracks.push_back(dr0);
+        s0.tracks.push_back(fl0);
+        SectionDefinition s1 = s0;
+        s1.type = SectionType::Main1; s1.name = "Main A";
+        s1.tracks[1] = gtMelodicPhrase(14); // active in Main1
+        s_no_bass.sections.push_back(s0);
+        s_no_bass.sections.push_back(s1);
+        const auto r_p11 = analyzeMusicalSemantics(s_no_bass);
+        TEST("P1-1: analyzeMusicalSemantics() gives kick_bass_lock == 0.0 when no Bass exists (silent-intro flute)",
+             r_p11.inter_track.kick_bass_lock_correlation == 0.0 &&
+             r_p11.groove.kick_bass_lock_ratio == 0.0);
+    }
+
     std::printf("Summary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }

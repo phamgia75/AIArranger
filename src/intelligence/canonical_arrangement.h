@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <limits>
+#include <locale>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -201,7 +202,8 @@ struct SoundIdentity {
     int         msb = -1;
     int         lsb = -1;
     int         pc  = -1;
-    bool        is_drum_kit = false;
+    bool        is_drum_kit  = false;
+    bool        is_drum_bank = false; // True iff (msb, lsb) matches a TargetCapabilityProfile drum bank
     std::string family;
     std::string sub_family;
 };
@@ -428,9 +430,18 @@ struct CanonicalStyleView {
 namespace canonical_detail {
 
 inline double clamp01(double v) noexcept {
-    if (v < 0.0) return 0.0;
+    if (!std::isfinite(v) || v < 0.0) return 0.0;
     if (v > 1.0) return 1.0;
     return v;
+}
+
+inline uint32_t saturatingAddU32(uint32_t a, uint32_t b) noexcept {
+    const uint64_t sum = uint64_t{a} + uint64_t{b};
+    return (sum > uint64_t{UINT32_MAX}) ? UINT32_MAX : static_cast<uint32_t>(sum);
+}
+
+inline uint64_t safeOffTick64(uint32_t on_t, uint32_t off_t) noexcept {
+    return (off_t > on_t) ? uint64_t{off_t} : (uint64_t{on_t} + 1ULL);
 }
 
 inline std::array<bool, 12> chordPitchClassMask(const exporters::korg::quality::DecodedYamahaSourceChord& ch) noexcept {
@@ -596,14 +607,14 @@ inline std::vector<exporters::korg::quality::NoteSpan> extractNoteSpansFromKorg(
             if (!q.empty()) {
                 const auto [on_t, vel] = q.front();
                 q.erase(q.begin());
-                const uint32_t off_t = (ev.tick > on_t) ? ev.tick : (on_t + 1u);
+                const uint32_t off_t = (ev.tick > on_t) ? ev.tick : saturatingAddU32(on_t, 1u);
                 spans.push_back(NoteSpan{on_t, off_t, pitch, vel, false});
             }
         }
     }
     for (uint8_t p = 0; p < 128; ++p) {
         for (const auto& [on_t, vel] : active[p]) {
-            const uint32_t off_t = (section_end > on_t) ? section_end : (on_t + 1u);
+            const uint32_t off_t = (section_end > on_t) ? section_end : saturatingAddU32(on_t, 1u);
             spans.push_back(NoteSpan{on_t, off_t, p, vel, false});
         }
     }
@@ -636,13 +647,15 @@ inline TrackFeatureSummary computeTrackFeatures(
     f.cc7_volume          = ctrl.cc7_volume;
     f.cc10_pan            = ctrl.cc10_pan;
 
-    const uint32_t eff_ppqn = ppqn ? ppqn : 480u;
+    const uint32_t eff_ppqn = ppqn ? std::clamp<uint32_t>(ppqn, 1u, 19200u) : 480u;
     const uint32_t eff_num  = meter_num ? uint32_t{meter_num} : 4u;
     const uint32_t eff_den  = meter_den ? uint32_t{meter_den} : 4u;
-    const uint32_t beat_ticks = std::max<uint32_t>(1u, (eff_ppqn * 4u) / eff_den);
-    const uint32_t bar_ticks  = std::max<uint32_t>(1u, beat_ticks * eff_num);
+    const uint64_t beat_ticks = std::max<uint64_t>(1u, (uint64_t{eff_ppqn} * 4ULL) / uint64_t{eff_den});
+    const uint64_t bar_ticks  = std::max<uint64_t>(1u, beat_ticks * uint64_t{eff_num});
     const uint32_t eff_bars   = std::max<uint32_t>(1u, bars);
-    const uint32_t total_ticks = bar_ticks * eff_bars;
+    const uint64_t total_ticks = (uint64_t{eff_bars} > UINT64_MAX / bar_ticks)
+                                     ? UINT64_MAX
+                                     : (bar_ticks * uint64_t{eff_bars});
     f.total_bars = eff_bars;
 
     const auto decoded_chord = exporters::korg::quality::decodeYamahaSourceChord(
@@ -692,7 +705,9 @@ inline TrackFeatureSummary computeTrackFeatures(
     std::vector<double> offbeat_ratios;
     std::vector<double> micro_errors;
     std::array<uint32_t, 16> grid16_counts{};
-    std::vector<std::array<uint32_t, 16>> per_bar_grid(eff_bars);
+    constexpr uint32_t kMaxGridBars = 4096u;
+    const uint32_t grid_bars = std::min<uint32_t>(eff_bars, kMaxGridBars);
+    std::vector<std::array<uint32_t, 16>> per_bar_grid(grid_bars);
 
     const double tol_ticks = std::max<double>(8.0, static_cast<double>(eff_ppqn) * 0.06);
     const double slot16_ticks = static_cast<double>(bar_ticks) / 16.0;
@@ -702,15 +717,16 @@ inline TrackFeatureSummary computeTrackFeatures(
     dur_beats_vec.reserve(n);
 
     for (const auto& ns : notes) {
-        pitches.push_back(ns.pitch);
-        pitch_counts[ns.pitch]++;
-        f.pitch_class_hist[ns.pitch % 12u]++;
-        pitch_sum += static_cast<double>(ns.pitch);
-        p_min = std::min(p_min, ns.pitch);
-        p_max = std::max(p_max, ns.pitch);
+        const uint8_t p = std::min<uint8_t>(ns.pitch, 127u);
+        pitches.push_back(p);
+        pitch_counts[p]++;
+        f.pitch_class_hist[p % 12u]++;
+        pitch_sum += static_cast<double>(p);
+        p_min = std::min(p_min, p);
+        p_max = std::max(p_max, p);
 
-        if (ns.pitch < 52) ++low_ct;
-        else if (ns.pitch < 76) ++mid_ct;
+        if (p < 52) ++low_ct;
+        else if (p < 76) ++mid_ct;
         else ++high_ct;
 
         vel_sum += static_cast<double>(ns.vel);
@@ -718,14 +734,14 @@ inline TrackFeatureSummary computeTrackFeatures(
         v_max = std::max(v_max, ns.vel);
         if (ns.vel <= 45) ++ghost_ct;
 
-        const uint32_t dur_ticks = (ns.off_tick > ns.on_tick) ? (ns.off_tick - ns.on_tick) : 1u;
+        const uint64_t dur_ticks = (ns.off_tick > ns.on_tick) ? (uint64_t{ns.off_tick} - uint64_t{ns.on_tick}) : 1ULL;
         const double dur_beats = static_cast<double>(dur_ticks) / quarter_ticks;
         dur_beats_sum += dur_beats;
         dur_beats_vec.push_back(dur_beats);
         if (dur_beats <= 0.35) ++staccato_ct;
         if (dur_beats >= 0.90) ++legato_ct;
 
-        const uint8_t pc = ns.pitch % 12u;
+        const uint8_t pc = p % 12u;
         const uint8_t rel = static_cast<uint8_t>((pc + 12u - decoded_chord.root) % 12u);
         if (chord_mask[pc]) ++chord_ct;
         if (rel == 0) ++root_ct;
@@ -733,32 +749,35 @@ inline TrackFeatureSummary computeTrackFeatures(
         else if (rel == 7) ++fifth_ct;
         else if (rel == 10 || rel == 11) ++seventh_ct;
 
-        if (isKickSnareKey(ns.pitch)) ++kick_snare_ct;
-        if (isHatCymbalKey(ns.pitch)) ++hat_cym_ct;
-        if (isAuxPercKey(ns.pitch))   ++aux_perc_ct;
-        if (isFxCymbalKey(ns.pitch))  ++fx_cym_ct;
+        if (isKickSnareKey(p)) ++kick_snare_ct;
+        if (isHatCymbalKey(p)) ++hat_cym_ct;
+        if (isAuxPercKey(p))   ++aux_perc_ct;
+        if (isFxCymbalKey(p))  ++fx_cym_ct;
 
-        const uint32_t bar_idx = std::min<uint32_t>(eff_bars - 1u, ns.on_tick / bar_ticks);
+        const uint32_t bar_idx = static_cast<uint32_t>(
+            std::min<uint64_t>(uint64_t{eff_bars - 1u}, uint64_t{ns.on_tick} / bar_ticks));
         active_bar_set.insert(bar_idx);
 
-        if (ns.on_tick <= beat_ticks / 2u ||
-            (total_ticks > beat_ticks && ns.on_tick >= total_ticks - beat_ticks)) {
+        if (uint64_t{ns.on_tick} <= beat_ticks / 2ULL ||
+            (total_ticks > beat_ticks && uint64_t{ns.on_tick} >= total_ticks - beat_ticks)) {
             ++boundary_ct;
         }
 
-        const uint32_t in_bar = ns.on_tick % bar_ticks;
+        const uint64_t in_bar = uint64_t{ns.on_tick} % bar_ticks;
         const size_t slot16 = std::min<size_t>(
             15u, static_cast<size_t>(std::floor((static_cast<double>(in_bar) / slot16_ticks) + 0.5)) % 16u);
         grid16_counts[slot16]++;
-        per_bar_grid[bar_idx][slot16]++;
+        if (bar_idx < grid_bars) {
+            per_bar_grid[bar_idx][slot16]++;
+        }
 
         // Beat alignment & syncopation
         const double beat_pos = static_cast<double>(in_bar) / static_cast<double>(beat_ticks);
         const double nearest_beat = std::round(beat_pos);
         const double beat_err_ticks = std::abs(beat_pos - nearest_beat) * static_cast<double>(beat_ticks);
 
-        if (in_bar <= static_cast<uint32_t>(tol_ticks) ||
-            (bar_ticks > in_bar && (bar_ticks - in_bar) <= static_cast<uint32_t>(tol_ticks))) {
+        if (in_bar <= static_cast<uint64_t>(tol_ticks) ||
+            (bar_ticks > in_bar && (bar_ticks - in_bar) <= static_cast<uint64_t>(tol_ticks))) {
             ++downbeat_ct;
         } else if (eff_num == 4u && beat_err_ticks <= tol_ticks) {
             const uint32_t bi = static_cast<uint32_t>(nearest_beat) % eff_num;
@@ -908,39 +927,47 @@ inline TrackFeatureSummary computeTrackFeatures(
         f.microtiming_stddev_ticks = std::sqrt(mvar / static_cast<double>(micro_errors.size()));
     }
 
-    // ── Duty cycle via union of sounding intervals ──
+    // ── Duty cycle via union of sounding intervals (P1-2 & P2-3: uint64_t underflow-safe) ──
     {
-        std::vector<std::pair<uint32_t, uint32_t>> ivs;
+        std::vector<std::pair<uint64_t, uint64_t>> ivs;
         ivs.reserve(n);
         for (const auto& ns : notes) {
-            ivs.push_back({ns.on_tick, std::min<uint32_t>(total_ticks, std::max<uint32_t>(ns.on_tick + 1u, ns.off_tick))});
+            if (uint64_t{ns.on_tick} >= total_ticks) continue;
+            const uint64_t s = uint64_t{ns.on_tick};
+            const uint64_t e = std::min<uint64_t>(total_ticks, safeOffTick64(ns.on_tick, ns.off_tick));
+            if (e > s) ivs.push_back({s, e});
         }
-        std::sort(ivs.begin(), ivs.end());
-        uint64_t covered = 0;
-        uint32_t cur_s = ivs[0].first;
-        uint32_t cur_e = ivs[0].second;
-        for (size_t i = 1; i < ivs.size(); ++i) {
-            if (ivs[i].first <= cur_e) {
-                cur_e = std::max(cur_e, ivs[i].second);
-            } else {
-                covered += static_cast<uint64_t>(cur_e - cur_s);
-                cur_s = ivs[i].first;
-                cur_e = ivs[i].second;
+        if (!ivs.empty()) {
+            std::sort(ivs.begin(), ivs.end());
+            uint64_t covered = 0;
+            uint64_t cur_s = ivs[0].first;
+            uint64_t cur_e = ivs[0].second;
+            for (size_t i = 1; i < ivs.size(); ++i) {
+                if (ivs[i].first <= cur_e) {
+                    cur_e = std::max(cur_e, ivs[i].second);
+                } else {
+                    if (cur_e > cur_s) covered += (cur_e - cur_s);
+                    cur_s = ivs[i].first;
+                    cur_e = ivs[i].second;
+                }
             }
+            if (cur_e > cur_s) covered += (cur_e - cur_s);
+            f.duty_cycle = clamp01(static_cast<double>(covered) /
+                                   static_cast<double>(std::max<uint64_t>(1ULL, total_ticks)));
+        } else {
+            f.duty_cycle = 0.0;
         }
-        covered += static_cast<uint64_t>(cur_e - cur_s);
-        f.duty_cycle = clamp01(static_cast<double>(covered) / static_cast<double>(std::max<uint32_t>(1u, total_ticks)));
     }
 
     // ── Group 10: Polyphony, chord clusters, strum offsets, two-hand split, dissonance ──
     {
-        // Sweep line for exact max & time-weighted mean polyphony
-        struct Edge { uint32_t tick; int delta; };
+        // Sweep line for exact max & time-weighted mean polyphony (uint64_t overflow-safe)
+        struct Edge { uint64_t tick; int delta; };
         std::vector<Edge> edges;
         edges.reserve(n * 2u);
         for (const auto& ns : notes) {
-            edges.push_back({ns.on_tick, +1});
-            edges.push_back({std::max<uint32_t>(ns.on_tick + 1u, ns.off_tick), -1});
+            edges.push_back({uint64_t{ns.on_tick}, +1});
+            edges.push_back({safeOffTick64(ns.on_tick, ns.off_tick), -1});
         }
         std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
             if (a.tick != b.tick) return a.tick < b.tick;
@@ -1106,10 +1133,10 @@ inline TrackFeatureSummary computeTrackFeatures(
         }
 
         // Motif repetition: inter-bar 16th-grid cosine similarity (or intra-bar half-bar symmetry for 1-bar sections)
-        if (eff_bars >= 2u) {
+        if (grid_bars >= 2u) {
             double sim_sum = 0.0;
             uint32_t pairs = 0;
-            for (uint32_t b = 1; b < eff_bars; ++b) {
+            for (uint32_t b = 1; b < grid_bars; ++b) {
                 double dot = 0.0, na = 0.0, nb = 0.0;
                 for (size_t s = 0; s < 16u; ++s) {
                     const double va = static_cast<double>(per_bar_grid[b - 1u][s]);
@@ -1156,20 +1183,20 @@ inline TrackFeatureSummary computeTrackFeatures(
         }
 
         // Phrase boundary segmentation via inter-onset gap >= 1.5 beats
-        const uint32_t phrase_gap_ticks = std::max<uint32_t>(1u, (beat_ticks * 3u) / 2u);
+        const uint64_t phrase_gap_ticks = std::max<uint64_t>(1ULL, (beat_ticks * 3ULL) / 2ULL);
         f.phrase_count = 1u;
         f.phrase_boundary_ticks.push_back(cluster_ticks.front());
-        uint32_t max_gap = 0;
+        uint64_t max_gap = 0;
         double phrase_len_sum = 0.0;
         uint32_t cur_phrase_start = cluster_ticks.front();
         for (size_t i = 1; i < cluster_ticks.size(); ++i) {
-            const uint32_t gap = (cluster_ticks[i] > cluster_ticks[i - 1])
-                                     ? (cluster_ticks[i] - cluster_ticks[i - 1])
-                                     : 0u;
+            const uint64_t gap = (cluster_ticks[i] > cluster_ticks[i - 1])
+                                     ? uint64_t{cluster_ticks[i] - cluster_ticks[i - 1]}
+                                     : 0ULL;
             max_gap = std::max(max_gap, gap);
             if (gap >= phrase_gap_ticks) {
-                const uint32_t plen = (cluster_ticks[i - 1] >= cur_phrase_start)
-                                          ? (cluster_ticks[i - 1] - cur_phrase_start + beat_ticks / 2u)
+                const uint64_t plen = (cluster_ticks[i - 1] >= cur_phrase_start)
+                                          ? (uint64_t{cluster_ticks[i - 1] - cur_phrase_start} + beat_ticks / 2ULL)
                                           : beat_ticks;
                 phrase_len_sum += static_cast<double>(plen) / static_cast<double>(beat_ticks);
                 ++f.phrase_count;
@@ -1180,8 +1207,8 @@ inline TrackFeatureSummary computeTrackFeatures(
             }
         }
         {
-            const uint32_t last_plen = (cluster_ticks.back() >= cur_phrase_start)
-                                           ? (cluster_ticks.back() - cur_phrase_start + beat_ticks / 2u)
+            const uint64_t last_plen = (cluster_ticks.back() >= cur_phrase_start)
+                                           ? (uint64_t{cluster_ticks.back() - cur_phrase_start} + beat_ticks / 2ULL)
                                            : beat_ticks;
             phrase_len_sum += static_cast<double>(last_plen) / static_cast<double>(beat_ticks);
         }
@@ -1197,11 +1224,12 @@ inline InterTrackRelationships computeInterTrackRelationships(
     const std::vector<std::vector<exporters::korg::quality::NoteSpan>>& track_notes,
     uint32_t ppqn) {
     InterTrackRelationships rel{};
-    const uint32_t lock_tol = std::max<uint32_t>(16u, (ppqn ? ppqn : 480u) / 12u); // ~1/48th note tolerance
+    const uint32_t eff_ppqn = ppqn ? std::clamp<uint32_t>(ppqn, 1u, 19200u) : 480u;
+    const uint64_t lock_tol = std::max<uint64_t>(16ULL, uint64_t{eff_ppqn} / 12ULL); // ~1/48th note tolerance
 
     // Find kick/drum onset ticks and bass onset ticks
-    std::vector<uint32_t> kick_ticks;
-    std::vector<uint32_t> bass_ticks;
+    std::vector<uint64_t> kick_ticks;
+    std::vector<uint64_t> bass_ticks;
     std::vector<exporters::korg::quality::NoteSpan> bass_spans;
     std::vector<exporters::korg::quality::NoteSpan> piano_or_comp_spans;
 
@@ -1210,14 +1238,17 @@ inline InterTrackRelationships computeInterTrackRelationships(
         const auto& ns = track_notes[i];
         if (ns.empty()) continue;
 
+        const bool has_valid_pitch = (tr.features.note_count > 0 && tr.features.pitch_median > 0);
         const bool looks_drum = tr.is_drum || tr.semantic_role == MusicalRole::KickSnareFoundation ||
                                 tr.uasf_role == uasf::TrackRole::Drum ||
-                                (tr.features.drum_kick_snare_ratio >= 0.35 && tr.features.staccato_ratio >= 0.75);
-        const bool looks_bass = !looks_drum &&
+                                (has_valid_pitch && tr.features.drum_kick_snare_ratio >= 0.35 &&
+                                 tr.features.staccato_ratio >= 0.75);
+        const bool looks_bass = !looks_drum && has_valid_pitch &&
                                 (tr.semantic_role == MusicalRole::BassFoundation ||
-                                 tr.uasf_role == uasf::TrackRole::Bass ||
-                                 (tr.features.pitch_median <= 50 && tr.features.mean_polyphony <= 1.25));
-        const bool looks_piano = !looks_drum && !looks_bass &&
+                                 (tr.semantic_role == MusicalRole::UnknownAbstain &&
+                                  (tr.uasf_role == uasf::TrackRole::Bass ||
+                                   (tr.features.pitch_median <= 50 && tr.features.mean_polyphony <= 1.25))));
+        const bool looks_piano = !looks_drum && !looks_bass && has_valid_pitch &&
                                  (tr.semantic_role == MusicalRole::PianoAccompaniment ||
                                   tr.semantic_role == MusicalRole::ChordComping ||
                                   tr.semantic_role == MusicalRole::HarmonicAccompaniment ||
@@ -1228,13 +1259,13 @@ inline InterTrackRelationships computeInterTrackRelationships(
         if (looks_drum) {
             for (const auto& n : ns) {
                 if (n.pitch == 35 || n.pitch == 36) {
-                    kick_ticks.push_back(n.on_tick);
+                    kick_ticks.push_back(uint64_t{n.on_tick});
                 }
             }
         }
         if (looks_bass) {
             for (const auto& n : ns) {
-                bass_ticks.push_back(n.on_tick);
+                bass_ticks.push_back(uint64_t{n.on_tick});
                 bass_spans.push_back(n);
             }
         }
@@ -1254,16 +1285,20 @@ inline InterTrackRelationships computeInterTrackRelationships(
         bass_ticks.erase(std::unique(bass_ticks.begin(), bass_ticks.end()), bass_ticks.end());
 
         uint32_t kick_matched = 0;
-        for (uint32_t kt : kick_ticks) {
-            auto it = std::lower_bound(bass_ticks.begin(), bass_ticks.end(), kt > lock_tol ? kt - lock_tol : 0u);
-            if (it != bass_ticks.end() && (*it <= kt + lock_tol)) {
+        for (uint64_t kt : kick_ticks) {
+            const uint64_t lo = (kt > lock_tol) ? (kt - lock_tol) : 0ULL;
+            const uint64_t hi = (kt <= UINT64_MAX - lock_tol) ? (kt + lock_tol) : UINT64_MAX;
+            auto it = std::lower_bound(bass_ticks.begin(), bass_ticks.end(), lo);
+            if (it != bass_ticks.end() && (*it <= hi)) {
                 ++kick_matched;
             }
         }
         uint32_t bass_matched = 0;
-        for (uint32_t bt : bass_ticks) {
-            auto it = std::lower_bound(kick_ticks.begin(), kick_ticks.end(), bt > lock_tol ? bt - lock_tol : 0u);
-            if (it != kick_ticks.end() && (*it <= bt + lock_tol)) {
+        for (uint64_t bt : bass_ticks) {
+            const uint64_t lo = (bt > lock_tol) ? (bt - lock_tol) : 0ULL;
+            const uint64_t hi = (bt <= UINT64_MAX - lock_tol) ? (bt + lock_tol) : UINT64_MAX;
+            auto it = std::lower_bound(kick_ticks.begin(), kick_ticks.end(), lo);
+            if (it != kick_ticks.end() && (*it <= hi)) {
                 ++bass_matched;
             }
         }
@@ -1403,7 +1438,9 @@ inline double computeSectionCompositeEnergy(const std::vector<CanonicalTrackView
 }
 
 inline std::string fmtDouble(double v, int prec = 4) {
+    if (!std::isfinite(v)) v = 0.0;
     std::ostringstream os;
+    os.imbue(std::locale::classic());
     os << std::fixed << std::setprecision(prec) << v;
     return os.str();
 }
@@ -1460,10 +1497,11 @@ inline CanonicalStyleView buildCanonicalStyleView(
         view.transitions.total_cv_elements = static_cast<uint32_t>(korg_style->elements.size());
     }
 
-    // Aggregate per-channel notes across sections for overall inter-track metrics
+    // Aggregate per-channel notes across ALL active sections for overall inter-track metrics (P1-1 / P2-3)
     std::map<uint8_t, CanonicalTrackView> overall_tracks_map;
     std::map<uint8_t, std::vector<exporters::korg::quality::NoteSpan>> overall_notes_map;
     uint32_t running_tick_offset = 0;
+    uint32_t total_style_bars = 0;
 
     view.sections.reserve(uasf_style.sections.size());
     for (size_t sidx = 0; sidx < uasf_style.sections.size(); ++sidx) {
@@ -1473,13 +1511,17 @@ inline CanonicalStyleView buildCanonicalStyleView(
         sv.type = sec.type;
         sv.name = sec.name;
         sv.bars = sec.bars ? sec.bars : 1u;
-        sv.ppqn = sec.resolution ? sec.resolution : view.ppqn;
+        sv.ppqn = sec.resolution ? std::clamp<uint32_t>(sec.resolution, 1u, 19200u)
+                                 : std::clamp<uint32_t>(view.ppqn, 1u, 19200u);
         sv.meter_num = sec.beats_per_bar ? static_cast<uint8_t>(std::min<uint32_t>(sec.beats_per_bar, 32u)) : 4u;
         sv.meter_den = sec.beat_note ? static_cast<uint8_t>(std::min<uint32_t>(sec.beat_note, 32u)) : 4u;
 
-        const uint32_t beat_ticks = std::max<uint32_t>(1u, (sv.ppqn * 4u) / std::max<uint32_t>(1u, sv.meter_den));
-        const uint32_t bar_ticks = beat_ticks * std::max<uint32_t>(1u, sv.meter_num);
-        sv.length_ticks = bar_ticks * sv.bars;
+        const uint64_t beat_ticks64 = std::max<uint64_t>(1ULL, (uint64_t{sv.ppqn} * 4ULL) / std::max<uint64_t>(1ULL, sv.meter_den));
+        const uint64_t bar_ticks64  = std::max<uint64_t>(1ULL, beat_ticks64 * std::max<uint64_t>(1ULL, sv.meter_num));
+        const uint64_t len64        = (uint64_t{sv.bars} > uint64_t{UINT32_MAX} / bar_ticks64)
+                                          ? uint64_t{UINT32_MAX}
+                                          : (bar_ticks64 * uint64_t{sv.bars});
+        sv.length_ticks = static_cast<uint32_t>(len64);
         sv.loop_start_tick = 0;
         sv.loop_end_tick = sv.length_ticks;
 
@@ -1565,7 +1607,8 @@ inline CanonicalStyleView buildCanonicalStyleView(
             tv.sound_identity.msb = (ctrl.msb >= 0) ? ctrl.msb : tv.timbre.yamaha_msb;
             tv.sound_identity.lsb = (ctrl.lsb >= 0) ? ctrl.lsb : tv.timbre.yamaha_lsb;
             tv.sound_identity.pc  = (ctrl.pc  >= 0) ? ctrl.pc  : tv.timbre.yamaha_pc;
-            tv.sound_identity.is_drum_kit = tv.is_drum ||
+            tv.sound_identity.is_drum_bank = isKnownArrangerDrumBank(tv.sound_identity.msb, tv.sound_identity.lsb);
+            tv.sound_identity.is_drum_kit = tv.is_drum || tv.sound_identity.is_drum_bank ||
                                             exporters::korg::quality::isPercussiveTimbreFamily(tv.timbre.inferred.family);
             tv.sound_identity.family = exporters::korg::quality::timbreFamilyName(tv.timbre.inferred.family);
             tv.sound_identity.sub_family = tv.timbre.inferred.sub_family;
@@ -1603,27 +1646,22 @@ inline CanonicalStyleView buildCanonicalStyleView(
                 swing_weight_sum += w;
             }
 
-            // Accumulate overall track spans for style-level inter-track relationships
+            // Accumulate overall track spans across ALL active sections (P1-1: never keep empty section-0 stub!)
             if (overall_tracks_map.find(tv.source_channel) == overall_tracks_map.end()) {
                 overall_tracks_map[tv.source_channel] = tv;
             } else {
                 auto& ot = overall_tracks_map[tv.source_channel];
-                if (tv.features.note_count > 0) {
-                    if (ot.features.note_count == 0) {
-                        ot.features.pitch_min = tv.features.pitch_min;
-                        ot.features.pitch_max = tv.features.pitch_max;
-                    } else {
-                        ot.features.pitch_min = std::min(ot.features.pitch_min, tv.features.pitch_min);
-                        ot.features.pitch_max = std::max(ot.features.pitch_max, tv.features.pitch_max);
-                    }
-                    ot.features.pitch_span = static_cast<uint8_t>(ot.features.pitch_max - ot.features.pitch_min);
-                    ot.features.note_count += tv.features.note_count;
+                if (ot.features.note_count == 0 && tv.features.note_count > 0) {
+                    ot = tv;
+                } else if (tv.features.note_count > 0) {
+                    ot.is_drum = ot.is_drum || tv.is_drum;
+                    if (ot.name.empty() && !tv.name.empty()) ot.name = tv.name;
                 }
             }
             auto& dst_notes = overall_notes_map[tv.source_channel];
             for (auto ns : spans) {
-                ns.on_tick += running_tick_offset;
-                ns.off_tick += running_tick_offset;
+                ns.on_tick  = canonical_detail::saturatingAddU32(ns.on_tick, running_tick_offset);
+                ns.off_tick = canonical_detail::saturatingAddU32(ns.off_tick, running_tick_offset);
                 dst_notes.push_back(ns);
             }
 
@@ -1636,22 +1674,31 @@ inline CanonicalStyleView buildCanonicalStyleView(
         sv.inter_track = canonical_detail::computeInterTrackRelationships(sv.tracks, sec_track_notes, sv.ppqn);
 
         view.sections.push_back(std::move(sv));
-        running_tick_offset += sv.length_ticks;
+        running_tick_offset = canonical_detail::saturatingAddU32(running_tick_offset, view.sections.back().length_ticks);
+        total_style_bars = canonical_detail::saturatingAddU32(total_style_bars, view.sections.back().bars);
     }
 
     if (view.transitions.total_cv_elements == 0) {
         view.transitions.total_cv_elements = static_cast<uint32_t>(view.sections.size());
     }
 
-    // Compute overall inter-track relationships
+    // Recompute exact style-wide features over merged active-section notes for inter_track_overall (P1-1)
     {
         std::vector<CanonicalTrackView> ov_tracks;
         std::vector<std::vector<exporters::korg::quality::NoteSpan>> ov_notes;
         ov_tracks.reserve(overall_tracks_map.size());
         ov_notes.reserve(overall_tracks_map.size());
-        for (const auto& [ch, tr] : overall_tracks_map) {
+        const uint32_t eff_bars = std::max<uint32_t>(1u, total_style_bars);
+        for (auto& [ch, tr] : overall_tracks_map) {
+            const auto& merged = overall_notes_map[ch];
+            if (!merged.empty()) {
+                canonical_detail::ControllerTrace empty_ctrl{};
+                tr.features = canonical_detail::computeTrackFeatures(
+                    merged, empty_ctrl, view.ppqn, 4u, 4u, eff_bars,
+                    tr.casm.source_chord_root, tr.casm.source_chord_type);
+            }
             ov_tracks.push_back(tr);
-            ov_notes.push_back(overall_notes_map[ch]);
+            ov_notes.push_back(merged);
         }
         view.inter_track_overall = canonical_detail::computeInterTrackRelationships(ov_tracks, ov_notes, view.ppqn);
     }
@@ -1688,6 +1735,7 @@ inline CanonicalStyleView buildCanonicalStyleViewFromKorg(
     std::map<uint8_t, CanonicalTrackView> overall_tracks_map;
     std::map<uint8_t, std::vector<exporters::korg::quality::NoteSpan>> overall_notes_map;
     uint32_t running_tick_offset = 0;
+    uint32_t total_style_bars = 0;
 
     for (size_t eidx = 0; eidx < korg_style.elements.size(); ++eidx) {
         const auto& el = korg_style.elements[eidx];
@@ -1696,13 +1744,13 @@ inline CanonicalStyleView buildCanonicalStyleViewFromKorg(
         sv.type = canonical_detail::sectionTypeFromKorgMarker(el.marker);
         sv.name = el.marker;
         sv.korg_marker = el.marker;
-        sv.ppqn = view.ppqn;
+        sv.ppqn = std::clamp<uint32_t>(view.ppqn, 1u, 19200u);
         sv.meter_num = el.num ? el.num : 4u;
         sv.meter_den = el.den ? el.den : 4u;
-        const uint32_t beat_ticks = std::max<uint32_t>(1u, (sv.ppqn * 4u) / std::max<uint32_t>(1u, sv.meter_den));
-        const uint32_t bar_ticks = std::max<uint32_t>(1u, beat_ticks * std::max<uint32_t>(1u, sv.meter_num));
-        sv.bars = std::max<uint32_t>(1u, el.length / bar_ticks);
-        sv.length_ticks = el.length ? el.length : bar_ticks;
+        const uint64_t beat_ticks64 = std::max<uint64_t>(1ULL, (uint64_t{sv.ppqn} * 4ULL) / std::max<uint64_t>(1ULL, sv.meter_den));
+        const uint64_t bar_ticks64  = std::max<uint64_t>(1ULL, beat_ticks64 * std::max<uint64_t>(1ULL, sv.meter_num));
+        sv.bars = static_cast<uint32_t>(std::max<uint64_t>(1ULL, uint64_t{el.length} / bar_ticks64));
+        sv.length_ticks = el.length ? el.length : static_cast<uint32_t>(std::min<uint64_t>(bar_ticks64, uint64_t{UINT32_MAX}));
         sv.loop_start_tick = 0;
         sv.loop_end_tick = sv.length_ticks;
         sv.cv_count = 1;
@@ -1753,7 +1801,8 @@ inline CanonicalStyleView buildCanonicalStyleViewFromKorg(
             tv.sound_identity.msb = ctrl.msb;
             tv.sound_identity.lsb = ctrl.lsb;
             tv.sound_identity.pc  = ctrl.pc;
-            tv.sound_identity.is_drum_kit = tv.is_drum;
+            tv.sound_identity.is_drum_bank = isKnownArrangerDrumBank(ctrl.msb, ctrl.lsb);
+            tv.sound_identity.is_drum_kit = tv.is_drum || tv.sound_identity.is_drum_bank;
             tv.features = canonical_detail::computeTrackFeatures(
                 spans, ctrl, sv.ppqn, sv.meter_num, sv.meter_den, sv.bars, 0u, 0u);
             tv.harmonic.chord_tone_ratio = tv.features.chord_tone_ratio;
@@ -1778,10 +1827,15 @@ inline CanonicalStyleView buildCanonicalStyleViewFromKorg(
 
             if (overall_tracks_map.find(ch) == overall_tracks_map.end()) {
                 overall_tracks_map[ch] = tv;
+            } else {
+                auto& ot = overall_tracks_map[ch];
+                if (ot.features.note_count == 0 && tv.features.note_count > 0) {
+                    ot = tv;
+                }
             }
             for (auto ns : spans) {
-                ns.on_tick += running_tick_offset;
-                ns.off_tick += running_tick_offset;
+                ns.on_tick  = canonical_detail::saturatingAddU32(ns.on_tick, running_tick_offset);
+                ns.off_tick = canonical_detail::saturatingAddU32(ns.off_tick, running_tick_offset);
                 overall_notes_map[ch].push_back(ns);
             }
 
@@ -1793,15 +1847,23 @@ inline CanonicalStyleView buildCanonicalStyleViewFromKorg(
         sv.swing_ratio = (swing_w_sum > 0.0) ? (swing_val / swing_w_sum) : 0.50;
         sv.inter_track = canonical_detail::computeInterTrackRelationships(sv.tracks, sec_notes, sv.ppqn);
         view.sections.push_back(std::move(sv));
-        running_tick_offset += sv.length_ticks;
+        running_tick_offset = canonical_detail::saturatingAddU32(running_tick_offset, view.sections.back().length_ticks);
+        total_style_bars = canonical_detail::saturatingAddU32(total_style_bars, view.sections.back().bars);
     }
 
     {
         std::vector<CanonicalTrackView> ov_tracks;
         std::vector<std::vector<exporters::korg::quality::NoteSpan>> ov_notes;
-        for (const auto& [ch, tr] : overall_tracks_map) {
+        const uint32_t eff_bars = std::max<uint32_t>(1u, total_style_bars);
+        for (auto& [ch, tr] : overall_tracks_map) {
+            const auto& merged = overall_notes_map[ch];
+            if (!merged.empty()) {
+                canonical_detail::ControllerTrace empty_ctrl{};
+                tr.features = canonical_detail::computeTrackFeatures(
+                    merged, empty_ctrl, view.ppqn, 4u, 4u, eff_bars, 0u, 0u);
+            }
             ov_tracks.push_back(tr);
-            ov_notes.push_back(overall_notes_map[ch]);
+            ov_notes.push_back(merged);
         }
         view.inter_track_overall = canonical_detail::computeInterTrackRelationships(ov_tracks, ov_notes, view.ppqn);
     }
