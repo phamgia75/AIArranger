@@ -894,6 +894,44 @@ int main() {
              !mPriv1.selected.has_value() && !mPriv2.selected.has_value() &&
              (mPriv1.top_candidates.empty() || mPriv1.top_candidates[0].score <= 65) &&
              (mPriv2.top_candidates.empty() || mPriv2.top_candidates[0].score <= 65));
+
+        // Phase 4 P4-M6 DEF-P4-002: RockPerc -> Standard Perc Kit (NEVER SFX Perc Kit GM2);
+        // MegaDist & OvdGtr/LeadGtr -> Distortion Guitar GM2 (NEVER Strat Cln / Jazz Guitar).
+        const auto rockPercProf = profileTrackTimbre(127, 0, 0, "RockPerc", TrackRole::Percussion, {}, {}, 8, kPercCh);
+        const auto mRockPerc = matchTrackSound(rockPercProf, {}, nullptr, opt);
+        TEST("P4-M6 DEF-P4-002: RockPerc (127/0/0 on kPercCh) maps to Standard Perc Kit (120/0/69, NEVER SFX Perc Kit GM2)",
+             mRockPerc.selected.has_value() &&
+             mRockPerc.selected->msb == 120 && mRockPerc.selected->lsb == 0 && mRockPerc.selected->pc == 69 &&
+             mRockPerc.top_candidates[0].display_name == "Standard Perc Kit");
+
+        const auto customPerc = makeProfile(TimbreFamily::PercussionKit, "Custom Rock Perc", kPercCh, 90);
+        const auto mCustomPerc = matchTrackSound(customPerc, {}, nullptr, opt);
+        TEST("P4-M6 DEF-P4-002: non-SFX/non-Ethnic PercussionKit tie resolves to Standard Perc Kit (120/0/69, NEVER SFX 56 or Ethnic 64)",
+             mCustomPerc.selected.has_value() &&
+             mCustomPerc.selected->msb == 120 && mCustomPerc.selected->lsb == 0 && mCustomPerc.selected->pc == 69 &&
+             mCustomPerc.top_candidates[0].display_name == "Standard Perc Kit");
+
+        const auto revoRockPerc = profileTrackTimbre(62, 100, 0, "RockPerc", TrackRole::Percussion, {}, {}, 8, kPercCh);
+        const auto mRevoRockPerc = matchTrackSound(revoRockPerc, {}, nullptr, opt);
+        TEST("P4-M6 DEF-P4-002: Revo! 62/100/0 RockPerc on kPercCh resolves to Standard Perc Kit (120/0/69, NEVER SFX 56 or Ethnic 64)",
+             revoRockPerc.inferred.family == TimbreFamily::PercussionKit &&
+             mRevoRockPerc.selected.has_value() &&
+             mRevoRockPerc.selected->msb == 120 && mRevoRockPerc.selected->lsb == 0 && mRevoRockPerc.selected->pc == 69 &&
+             mRevoRockPerc.top_candidates[0].display_name == "Standard Perc Kit");
+
+        const auto megaDistProf = profileTrackTimbre(63, 120, 30, "MegaDist", TrackRole::Chord, {}, {}, 12, 12);
+        const auto mMegaDist = matchTrackSound(megaDistProf, {}, nullptr, opt);
+        TEST("P4-M6 DEF-P4-002: MegaDist (63/120/30) maps to Distortion Guitar GM2 (121/0/30, NEVER Strat Cln DNC)",
+             mMegaDist.selected.has_value() &&
+             mMegaDist.selected->msb == 121 && mMegaDist.selected->lsb == 0 && mMegaDist.selected->pc == 30 &&
+             mMegaDist.top_candidates[0].display_name == "Distortion Guitar GM2");
+
+        const auto ovdGtrProf = profileTrackTimbre(0, 0, 29, "OvdGtr", TrackRole::Accompaniment, {}, {}, 14, 14);
+        const auto mOvdGtr = matchTrackSound(ovdGtrProf, {}, nullptr, opt);
+        TEST("P4-M6 DEF-P4-002: OvdGtr/LeadGtr (0/0/29) maps to Distortion Guitar GM2 (121/0/30, NEVER Jazz Guitar)",
+             mOvdGtr.selected.has_value() &&
+             mOvdGtr.selected->msb == 121 && mOvdGtr.selected->lsb == 0 && mOvdGtr.selected->pc == 30 &&
+             mOvdGtr.top_candidates[0].display_name == "Distortion Guitar GM2");
     }
 
     std::printf("\n%d passed, %d failed\n", passes, failures);

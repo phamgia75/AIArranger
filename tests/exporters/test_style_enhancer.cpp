@@ -935,6 +935,170 @@ int main() {
              write(p2.style).bytes == write(p1.style).bytes);
     }
 
+    // ── 19. Phase 4 P4-M6 DEF-P4-009: B6 adapts non-walking Bass AND pitched Timpani in synthesized CVs ──
+    {
+        // (a) Non-walking Bass (mostly Root/5th C2/G2 + occasional E2/B1 -> non_rf < 15%, has_walking_bass=false)
+        //     paired with Maj7 Piano (B4) triggering B6 CV2/CV3/CV4 synthesis.
+        Style ballad;
+        ballad.ppqn = 384; ballad.mpqn = 810810;
+        Element v2{"v2cv1", 4, 4, 6144, {}};
+        addVoice(v2, kBassCh, 121, 29, 33);
+        addVoice(v2, kAcc1Ch, 121, 20, 0);
+        // 16 bass notes: 7×C2(36), 7×G2(43), 1×E2(40), 1×B1(35) -> non_rf = 2/16 = 12.5% (< 15%!)
+        const uint8_t bass_p[16] = {36, 43, 36, 43, 36, 43, 40, 43, 36, 43, 36, 43, 36, 43, 35, 36};
+        for (uint32_t i = 0; i < 16u; ++i) {
+            addNote(v2, kBassCh, i * 384u, i * 384u + 340u, bass_p[i], 90);
+        }
+        addNote(v2, kAcc1Ch, 0, 700, 64, 82);    // E4
+        addNote(v2, kAcc1Ch, 768, 1400, 71, 82); // Maj7 B4
+        sortEl(v2);
+        ballad.elements.push_back(std::move(v2));
+
+        EnhanceOptions opt;
+        opt.mode = ConversionMode::IntelligentEnhance;
+        opt.enhance_jazz_cv_melody_split = true;
+        const auto res = enhanceStyle(ballad, opt);
+        const auto res2 = enhanceStyle(res.style, opt);
+
+        const auto* el_cv2 = findMarker(res.style, "v2cv2");
+        const auto* el_cv3 = findMarker(res.style, "v2cv3");
+        const auto* el_cv4 = findMarker(res.style, "v2cv4");
+        bool bass_cv2_ok = false, bass_cv3_ok = false, bass_cv4_ok = false;
+        if (el_cv2 && el_cv3 && el_cv4) {
+            const auto b2 = style_enhancer_detail::extractChannelNotes(*el_cv2, kBassCh);
+            const auto b3 = style_enhancer_detail::extractChannelNotes(*el_cv3, kBassCh);
+            const auto b4 = style_enhancer_detail::extractChannelNotes(*el_cv4, kBassCh);
+            // C Minor (cv2): E->Eb(39), B->Bb(34), G stays G(43)
+            bass_cv2_ok = (b2.size() == 16u && b2[6].pitch == 39u && b2[14].pitch == 34u && b2[1].pitch == 43u);
+            // C Dom7 (cv3): B->Bb(34), E stays E(40), G stays G(43)
+            bass_cv3_ok = (b3.size() == 16u && b3[6].pitch == 40u && b3[14].pitch == 34u && b3[1].pitch == 43u);
+            // C Dim7 (cv4): E->Eb(39), G->Gb(42), B->A(33), C stays C(36) => 100% in {0, 3, 6, 9}
+            bass_cv4_ok = (b4.size() == 16u);
+            for (const auto& n : b4) {
+                const uint8_t pc = static_cast<uint8_t>(n.pitch % 12u);
+                if (pc != 0u && pc != 3u && pc != 6u && pc != 9u) bass_cv4_ok = false;
+            }
+        }
+        TEST("P4-M6 DEF-P4-009a: B6 adapts non-walking Bass across cv2/cv3/cv4 (0 C Dim7 clashes) & Pass-2 idempotent",
+             res.ok && bass_cv2_ok && bass_cv3_ok && bass_cv4_ok &&
+             res2.ok && res2.actions.empty() && write(res2.style).bytes == write(res.style).bytes);
+
+        // (b) Orchestral Timpani (Acc5, MSB=121 PC=47) in synthesized v3cv4 (C Dim):
+        //     Timpani G2(43) MUST adapt to Gb2(42) in v3cv4 while remaining exempt from Rule 4 mud lift!
+        Style orch;
+        orch.ppqn = 384; orch.mpqn = 600000;
+        Element v3{"v3cv1", 4, 4, 3072, {}};
+        addVoice(v3, kBassCh, 121, 13, 32);
+        addVoice(v3, kAcc1Ch, 121, 13, 49);       // Strings
+        addVoice(v3, kAcc1Ch + 4u, 121, 0, 47);   // Timpani (MSB=121, PC=47)
+        const uint8_t wb[8] = {36, 38, 40, 43, 45, 43, 40, 36}; // walking bass
+        for (uint32_t i = 0; i < 8u; ++i) {
+            addNote(v3, kBassCh, i * 384u, i * 384u + 340u, wb[i], 90);
+        }
+        addNote(v3, kAcc1Ch, 0, 1500, 60, 82);
+        addNote(v3, kAcc1Ch, 0, 1500, 64, 82);
+        addNote(v3, kAcc1Ch, 0, 1500, 67, 82);
+        // Timpani hits: C2(36) and G2(43)
+        addNote(v3, kAcc1Ch + 4u, 0, 350, 36, 94);
+        addNote(v3, kAcc1Ch + 4u, 768, 1100, 43, 94);
+        addNote(v3, kAcc1Ch + 4u, 1536, 1900, 43, 94);
+        sortEl(v3);
+        orch.elements.push_back(std::move(v3));
+
+        const auto res_o = enhanceStyle(orch, EnhanceOptions::recommended());
+        const auto res_o2 = enhanceStyle(res_o.style, EnhanceOptions::recommended());
+        const auto* o_cv1 = findMarker(res_o.style, "v3cv1");
+        const auto* o_cv4 = findMarker(res_o.style, "v3cv4");
+        bool timp_ok = false;
+        if (o_cv1 && o_cv4) {
+            const auto t1 = style_enhancer_detail::extractChannelNotes(*o_cv1, kAcc1Ch + 4u);
+            const auto t4 = style_enhancer_detail::extractChannelNotes(*o_cv4, kAcc1Ch + 4u);
+            timp_ok = (t1.size() == 3u && t1[0].pitch == 36u && t1[1].pitch == 43u && t1[2].pitch == 43u &&
+                       t4.size() == 3u && t4[0].pitch == 36u && t4[1].pitch == 42u && t4[2].pitch == 42u);
+        }
+        TEST("P4-M6 DEF-P4-009b: B6 adapts pitched Timpani G2->Gb2 in v3cv4 (0 clashes) & Pass-2 idempotent",
+             res_o.ok && timp_ok &&
+             res_o2.ok && res_o2.actions.empty() && write(res_o2.style).bytes == write(res_o.style).bytes);
+    }
+
+    // ── 20. Phase 4 P4-M6 DEF-P4-010 & DEF-P4-005: Same-tick CC before NoteOn & 0-action bit-exactness ──
+    {
+        auto countCcAfterNoteOn = [](const Style& s) -> uint32_t {
+            uint32_t bad = 0u;
+            for (const auto& el : s.elements) {
+                std::set<std::pair<uint32_t, uint8_t>> seen_on;
+                for (const auto& ev : el.events) {
+                    const uint8_t hi = ev.status & 0xF0u;
+                    const uint8_t ch = ev.status & 0x0Fu;
+                    if (hi == 0x90u && ev.d2 > 0u) {
+                        seen_on.insert({ev.tick, ch});
+                    } else if (hi == 0xB0u || hi == 0xE0u) {
+                        if (seen_on.count({ev.tick, ch}) > 0u) ++bad;
+                    }
+                }
+            }
+            return bad;
+        };
+
+        // (a) DEF-P4-010: Active Mode B edit with tick>0 co-located CC11/CC64/CC74/PB + NoteOff + NoteOn.
+        Style cc_order;
+        cc_order.ppqn = 384; cc_order.mpqn = 500000;
+        Element v1{"v1cv1", 4, 4, 3072, {}};
+        addVoice(v1, kDrumCh, 120, 0, 100);
+        addVoice(v1, kAcc1Ch, 121, 0, 0);
+        // Flat snare triggers Rule 2 so canonicalSortElement runs on v1cv1
+        addNote(v1, kDrumCh, 384, 480, 38, 96);
+        addNote(v1, kDrumCh, 1152, 1248, 38, 96);
+        addNote(v1, kDrumCh, 1920, 2016, 38, 96);
+        addNote(v1, kDrumCh, 2688, 2784, 38, 96);
+        // Co-located CC11, CC64, CC74, PB at tick=384 and tick=768 alongside NoteOff + NoteOn on Acc1
+        addCc(v1, 0, kAcc1Ch, 11, 100);
+        addNote(v1, kAcc1Ch, 0, 384, 60, 82);
+        addCc(v1, 384, kAcc1Ch, 11, 88);
+        addCc(v1, 384, kAcc1Ch, 64, 127);
+        addCc(v1, 384, kAcc1Ch, 74, 72);
+        v1.events.push_back(Event{384, static_cast<uint8_t>(0xE0u | kAcc1Ch), 0u, 64u});
+        addNote(v1, kAcc1Ch, 384, 768, 60, 84);
+        addCc(v1, 768, kAcc1Ch, 64, 0);
+        addCc(v1, 768, kAcc1Ch, 11, 104);
+        addNote(v1, kAcc1Ch, 768, 1500, 64, 86);
+        sortEl(v1);
+        cc_order.elements.push_back(std::move(v1));
+
+        const auto r_cc = enhanceStyle(cc_order, EnhanceOptions::recommended());
+        const auto r_cc2 = enhanceStyle(r_cc.style, EnhanceOptions::recommended());
+        TEST("P4-M6 DEF-P4-010: tick>0 same-tick CC11/CC64/CC74/PB always sort BEFORE NoteOn (0 after-NoteOn)",
+             r_cc.ok && !r_cc.actions.empty() &&
+             countCcAfterNoteOn(r_cc.style) == 0u &&
+             r_cc2.ok && r_cc2.actions.empty() &&
+             write(r_cc2.style).bytes == write(r_cc.style).bytes);
+
+        // (b) DEF-P4-005: Zero-action Mode B style (already dynamic drums, clean harmony/CCs)
+        //     must remain 0-byte bit-exact identical to Mode A input!
+        Style zero_act;
+        zero_act.ppqn = 384; zero_act.mpqn = 500000;
+        Element zv1{"v1cv1", 4, 4, 1536, {}};
+        addVoice(zv1, kDrumCh, 120, 0, 100);
+        addVoice(zv1, kAcc1Ch, 121, 0, 4);
+        // Dynamic snare with ghost note -> skips Rule 2
+        addNote(zv1, kDrumCh, 384, 480, 38, 108);
+        addNote(zv1, kDrumCh, 672, 740, 38, 42);
+        addNote(zv1, kDrumCh, 1152, 1248, 38, 104);
+        // Same-tick CC11/CC74 + NoteOn in Mode A order (CC before NoteOn)
+        addCc(zv1, 384, kAcc1Ch, 11, 92);
+        addCc(zv1, 384, kAcc1Ch, 74, 80);
+        addNote(zv1, kAcc1Ch, 384, 1100, 60, 84);
+        sortEl(zv1);
+        zero_act.elements.push_back(std::move(zv1));
+
+        const auto mode_a_w = write(zero_act);
+        const auto r_zero = enhanceStyle(zero_act, EnhanceOptions::recommended());
+        TEST("P4-M6 DEF-P4-005: zero-action Mode B style preserves 0-byte bit-exact Mode A fidelity",
+             mode_a_w.ok && r_zero.ok && r_zero.actions.empty() &&
+             countCcAfterNoteOn(r_zero.style) == 0u &&
+             write(r_zero.style).bytes == mode_a_w.bytes);
+    }
+
     std::printf("\nSummary: %d passed, %d failed\n", passes, failures);
     return failures == 0 ? 0 : 1;
 }

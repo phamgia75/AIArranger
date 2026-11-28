@@ -270,7 +270,7 @@ std::string formatOperatorPrepNotesMd(
         o << " — perform blind A/B listening comparing Candidate B (Mode A Faithful) vs. Candidate C (Mode B Enhanced)";
     }
     o << ".\n";
-    o << "6. Record honest musician ratings and defects in `LISTENING_RECORD_TEMPLATE.json`, set `\"is_template\": false`, `\"hardware_verified\": true`, and `\"overall_rating_1_to_5\"` (`1..5`), save to a new file (e.g., `listening_record_completed.json`), and re-run `aiarranger-convert --validation-bundle ... --listening-record listening_record_completed.json` to compute the hardware-verified Acceptance Gate grade (the completed JSON is also directly compatible with `calibrate_analyzer_human.py`).\n";
+    o << "6. Record honest musician ratings and defects in `LISTENING_RECORD_TEMPLATE.json`, explicitly set `\"source_class\"` (`\"REAL_GENOS_HUMAN\"` or `\"SYNTHETIC_CC0\"`), `\"is_template\": false`, `\"hardware_verified\": true`, and `\"overall_rating_1_to_5\"` (`1..5`), save to a new file (e.g., `listening_record_completed.json`), and re-run `aiarranger-convert --validation-bundle ... --listening-record listening_record_completed.json` to compute the hardware-verified Acceptance Gate grade (the completed JSON is also directly compatible with `calibrate_analyzer_human.py`).\n";
     return o.str();
 }
 

@@ -219,7 +219,7 @@ inline const std::vector<Pa5xFactorySoundEntry>& pa5xFactoryCatalog() {
         // ── Electric Guitar ──
         {TimbreFamily::ElectricGuitar, "Strat N Cln DNC",        "clean strat pop muted electric guitar",      {121, 38, 27}, false, true,  "MAN5 p.1577", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
         {TimbreFamily::ElectricGuitar, "Jazz Electric Guitar",   "jazz hollow electric guitar",                {121,  0, 26}, false, false, "MAN5 p.1577 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
-        {TimbreFamily::ElectricGuitar, "Distortion Guitar GM2",  "distortion overdrive rock crunch electric guitar", {121,  0, 30}, false, false, "MAN5 p.1577 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
+        {TimbreFamily::ElectricGuitar, "Distortion Guitar GM2",  "distortion overdrive overdriven rock crunch electric guitar", {121,  0, 30}, false, false, "MAN5 p.1577 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
 
         // ── Plucked Strings ──
         {TimbreFamily::PluckedStrings, "Orchestral Harp GM2",    "harp orchestral plucked strings",            {121,  0, 46}, false, false, "MAN5 p.1578 (GM2)", kEpistemicFactoryDocumented, false, kL3StatusNotTested},
@@ -590,6 +590,14 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
         return candidates;
     }
 
+    const auto query_sub_toks = timbre_detail::tokenizeSafeWords(profile.inferred.sub_family);
+    const bool query_wants_sfx = timbre_detail::hasAnyToken(query_sub_toks, {"sfx", "fx", "effects", "effect"});
+    const bool query_wants_ethnic = timbre_detail::hasAnyToken(
+        query_sub_toks, {"ethnic", "oriental", "orient", "arabic", "arab", "indian", "turkish", "tabla", "darbuka"});
+    const bool query_wants_driven_gtr =
+        (fam == TimbreFamily::ElectricGuitar) &&
+        timbre_detail::hasAnyToken(query_sub_toks, {"distortion", "overdrive", "overdriven", "crunch"});
+
     // 1. Score Curated Documented Pa5X Factory Catalog
     for (const auto& entry : pa5xFactoryCatalog()) {
         if (entry.is_drum_kit != want_drum) continue;
@@ -601,11 +609,30 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
             const int base = (profile.confidence >= 40) ? 74 : 52;
             const int sub_bonus = static_cast<int>(
                 computeSubFamilyOverlapBonus(profile.inferred.sub_family, entry.sub_tags, entry.display_name));
-            const int dnc_bonus = (profile.inferred.prefers_dnc && entry.is_dnc)
-                                      ? 5
-                                      : ((!profile.inferred.prefers_dnc && !entry.is_dnc) ? 1 : 0);
+            int dnc_bonus = (profile.inferred.prefers_dnc && entry.is_dnc)
+                                ? 5
+                                : ((!profile.inferred.prefers_dnc && !entry.is_dnc) ? 1 : 0);
+            int character_penalty = 0;
+            // Guard: never fall into SFX Perc Kit GM2 (120/0/56) or Ethnic / Oriental Perc Kit (120/0/64)
+            // on tie-break for generic/non-SFX/non-Ethnic percussion tracks.
+            if (entry.family == TimbreFamily::PercussionKit &&
+                entry.ref.msb == 120u && entry.ref.lsb == 0u) {
+                if (entry.ref.pc == 56u && !query_wants_sfx) {
+                    character_penalty = -6;
+                } else if (entry.ref.pc == 64u && !query_wants_ethnic) {
+                    character_penalty = -6;
+                }
+            }
+            // Guard: never let DNC bonus pull Distortion/Overdriven Electric Guitar onto Clean/Jazz Guitar.
+            if (query_wants_driven_gtr) {
+                const auto entry_toks = timbre_detail::tokenizeSafeWords(entry.sub_tags);
+                if (!timbre_detail::hasAnyToken(entry_toks, {"distortion", "overdrive", "overdriven", "crunch"})) {
+                    dnc_bonus = 0;
+                    character_penalty = -4;
+                }
+            }
             const int conf_bonus = (profile.confidence >= 85) ? 4 : (profile.confidence >= 70 ? 2 : 0);
-            raw_score = std::clamp(base + sub_bonus + dnc_bonus + conf_bonus, 0, 98);
+            raw_score = std::clamp(base + sub_bonus + dnc_bonus + conf_bonus + character_penalty, 0, 98);
             if (profile.confidence < 40) {
                 raw_score = std::min<int>(raw_score, 65);
             }

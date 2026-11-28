@@ -1069,8 +1069,10 @@ inline TrackTimbreProfile profileTrackTimbre(
             } else {
                 sub.sub_family = isPercTarget ? "Standard Percussion Kit" : "Pop / Studio Drum Kit";
             }
-            // Refine sub-family with explicit kit keywords when present.
-            if (kw.confidence > 0 && isPercussiveTimbreFamily(kw.sub.family) &&
+            // Refine sub-family with explicit kit keywords only when the keyword agrees
+            // with the bank/channel family (never let a DrumKit keyword like "Rock Drum Kit"
+            // clobber a PercussionKit track's "Standard Percussion Kit" sub-family).
+            if (kw.confidence > 0 && kw.sub.family == sub.family &&
                 kw.matched_rule != "keyword:drum-kit" && kw.matched_rule != "keyword:perc") {
                 sub.sub_family = kw.sub.sub_family;
             }
@@ -1085,7 +1087,7 @@ inline TrackTimbreProfile profileTrackTimbre(
             TimbreSubFamily sub{};
             sub.family = isPercTarget ? TimbreFamily::PercussionKit : TimbreFamily::DrumKit;
             sub.prefers_dnc = true;
-            if (kw.confidence > 0 && isPercussiveTimbreFamily(kw.sub.family) &&
+            if (kw.confidence > 0 && kw.sub.family == sub.family &&
                 kw.matched_rule != "keyword:drum-kit" && kw.matched_rule != "keyword:perc") {
                 sub.sub_family = "Revo! " + kw.sub.sub_family;
             } else if (yamaha_pc >= 32 && yamaha_pc <= 39) {
@@ -1110,7 +1112,7 @@ inline TrackTimbreProfile profileTrackTimbre(
             TimbreSubFamily sub{};
             sub.family = TimbreFamily::PercussionKit;
             sub.prefers_dnc = nameDnc;
-            if (kw.confidence > 0 && isPercussiveTimbreFamily(kw.sub.family) &&
+            if (kw.confidence > 0 && kw.sub.family == sub.family &&
                 kw.matched_rule != "keyword:drum-kit" && kw.matched_rule != "keyword:perc") {
                 sub.sub_family = kw.sub.sub_family;
             } else if (yamaha_pc <= 1) {
@@ -1210,7 +1212,7 @@ inline TrackTimbreProfile profileTrackTimbre(
             if (isDrumTarget || isPercTarget) {
                 TimbreSubFamily sub{};
                 sub.family = isPercTarget ? TimbreFamily::PercussionKit : TimbreFamily::DrumKit;
-                sub.sub_family = (kw.confidence > 0 && isPercussiveTimbreFamily(kw.sub.family))
+                sub.sub_family = (kw.confidence > 0 && kw.sub.family == sub.family)
                                      ? kw.sub.sub_family
                                      : (isPercTarget ? "Percussion Kit" : "Drum Kit");
                 sub.prefers_dnc = nameDnc || (yamaha_msb == 8 && yamaha_lsb >= 64);
