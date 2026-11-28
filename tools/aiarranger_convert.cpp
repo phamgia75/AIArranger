@@ -31,6 +31,7 @@
 #include "exporters/korg/timbre_profiler.h"
 #include "importers/sff1/sff1_mapper.h"
 #include "importers/sff1/sff1_reader.h"
+#include "intelligence/quality_intelligence.h"
 
 #include <algorithm>
 #include <cctype>
@@ -65,6 +66,8 @@ int usage() {
                  "                          [--target-kst <dir>] [--prefer-target-user-sounds] [--dump-soundmap FILE]\n"
                  "                          [--enhance <off|recommended>] [--analyze-musical-quality <dir_or_prefix>]\n"
                  "                          [--listening-record <path.json>] [--validation-bundle <dir>]\n"
+                 "                          [--p5-mode <faithful|adapt|enhance>] [--p5-target <pa5x|genos2|korg_pa|ketron_event|roland>]\n"
+                 "                          [--p5-intelligence-report <dir>] [--p5-lock-tracks <csv>]\n"
                  "       aiarranger-convert --input <file.sty> --out-bundle <dir> [options...]\n"
                  "       aiarranger-convert --input <file.sty> --validation-bundle <dir> [--enhance off|recommended] [--listening-record FILE] [options...]\n"
                  "       aiarranger-convert --batch-dir <in_dir> --out-dir <out_dir> [--strict-batch] [--flat] [options...]\n"
@@ -426,6 +429,33 @@ struct SingleConvertOutcome {
     std::string written_mid_sha256;
 };
 
+struct Phase5CliConfig {
+    bool enabled = false;
+    intelligence::ArrangementMode mode = intelligence::ArrangementMode::ModeA_Faithful;
+    intelligence::TargetPlatformId target = intelligence::TargetPlatformId::KorgPa5X;
+    std::set<uint8_t> locked_channels;
+    std::optional<fs::path> report_dir;
+};
+
+bool parseLockTracksCsv(const std::string& csv, std::set<uint8_t>& out) {
+    if (csv.empty()) return false;
+    std::stringstream ss(csv);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        const std::string t = toLowerAscii(tok);
+        if (t == "bass" || t == "8") out.insert(kBassCh);
+        else if (t == "drum" || t == "9") out.insert(kDrumCh);
+        else if (t == "perc" || t == "10") out.insert(kPercCh);
+        else if (t == "acc1" || t == "11") out.insert(11);
+        else if (t == "acc2" || t == "12") out.insert(12);
+        else if (t == "acc3" || t == "13") out.insert(13);
+        else if (t == "acc4" || t == "14") out.insert(14);
+        else if (t == "acc5" || t == "15") out.insert(15);
+        else return false;
+    }
+    return !out.empty();
+}
+
 SingleConvertOutcome convertOneStyle(
     const fs::path& inputPath,
     const MapOptions& baseOpt,
@@ -440,7 +470,8 @@ SingleConvertOutcome convertOneStyle(
     const std::optional<fs::path>& unresolvedReportPath,
     bool quietStdout,
     bool applyEnhanceRecommended = false,
-    bool captureValidationData = false) {
+    bool captureValidationData = false,
+    const Phase5CliConfig* p5Cfg = nullptr) {
     SingleConvertOutcome outcome{};
     const std::string baseStyleName = inputPath.filename().string();
 
@@ -518,6 +549,51 @@ SingleConvertOutcome convertOneStyle(
             return outcome;
         }
         styleToWrite = &enhancedResult->style;
+    }
+
+    // Opt-in Phase 5 Musical Intelligence pipeline (strictly default OFF -> 0 change when p5Cfg == nullptr or !enabled!).
+    std::optional<intelligence::ReorchestrateResult> p5Reorch;
+    std::optional<intelligence::QualityIntelligenceReport> p5QiReport;
+    std::optional<intelligence::SemanticArrangementAnalysis> p5Semantics;
+    std::optional<intelligence::ContextSoundMatchResult> p5ContextSounds;
+    std::optional<intelligence::CandidateGateDecision> p5GateDecision;
+    if (p5Cfg != nullptr && p5Cfg->enabled) {
+        const auto& targetProf = intelligence::targetCapabilityProfile(p5Cfg->target);
+        intelligence::SemanticAnalyzeOptions semOpt{};
+        semOpt.target_platform = p5Cfg->target;
+        p5Semantics = intelligence::analyzeMusicalSemantics(canon.style, &mapped.style, &mapped.report, semOpt);
+
+        intelligence::ContextSoundMatchOptions csmOpt{};
+        csmOpt.target_platform = p5Cfg->target;
+        csmOpt.enabled = false; // Advisory only in CLI; verified soundmap/Stage-5 mapping untouched
+        p5ContextSounds = intelligence::matchSoundsInContext(
+            *p5Semantics, targetProf, opt.sounds, opt.target_sound_catalog, csmOpt);
+
+        intelligence::ReorchestrateOptions roOpt{};
+        roOpt.mode = p5Cfg->mode;
+        roOpt.target_platform = p5Cfg->target;
+        roOpt.locked_channels = p5Cfg->locked_channels;
+        roOpt.context_sounds = &(*p5ContextSounds);
+        p5Reorch = intelligence::reorchestrateForTarget(
+            mapped.style, mapped.report, *p5Semantics, targetProf, roOpt);
+
+        if (p5Cfg->mode == intelligence::ArrangementMode::ModeA_Faithful) {
+            p5QiReport = intelligence::evaluateQualityIntelligence(
+                mapped.style, mapped.report, targetProf, intelligence::ArrangementMode::ModeA_Faithful,
+                &mapped.style, p5Cfg->locked_channels, nullptr, &(*p5ContextSounds));
+        } else {
+            p5GateDecision = intelligence::evaluateCandidateAcceptance(
+                mapped.style, mapped.report, *p5Reorch, targetProf, {}, nullptr,
+                p5Cfg->locked_channels, &(*p5ContextSounds));
+            if (p5GateDecision->accepted) {
+                styleToWrite = &p5Reorch->style;
+                p5QiReport = p5GateDecision->candidate_report;
+            } else {
+                // Fail-closed AI-Rejection Gate: fall back strictly to untouched Mode A!
+                styleToWrite = &mapped.style;
+                p5QiReport = p5GateDecision->baseline_report;
+            }
+        }
     }
 
     // Write -> re-parse with the independent reader -> validate BEFORE writing any output files.
@@ -749,6 +825,59 @@ SingleConvertOutcome convertOneStyle(
         return outcome;
     }
 
+    if (p5Cfg != nullptr && p5Cfg->enabled && p5Cfg->report_dir.has_value() &&
+        p5Semantics.has_value() && p5ContextSounds.has_value() && p5Reorch.has_value() && p5QiReport.has_value()) {
+        std::error_code p5ec;
+        const fs::path p5Dir = *p5Cfg->report_dir;
+        if (fs::exists(p5Dir, p5ec) && !fs::is_directory(p5Dir, p5ec)) {
+            outcome.exit_code = 1;
+            outcome.manifest.ok = false;
+            outcome.manifest.error = "p5 intelligence report target exists and is not a directory: " + p5Dir.string();
+            return outcome;
+        }
+        fs::create_directories(p5Dir, p5ec);
+        if (p5ec) {
+            outcome.exit_code = 1;
+            outcome.manifest.ok = false;
+            outcome.manifest.error = "cannot create p5 intelligence report directory: " + p5ec.message();
+            return outcome;
+        }
+        if (!writeText(p5Dir / "semantic_analysis.json", intelligence::formatSemanticAnalysisJson(*p5Semantics)) ||
+            !writeText(p5Dir / "semantic_analysis.md", intelligence::formatSemanticAnalysisMd(*p5Semantics)) ||
+            !writeText(p5Dir / "context_sound_match.json", intelligence::formatContextSoundMatchJson(*p5ContextSounds)) ||
+            !writeText(p5Dir / "context_sound_match.md", intelligence::formatContextSoundMatchMd(*p5ContextSounds)) ||
+            !writeText(p5Dir / "reorchestration_audit.json", intelligence::formatReorchestrationAuditJson(*p5Reorch)) ||
+            !writeText(p5Dir / "quality_intelligence.json", intelligence::formatQualityIntelligenceJson(*p5QiReport)) ||
+            !writeText(p5Dir / "quality_intelligence.md", intelligence::formatQualityIntelligenceMd(*p5QiReport))) {
+            outcome.exit_code = 1;
+            outcome.manifest.ok = false;
+            outcome.manifest.error = "cannot write p5 intelligence reports";
+            return outcome;
+        }
+        if (p5GateDecision.has_value()) {
+            std::ostringstream gs;
+            gs << "# Phase 5 Candidate Gate Summary\n\n";
+            gs << "- **Requested Mode:** `" << intelligence::arrangementModeName(p5Cfg->mode) << "`\n";
+            gs << "- **Gate Decision:** `" << (p5GateDecision->accepted ? "ACCEPTED" : "REJECTED_FALLBACK_TO_MODE_A") << "`\n";
+            gs << "- **Layer 2 Musical Delta:** `" << fmtSigned2(p5GateDecision->musical_delta) << "`\n";
+            gs << "- **Layer 3 Target Delta:** `" << fmtSigned2(p5GateDecision->target_delta) << "`\n";
+            gs << "- **Identity Preservation:** `" << fmtUnsigned2(p5GateDecision->identity_preservation_score) << "`\n";
+            gs << "- **Epistemic Lock:** `hardwareVerified: false` | `l3Status: NOT_TESTED` | `Layer 4: NOT_TESTED`\n";
+            for (const auto& r : p5GateDecision->rejection_reasons) {
+                gs << "- **Rejection Reason:** " << r << "\n";
+            }
+            if (!writeText(p5Dir / "candidate_gate_summary.md", gs.str())) {
+                outcome.exit_code = 1;
+                outcome.manifest.ok = false;
+                outcome.manifest.error = "cannot write p5 candidate gate summary";
+                return outcome;
+            }
+        }
+        if (!quietStdout) {
+            std::cout << "Wrote Phase 5 intelligence reports to " << p5Dir.string() << "\n";
+        }
+    }
+
     if (captureValidationData) {
         outcome.has_validation_data = true;
         outcome.korg_style = *styleToWrite;
@@ -770,6 +899,7 @@ int main(int argc, char** argv) {
     std::string outBundleDir, batchDir, outDir, manifestPath, unresolvedReportPath;
     std::string enhanceMode = "off";
     std::string analyzeQualityArg, listeningRecordPath, validationBundleDir;
+    std::string p5ModeArg, p5TargetArg, p5ReportDirArg, p5LockTracksArg;
     bool hasValidationBundle = false;
     MapOptions opt;
     bool rawModeRequested = false;
@@ -876,6 +1006,31 @@ int main(int argc, char** argv) {
         } else if (a == "--validation-bundle") {
             hasValidationBundle = true;
             validationBundleDir = v;
+        } else if (a == "--p5-mode") {
+            if (v == "faithful" || v == "adapt" || v == "enhance") p5ModeArg = v;
+            else {
+                std::cerr << "invalid flags: --p5-mode must be 'faithful', 'adapt', or 'enhance' (got '" << v << "')\n";
+                return 1;
+            }
+        } else if (a == "--p5-target") {
+            if (!intelligence::parseTargetPlatformId(v).has_value()) {
+                std::cerr << "invalid flags: unsupported --p5-target '" << v
+                          << "' (supported: pa5x, genos2, korg_pa_series/pa4x, ketron_event, roland)\n";
+                return 1;
+            }
+            p5TargetArg = v;
+        } else if (a == "--p5-intelligence-report") {
+            if (v.empty()) {
+                std::cerr << "invalid flags: --p5-intelligence-report directory must be non-empty\n";
+                return 1;
+            }
+            p5ReportDirArg = v;
+        } else if (a == "--p5-lock-tracks") {
+            if (v.empty()) {
+                std::cerr << "invalid flags: --p5-lock-tracks must be non-empty\n";
+                return 1;
+            }
+            p5LockTracksArg = v;
         }
         else if (a == "--ppqn") {
             try {
@@ -961,15 +1116,40 @@ int main(int argc, char** argv) {
     if (!compareA.empty() || !compareB.empty()) {
         if (compareA.empty() || compareB.empty() || !input.empty() || !batchDir.empty() ||
             !outBundleDir.empty() || hasValidationBundle ||
-            !analyzeQualityArg.empty() || !listeningRecordPath.empty()) {
+            !analyzeQualityArg.empty() || !listeningRecordPath.empty() ||
+            !p5ModeArg.empty() || !p5TargetArg.empty() || !p5ReportDirArg.empty() || !p5LockTracksArg.empty()) {
             return usage();
         }
         return compareMode(compareA, compareB);
     }
 
     const bool enhanceRecommended = (enhanceMode == "recommended");
+    const bool anyP5Flag = !p5ModeArg.empty() || !p5TargetArg.empty() || !p5ReportDirArg.empty() || !p5LockTracksArg.empty();
+    Phase5CliConfig p5Config{};
+    if (anyP5Flag) {
+        p5Config.enabled = true;
+        if (p5ModeArg == "adapt") p5Config.mode = intelligence::ArrangementMode::ModeB_IntelligentAdaptation;
+        else if (p5ModeArg == "enhance") p5Config.mode = intelligence::ArrangementMode::ModeC_CreativeEnhancement;
+        else p5Config.mode = intelligence::ArrangementMode::ModeA_Faithful;
+        if (!p5TargetArg.empty()) {
+            const auto parsedTarget = intelligence::parseTargetPlatformId(p5TargetArg);
+            if (!parsedTarget.has_value()) return 1;
+            p5Config.target = *parsedTarget;
+        }
+        if (!p5ReportDirArg.empty()) {
+            p5Config.report_dir = fs::path(p5ReportDirArg);
+        }
+        if (!p5LockTracksArg.empty() && !parseLockTracksCsv(p5LockTracksArg, p5Config.locked_channels)) {
+            std::cerr << "invalid flags: --p5-lock-tracks contains unrecognized channel '" << p5LockTracksArg << "'\n";
+            return 1;
+        }
+    }
     const bool isBatchMode = !batchDir.empty() || !outDir.empty();
     if (isBatchMode) {
+        if (anyP5Flag) {
+            std::cerr << "invalid flags: --p5-* flags cannot be combined with --batch-dir\n";
+            return 1;
+        }
         if (batchDir.empty() || outDir.empty()) {
             std::cerr << "invalid flags: --batch-dir and --out-dir must both be specified\n";
             return 1;
@@ -996,10 +1176,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (input.empty()) return usage();
-        if (output.empty() && outBundleDir.empty() && !hasValidationBundle && analyzeQualityArg.empty()) {
+        if (output.empty() && outBundleDir.empty() && !hasValidationBundle && analyzeQualityArg.empty() && p5ReportDirArg.empty()) {
             return usage();
         }
-        if (outBundleDir.empty() && !hasValidationBundle && analyzeQualityArg.empty() && target.empty()) {
+        if (outBundleDir.empty() && !hasValidationBundle && analyzeQualityArg.empty() && p5ReportDirArg.empty() && target.empty()) {
             return usage();
         }
         if (!target.empty() && target != "pa5x") {
@@ -1010,6 +1190,14 @@ int main(int argc, char** argv) {
 
     if (rawModeRequested && enhanceRecommended) {
         std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --enhance recommended\n";
+        return 1;
+    }
+    if (rawModeRequested && p5Config.enabled && p5Config.mode != intelligence::ArrangementMode::ModeA_Faithful) {
+        std::cerr << "invalid flags: --raw / --quality-mode raw cannot be combined with --p5-mode adapt|enhance\n";
+        return 1;
+    }
+    if (enhanceRecommended && p5Config.enabled && p5Config.mode != intelligence::ArrangementMode::ModeA_Faithful) {
+        std::cerr << "invalid flags: --enhance recommended cannot be combined with --p5-mode adapt|enhance\n";
         return 1;
     }
     if (!listeningRecordPath.empty() && !hasValidationBundle) {
@@ -1291,7 +1479,8 @@ int main(int argc, char** argv) {
             unresolvedReportPath.empty() ? std::nullopt : std::optional<fs::path>(unresolvedReportPath),
             false,
             enhanceRecommended,
-            needValidationCapture);
+            needValidationCapture,
+            p5Config.enabled ? &p5Config : nullptr);
         if (res.exit_code != 0) return res.exit_code;
 
         if (!analyzeQualityArg.empty() && res.has_validation_data) {

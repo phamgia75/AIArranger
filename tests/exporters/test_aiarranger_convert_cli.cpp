@@ -523,6 +523,41 @@ int main(int argc, char** argv) {
              readTextFile(vbExp15Fixed / "acceptance_report.json").find("\"grade\": \"U\"") != std::string::npos);
     }
 
+    // ── Phase 5 Opt-In CLI Flags (--p5-mode, --p5-target, --p5-intelligence-report, --p5-lock-tracks) ──
+    {
+        TEST("invalid --p5-mode exits 1",
+             run(base + "--p5-mode turbo --output " + q(dir / "p5_bad.mid")) == 1 && !fs::exists(dir / "p5_bad.mid"));
+        TEST("invalid --p5-target exits 1",
+             run(base + "--p5-target unknown_kb --output " + q(dir / "p5_bad2.mid")) == 1);
+        TEST("invalid --p5-lock-tracks exits 1",
+             run(base + "--p5-lock-tracks invalid_ch --output " + q(dir / "p5_bad3.mid")) == 1);
+        TEST("--p5-mode adapt combined with --raw exits 1 (fail-closed)",
+             run(base + "--raw --p5-mode adapt --output " + q(dir / "p5_bad4.mid")) == 1);
+        TEST("--p5-mode adapt combined with --enhance recommended exits 1 (fail-closed)",
+             run(base + "--enhance recommended --p5-mode adapt --output " + q(dir / "p5_bad5.mid")) == 1);
+
+        const fs::path p5Dir = dir / "p5_reports";
+        TEST("--p5-mode faithful + --p5-target pa5x + --p5-intelligence-report exits 0",
+             run(base + "--p5-mode faithful --p5-target pa5x --output " + q(dir / "p5_faithful.mid") +
+                 " --p5-intelligence-report " + q(p5Dir)) == 0);
+        TEST("--p5-mode faithful output is bit-exact identical to default CLI output",
+             readTextFile(dir / "p5_faithful.mid") == readTextFile(dir / "pop.mid"));
+        TEST("--p5-intelligence-report writes semantic, context-sound, reorch & 4-layer quality reports",
+             fs::exists(p5Dir / "semantic_analysis.json") &&
+             fs::exists(p5Dir / "context_sound_match.json") &&
+             fs::exists(p5Dir / "reorchestration_audit.json") &&
+             fs::exists(p5Dir / "quality_intelligence.json") &&
+             readTextFile(p5Dir / "quality_intelligence.json").find("\"hardwareVerified\": false") != std::string::npos &&
+             readTextFile(p5Dir / "quality_intelligence.json").find("\"status\": \"NOT_TESTED\"") != std::string::npos);
+
+        const fs::path p5AdaptDir = dir / "p5_adapt_reports";
+        TEST("--p5-mode adapt + --p5-lock-tracks bass,drum exits 0 and emits candidate gate summary",
+             run(base + "--p5-mode adapt --p5-target genos2 --p5-lock-tracks bass,drum --output " +
+                 q(dir / "p5_adapt.mid") + " --p5-intelligence-report " + q(p5AdaptDir)) == 0 &&
+             fs::exists(dir / "p5_adapt.mid") &&
+             fs::exists(p5AdaptDir / "candidate_gate_summary.md"));
+    }
+
     fs::remove_all(dir);
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
