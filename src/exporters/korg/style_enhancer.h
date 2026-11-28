@@ -223,15 +223,12 @@ inline std::string sectionBaseOf(std::string_view m) {
 
 inline int eventSortPriority(const Event& ev) noexcept {
     const uint8_t hi = ev.status & 0xF0u;
-    if (ev.tick == 0u) {
-        if (hi == 0xB0u && ev.d1 == 0u)  return 0;  // Bank MSB
-        if (hi == 0xB0u && ev.d1 == 32u) return 1;  // Bank LSB
-        if (hi == 0xC0u)                 return 2;  // Program Change
-        if (hi == 0xB0u || hi == 0xE0u)  return 3;  // Mix / Controller init
-    }
+    if (hi == 0xB0u && ev.d1 == 0u)                  return 0;  // Bank MSB
+    if (hi == 0xB0u && ev.d1 == 32u)                 return 1;  // Bank LSB
+    if (hi == 0xC0u)                                 return 2;  // Program Change
     if (hi == 0x80u || (hi == 0x90u && ev.d2 == 0u)) return 4;  // NoteOff before NoteOn
-    if (hi == 0x90u) return 5;                                   // NoteOn
-    return 6;
+    if (hi == 0x90u)                                 return 5;  // NoteOn (after CCs & NoteOff)
+    return 3;                                                   // CC / PitchBend / Pressure before NoteOn
 }
 
 inline void canonicalSortElement(Element& el) {
@@ -366,6 +363,16 @@ inline int firstTick0Pc(const Element& el, uint8_t ch) noexcept {
         if (ev.tick > 0u) break;
         if ((ev.status & 0xF0u) == 0xC0u && (ev.status & 0x0Fu) == ch) {
             return static_cast<int>(ev.d1);
+        }
+    }
+    return -1;
+}
+
+inline int firstTick0Msb(const Element& el, uint8_t ch) noexcept {
+    for (const auto& ev : el.events) {
+        if (ev.tick > 0u) break;
+        if ((ev.status & 0xF0u) == 0xB0u && (ev.status & 0x0Fu) == ch && ev.d1 == 0u) {
+            return static_cast<int>(ev.d2);
         }
     }
     return -1;
@@ -595,8 +602,10 @@ inline void applyJazzCvMelodySplit(Style& style,
 
             for (uint8_t ch = kBassCh; ch <= 15u; ++ch) {
                 if (!isChordDriven(ch)) continue;
-                if (ch >= kAcc1Ch && isExemptFromPianoMud(ch, firstTick0Pc(el, ch), report)) continue;
-                if (ch == kBassCh && !has_walking_bass) continue;
+                // Skip unpitched Korg Drum/Percussion kit banks (MSB 120) if any appear on Acc1..Acc5,
+                // but ALWAYS adapt all pitched chord-driven tracks (including non-walking Bass and
+                // pitched low-register orchestral instruments like Timpani/Contrabass/Tuba).
+                if (ch >= kAcc1Ch && firstTick0Msb(el, ch) == 120) continue;
 
                 auto notes = extractChannelNotes(clone, ch);
                 if (notes.empty()) continue;
@@ -1524,8 +1533,12 @@ inline EnhanceResult enhanceStyle(
             applyEndingFadePopGuard(candidate, opt, stats, actions);
         }
 
-        for (auto& el : candidate.elements) {
-            canonicalSortElement(el);
+        // Zero-action Mode B preservation: never gratuitously re-sort or drift bytes
+        // when no enhancement rule applied any change.
+        if (!actions.empty()) {
+            for (auto& el : candidate.elements) {
+                canonicalSortElement(el);
+            }
         }
 
         // ── Hard Post-Enhancement Anti-Degradation Guardrails ───────────

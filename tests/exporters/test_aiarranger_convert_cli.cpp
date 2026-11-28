@@ -436,7 +436,24 @@ int main(int argc, char** argv) {
              prepNotes.find("NO_HARDWARE_WRITES") != std::string::npos &&
              prepNotes.find("HARDWARE_AUTHORIZATION_REQUIRED") != std::string::npos &&
              tmplJson.find("\"is_template\": true") != std::string::npos &&
+             tmplJson.find("\"source_class\": \"UNSPECIFIED_PENDING_PROVENANCE\"") != std::string::npos &&
+             tmplJson.find("\"source_class\": \"REAL_GENOS_HUMAN\"") == std::string::npos &&
              tmplJson.find("\"overall_rating_1_to_5\": null") != std::string::npos);
+
+        // DEF-P4-011: Even if is_template is flipped to false, leaving source_class as placeholder MUST fail closed!
+        const fs::path unfilledSrcClass = dir / "unfilled_source_class.json";
+        std::ofstream(unfilledSrcClass) << R"({
+            "schema": "aiarranger-human-listening-record/1",
+            "is_template": false,
+            "source_class": "UNSPECIFIED_PENDING_PROVENANCE",
+            "evaluator_id": "EVAL_01",
+            "hardware_verified": true,
+            "hardware_model": "Korg Pa5X",
+            "overall_rating_1_to_5": 5
+        })";
+        TEST("P4-M6 DEF-P4-011: --listening-record rejects UNSPECIFIED_PENDING_PROVENANCE fail-closed (exit 1)",
+             run("--input " + q(pop) + " --ppqn 384 --validation-bundle " + q(dir / "vb_src_rej") +
+                 " --listening-record " + q(unfilledSrcClass)) == 1);
 
         // Template placeholder cannot be blindly fed back to --listening-record
         TEST("unfilled LISTENING_RECORD_TEMPLATE.json is rejected fail-closed by --listening-record",

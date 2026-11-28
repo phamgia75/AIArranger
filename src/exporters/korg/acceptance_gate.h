@@ -67,6 +67,8 @@ inline std::string acceptanceGradeDisplay(AcceptanceGrade g) {
     return std::string("Grade ") + acceptanceGradeCode(g) + " (" + acceptanceGradeLabel(g) + ")";
 }
 
+inline constexpr const char* kUnspecifiedSourceClassPlaceholder = "UNSPECIFIED_PENDING_PROVENANCE";
+
 struct HumanListeningRecord {
     bool                 present = false;
     std::string          evaluator_id;               // Non-PII evaluator tag (e.g. "musician-01")
@@ -78,6 +80,7 @@ struct HumanListeningRecord {
     bool                 hardware_verified = false;  // Default false — never assumed offline
     std::string          hardware_model;             // Required non-empty when hardware_verified == true in JSON
     std::string          reference_type;             // e.g. "Genos_Direct_AB", "Standalone_Pa5X_Audition"
+    std::string          source_class;               // Optional in minimal JSON; when present must be canonical provenance
     bool                 major_correction_needed = false; // Distinguishes rating==3 Grade C vs Grade B
     bool                 required_sections_verified = true;
     bool                 required_chords_verified = true;
@@ -212,7 +215,28 @@ inline bool isPlaceholderText(std::string_view s) noexcept {
     return up.find("REPLACE_WITH") != std::string::npos ||
            up.find("REPLACE_ME") != std::string::npos ||
            up.find("TEMPLATE ONLY") != std::string::npos ||
+           up.find("UNSPECIFIED_") != std::string::npos ||
+           up.find("TODO_") != std::string::npos ||
+           up.find("PENDING_PROVENANCE") != std::string::npos ||
            up.find(" | ") != std::string::npos;
+}
+
+inline bool isValidListeningSourceClass(std::string_view raw) noexcept {
+    size_t b = 0u;
+    size_t e = raw.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(raw[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(raw[e - 1u]))) --e;
+    if (b >= e) return false;
+    std::string up;
+    up.reserve(e - b);
+    for (size_t i = b; i < e; ++i) {
+        up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(raw[i]))));
+    }
+    return up == "REAL_GENOS_HUMAN" ||
+           up == "REAL_GENOS_HUMAN_AUTHORIZED" ||
+           up == "SYNTHETIC_CC0" ||
+           up == "SYNTHETIC_CC0_PERFORMANCE_MODEL" ||
+           up == "SYNTHETIC_CC0_Q1_FROZEN";
 }
 
 inline std::string stripStyleExtension(std::string_view filename) {
@@ -244,14 +268,10 @@ inline std::string canonicalCandidateLabel(std::string_view raw) {
     return "B_FAITHFUL";
 }
 
-inline std::string inferTemplateSourceClass(std::string_view style_id) {
-    std::string up;
-    up.reserve(style_id.size());
-    for (char c : style_id) up.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-    if (up.rfind("SYNTH_", 0u) == 0u || up.rfind("EXP", 0u) == 0u || up.rfind("MAL", 0u) == 0u) {
-        return "SYNTHETIC_CC0";
-    }
-    return "REAL_GENOS_HUMAN";
+// Fail-closed provenance default: never infer REAL_GENOS_HUMAN from filenames.
+// Musicians/operators MUST explicitly set source_class to REAL_GENOS_HUMAN or SYNTHETIC_CC0.
+inline std::string inferTemplateSourceClass(std::string_view /*style_id*/) {
+    return kUnspecifiedSourceClassPlaceholder;
 }
 
 inline bool isCriticalTrackKey(std::string_view key) noexcept {
@@ -664,12 +684,28 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
             } else if (canonical == "styleName" || canonical == "candidate" ||
                        canonical == "convertedMidSha256" || canonical == "date" ||
                        canonical == "recordId" || canonical == "styleId" ||
-                       canonical == "genre" || canonical == "sourceClass" ||
-                       canonical == "analyzerVersion") {
+                       canonical == "genre" || canonical == "analyzerVersion") {
                 if (!r.parseNull()) {
                     std::string ignored_meta;
                     if (!r.parseString(ignored_meta, err)) {
                         res.error = "field '" + key + "': " + err;
+                        return res;
+                    }
+                }
+            } else if (canonical == "sourceClass") {
+                if (!r.parseNull()) {
+                    if (!r.parseString(rec.source_class, err)) {
+                        res.error = "field '" + key + "': " + err;
+                        return res;
+                    }
+                    if (hasControlChar(rec.source_class) || rec.source_class.size() > 128u) {
+                        res.error = "field '" + key + "' must be single-line (<= 128 chars)";
+                        return res;
+                    }
+                    if (!isValidListeningSourceClass(rec.source_class)) {
+                        res.error = "field '" + key + "' has invalid or placeholder provenance '" +
+                                    rec.source_class +
+                                    "' (must be explicitly set to 'REAL_GENOS_HUMAN' or 'SYNTHETIC_CC0')";
                         return res;
                     }
                 }
@@ -1361,11 +1397,14 @@ inline std::string formatAcceptanceReportMd(const AcceptanceReport& r) {
 inline std::string formatListeningRecordTemplateJson(
     const std::string& style_name,
     const std::string& candidate_label,
-    const std::string& converted_mid_sha256) {
+    const std::string& converted_mid_sha256,
+    std::string_view explicit_source_class = {}) {
     using namespace acceptance_gate_detail;
     const std::string style_id = stripStyleExtension(style_name);
     const std::string cand = canonicalCandidateLabel(candidate_label);
-    const std::string src_class = inferTemplateSourceClass(style_id);
+    const std::string src_class = explicit_source_class.empty()
+                                      ? inferTemplateSourceClass(style_id)
+                                      : std::string(explicit_source_class);
     const std::string record_id = "REC_" + style_id + "_" + cand;
     std::ostringstream o;
     o << "{\n";
@@ -1407,7 +1446,7 @@ inline std::string formatListeningRecordTemplateJson(
     o << "  \"major_correction_needed\": false,\n";
     o << "  \"required_sections_verified\": true,\n";
     o << "  \"required_chords_verified\": true,\n";
-    o << "  \"evaluator_comments\": \"TEMPLATE ONLY — fill after owner-authorized Pa5X audition, then set is_template=false, hardware_verified=true, and overall_rating_1_to_5 (1..5).\"\n";
+    o << "  \"evaluator_comments\": \"TEMPLATE ONLY — fill after owner-authorized Pa5X audition, then explicitly set source_class (REAL_GENOS_HUMAN or SYNTHETIC_CC0), is_template=false, hardware_verified=true, and overall_rating_1_to_5 (1..5).\"\n";
     o << "}\n";
     return o.str();
 }

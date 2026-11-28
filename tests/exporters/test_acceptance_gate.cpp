@@ -344,6 +344,69 @@ int main() {
              evaluateAcceptanceGate(ev).grade == AcceptanceGrade::C);
     }
 
+    // 9. Phase 4 P4-M6 DEF-P4-011: Fail-closed provenance placeholder in LISTENING_RECORD_TEMPLATE.json
+    {
+        const std::string tP3 = formatListeningRecordTemplateJson(
+            "P3_01_POP_MODERN_BALLAD_SFF2.sty", "Candidate B", "deadbeef");
+        const std::string tSynth = formatListeningRecordTemplateJson(
+            "SYNTH_POP_SFF2.sty", "Candidate C", "cafebabe");
+        const std::string tCustom = formatListeningRecordTemplateJson(
+            "USER_STYLE_01.sty", "Candidate B", "01234567");
+        TEST("P4-M6 DEF-P4-011: generated template defaults source_class to UNSPECIFIED_PENDING_PROVENANCE (never REAL_GENOS_HUMAN)",
+             tP3.find("\"source_class\": \"UNSPECIFIED_PENDING_PROVENANCE\"") != std::string::npos &&
+             tP3.find("\"source_class\": \"REAL_GENOS_HUMAN\"") == std::string::npos &&
+             tSynth.find("\"source_class\": \"UNSPECIFIED_PENDING_PROVENANCE\"") != std::string::npos &&
+             tCustom.find("\"source_class\": \"UNSPECIFIED_PENDING_PROVENANCE\"") != std::string::npos);
+
+        const std::string tExplicit = formatListeningRecordTemplateJson(
+            "P3_01_POP_MODERN_BALLAD_SFF2.sty", "Candidate B", "deadbeef", "SYNTHETIC_CC0");
+        TEST("P4-M6 DEF-P4-011: explicit_source_class parameter overrides template placeholder when supplied",
+             tExplicit.find("\"source_class\": \"SYNTHETIC_CC0\"") != std::string::npos);
+
+        // Flipping is_template=false without replacing source_class MUST fail closed!
+        const auto pUnfilled = parseHumanListeningRecordJson(R"({
+            "schema": "aiarranger-human-listening-record/1",
+            "is_template": false,
+            "source_class": "UNSPECIFIED_PENDING_PROVENANCE",
+            "evaluator_id": "EVAL_01",
+            "hardware_verified": true,
+            "hardware_model": "Korg Pa5X",
+            "overall_rating_1_to_5": 5
+        })");
+        TEST("P4-M6 DEF-P4-011: rejects UNSPECIFIED_PENDING_PROVENANCE even when is_template=false",
+             !pUnfilled.ok);
+
+        TEST("P4-M6 DEF-P4-011: rejects arbitrary invalid source_class fail-closed",
+             !parseHumanListeningRecordJson(R"({
+                 "evaluator_id": "EVAL_01",
+                 "overall_rating_1_to_5": 4,
+                 "source_class": "TODO_SELECT_SOURCE_PROVENANCE"
+             })").ok &&
+             !parseHumanListeningRecordJson(R"({
+                 "evaluator_id": "EVAL_01",
+                 "overall_rating_1_to_5": 4,
+                 "source_class": "UNKNOWN_ORIGIN"
+             })").ok);
+
+        const auto pReal = parseHumanListeningRecordJson(R"({
+            "evaluator_id": "EVAL_01",
+            "overall_rating_1_to_5": 4,
+            "hardware_verified": true,
+            "hardware_model": "Korg Pa5X",
+            "source_class": "REAL_GENOS_HUMAN"
+        })");
+        const auto pSynth = parseHumanListeningRecordJson(R"({
+            "evaluator_id": "EVAL_01",
+            "overall_rating_1_to_5": 4,
+            "hardware_verified": true,
+            "hardware_model": "Korg Pa5X",
+            "source_class": "SYNTHETIC_CC0_PERFORMANCE_MODEL"
+        })");
+        TEST("P4-M6 DEF-P4-011: accepts valid canonical source_class values matching calibrate_analyzer_human.py",
+             pReal.ok && pReal.record.source_class == "REAL_GENOS_HUMAN" &&
+             pSynth.ok && pSynth.record.source_class == "SYNTHETIC_CC0_PERFORMANCE_MODEL");
+    }
+
     std::printf("\n%d passed, %d failed\n", passes, failures);
     return failures ? 1 : 0;
 }

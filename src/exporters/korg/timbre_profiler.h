@@ -1069,8 +1069,10 @@ inline TrackTimbreProfile profileTrackTimbre(
             } else {
                 sub.sub_family = isPercTarget ? "Standard Percussion Kit" : "Pop / Studio Drum Kit";
             }
-            // Refine sub-family with explicit kit keywords when present.
-            if (kw.confidence > 0 && isPercussiveTimbreFamily(kw.sub.family) &&
+            // Refine sub-family with explicit kit keywords only when the keyword agrees
+            // with the bank/channel family (never let a DrumKit keyword like "Rock Drum Kit"
+            // clobber a PercussionKit track's "Standard Percussion Kit" sub-family).
+            if (kw.confidence > 0 && kw.sub.family == sub.family &&
                 kw.matched_rule != "keyword:drum-kit" && kw.matched_rule != "keyword:perc") {
                 sub.sub_family = kw.sub.sub_family;
             }
