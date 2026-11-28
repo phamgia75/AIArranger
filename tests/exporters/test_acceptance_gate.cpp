@@ -376,6 +376,18 @@ int main() {
         TEST("P4-M6 DEF-P4-011: rejects UNSPECIFIED_PENDING_PROVENANCE even when is_template=false",
              !pUnfilled.ok);
 
+        TEST("P4-M6 DEF-P4-011: rejects explicit null source_class/sourceClass fail-closed (matches calibrate_analyzer_human.py)",
+             !parseHumanListeningRecordJson(R"({
+                 "evaluator_id": "EVAL_01",
+                 "overall_rating_1_to_5": 4,
+                 "source_class": null
+             })").ok &&
+             !parseHumanListeningRecordJson(R"({
+                 "evaluatorId": "EVAL_01",
+                 "overallRating": 4,
+                 "sourceClass": null
+             })").ok);
+
         TEST("P4-M6 DEF-P4-011: rejects arbitrary invalid source_class fail-closed",
              !parseHumanListeningRecordJson(R"({
                  "evaluator_id": "EVAL_01",

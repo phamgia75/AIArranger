@@ -693,21 +693,24 @@ inline HumanListeningParseResult parseHumanListeningRecordJson(std::string_view 
                     }
                 }
             } else if (canonical == "sourceClass") {
-                if (!r.parseNull()) {
-                    if (!r.parseString(rec.source_class, err)) {
-                        res.error = "field '" + key + "': " + err;
-                        return res;
-                    }
-                    if (hasControlChar(rec.source_class) || rec.source_class.size() > 128u) {
-                        res.error = "field '" + key + "' must be single-line (<= 128 chars)";
-                        return res;
-                    }
-                    if (!isValidListeningSourceClass(rec.source_class)) {
-                        res.error = "field '" + key + "' has invalid or placeholder provenance '" +
-                                    rec.source_class +
-                                    "' (must be explicitly set to 'REAL_GENOS_HUMAN' or 'SYNTHETIC_CC0')";
-                        return res;
-                    }
+                if (r.parseNull()) {
+                    res.error = "field '" + key + "' cannot be null "
+                                "(must be explicitly set to 'REAL_GENOS_HUMAN' or 'SYNTHETIC_CC0')";
+                    return res;
+                }
+                if (!r.parseString(rec.source_class, err)) {
+                    res.error = "field '" + key + "': " + err;
+                    return res;
+                }
+                if (hasControlChar(rec.source_class) || rec.source_class.size() > 128u) {
+                    res.error = "field '" + key + "' must be single-line (<= 128 chars)";
+                    return res;
+                }
+                if (!isValidListeningSourceClass(rec.source_class)) {
+                    res.error = "field '" + key + "' has invalid or placeholder provenance '" +
+                                rec.source_class +
+                                "' (must be explicitly set to 'REAL_GENOS_HUMAN' or 'SYNTHETIC_CC0')";
+                    return res;
                 }
             } else if (canonical == "listeningEnvironment") {
                 if (!r.parseNull()) {

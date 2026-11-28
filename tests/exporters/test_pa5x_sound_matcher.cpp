@@ -906,8 +906,18 @@ int main() {
 
         const auto customPerc = makeProfile(TimbreFamily::PercussionKit, "Custom Rock Perc", kPercCh, 90);
         const auto mCustomPerc = matchTrackSound(customPerc, {}, nullptr, opt);
-        TEST("P4-M6 DEF-P4-002: non-SFX PercussionKit tie never falls into SFX Perc Kit GM2 (120/0/56)",
-             mCustomPerc.selected.has_value() && mCustomPerc.selected->pc != 56);
+        TEST("P4-M6 DEF-P4-002: non-SFX/non-Ethnic PercussionKit tie resolves to Standard Perc Kit (120/0/69, NEVER SFX 56 or Ethnic 64)",
+             mCustomPerc.selected.has_value() &&
+             mCustomPerc.selected->msb == 120 && mCustomPerc.selected->lsb == 0 && mCustomPerc.selected->pc == 69 &&
+             mCustomPerc.top_candidates[0].display_name == "Standard Perc Kit");
+
+        const auto revoRockPerc = profileTrackTimbre(62, 100, 0, "RockPerc", TrackRole::Percussion, {}, {}, 8, kPercCh);
+        const auto mRevoRockPerc = matchTrackSound(revoRockPerc, {}, nullptr, opt);
+        TEST("P4-M6 DEF-P4-002: Revo! 62/100/0 RockPerc on kPercCh resolves to Standard Perc Kit (120/0/69, NEVER SFX 56 or Ethnic 64)",
+             revoRockPerc.inferred.family == TimbreFamily::PercussionKit &&
+             mRevoRockPerc.selected.has_value() &&
+             mRevoRockPerc.selected->msb == 120 && mRevoRockPerc.selected->lsb == 0 && mRevoRockPerc.selected->pc == 69 &&
+             mRevoRockPerc.top_candidates[0].display_name == "Standard Perc Kit");
 
         const auto megaDistProf = profileTrackTimbre(63, 120, 30, "MegaDist", TrackRole::Chord, {}, {}, 12, 12);
         const auto mMegaDist = matchTrackSound(megaDistProf, {}, nullptr, opt);

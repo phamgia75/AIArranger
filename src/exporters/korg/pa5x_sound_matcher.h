@@ -592,6 +592,8 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
 
     const auto query_sub_toks = timbre_detail::tokenizeSafeWords(profile.inferred.sub_family);
     const bool query_wants_sfx = timbre_detail::hasAnyToken(query_sub_toks, {"sfx", "fx", "effects", "effect"});
+    const bool query_wants_ethnic = timbre_detail::hasAnyToken(
+        query_sub_toks, {"ethnic", "oriental", "orient", "arabic", "arab", "indian", "turkish", "tabla", "darbuka"});
     const bool query_wants_driven_gtr =
         (fam == TimbreFamily::ElectricGuitar) &&
         timbre_detail::hasAnyToken(query_sub_toks, {"distortion", "overdrive", "overdriven", "crunch"});
@@ -611,11 +613,15 @@ inline std::vector<SoundCandidate> scoreCandidatesForProfile(
                                 ? 5
                                 : ((!profile.inferred.prefers_dnc && !entry.is_dnc) ? 1 : 0);
             int character_penalty = 0;
-            // Guard: never fall into SFX Perc Kit GM2 (120/0/56) on tie-break for non-SFX percussion.
+            // Guard: never fall into SFX Perc Kit GM2 (120/0/56) or Ethnic / Oriental Perc Kit (120/0/64)
+            // on tie-break for generic/non-SFX/non-Ethnic percussion tracks.
             if (entry.family == TimbreFamily::PercussionKit &&
-                entry.ref.msb == 120u && entry.ref.lsb == 0u && entry.ref.pc == 56u &&
-                !query_wants_sfx) {
-                character_penalty = -6;
+                entry.ref.msb == 120u && entry.ref.lsb == 0u) {
+                if (entry.ref.pc == 56u && !query_wants_sfx) {
+                    character_penalty = -6;
+                } else if (entry.ref.pc == 64u && !query_wants_ethnic) {
+                    character_penalty = -6;
+                }
             }
             // Guard: never let DNC bonus pull Distortion/Overdriven Electric Guitar onto Clean/Jazz Guitar.
             if (query_wants_driven_gtr) {
